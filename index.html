@@ -20,6 +20,7 @@
         <header id="header">
             <div style="font-weight: 700; font-size: 14px; letter-spacing: -0.02em;">ANTIGRAVITY VECTOR</div>
             <div style="flex: 1;"></div>
+            <button id="import-svg" style="background: var(--bg-hover); color: var(--text-main); border: 1px solid var(--border); padding: 4px 12px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-right: 8px;">Import SVG</button>
             <button id="export-svg" style="background: var(--accent); color: white; border: none; padding: 4px 12px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-right: 16px;">Export SVG</button>
             <div id="zoom-level" style="font-size: 11px; color: #909090;">100%</div>
         </header>
@@ -33,6 +34,7 @@
                 <div class="tool-btn" id="tool-ellipse" title="Ellipse (L)"><i data-lucide="circle"></i></div>
                 <div class="tool-btn" id="tool-polygon" title="Polygon"><i data-lucide="hexagon"></i></div>
                 <div class="tool-btn" id="tool-star" title="Star"><i data-lucide="star"></i></div>
+                <div class="tool-btn" id="tool-text" title="Text (T)"><i data-lucide="type"></i></div>
                 <div style="flex: 1;"></div>
                 <div class="tool-btn" id="tool-smart-paint" title="Smart Paint (K)"><i data-lucide="paint-bucket"></i></div>
                 <div class="tool-btn" id="tool-stroke" title="Stroke Color"><i data-lucide="pen-line"></i></div>
@@ -43,39 +45,176 @@
             </section>
 
             <aside id="side-panel">
+                <!-- TRANSFORM -->
                 <div class="panel-section">
-                    <div class="panel-title">Properties</div>
-                    <div class="prop-group">
-                        <span class="prop-label">Fill</span>
-                        <input type="color" id="fill-color" class="color-input" value="#cccccc">
+                    <div class="panel-section-header" data-section="transform">
+                        <span class="chevron">▾</span>
+                        <span class="section-title">Transform</span>
                     </div>
-                    <div class="prop-group">
-                        <span class="prop-label">Stroke</span>
-                        <input type="color" id="stroke-color" class="color-input" value="#000000">
-                    </div>
-                    <div class="prop-group">
-                        <span class="prop-label">Weight</span>
-                        <input type="number" id="stroke-weight" class="prop-input" value="2" min="0">
-                    </div>
-                    <div class="prop-group">
-                        <span class="prop-label">Opacity</span>
-                        <input type="number" id="opacity" class="prop-input" value="100" min="0" max="100">
+                    <div class="panel-section-body" data-section-body="transform">
+                        <div class="transform-grid">
+                            <div class="transform-cell">
+                                <label>X</label>
+                                <input type="number" id="prop-x" class="prop-input" value="0" step="1">
+                            </div>
+                            <div class="transform-cell">
+                                <label>Y</label>
+                                <input type="number" id="prop-y" class="prop-input" value="0" step="1">
+                            </div>
+                            <div class="transform-cell">
+                                <label>W</label>
+                                <input type="number" id="prop-w" class="prop-input" value="0" step="1" min="0">
+                            </div>
+                            <div class="transform-cell">
+                                <label>H</label>
+                                <input type="number" id="prop-h" class="prop-input" value="0" step="1" min="0">
+                            </div>
+                            <div class="transform-cell">
+                                <label>R</label>
+                                <input type="number" id="prop-rotation" class="prop-input" value="0" step="1">
+                            </div>
+                            <div class="transform-cell">
+                                <label>⌒</label>
+                                <input type="number" id="prop-corner-radius" class="prop-input" value="0" step="1" min="0">
+                            </div>
+                        </div>
                     </div>
                 </div>
 
+                <!-- FILL -->
                 <div class="panel-section">
-                    <div class="panel-title">Pathfinder</div>
-                    <div class="pathfinder-grid">
-                        <button class="op-btn" id="op-union" title="Union">∪</button>
-                        <button class="op-btn" id="op-subtract" title="Subtract">∖</button>
-                        <button class="op-btn" id="op-intersect" title="Intersect">∩</button>
-                        <button class="op-btn" id="op-xor" title="Exclude">⊕</button>
+                    <div class="panel-section-header" data-section="fill">
+                        <span class="chevron">▾</span>
+                        <span class="section-title">Fill</span>
+                    </div>
+                    <div class="panel-section-body" data-section-body="fill">
+                        <div class="fill-stroke-row">
+                            <label class="toggle-label"><input type="checkbox" id="fill-enabled" checked></label>
+                            <input type="color" id="fill-color" class="color-input" value="#cccccc">
+                            <span class="label-short" style="min-width: 8px;">α</span>
+                            <input type="number" id="fill-opacity" class="prop-input" value="100" min="0" max="100" step="1" style="width: 40px; flex: 0 0 40px;">
+                            <span class="unit">%</span>
+                        </div>
+                        <div class="prop-row" style="margin-top: 4px;">
+                            <span class="label">Fill Rule</span>
+                            <select id="fill-rule" class="prop-select">
+                                <option value="0">Non-Zero</option>
+                                <option value="1">Even-Odd</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
 
-                <div class="panel-section" style="flex: 1; display: flex; flex-direction: column;">
-                    <div class="panel-title">Layers</div>
-                    <div id="layer-list">
+                <!-- STROKE -->
+                <div class="panel-section">
+                    <div class="panel-section-header" data-section="stroke">
+                        <span class="chevron">▾</span>
+                        <span class="section-title">Stroke</span>
+                    </div>
+                    <div class="panel-section-body" data-section-body="stroke">
+                        <div class="fill-stroke-row">
+                            <label class="toggle-label"><input type="checkbox" id="stroke-enabled" checked></label>
+                            <input type="color" id="stroke-color" class="color-input" value="#000000">
+                            <span class="label-short">W</span>
+                            <input type="number" id="stroke-weight" class="prop-input" value="2" min="0" step="0.5" style="width: 44px; flex: 0 0 44px;">
+                        </div>
+                        <div class="stroke-details">
+                            <div class="prop-row">
+                                <span class="label">Cap</span>
+                                <select id="stroke-cap" class="prop-select">
+                                    <option value="0">Butt</option>
+                                    <option value="1">Round</option>
+                                    <option value="2">Square</option>
+                                </select>
+                                <span class="label" style="margin-left: 4px;">Join</span>
+                                <select id="stroke-join" class="prop-select">
+                                    <option value="0">Miter</option>
+                                    <option value="1">Round</option>
+                                    <option value="2">Bevel</option>
+                                </select>
+                            </div>
+                            <div class="prop-row">
+                                <span class="label">Dash</span>
+                                <select id="stroke-dash" class="prop-select">
+                                    <option value="">Solid</option>
+                                    <option value="8,4">Dashed</option>
+                                    <option value="2,4">Dotted</option>
+                                    <option value="12,4,4,4">Dash-Dot</option>
+                                    <option value="16,4,2,4,2,4">Dash-Dot-Dot</option>
+                                </select>
+                                <span class="label" style="min-width: 28px; margin-left: 4px;">Off</span>
+                                <input type="number" id="stroke-dash-offset" class="prop-input" value="0" step="1" style="width: 36px; flex: 0 0 36px;">
+                            </div>
+                            <div class="prop-row">
+                                <span class="label">Miter</span>
+                                <input type="number" id="stroke-miter-limit" class="prop-input" value="4" min="1" step="0.5" style="width: 44px; flex: 0 0 44px;">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- APPEARANCE -->
+                <div class="panel-section">
+                    <div class="panel-section-header" data-section="appearance">
+                        <span class="chevron">▾</span>
+                        <span class="section-title">Appearance</span>
+                    </div>
+                    <div class="panel-section-body" data-section-body="appearance">
+                        <div class="prop-row">
+                            <span class="label">Opacity</span>
+                            <input type="number" id="opacity" class="prop-input" value="100" min="0" max="100" style="width: 44px; flex: 0 0 44px;">
+                            <span class="unit">%</span>
+                            <span style="flex: 1;"></span>
+                            <button class="icon-toggle active" id="toggle-visible" title="Visibility">👁</button>
+                            <button class="icon-toggle" id="toggle-locked" title="Lock">🔒</button>
+                        </div>
+                        <div class="prop-row">
+                            <span class="label">Blend</span>
+                            <select id="blend-mode" class="prop-select">
+                                <option value="0">Normal</option>
+                                <option value="1">Multiply</option>
+                                <option value="2">Screen</option>
+                                <option value="3">Overlay</option>
+                                <option value="4">Darken</option>
+                                <option value="5">Lighten</option>
+                                <option value="6">Color Dodge</option>
+                                <option value="7">Color Burn</option>
+                                <option value="8">Hard Light</option>
+                                <option value="9">Soft Light</option>
+                                <option value="10">Difference</option>
+                                <option value="11">Exclusion</option>
+                                <option value="12">Hue</option>
+                                <option value="13">Saturation</option>
+                                <option value="14">Color</option>
+                                <option value="15">Luminosity</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- PATHFINDER -->
+                <div class="panel-section">
+                    <div class="panel-section-header" data-section="pathfinder">
+                        <span class="chevron">▾</span>
+                        <span class="section-title">Pathfinder</span>
+                    </div>
+                    <div class="panel-section-body" data-section-body="pathfinder">
+                        <div class="pathfinder-grid">
+                            <button class="op-btn" id="op-union" title="Union">∪</button>
+                            <button class="op-btn" id="op-subtract" title="Subtract">∖</button>
+                            <button class="op-btn" id="op-intersect" title="Intersect">∩</button>
+                            <button class="op-btn" id="op-xor" title="Exclude">⊕</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- LAYERS -->
+                <div class="panel-section layers-section">
+                    <div class="panel-section-header" data-section="layers">
+                        <span class="chevron">▾</span>
+                        <span class="section-title">Layers</span>
+                    </div>
+                    <div id="layer-list" data-section-body="layers">
                         <!-- Layers injected by JS -->
                     </div>
                 </div>

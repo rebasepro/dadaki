@@ -1,18 +1,18 @@
 import type { CanvasKit } from 'canvaskit-wasm';
-import { Scene } from './scene';
+import type { WasmScene } from './wasm_scene';
 
 export class SmartPaint {
     ck: CanvasKit;
-    scene: Scene;
+    scene: WasmScene;
 
-    constructor(ck: CanvasKit, scene: Scene) {
+    constructor(ck: CanvasKit, scene: WasmScene) {
         this.ck = ck;
         this.scene = scene;
     }
 
-    // Finds the enclosed region at (x, y) and returns a new PathObject
-    // Finds the enclosed region at (x, y) in screen coordinates and returns a new PathObject in world coordinates
-    findRegion(screenX: number, screenY: number, width: number, height: number, dpr: number, pan: {x: number, y: number}, zoom: number): any {
+    // Finds the enclosed region at (screenX, screenY) in screen coordinates
+    // and returns a CanvasKit Path in world coordinates
+    findRegion(screenX: number, screenY: number, width: number, height: number, dpr: number, pan: {x: number, y: number}, zoom: number): ReturnType<CanvasKit['Path']['prototype']> | null {
         try {
             // 1. Create an offscreen surface to render strokes
             const surface = (this.ck as any).MakeSurface(width, height);
@@ -30,19 +30,42 @@ export class SmartPaint {
             canvas.translate(pan.x, pan.y);
             canvas.scale(zoom, zoom);
 
-            // 2. Render all scene objects as thin black strokes
-            // We scale the stroke width so it's 1 physical pixel regardless of zoom
+            // 2. Render all WASM engine nodes as thin black strokes
             const paint = new this.ck.Paint();
             paint.setColor(this.ck.BLACK);
             paint.setStyle(this.ck.PaintStyle.Stroke);
             paint.setStrokeWidth(1 / zoom);
 
-            for (const obj of this.scene.objects) {
-                if (obj.renderOutline) {
-                    obj.renderOutline(canvas, this.ck, paint);
-                } else {
-                    obj.render(canvas, this.ck);
+            const sceneData = this.scene.getSceneData();
+            const nodes = sceneData.nodes;
+
+            for (const idStr of Object.keys(nodes)) {
+                const id = Number(idStr);
+                const node = nodes[id];
+                if (!node || !node.visible) continue;
+
+                // Get the pre-computed global transform from WASM
+                const transform = this.scene.getTransform(id);
+
+                canvas.save();
+                canvas.concat(transform);
+
+                const geom = node.geometry;
+                if (geom.Rect) {
+                    canvas.drawRect(
+                        this.ck.LTRBRect(0, 0, geom.Rect.width, geom.Rect.height),
+                        paint
+                    );
+                } else if (geom.Ellipse) {
+                    const { radius_x, radius_y } = geom.Ellipse;
+                    canvas.drawOval(
+                        this.ck.LTRBRect(-radius_x, -radius_y, radius_x, radius_y),
+                        paint
+                    );
                 }
+                // Path geometry could be added here in the future
+
+                canvas.restore();
             }
             
             canvas.restore();
@@ -70,7 +93,7 @@ export class SmartPaint {
             const startY = Math.floor(screenY * dpr);
             
             if (startX < 0 || startX >= width || startY < 0 || startY >= height) {
-                console.error("SmartPaint: Click outside of canvas bounds in world space", startX, startY);
+                console.error("SmartPaint: Click outside of canvas bounds", startX, startY);
                 image.delete();
                 surface.delete();
                 return null;
@@ -79,7 +102,7 @@ export class SmartPaint {
             const mask = this.floodFill(pixels, startX, startY, width, height);
             
             if (!mask) {
-                console.error("SmartPaint: floodFill returned null");
+                console.error("SmartPaint: floodFill returned null (clicked on stroke or region too small)");
                 image.delete();
                 surface.delete();
                 return null;
@@ -138,32 +161,22 @@ export class SmartPaint {
         // Simple bounding box for now, in a real tool we'd use Marching Squares
         const path: any = new (this.ck as any).Path();
         
-        // Find first pixel
-        let startPixel: { x: number; y: number } | null = null;
-        for (let y = 0; y < height; y++) {
-            for (let x = 0; x < width; x++) {
-                if (mask[y * width + x]) {
-                    startPixel = {x, y};
-                    break;
-                }
-            }
-            if (startPixel) break;
-        }
-
-        if (!startPixel) return null;
-
-        // Dummy region for now: a rect encompassing the filled area
-        let minX = startPixel.x, minY = startPixel.y, maxX = startPixel.x, maxY = startPixel.y;
-        for(let i=0; i<mask.length; i++) {
-            if(mask[i]) {
+        // Find bounding box of mask
+        let minX = width, minY = height, maxX = 0, maxY = 0;
+        let found = false;
+        for (let i = 0; i < mask.length; i++) {
+            if (mask[i]) {
                 const x = i % width;
                 const y = Math.floor(i / width);
                 minX = Math.min(minX, x);
                 minY = Math.min(minY, y);
                 maxX = Math.max(maxX, x);
                 maxY = Math.max(maxY, y);
+                found = true;
             }
         }
+
+        if (!found) return null;
         
         // Convert screen physical pixels to world coordinates
         const worldMinX = (minX / dpr - pan.x) / zoom;
