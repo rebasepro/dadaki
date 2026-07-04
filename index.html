@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Antigravity Vector — Wasm/WebGL SVG Editor</title>
+    <link rel="stylesheet" href="style.css">
+    <script>
+        // Block all browser-level zoom as early as possible
+        const blockZoom = (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+            }
+        };
+
+        window.addEventListener('wheel', blockZoom, { passive: false, capture: true });
+        window.addEventListener('mousewheel', blockZoom, { passive: false, capture: true });
+
+        window.addEventListener('gesturestart', (e) => e.preventDefault(), { capture: true });
+        window.addEventListener('gesturechange', (e) => e.preventDefault(), { capture: true });
+        window.addEventListener('gestureend', (e) => e.preventDefault(), { capture: true });
+
+        window.addEventListener('touchstart', (e) => {
+            if (e.touches.length > 1) {
+                e.preventDefault();
+            }
+        }, { passive: false, capture: true });
+
+        window.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && (e.key === '+' || e.key === '-' || e.key === '=' || e.key === '0')) {
+                e.preventDefault();
+            }
+        }, { capture: true });
+
+        // Block multi-touch gestures (pinch-to-zoom on touch devices)
+        window.addEventListener('touchmove', (e) => {
+            if (e.touches.length > 1) {
+                e.preventDefault();
+            }
+        }, { passive: false, capture: true });
+    </script>
+    <script src="/canvaskit.js"></script>
+    <script type="module" src="/src/main.ts"></script>
+</head>
+<body>
+    <canvas id="editor-canvas"></canvas>
+    
+    <!-- Hidden input for property editing -->
+    <input type="text" id="property-input" style="display:none; position:absolute; z-index:100;">
+</body>
+</html>

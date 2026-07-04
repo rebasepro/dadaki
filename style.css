@@ -1,0 +1,27 @@
+body, html {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: #1e1e1e;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    touch-action: none;
+    overscroll-behavior: none;
+}
+
+#editor-canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    touch-action: none;
+}
+
+#property-input {
+    background: #3c3c3c;
+    color: white;
+    border: 1px solid #555;
+    padding: 4px 8px;
+    outline: none;
+    font-size: 12px;
+}
