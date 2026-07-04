@@ -11,47 +11,92 @@ export class SmartPaint {
     }
 
     // Finds the enclosed region at (x, y) and returns a new PathObject
-    findRegion(x: number, y: number, width: number, height: number): any {
-        // 1. Create an offscreen surface to render strokes
-        const surface = (this.ck as any).MakeSurface(width, height);
-        const canvas = surface.getCanvas();
-        canvas.clear(this.ck.TRANSPARENT);
+    // Finds the enclosed region at (x, y) in screen coordinates and returns a new PathObject in world coordinates
+    findRegion(screenX: number, screenY: number, width: number, height: number, dpr: number, pan: {x: number, y: number}, zoom: number): any {
+        try {
+            // 1. Create an offscreen surface to render strokes
+            const surface = (this.ck as any).MakeSurface(width, height);
+            if (!surface) {
+                console.error("SmartPaint: MakeSurface failed");
+                return null;
+            }
+            
+            const canvas = surface.getCanvas();
+            canvas.clear(this.ck.TRANSPARENT);
+            
+            // Apply camera transform to match screen
+            canvas.save();
+            canvas.scale(dpr, dpr);
+            canvas.translate(pan.x, pan.y);
+            canvas.scale(zoom, zoom);
 
-        // 2. Render all scene objects as thin black strokes
-        const paint = new this.ck.Paint();
-        paint.setColor(this.ck.BLACK);
-        paint.setStyle(this.ck.PaintStyle.Stroke);
-        paint.setStrokeWidth(1);
+            // 2. Render all scene objects as thin black strokes
+            // We scale the stroke width so it's 1 physical pixel regardless of zoom
+            const paint = new this.ck.Paint();
+            paint.setColor(this.ck.BLACK);
+            paint.setStyle(this.ck.PaintStyle.Stroke);
+            paint.setStrokeWidth(1 / zoom);
 
-        for (const obj of this.scene.objects) {
-            obj.render(canvas, this.ck);
+            for (const obj of this.scene.objects) {
+                if (obj.renderOutline) {
+                    obj.renderOutline(canvas, this.ck, paint);
+                } else {
+                    obj.render(canvas, this.ck);
+                }
+            }
+            
+            canvas.restore();
+            paint.delete();
+
+            // 3. Read pixels to perform flood fill
+            const image = surface.makeImageSnapshot();
+            const pixels = (image as any).readPixels(0, 0, {
+                width: width,
+                height: height,
+                colorType: this.ck.ColorType.RGBA_8888,
+                alphaType: this.ck.AlphaType.Unpremul,
+                colorSpace: this.ck.ColorSpace.SRGB
+            });
+
+            if (!pixels) {
+                console.error("SmartPaint: readPixels failed");
+                image.delete();
+                surface.delete();
+                return null;
+            }
+
+            // 4. Perform Flood Fill on the alpha channel to find the region
+            const startX = Math.floor(screenX * dpr);
+            const startY = Math.floor(screenY * dpr);
+            
+            if (startX < 0 || startX >= width || startY < 0 || startY >= height) {
+                console.error("SmartPaint: Click outside of canvas bounds in world space", startX, startY);
+                image.delete();
+                surface.delete();
+                return null;
+            }
+
+            const mask = this.floodFill(pixels, startX, startY, width, height);
+            
+            if (!mask) {
+                console.error("SmartPaint: floodFill returned null");
+                image.delete();
+                surface.delete();
+                return null;
+            }
+
+            // 5. Trace the mask to create a vector path
+            const path = this.traceContour(mask, width, height, dpr, pan, zoom);
+            
+            // Cleanup
+            image.delete();
+            surface.delete();
+
+            return path;
+        } catch (e) {
+            console.error("SmartPaint Error:", e);
+            return null;
         }
-
-        // 3. Read pixels to perform flood fill
-        const image = surface.makeImageSnapshot();
-        const pixels = (image as any).readPixels(0, 0, {
-            width: width,
-            height: height,
-            colorType: this.ck.ColorType.RGBA_8888,
-            alphaType: this.ck.AlphaType.Unpremul,
-        });
-
-        if (!pixels) return null;
-
-        // 4. Perform Flood Fill on the alpha channel to find the region
-        const mask = this.floodFill(pixels, Math.floor(x), Math.floor(y), width, height);
-        
-        if (!mask) return null;
-
-        // 5. Trace the mask to create a vector path
-        const path = this.traceContour(mask, width, height);
-        
-        // Cleanup
-        image.delete();
-        surface.delete();
-        paint.delete();
-
-        return path;
     }
 
     floodFill(pixels: Uint8Array, startX: number, startY: number, width: number, height: number): Uint8Array | null {
@@ -89,7 +134,7 @@ export class SmartPaint {
         return count > 10 ? mask : null;
     }
 
-    traceContour(mask: Uint8Array, width: number, height: number): any {
+    traceContour(mask: Uint8Array, width: number, height: number, dpr: number, pan: {x: number, y: number}, zoom: number): any {
         // Simple bounding box for now, in a real tool we'd use Marching Squares
         const path: any = new (this.ck as any).Path();
         
@@ -107,8 +152,6 @@ export class SmartPaint {
 
         if (!startPixel) return null;
 
-        path.moveTo(startPixel.x, startPixel.y);
-        
         // Dummy region for now: a rect encompassing the filled area
         let minX = startPixel.x, minY = startPixel.y, maxX = startPixel.x, maxY = startPixel.y;
         for(let i=0; i<mask.length; i++) {
@@ -121,7 +164,14 @@ export class SmartPaint {
                 maxY = Math.max(maxY, y);
             }
         }
-        path.addRect(this.ck.LTRBRect(minX, minY, maxX, maxY));
+        
+        // Convert screen physical pixels to world coordinates
+        const worldMinX = (minX / dpr - pan.x) / zoom;
+        const worldMinY = (minY / dpr - pan.y) / zoom;
+        const worldMaxX = (maxX / dpr - pan.x) / zoom;
+        const worldMaxY = (maxY / dpr - pan.y) / zoom;
+        
+        path.addRect(this.ck.LTRBRect(worldMinX, worldMinY, worldMaxX, worldMaxY));
         
         return path;
     }

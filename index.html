@@ -3,49 +3,88 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Antigravity Vector — Wasm/WebGL SVG Editor</title>
+    <title>Antigravity Vector — Pro SVG Editor</title>
     <link rel="stylesheet" href="style.css">
     <script>
-        // Block all browser-level zoom as early as possible
-        const blockZoom = (e) => {
-            if (e.ctrlKey || e.metaKey) {
-                e.preventDefault();
-            }
-        };
-
-        window.addEventListener('wheel', blockZoom, { passive: false, capture: true });
-        window.addEventListener('mousewheel', blockZoom, { passive: false, capture: true });
-
-        window.addEventListener('gesturestart', (e) => e.preventDefault(), { capture: true });
-        window.addEventListener('gesturechange', (e) => e.preventDefault(), { capture: true });
-        window.addEventListener('gestureend', (e) => e.preventDefault(), { capture: true });
-
-        window.addEventListener('touchstart', (e) => {
-            if (e.touches.length > 1) {
-                e.preventDefault();
-            }
-        }, { passive: false, capture: true });
-
-        window.addEventListener('keydown', (e) => {
-            if ((e.ctrlKey || e.metaKey) && (e.key === '+' || e.key === '-' || e.key === '=' || e.key === '0')) {
-                e.preventDefault();
-            }
-        }, { capture: true });
-
-        // Block multi-touch gestures (pinch-to-zoom on touch devices)
-        window.addEventListener('touchmove', (e) => {
-            if (e.touches.length > 1) {
-                e.preventDefault();
-            }
+        // Block browser zoom
+        window.addEventListener('wheel', (e) => {
+            if (e.ctrlKey || e.metaKey) e.preventDefault();
         }, { passive: false, capture: true });
     </script>
+    <script src="https://unpkg.com/lucide@latest"></script>
     <script src="/canvaskit.js"></script>
     <script type="module" src="/src/main.ts"></script>
 </head>
 <body>
-    <canvas id="editor-canvas"></canvas>
-    
-    <!-- Hidden input for property editing -->
-    <input type="text" id="property-input" style="display:none; position:absolute; z-index:100;">
+    <div id="app-container">
+        <header id="header">
+            <div style="font-weight: 700; font-size: 14px; letter-spacing: -0.02em;">ANTIGRAVITY VECTOR</div>
+            <div style="flex: 1;"></div>
+            <button id="export-svg" style="background: var(--accent); color: white; border: none; padding: 4px 12px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-right: 16px;">Export SVG</button>
+            <div id="zoom-level" style="font-size: 11px; color: #909090;">100%</div>
+        </header>
+
+        <main id="main-layout">
+            <nav id="toolbar">
+                <div class="tool-btn active" id="tool-selection" title="Selection (V)"><i data-lucide="mouse-pointer-2"></i></div>
+                <div class="tool-btn" id="tool-direct" title="Direct Selection (A)"><i data-lucide="mouse-pointer-click"></i></div>
+                <div class="tool-btn" id="tool-pen" title="Pen Tool (P)"><i data-lucide="pen-tool"></i></div>
+                <div class="tool-btn" id="tool-rect" title="Rectangle (M)"><i data-lucide="square"></i></div>
+                <div class="tool-btn" id="tool-ellipse" title="Ellipse (L)"><i data-lucide="circle"></i></div>
+                <div class="tool-btn" id="tool-polygon" title="Polygon"><i data-lucide="hexagon"></i></div>
+                <div class="tool-btn" id="tool-star" title="Star"><i data-lucide="star"></i></div>
+                <div style="flex: 1;"></div>
+                <div class="tool-btn" id="tool-smart-paint" title="Smart Paint (K)"><i data-lucide="paint-bucket"></i></div>
+                <div class="tool-btn" id="tool-stroke" title="Stroke Color"><i data-lucide="pen-line"></i></div>
+            </nav>
+
+            <section id="canvas-container">
+                <canvas id="editor-canvas"></canvas>
+            </section>
+
+            <aside id="side-panel">
+                <div class="panel-section">
+                    <div class="panel-title">Properties</div>
+                    <div class="prop-group">
+                        <span class="prop-label">Fill</span>
+                        <input type="color" id="fill-color" class="color-input" value="#cccccc">
+                    </div>
+                    <div class="prop-group">
+                        <span class="prop-label">Stroke</span>
+                        <input type="color" id="stroke-color" class="color-input" value="#000000">
+                    </div>
+                    <div class="prop-group">
+                        <span class="prop-label">Weight</span>
+                        <input type="number" id="stroke-weight" class="prop-input" value="2" min="0">
+                    </div>
+                    <div class="prop-group">
+                        <span class="prop-label">Opacity</span>
+                        <input type="number" id="opacity" class="prop-input" value="100" min="0" max="100">
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <div class="panel-title">Pathfinder</div>
+                    <div class="pathfinder-grid">
+                        <button class="op-btn" id="op-union" title="Union">∪</button>
+                        <button class="op-btn" id="op-subtract" title="Subtract">∖</button>
+                        <button class="op-btn" id="op-intersect" title="Intersect">∩</button>
+                        <button class="op-btn" id="op-xor" title="Exclude">⊕</button>
+                    </div>
+                </div>
+
+                <div class="panel-section" style="flex: 1; display: flex; flex-direction: column;">
+                    <div class="panel-title">Layers</div>
+                    <div id="layer-list">
+                        <!-- Layers injected by JS -->
+                    </div>
+                </div>
+            </aside>
+        </main>
+    </div>
+    <script>
+        // Initialize Lucide icons
+        lucide.createIcons();
+    </script>
 </body>
 </html>
