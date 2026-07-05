@@ -5,6 +5,12 @@ import { FileIO } from './file_io';
 import { SnapEngine, type SnapGuide } from './snapping';
 import type { WasmScene } from './wasm_scene';
 import type { PenPathPoint, Subpath } from './types';
+import {
+    addAnchorPoint, deleteAnchorPoint,
+    splitPathAtSegment, splitPathAtPoint,
+    joinSubpaths, findNearestSegment,
+    type SegmentHitResult,
+} from './path_ops';
 
 export class InputManager {
     canvas: HTMLCanvasElement;
@@ -66,6 +72,15 @@ export class InputManager {
     draggingHandleType: 'anchor' | 'cp1' | 'cp2' | null = null;
     /** Transform of the node being edited (for world<->local conversion). */
     editingTransform: Float32Array | null = null;
+
+    // --- Path operation state ---
+    /** True when Add Point mode is active (next click on segment adds a point). */
+    addPointMode: boolean = false;
+    /** World-space point on nearest segment for scissors/add-point hover preview. */
+    scissorsHoverPoint: { x: number; y: number } | null = null;
+    /** The selected anchor index in path editing (for delete point). */
+    selectedAnchorSubpath: number = -1;
+    selectedAnchorIndex: number = -1;
 
     // --- Resize handle state ---
     resizeHandleType: string | null = null; // 'nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w', or null
@@ -231,7 +246,7 @@ export class InputManager {
 
     onDoubleClick(e: MouseEvent) {
         const pos = this.getPos(e);
-        const hitId = this.scene.hitTest(pos.x, pos.y); // raw hit for drill-down
+        const hitId = this.scene.hitTest(pos.x, pos.y); // raw hit (deepest leaf)
         if (hitId === undefined) return;
 
         // Check if the currently selected node is a group
@@ -239,11 +254,15 @@ export class InputManager {
         if (selection.length === 1) {
             const selectedNode = this.scene.getNode(selection[0]);
             if (selectedNode && selectedNode.node_type === 'Group') {
-                // Double-click on a group → "enter" it: select the child under cursor
-                this.scene.selectNode(hitId, false);
-                this.ui.syncWithSelection();
-                this.ui.updateLayerList();
-                return;
+                // Double-click on a group → drill down ONE level:
+                // Find the direct child of this group that is (or contains) the hit leaf
+                const targetChild = this.findDirectChildContaining(selection[0], hitId);
+                if (targetChild !== undefined) {
+                    this.scene.selectNode(targetChild, false);
+                    this.ui.syncWithSelection();
+                    this.ui.updateLayerList();
+                    return;
+                }
             }
         }
 
@@ -272,6 +291,24 @@ export class InputManager {
             this.ui.syncWithSelection();
             this.ui.updateLayerList();
         }
+    }
+
+    /**
+     * Walk from `leafId` up the parent chain toward `groupId`, returning the
+     * direct child of `groupId` that is an ancestor of (or is) `leafId`.
+     * This enables progressive drill-down through nested groups.
+     */
+    private findDirectChildContaining(groupId: number, leafId: number): number | undefined {
+        let current = leafId;
+        while (current !== -1) {
+            const parentId = this.scene.getNodeParent(current);
+            if (parentId === groupId) {
+                return current; // `current` is a direct child of the selected group
+            }
+            if (parentId === -1) break; // reached root without finding groupId
+            current = parentId;
+        }
+        return undefined;
     }
 
     /** Enter path edit mode on a node. Converts Rect/Ellipse to Path first if needed. */
@@ -334,6 +371,7 @@ export class InputManager {
             if (e.key === 'o' || e.key === 'O') this.ui.setActiveTool('ellipse');
 
             if (e.key === 'b' || e.key === 'B') this.ui.setActiveTool('paint-bucket');
+            if (e.key === 'c' || e.key === 'C') this.ui.setActiveTool('scissors');
             if (e.key === 't' || e.key === 'T') this.ui.setActiveTool('text');
 
             // View shortcuts (Figma-style)
@@ -365,9 +403,29 @@ export class InputManager {
             }
         }
 
-        // Delete
+        // Delete — in path editing mode, delete the selected anchor point
         if (e.key === 'Backspace' || e.key === 'Delete') {
-            this.deleteSelection();
+            if (this.editingNodeId !== null && this.draggingHandleType === null
+                && this.selectedAnchorSubpath >= 0 && this.selectedAnchorIndex >= 0) {
+                this.deleteSelectedPoint();
+            } else {
+                this.deleteSelection();
+            }
+        }
+
+        // Join Paths: Cmd+J / Ctrl+J
+        if ((e.metaKey || e.ctrlKey) && (e.key === 'j' || e.key === 'J')) {
+            e.preventDefault();
+            this.joinSelectedPaths();
+        }
+
+        // Add point toggle: + key in path edit mode
+        if (e.key === '+' || e.key === '=') {
+            if (this.editingNodeId !== null && !e.metaKey && !e.ctrlKey) {
+                this.addPointMode = !this.addPointMode;
+                this.ui.contextBar?.refresh();
+                return;
+            }
         }
 
         // Undo: Cmd+Z / Ctrl+Z
@@ -557,13 +615,33 @@ export class InputManager {
         const screenX = t[2] * this.renderer.zoom + this.renderer.pan.x;
         const screenY = (t[5] - fontSize) * this.renderer.zoom + this.renderer.pan.y;
 
-        const input = document.createElement('input');
+        const input = document.createElement('textarea');
         input.className = 'text-input-overlay';
-        input.type = 'text';
         input.value = originalContent;
         input.style.left = `${screenX}px`;
         input.style.top = `${screenY}px`;
         input.style.fontSize = `${fontSize * this.renderer.zoom}px`;
+        // Apply font family for WYSIWYG feel
+        const textGeo = geo.Text;
+        if (textGeo.font_family) {
+            input.style.fontFamily = textGeo.font_family + ', sans-serif';
+            // Ensure Google Font CSS is loaded for the editor
+            const linkId = `gfont-${textGeo.font_family.replace(/\s+/g, '-')}`;
+            if (!document.getElementById(linkId)) {
+                const link = document.createElement('link');
+                link.id = linkId;
+                link.rel = 'stylesheet';
+                link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(textGeo.font_family)}:wght@400;700&display=swap`;
+                document.head.appendChild(link);
+            }
+        }
+        const lineCount = originalContent.split('\n').length;
+        input.rows = Math.max(lineCount + 1, 2);
+        input.style.resize = 'both';
+        input.style.minWidth = '100px';
+        input.style.minHeight = '1.5em';
+        input.style.whiteSpace = 'pre-wrap';
+        input.style.overflow = 'hidden';
 
         let done = false;
         const commit = () => {
@@ -583,7 +661,7 @@ export class InputManager {
         };
 
         input.addEventListener('keydown', (ev: KeyboardEvent) => {
-            if (ev.key === 'Enter') {
+            if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
                 ev.preventDefault();
                 commit();
             } else if (ev.key === 'Escape') {
@@ -710,7 +788,8 @@ export class InputManager {
                 return;
             }
 
-            const hitId = this.getTargetIdForHit(this.startPos);
+            const isDeepSelect = e.metaKey || e.ctrlKey;
+            const hitId = this.getTargetIdForHit(this.startPos, isDeepSelect);
             if (hitId !== undefined) {
                 // Clicked on an object — select it and prepare to drag-move
                 if (!e.shiftKey) {
@@ -753,16 +832,22 @@ export class InputManager {
             const screenX = this.startPos.x * this.renderer.zoom + this.renderer.pan.x;
             const screenY = this.startPos.y * this.renderer.zoom + this.renderer.pan.y;
 
-            const input = document.createElement('input');
+            const input = document.createElement('textarea');
             input.className = 'text-input-overlay';
-            input.type = 'text';
             input.value = 'Hello World';
             input.style.left = `${screenX}px`;
             input.style.top = `${screenY}px`;
             input.style.fontSize = `${32 * this.renderer.zoom}px`;
+            input.style.fontFamily = 'sans-serif';
+            input.rows = 3;
+            input.style.resize = 'both';
+            input.style.minWidth = '100px';
+            input.style.minHeight = '1.5em';
+            input.style.whiteSpace = 'pre-wrap';
+            input.style.overflow = 'hidden';
 
             // `done` guards against the double-commit that happens when
-            // Enter removes the input, which fires blur → commit again.
+            // Cmd+Enter removes the textarea, which fires blur → commit again.
             let done = false;
             const commit = () => {
                 if (done) return;
@@ -790,7 +875,7 @@ export class InputManager {
             };
 
             input.addEventListener('keydown', (ev: KeyboardEvent) => {
-                if (ev.key === 'Enter') {
+                if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
                     ev.preventDefault();
                     commit();
                 } else if (ev.key === 'Escape') {
@@ -816,6 +901,8 @@ export class InputManager {
             this.previewRect = { x: this.startPos.x, y: this.startPos.y, w: 0, h: 0, tool: this.ui.activeTool };
         } else if (this.ui.activeTool === 'paint-bucket') {
             this.handlePaintBucketClick(this.startPos);
+        } else if (this.ui.activeTool === 'scissors') {
+            this.handleScissorsDown(this.startPos);
         }
     }
 
@@ -832,13 +919,27 @@ export class InputManager {
     handleDirectDown(pos: { x: number; y: number }, isShift: boolean) {
         // First: if we're already editing a node, check if clicking on one of its points/handles
         if (this.editingNodeId !== null && this.editingPoints) {
+            // Add Point mode: clicking on a segment inserts a new anchor
+            if (this.addPointMode) {
+                if (this.handleAddPointClick(pos)) return;
+            }
+
             const hitInfo = this.findNearestHandle(pos);
             if (hitInfo) {
                 this.draggingSubpathIndex = hitInfo.subpathIndex;
                 this.draggingPointIndex = hitInfo.index;
                 this.draggingHandleType = hitInfo.type;
+                // Track selected anchor for delete point
+                if (hitInfo.type === 'anchor') {
+                    this.selectedAnchorSubpath = hitInfo.subpathIndex;
+                    this.selectedAnchorIndex = hitInfo.index;
+                }
                 this.scene.saveMoveHistory();
                 return;
+            } else {
+                // Clicked empty space in edit mode — deselect anchor
+                this.selectedAnchorSubpath = -1;
+                this.selectedAnchorIndex = -1;
             }
         }
 
@@ -972,6 +1073,211 @@ export class InputManager {
         this.ui.syncWithSelection();
     }
 
+    // ─── Path Operations ─────────────────────────────────────────────
+
+    /** Handle scissors tool click — cut path at segment or anchor. */
+    handleScissorsDown(pos: { x: number; y: number }) {
+        if (!this.scene.engine) return;
+
+        // Find the nearest path node under the cursor
+        const hitId = this.scene.hitTest(pos.x, pos.y);
+        if (hitId === undefined) return;
+
+        const geometry = this.scene.getNodeGeometry(hitId);
+        if (!geometry) return;
+
+        // Convert to path if needed
+        if (!geometry.Path) {
+            this.scene.convertToPath(hitId);
+        }
+        const updatedGeometry = this.scene.getNodeGeometry(hitId);
+        if (!updatedGeometry?.Path) return;
+
+        const subpaths = updatedGeometry.Path.subpaths;
+        const transform = this.scene.getTransform(hitId);
+        const threshold = 10 / this.renderer.zoom;
+
+        // First check: is the cursor near an existing anchor point?
+        for (let si = 0; si < subpaths.length; si++) {
+            const sp = subpaths[si];
+            for (let pi = 0; pi < sp.points.length; pi++) {
+                const p = sp.points[pi];
+                const wx = transform[0] * p.x + transform[1] * p.y + transform[2];
+                const wy = transform[3] * p.x + transform[4] * p.y + transform[5];
+                if (Math.hypot(pos.x - wx, pos.y - wy) < threshold) {
+                    // Split at existing anchor
+                    this.scene.saveMoveHistory();
+                    const newSubpaths = splitPathAtPoint(subpaths, si, pi);
+                    this.scene.updatePathPoints(hitId, JSON.stringify(newSubpaths));
+                    this.ui.syncWithSelection();
+                    this.ui.updateLayerList();
+                    return;
+                }
+            }
+        }
+
+        // Second check: is the cursor near a segment?
+        const segHit = findNearestSegment(subpaths, transform, pos.x, pos.y, threshold);
+        if (segHit) {
+            this.scene.saveMoveHistory();
+            const newSubpaths = splitPathAtSegment(
+                subpaths, segHit.subpathIndex, segHit.segmentIndex, segHit.t
+            );
+            this.scene.updatePathPoints(hitId, JSON.stringify(newSubpaths));
+            this.ui.syncWithSelection();
+            this.ui.updateLayerList();
+        }
+    }
+
+    /** Handle click in path-edit mode when Add Point mode is active. */
+    handleAddPointClick(pos: { x: number; y: number }): boolean {
+        if (!this.editingNodeId || !this.editingPoints || !this.editingTransform) return false;
+
+        const threshold = 10 / this.renderer.zoom;
+        const segHit = findNearestSegment(
+            this.editingPoints, this.editingTransform, pos.x, pos.y, threshold
+        );
+        if (!segHit) return false;
+
+        const newSubpaths = addAnchorPoint(
+            this.editingPoints, segHit.subpathIndex, segHit.segmentIndex, segHit.t
+        );
+
+        // Update engine and local editing state
+        this.scene.saveMoveHistory();
+        this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(newSubpaths));
+        this.editingPoints = newSubpaths;
+        this.addPointMode = false;
+        this.ui.contextBar?.refresh();
+        return true;
+    }
+
+    /** Delete the currently selected anchor point in path editing mode. */
+    deleteSelectedPoint() {
+        if (!this.editingNodeId || !this.editingPoints) return;
+
+        // Use the last-clicked anchor if tracked, or the dragging point
+        let si = this.selectedAnchorSubpath;
+        let pi = this.selectedAnchorIndex;
+        if (si < 0 || pi < 0) {
+            si = this.draggingSubpathIndex;
+            pi = this.draggingPointIndex;
+        }
+        if (si < 0 || pi < 0) return;
+
+        const newSubpaths = deleteAnchorPoint(this.editingPoints, si, pi);
+
+        if (newSubpaths.length === 0) {
+            // All points deleted — remove the node entirely
+            this.editingNodeId = null;
+            this.editingPoints = null;
+            this.editingTransform = null;
+            this.selectedAnchorSubpath = -1;
+            this.selectedAnchorIndex = -1;
+            this.deleteSelection();
+            return;
+        }
+
+        this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(newSubpaths));
+        this.editingPoints = newSubpaths;
+        this.selectedAnchorSubpath = -1;
+        this.selectedAnchorIndex = -1;
+        this.draggingSubpathIndex = -1;
+        this.draggingPointIndex = -1;
+        this.draggingHandleType = null;
+        this.ui.contextBar?.refresh();
+    }
+
+    /** Join two selected path nodes by connecting their nearest endpoints. */
+    joinSelectedPaths() {
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length !== 2) return;
+
+        const [idA, idB] = selection;
+
+        // Ensure both are paths
+        for (const id of [idA, idB]) {
+            const geo = this.scene.getNodeGeometry(id);
+            if (!geo?.Path) {
+                this.scene.convertToPath(id);
+            }
+        }
+
+        const geoA = this.scene.getNodeGeometry(idA);
+        const geoB = this.scene.getNodeGeometry(idB);
+        if (!geoA?.Path || !geoB?.Path) return;
+
+        // Find open subpaths
+        const spA = geoA.Path.subpaths;
+        const spB = geoB.Path.subpaths;
+
+        const openA = spA.findIndex(sp => !sp.closed);
+        const openB = spB.findIndex(sp => !sp.closed);
+        if (openA < 0 || openB < 0) return; // no open subpaths to join
+
+        // Merge B's geometry into A by combining subpaths, then join the open ones
+        const tA = this.scene.getTransform(idA);
+        const tB = this.scene.getTransform(idB);
+
+        // Transform B's points into A's local space
+        // Invert A's transform
+        const a = tA[0], b = tA[1], c = tA[2];
+        const d = tA[3], e = tA[4], f = tA[5];
+        const det = a * e - b * d;
+        if (Math.abs(det) < 1e-10) return;
+
+        const bSubpaths: Subpath[] = JSON.parse(JSON.stringify(spB));
+        for (const sp of bSubpaths) {
+            for (const pt of sp.points) {
+                // Transform point from B's local to world, then to A's local
+                const wx = tB[0] * pt.x + tB[1] * pt.y + tB[2];
+                const wy = tB[3] * pt.x + tB[4] * pt.y + tB[5];
+                pt.x = (e * (wx - c) - b * (wy - f)) / det;
+                pt.y = (a * (wy - f) - d * (wx - c)) / det;
+
+                // Same for handles
+                const c1w: [number, number] = [
+                    tB[0] * pt.cp1[0] + tB[1] * pt.cp1[1] + tB[2],
+                    tB[3] * pt.cp1[0] + tB[4] * pt.cp1[1] + tB[5],
+                ];
+                pt.cp1 = [
+                    (e * (c1w[0] - c) - b * (c1w[1] - f)) / det,
+                    (a * (c1w[1] - f) - d * (c1w[0] - c)) / det,
+                ];
+
+                const c2w: [number, number] = [
+                    tB[0] * pt.cp2[0] + tB[1] * pt.cp2[1] + tB[2],
+                    tB[3] * pt.cp2[0] + tB[4] * pt.cp2[1] + tB[5],
+                ];
+                pt.cp2 = [
+                    (e * (c2w[0] - c) - b * (c2w[1] - f)) / det,
+                    (a * (c2w[1] - f) - d * (c2w[0] - c)) / det,
+                ];
+            }
+        }
+
+        // Combine all subpaths into one array, then join the two open ones
+        const combined = [...JSON.parse(JSON.stringify(spA)) as Subpath[], ...bSubpaths];
+        const combinedOpenA = combined.findIndex(sp => !sp.closed);
+        const aSubpathCount = spA.length;
+        const combinedOpenB = combined.findIndex((sp, i) => i >= aSubpathCount && !sp.closed);
+
+        if (combinedOpenA < 0 || combinedOpenB < 0) return;
+
+        const joined = joinSubpaths(combined, combinedOpenA, 'end', combinedOpenB, 'start');
+
+        // Replace: update A's geometry, remove B
+        this.scene.saveMoveHistory();
+        this.scene.engine!.update_path_points(idA, JSON.stringify(joined));
+        this.scene.engine!.remove_node(idB);
+        this.scene.engine!.clear_selection();
+        this.scene.engine!.select_node(idA, false);
+        this.scene.invalidateCache();
+        this.scene.autosave?.trigger();
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+    }
+
     groupSelection() {
         const selection = this.scene.engine!.get_selection();
         if (selection.length < 1) return;
@@ -1100,6 +1406,30 @@ export class InputManager {
             const faceId = this.scene.engine!.query_face_at(this.currentPos.x, this.currentPos.y);
             this.renderer.hoverFaceId = faceId;
             this.canvas.style.cursor = faceId >= 0 ? 'crosshair' : 'default';
+        }
+
+        // Scissors / Add-Point hover preview
+        if (!this.isMouseDown && (this.ui.activeTool === 'scissors' || (this.ui.activeTool === 'direct' && this.addPointMode))) {
+            this.scissorsHoverPoint = null;
+            // For scissors: hit test all visible paths
+            if (this.ui.activeTool === 'scissors') {
+                const hitId = this.scene.hitTest(this.currentPos.x, this.currentPos.y);
+                if (hitId !== undefined) {
+                    const geo = this.scene.getNodeGeometry(hitId);
+                    if (geo?.Path) {
+                        const t = this.scene.getTransform(hitId);
+                        const seg = findNearestSegment(geo.Path.subpaths, t, this.currentPos.x, this.currentPos.y, 10 / this.renderer.zoom);
+                        if (seg) this.scissorsHoverPoint = { x: seg.worldX, y: seg.worldY };
+                    }
+                }
+            }
+            // For add-point mode: hit test the editing path's segments
+            else if (this.editingNodeId && this.editingPoints && this.editingTransform) {
+                const seg = findNearestSegment(this.editingPoints, this.editingTransform, this.currentPos.x, this.currentPos.y, 10 / this.renderer.zoom);
+                if (seg) this.scissorsHoverPoint = { x: seg.worldX, y: seg.worldY };
+            }
+        } else {
+            this.scissorsHoverPoint = null;
         }
 
         if (!this.isMouseDown) return;
@@ -1587,9 +1917,13 @@ export class InputManager {
      * This implements "context-aware" selection: if you are inside a group, you select 
      * siblings/children of that group. If not, you select the topmost group.
      */
-    private getTargetIdForHit(pos: { x: number; y: number }): number | undefined {
+    private getTargetIdForHit(pos: { x: number; y: number }, deepSelect: boolean = false): number | undefined {
         const rawHitId = this.scene.hitTest(pos.x, pos.y);
         if (rawHitId === undefined) return undefined;
+
+        if (deepSelect) {
+            return rawHitId;
+        }
 
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) {

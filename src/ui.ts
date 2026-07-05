@@ -230,6 +230,7 @@ export class UIEngine {
                 'text': 'text',
                 
                 'paint-bucket': 'crosshair',
+                'scissors': 'crosshair',
             };
             canvas.style.cursor = cursorMap[toolId] || 'default';
         }

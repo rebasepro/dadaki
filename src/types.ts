@@ -128,6 +128,9 @@ export interface NodeVectorNetwork {
 export interface TextGeometry {
     content: string;
     font_size: number;
+    font_family: string;
+    text_align: number;
+    line_height: number;
 }
 
 /**

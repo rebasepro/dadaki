@@ -13,6 +13,8 @@ import { alignSelection, distributeSelection } from './align';
 import type { AlignMode } from './align';
 import { applyBooleanOp } from './boolean_ops';
 import type { BoolOp } from './boolean_ops';
+import { addAnchorPoint, deleteAnchorPoint, findNearestSegment, joinSubpaths, type SegmentHitResult } from './path_ops';
+import { outlineStroke } from './outline_stroke';
 import {
     iconUndo, iconRedo, iconPencil, iconTrash, iconCopy,
     iconAlignLeft, iconAlignCenterH, iconAlignRight,
@@ -20,6 +22,10 @@ import {
     iconDistributeH, iconDistributeV,
     iconBoolUnion, iconBoolSubtract, iconBoolIntersect, iconBoolExclude,
     iconGroup, iconUngroup, iconCornerDownRight,
+    iconPlusCircle, iconMinusCircle, iconScissors, iconLink, iconBoxSelect,
+    iconFlipH, iconFlipV, iconFlatten,
+    iconTextAlignLeft, iconTextAlignCenter, iconTextAlignRight,
+    iconCreateOutlines,
 } from './icons';
 
 /** Tool-specific hint text for shape-tool and text-tool contexts. */
@@ -85,7 +91,12 @@ export class ContextBar {
     /** Build a cache key that captures everything affecting the bar's rendered output. */
     private buildSignature(info: ContextInfo): string {
         // Include values that the various render* methods read from the UI inputs
-        return `${info.context}|${info.selectedIds.join(',')}|${info.pointCount}|${info.primaryNodeType}|${this.ui.fillInput.value}|${this.ui.strokeInput.value}|${this.ui.opacityInput.value}|${this.ui.cornerRadius?.value ?? ''}|${Math.round(this.renderer.zoom * 100)}`;
+        let textSig = '';
+        if (info.primaryNodeType === 'Text' && info.selectedIds.length === 1) {
+            const geo = this.scene.getNodeGeometry(info.selectedIds[0])?.Text;
+            if (geo) textSig = `|ff:${geo.font_family}|ta:${geo.text_align}|lh:${geo.line_height}|fs:${geo.font_size}`;
+        }
+        return `${info.context}|${info.selectedIds.join(',')}|${info.pointCount}|${info.primaryNodeType}|${this.ui.fillInput.value}|${this.ui.strokeInput.value}|${this.ui.opacityInput.value}|${this.ui.cornerRadius?.value ?? ''}|${Math.round(this.renderer.zoom * 100)}${textSig}`;
     }
 
     /** Rebuild the bar DOM based on context info. */
@@ -191,15 +202,121 @@ export class ContextBar {
             }));
         }
 
+        // ── Text-specific controls ──────────────────────────────
+        if (info.primaryNodeType === 'Text' && info.selectedIds.length === 1) {
+            const nodeId = info.selectedIds[0];
+            const geo = this.scene.getNodeGeometry(nodeId);
+            const textGeo = geo?.Text;
+            const currentAlign = textGeo?.text_align ?? 0;
+            const currentLineHeight = textGeo?.line_height ?? 1.2;
+            const currentFontFamily = textGeo?.font_family ?? '';
+            const currentFontSize = textGeo?.font_size ?? 32;
+
+            this.el.appendChild(this.createSeparator());
+
+            // Font picker
+            this.el.appendChild(this.createFontPicker(currentFontFamily, (fontFamily) => {
+                this.scene.setTextProperties(nodeId, fontFamily, currentAlign, currentLineHeight);
+                this.ui.syncWithSelection();
+            }));
+
+            // Font size
+            this.el.appendChild(this.createNumberInput('Size', String(currentFontSize), 'px', (val) => {
+                const newSize = parseFloat(val) || 32;
+                this.scene.setTextContent(nodeId, textGeo?.content ?? '', newSize);
+                this.ui.syncWithSelection();
+            }));
+
+            this.el.appendChild(this.createSeparator());
+
+            // Text alignment buttons
+            const alignModes: Array<[string, string, number]> = [
+                ['Align left', iconTextAlignLeft(14), 0],
+                ['Align center', iconTextAlignCenter(14), 1],
+                ['Align right', iconTextAlignRight(14), 2],
+            ];
+            for (const [title, icon, align] of alignModes) {
+                const btn = this.createIconButton(title, icon, () => {
+                    const latestGeo = this.scene.getNodeGeometry(nodeId)?.Text;
+                    this.scene.setTextProperties(
+                        nodeId,
+                        latestGeo?.font_family ?? '',
+                        align,
+                        latestGeo?.line_height ?? 1.2,
+                    );
+                    this.ui.syncWithSelection();
+                });
+                if (align === currentAlign) btn.classList.add('cb-btn-active');
+                this.el.appendChild(btn);
+            }
+
+            // Line height
+            this.el.appendChild(this.createNumberInput('Line H', currentLineHeight.toFixed(1), '×', (val) => {
+                const newLH = parseFloat(val) || 1.2;
+                const latestGeo = this.scene.getNodeGeometry(nodeId)?.Text;
+                this.scene.setTextProperties(
+                    nodeId,
+                    latestGeo?.font_family ?? '',
+                    latestGeo?.text_align ?? 0,
+                    newLH,
+                );
+                this.ui.syncWithSelection();
+            }));
+
+            this.el.appendChild(this.createSeparator());
+
+            // Create Outlines button
+            this.el.appendChild(this.createButton('Create Outlines', iconCreateOutlines(14), () => {
+                document.dispatchEvent(new CustomEvent('create-outlines', { detail: { nodeId } }));
+            }));
+        }
+        // ── End text-specific controls ──────────────────────────
+
         this.el.appendChild(this.createSeparator());
 
-        // Edit Path
-        this.el.appendChild(this.createButton('Edit Path', iconPencil(14), () => {
-            if (info.selectedIds.length === 1) {
-                this.ui.setActiveTool('direct');
-                this.input.enterPathEditMode(info.selectedIds[0]);
+        // Edit Path (not for text)
+        if (info.primaryNodeType !== 'Text') {
+            this.el.appendChild(this.createButton('Edit Path', iconPencil(14), () => {
+                if (info.selectedIds.length === 1) {
+                    this.ui.setActiveTool('direct');
+                    this.input.enterPathEditMode(info.selectedIds[0]);
+                }
+            }));
+        }
+
+        // Flip & Flatten
+        this.el.appendChild(this.createSeparator());
+        this.el.appendChild(this.createIconButton('Flip Horizontal', iconFlipH(), () => {
+            for (const nid of info.selectedIds) {
+                this.scene.flipNodeH(nid);
             }
+            this.scene.invalidateCache();
+            this.ui.syncWithSelection();
         }));
+        this.el.appendChild(this.createIconButton('Flip Vertical', iconFlipV(), () => {
+            for (const nid of info.selectedIds) {
+                this.scene.flipNodeV(nid);
+            }
+            this.scene.invalidateCache();
+            this.ui.syncWithSelection();
+        }));
+        if (info.selectedIds.length === 1 && this.scene.engine!.has_non_identity_linear(info.selectedIds[0])) {
+            this.el.appendChild(this.createButton('Flatten', iconFlatten(), () => {
+                this.scene.flattenTransform(info.selectedIds[0]);
+                this.scene.invalidateCache();
+                this.ui.syncWithSelection();
+            }));
+        }
+
+        // Outline Stroke (only if node has a stroke)
+        const style = this.scene.getNodeStyle(info.selectedIds[0]);
+        if (style && style.stroke !== null && style.stroke_width > 0) {
+            this.el.appendChild(this.createButton('Outline Stroke', iconBoxSelect(14), () => {
+                outlineStroke(this.ui.ck, this.scene, info.selectedIds[0]);
+                this.ui.syncWithSelection();
+                this.ui.updateLayerList();
+            }));
+        }
 
         // Duplicate
         this.el.appendChild(this.createButton('Duplicate', iconCopy(14), () => {
@@ -272,7 +389,33 @@ export class ContextBar {
             }));
         }
 
+        // Flip
         this.el.appendChild(this.createSeparator());
+        this.el.appendChild(this.createIconButton('Flip Horizontal', iconFlipH(), () => {
+            for (const nid of info.selectedIds) {
+                this.scene.flipNodeH(nid);
+            }
+            this.scene.invalidateCache();
+            this.ui.syncWithSelection();
+        }));
+        this.el.appendChild(this.createIconButton('Flip Vertical', iconFlipV(), () => {
+            for (const nid of info.selectedIds) {
+                this.scene.flipNodeV(nid);
+            }
+            this.scene.invalidateCache();
+            this.ui.syncWithSelection();
+        }));
+
+        this.el.appendChild(this.createSeparator());
+
+        // Join Paths (show when exactly 2 path nodes are selected)
+        if (info.selectedIds.length === 2) {
+            this.el.appendChild(this.createIconButton('Join Paths ⌘J', iconLink(14), () => {
+                this.input.joinSelectedPaths();
+            }));
+
+            this.el.appendChild(this.createSeparator());
+        }
 
         // Group
         this.el.appendChild(this.createButton('Group ⌘G', iconGroup(14), () => {
@@ -302,6 +445,30 @@ export class ContextBar {
                 }
             }
         }));
+
+        // Flip & Flatten
+        this.el.appendChild(this.createSeparator());
+        this.el.appendChild(this.createIconButton('Flip Horizontal', iconFlipH(), () => {
+            for (const nid of info.selectedIds) {
+                this.scene.flipNodeH(nid);
+            }
+            this.scene.invalidateCache();
+            this.ui.syncWithSelection();
+        }));
+        this.el.appendChild(this.createIconButton('Flip Vertical', iconFlipV(), () => {
+            for (const nid of info.selectedIds) {
+                this.scene.flipNodeV(nid);
+            }
+            this.scene.invalidateCache();
+            this.ui.syncWithSelection();
+        }));
+        if (info.selectedIds.length === 1 && this.scene.engine!.has_non_identity_linear(info.selectedIds[0])) {
+            this.el.appendChild(this.createButton('Flatten', iconFlatten(), () => {
+                this.scene.flattenTransform(info.selectedIds[0]);
+                this.scene.invalidateCache();
+                this.ui.syncWithSelection();
+            }));
+        }
 
         this.el.appendChild(this.createSeparator());
 
@@ -345,11 +512,25 @@ export class ContextBar {
 
         this.el.appendChild(this.createSeparator());
 
+        // Add Point
+        this.el.appendChild(this.createIconButton('Add Point (+)', iconPlusCircle(14), () => {
+            this.input.addPointMode = true;
+            this.refresh();
+        }));
+
+        // Delete Point
+        this.el.appendChild(this.createIconButton('Delete Point (−)', iconMinusCircle(14), () => {
+            this.input.deleteSelectedPoint();
+        }));
+
+        this.el.appendChild(this.createSeparator());
+
         // Done (exit edit mode)
         this.el.appendChild(this.createButton('Done', '✓', () => {
             this.input.editingNodeId = null;
             this.input.editingPoints = null;
             this.input.editingTransform = null;
+            this.input.addPointMode = false;
             this.ui.setActiveTool('selection');
         }));
     }
@@ -414,6 +595,36 @@ export class ContextBar {
     }
 
 
+    private createFontPicker(
+        currentFont: string,
+        onChange: (font: string) => void,
+    ): HTMLElement {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'cb-font-picker';
+        wrapper.title = 'Font Family';
+
+        const select = document.createElement('select');
+        select.className = 'cb-font-select';
+
+        const fonts = [
+            '', // System default
+            'Inter', 'Roboto', 'Open Sans', 'Lato', 'Montserrat', 'Poppins', 'Nunito',
+            'Playfair Display', 'Merriweather', 'Lora', 'PT Serif',
+            'JetBrains Mono', 'Fira Code', 'Source Code Pro',
+            'Bebas Neue', 'Oswald', 'Raleway',
+        ];
+        for (const f of fonts) {
+            const opt = document.createElement('option');
+            opt.value = f;
+            opt.textContent = f || '(Default)';
+            if (f === currentFont) opt.selected = true;
+            select.appendChild(opt);
+        }
+
+        select.addEventListener('change', () => onChange(select.value));
+        wrapper.appendChild(select);
+        return wrapper;
+    }
 
     /** Compact icon-only button (align/boolean rows). */
     private createIconButton(title: string, icon: string, onClick: () => void): HTMLElement {

@@ -204,7 +204,23 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 }
                 nodeSvg += `<path d="${d.trim()}" ${attrs} />`;
             } else if (geo.Text) {
-                nodeSvg += `<text x="0" y="0" font-size="${geo.Text.font_size}" ${attrs}>${escapeXml(geo.Text.content)}</text>`;
+                const textAnchorMap = ['start', 'middle', 'end'];
+                const fontFamily = geo.Text.font_family ? ` font-family="${escapeXml(geo.Text.font_family)}"` : '';
+                const textAnchor = geo.Text.text_align ? ` text-anchor="${textAnchorMap[geo.Text.text_align] || 'start'}"` : '';
+                const lineHeightAttr = geo.Text.line_height && geo.Text.line_height !== 1.2 ? ` line-height="${geo.Text.line_height}"` : '';
+                const content = geo.Text.content;
+                const lines = content.split('\n');
+                if (lines.length <= 1) {
+                    nodeSvg += `<text x="0" y="0" font-size="${geo.Text.font_size}"${fontFamily}${textAnchor}${lineHeightAttr} ${attrs}>${escapeXml(content)}</text>`;
+                } else {
+                    const lh = geo.Text.line_height || 1.2;
+                    nodeSvg += `<text x="0" y="0" font-size="${geo.Text.font_size}"${fontFamily}${textAnchor}${lineHeightAttr} ${attrs}>`;
+                    for (let i = 0; i < lines.length; i++) {
+                        const dy = i === 0 ? '0' : `${lh}em`;
+                        nodeSvg += `<tspan x="0" dy="${dy}">${escapeXml(lines[i])}</tspan>`;
+                    }
+                    nodeSvg += '</text>';
+                }
             }
         }
         nodeSvg += `</g>`;

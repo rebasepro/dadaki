@@ -1063,3 +1063,39 @@ body, html {
     z-index: 200;
     min-width: 60px;
 }
+
+/* ─── Typography Panel ─────────────────────────────────────── */
+#typography-section .prop-select {
+    font-size: 11px;
+}
+
+/* ─── Context Bar: Font Picker ─────────────────────────────── */
+.cb-font-picker {
+    display: flex;
+    align-items: center;
+}
+
+.cb-font-select {
+    background: rgba(255,255,255,0.08);
+    color: #e0e0e0;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 4px;
+    padding: 2px 4px;
+    font-size: 11px;
+    height: 24px;
+    max-width: 120px;
+    cursor: pointer;
+}
+
+.cb-font-select:hover {
+    background: rgba(255,255,255,0.14);
+}
+
+.cb-font-select:focus {
+    outline: 1px solid var(--accent, #4a9eff);
+}
+
+.cb-btn-active {
+    background: rgba(74, 158, 255, 0.25) !important;
+    color: #4a9eff !important;
+}

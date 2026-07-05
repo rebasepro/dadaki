@@ -190,6 +190,12 @@ pub struct ProtoText {
     pub content: String,
     #[prost(float, tag = "2")]
     pub font_size: f32,
+    #[prost(string, tag = "3")]
+    pub font_family: String,
+    #[prost(uint32, tag = "4")]
+    pub text_align: u32,
+    #[prost(float, tag = "5")]
+    pub line_height: f32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -443,11 +449,14 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
             }),
             text: None,
         },
-        Geometry::Text { content, font_size } => ProtoGeometry {
+        Geometry::Text { content, font_size, ref font_family, text_align, line_height } => ProtoGeometry {
             rect: None, ellipse: None, path: None,
             text: Some(ProtoText {
                 content: content.clone(),
                 font_size: *font_size,
+                font_family: font_family.clone(),
+                text_align: *text_align as u32,
+                line_height: *line_height,
             }),
         },
     }
@@ -483,6 +492,9 @@ fn proto_to_geometry(g: &ProtoGeometry) -> Geometry {
         Geometry::Text {
             content: t.content.clone(),
             font_size: t.font_size,
+            font_family: t.font_family.clone(),
+            text_align: t.text_align as u8,
+            line_height: if t.line_height > 0.0 { t.line_height } else { 1.2 },
         }
     } else {
         Geometry::Rect { width: 100.0, height: 100.0 }

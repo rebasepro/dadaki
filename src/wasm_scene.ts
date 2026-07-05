@@ -341,6 +341,27 @@ export class WasmScene {
         this.autosave?.trigger();
     }
 
+    flipNodeH(id: number) {
+        this.saveHistory();
+        this.engine!.flip_node_horizontal(id);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    flipNodeV(id: number) {
+        this.saveHistory();
+        this.engine!.flip_node_vertical(id);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    flattenTransform(id: number) {
+        this.saveHistory();
+        this.engine!.flatten_transform(id);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
     duplicateNode(id: number): number {
         this.saveHistory();
         const newId = this.engine!.duplicate_node(id);
@@ -420,6 +441,14 @@ export class WasmScene {
     setTextContent(id: number, content: string, fontSize: number) {
         this.saveHistory();
         this.engine!.set_text_content(id, content, fontSize);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** Update a text node's typography properties. */
+    setTextProperties(id: number, fontFamily: string, textAlign: number, lineHeight: number) {
+        this.saveHistory();
+        this.engine!.set_text_properties(id, fontFamily, textAlign, lineHeight);
         this.invalidateCache();
         this.autosave?.trigger();
     }

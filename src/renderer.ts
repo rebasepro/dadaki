@@ -1,4 +1,5 @@
 import type { Canvas, CanvasKit, Paint, Surface } from 'canvaskit-wasm';
+import { buildFontProvider, isFontLoaded, loadGoogleFontData, onFontLoaded } from './fonts';
 
 /** Helper for efficient zero-copy parsing of the WASM binary render buffer. */
 class BinaryReader {
@@ -97,6 +98,12 @@ export class Renderer {
         this.pan = { x: 0, y: 0 };
 
         this.initGL();
+
+        // Re-render when a Google Font finishes loading so text appears correctly
+        onFontLoaded(() => {
+            this.scene.invalidateCache();
+            this._needsRender = true;
+        });
     }
 
     /** Signal that the scene or view changed and a new frame is needed. */
@@ -526,6 +533,9 @@ export class Renderer {
         // Draw direct selection edit handles
         this.drawDirectEditHandles(canvas, dpr);
 
+        // Draw scissors / add-point hover dot
+        this.drawScissorsPreview(canvas, dpr);
+
         this.surface.flush();
     }
 
@@ -642,14 +652,70 @@ export class Renderer {
             path.delete();
         } else if (type === 4) { // Text
             const fontSize = reader.f32();
+            const textAlign = reader.u32();   // 0=Left, 1=Center, 2=Right
+            const lineHeight = reader.f32();  // multiplier
+            const fontFamily = reader.string();
             const content = reader.string();
-            const font = new this.ck.Font(null, fontSize);
-            const blob = this.ck.TextBlob.MakeFromText(content, font);
-            if (blob) {
-                canvas.drawTextBlob(blob, 0, 0, paint);
-                blob.delete();
+
+            // Map text_align to CanvasKit TextAlign enum
+            const ckTextAlign = textAlign === 1 ? this.ck.TextAlign.Center
+                : textAlign === 2 ? this.ck.TextAlign.Right
+                : this.ck.TextAlign.Left;
+
+            // Extract current fill color from paint for the paragraph text style
+            const paintColor = paint.getColor();
+
+            // Try Paragraph API for rich text rendering
+            const fontProvider = buildFontProvider(this.ck);
+            const fontFamilies = fontFamily ? [fontFamily, 'sans-serif'] : ['sans-serif'];
+
+            try {
+                const paraStyle = new this.ck.ParagraphStyle({
+                    textStyle: {
+                        color: this.ck.Color4f(paintColor[0], paintColor[1], paintColor[2], paintColor[3]),
+                        fontSize: fontSize,
+                        fontFamilies: fontFamilies,
+                        heightMultiplier: lineHeight,
+                    },
+                    textAlign: ckTextAlign,
+                });
+
+                let builder;
+                if (fontProvider && fontFamily) {
+                    builder = this.ck.ParagraphBuilder.MakeFromFontProvider(paraStyle, fontProvider);
+                } else {
+                    const defaultFontMgr = this.ck.FontMgr.RefDefault();
+                    builder = this.ck.ParagraphBuilder.Make(paraStyle, defaultFontMgr);
+                }
+
+                builder.addText(content);
+                const para = builder.build();
+                // Layout with a generous max width; for left/center/right to matter,
+                // we use approx width based on content length (or a fixed large width).
+                const layoutWidth = content.includes('\n') ? content.length * fontSize * 0.6 : 1e5;
+                para.layout(layoutWidth);
+
+                canvas.drawParagraph(para, 0, -fontSize);
+
+                para.delete();
+                builder.delete();
+            } catch {
+                // Fallback: use simple TextBlob if Paragraph API fails
+                const font = new this.ck.Font(null, fontSize);
+                const blob = this.ck.TextBlob.MakeFromText(content, font);
+                if (blob) {
+                    canvas.drawTextBlob(blob, 0, 0, paint);
+                    blob.delete();
+                }
+                font.delete();
             }
-            font.delete();
+
+            // Trigger lazy font loading if font isn't cached yet
+            if (fontFamily && !isFontLoaded(fontFamily)) {
+                loadGoogleFontData(fontFamily); // fire-and-forget; repaint via callback
+            }
+            // Clean up font provider
+            if (fontProvider) fontProvider.delete();
         }
     }
 
@@ -942,6 +1008,38 @@ export class Renderer {
         anchorFill.delete();
         anchorStroke.delete();
         handleFill.delete();
+        canvas.restore();
+    }
+
+    /** Draw a preview dot for the scissors / add-point hover. */
+    private drawScissorsPreview(canvas: Canvas, dpr: number) {
+        const im = this.inputManager;
+        if (!im || !im.scissorsHoverPoint) return;
+
+        const { x, y } = im.scissorsHoverPoint;
+
+        canvas.save();
+        canvas.scale(dpr, dpr);
+        canvas.translate(this.pan.x, this.pan.y);
+        canvas.scale(this.zoom, this.zoom);
+
+        const radius = 5 / this.zoom;
+        const lineWidth = 1.5 / this.zoom;
+
+        const fill = new this.ck.Paint();
+        fill.setColor(this.ck.Color(0, 162, 255, 1.0));
+        fill.setStyle(this.ck.PaintStyle.Fill);
+
+        const stroke = new this.ck.Paint();
+        stroke.setColor(this.ck.Color(255, 255, 255, 1.0));
+        stroke.setStyle(this.ck.PaintStyle.Stroke);
+        stroke.setStrokeWidth(lineWidth);
+
+        canvas.drawCircle(x, y, radius, fill);
+        canvas.drawCircle(x, y, radius, stroke);
+
+        fill.delete();
+        stroke.delete();
         canvas.restore();
     }
 

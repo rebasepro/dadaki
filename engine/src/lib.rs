@@ -1,5 +1,5 @@
 use wasm_bindgen::prelude::*;
-use glam::{Mat3, Vec2};
+use glam::{Mat3, Vec2, Vec3};
 use serde::{Serialize, Deserialize};
 use std::collections::{HashMap, HashSet};
 
@@ -313,7 +313,16 @@ pub enum Geometry {
         #[serde(default)]
         network: Option<NodeVectorNetwork>,
     },
-    Text { content: String, font_size: f32 },
+    Text {
+        content: String,
+        font_size: f32,
+        #[serde(default)]
+        font_family: String,
+        #[serde(default)]
+        text_align: u8,
+        #[serde(default = "default_line_height")]
+        line_height: f32,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -429,6 +438,7 @@ pub struct Scene {
 }
 
 fn default_document_size() -> f32 { 1000.0 }
+fn default_line_height() -> f32 { 1.2 }
 
 #[wasm_bindgen]
 impl Engine {
@@ -606,17 +616,30 @@ impl Engine {
                     let total_size = (end_len - start_len) as u32;
                     self.render_buffer[size_offset..size_offset+4].copy_from_slice(&total_size.to_le_bytes());
                 }
-                Geometry::Text { content, font_size } => {
-                    let bytes = content.as_bytes();
-                    // Pad the UTF-8 payload so the next command stays 4-byte aligned
-                    let padding = (4 - (bytes.len() % 4)) % 4;
-                    let total_size = 4 + 4 + bytes.len() as u32 + padding as u32; // font_size + len_prefix + bytes + padding
+                Geometry::Text { content, font_size, ref font_family, text_align, line_height } => {
+                    let ff_bytes = font_family.as_bytes();
+                    let ff_padding = (4 - (ff_bytes.len() % 4)) % 4;
+                    let content_bytes = content.as_bytes();
+                    let content_padding = (4 - (content_bytes.len() % 4)) % 4;
+                    let total_size = 4 + 4 + 4  // font_size + text_align + line_height
+                        + 4 + ff_bytes.len() as u32 + ff_padding as u32  // ff_len + ff + ff_pad
+                        + 4 + content_bytes.len() as u32 + content_padding as u32; // content_len + content + pad
                     self.render_buffer.extend_from_slice(&total_size.to_le_bytes());
 
                     self.render_buffer.extend_from_slice(&font_size.to_le_bytes());
-                    self.render_buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                    self.render_buffer.extend_from_slice(bytes);
-                    let padded_len = self.render_buffer.len() + padding;
+                    self.render_buffer.extend_from_slice(&(*text_align as u32).to_le_bytes());
+                    self.render_buffer.extend_from_slice(&line_height.to_le_bytes());
+
+                    // font_family string
+                    self.render_buffer.extend_from_slice(&(ff_bytes.len() as u32).to_le_bytes());
+                    self.render_buffer.extend_from_slice(ff_bytes);
+                    let ff_padded = self.render_buffer.len() + ff_padding;
+                    self.render_buffer.resize(ff_padded, 0);
+
+                    // content string
+                    self.render_buffer.extend_from_slice(&(content_bytes.len() as u32).to_le_bytes());
+                    self.render_buffer.extend_from_slice(content_bytes);
+                    let padded_len = self.render_buffer.len() + content_padding;
                     self.render_buffer.resize(padded_len, 0);
                 }
             }
@@ -1029,7 +1052,7 @@ impl Engine {
                         AABB::from_corners([min_x, min_y], [max_x, max_y])
                     }
                 }
-                Geometry::Text { ref content, font_size } => {
+                Geometry::Text { ref content, font_size, .. } => {
                     let p = transform.transform_point2(Vec2::ZERO);
                     let approx_w = content.len() as f32 * font_size * 0.6;
                     AABB::from_corners([p.x, p.y - font_size], [p.x + approx_w, p.y])
@@ -1483,7 +1506,7 @@ impl Engine {
                         let local_tol = HIT_TOLERANCE / scale;
                         path_hit(subpaths, &node.style, local_point, local_tol)
                     },
-                    Geometry::Text { ref content, font_size } => {
+                    Geometry::Text { ref content, font_size, .. } => {
                         let approx_w = content.len() as f32 * font_size * 0.6;
                         local_point.x >= 0.0 && local_point.x <= approx_w &&
                         local_point.y >= -font_size && local_point.y <= 0.0
@@ -1868,6 +1891,221 @@ impl Engine {
         }
     }
 
+    /// Compute the center of a node's geometry in its local coordinate space.
+    fn compute_local_center(&self, id: u32) -> (f32, f32) {
+        let node = match self.scene.nodes.get(&id) {
+            Some(n) => n,
+            None => return (0.0, 0.0),
+        };
+        match node.node_type {
+            NodeType::Group => {
+                let bounds = self.get_node_bounds(id);
+                if bounds[0] > bounds[2] { return (0.0, 0.0); }
+                let world_cx = (bounds[0] + bounds[2]) / 2.0;
+                let world_cy = (bounds[1] + bounds[3]) / 2.0;
+                if let Some(gt) = self.global_transforms.get(&id) {
+                    let global = Mat3::from_cols_array(gt);
+                    let inv = global.inverse();
+                    let local = inv.transform_point2(Vec2::new(world_cx, world_cy));
+                    (local.x, local.y)
+                } else {
+                    (0.0, 0.0)
+                }
+            }
+            _ => match &node.geometry {
+                Geometry::Rect { width, height } => (*width / 2.0, *height / 2.0),
+                Geometry::Ellipse { .. } => (0.0, 0.0),
+                Geometry::Path { subpaths, .. } => {
+                    let mut min_x = f32::MAX;
+                    let mut max_x = f32::MIN;
+                    let mut min_y = f32::MAX;
+                    let mut max_y = f32::MIN;
+                    for sp in subpaths {
+                        for pt in &sp.points {
+                            min_x = min_x.min(pt.x);
+                            max_x = max_x.max(pt.x);
+                            min_y = min_y.min(pt.y);
+                            max_y = max_y.max(pt.y);
+                        }
+                    }
+                    if min_x <= max_x {
+                        ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+                    } else {
+                        (0.0, 0.0)
+                    }
+                }
+                Geometry::Text { .. } => (0.0, 0.0),
+            }
+        }
+    }
+
+    /// Flip a node horizontally (mirror across the local vertical center axis).
+    /// The shape stays visually in the same position — only the transform changes.
+    pub fn flip_node_horizontal(&mut self, id: u32) {
+        let (cx, _cy) = self.compute_local_center(id);
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            let mat = Mat3::from_cols_array(&node.transform);
+            // flip_around_center = T(cx,0) * S(-1,1) * T(-cx,0)
+            // Simplifies to: [-1, 0, 2*cx; 0, 1, 0; 0, 0, 1] (row-major)
+            let flip = Mat3::from_cols(
+                Vec3::new(-1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(2.0 * cx, 0.0, 1.0),
+            );
+            node.transform = (mat * flip).to_cols_array();
+        }
+        self.update_node_global_transform(id);
+        self.update_spatial_index_recursive(id);
+        self.update_ancestor_group_bounds(id);
+        self.mark_dirty(id);
+    }
+
+    /// Flip a node vertically (mirror across the local horizontal center axis).
+    pub fn flip_node_vertical(&mut self, id: u32) {
+        let (_cx, cy) = self.compute_local_center(id);
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            let mat = Mat3::from_cols_array(&node.transform);
+            let flip = Mat3::from_cols(
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(0.0, 2.0 * cy, 1.0),
+            );
+            node.transform = (mat * flip).to_cols_array();
+        }
+        self.update_node_global_transform(id);
+        self.update_spatial_index_recursive(id);
+        self.update_ancestor_group_bounds(id);
+        self.mark_dirty(id);
+    }
+
+    /// Check whether a node's local transform has a non-identity linear part
+    /// (rotation, scale != 1, skew, or flip).
+    pub fn has_non_identity_linear(&self, id: u32) -> bool {
+        if let Some(node) = self.scene.nodes.get(&id) {
+            let mat = Mat3::from_cols_array(&node.transform);
+            (mat.x_axis.x - 1.0).abs() > 1e-4 || mat.x_axis.y.abs() > 1e-4 ||
+            mat.y_axis.x.abs() > 1e-4 || (mat.y_axis.y - 1.0).abs() > 1e-4
+        } else {
+            false
+        }
+    }
+
+    /// Bake the node's rotation/scale/skew into its geometry, resetting the
+    /// transform to translation-only. Rect/Ellipse nodes are first converted
+    /// to paths; groups push their linear transform into each child.
+    pub fn flatten_transform(&mut self, id: u32) -> bool {
+        // Extract the linear part and check if it's non-identity
+        let (node_type, linear, tx, ty) = {
+            let node = match self.scene.nodes.get(&id) {
+                Some(n) => n,
+                None => return false,
+            };
+            let mat = Mat3::from_cols_array(&node.transform);
+            let is_identity =
+                (mat.x_axis.x - 1.0).abs() < 1e-5 && mat.x_axis.y.abs() < 1e-5 &&
+                mat.y_axis.x.abs() < 1e-5 && (mat.y_axis.y - 1.0).abs() < 1e-5;
+            if is_identity { return false; }
+            let linear = Mat3::from_cols(
+                Vec3::new(mat.x_axis.x, mat.x_axis.y, 0.0),
+                Vec3::new(mat.y_axis.x, mat.y_axis.y, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+            );
+            (node.node_type, linear, mat.z_axis.x, mat.z_axis.y)
+        };
+
+        match node_type {
+            NodeType::Rect | NodeType::Ellipse => {
+                // Convert primitive to path first, then flatten the path
+                self.convert_to_path(id);
+                self.flatten_path_geometry(id, linear, tx, ty)
+            }
+            NodeType::Path => {
+                self.flatten_path_geometry(id, linear, tx, ty)
+            }
+            NodeType::Group => {
+                // Push the linear transform into each child's transform
+                let children = match self.scene.nodes.get(&id) {
+                    Some(n) => n.children.clone(),
+                    None => return false,
+                };
+                for &child_id in &children {
+                    if let Some(child) = self.scene.nodes.get_mut(&child_id) {
+                        let child_mat = Mat3::from_cols_array(&child.transform);
+                        child.transform = (linear * child_mat).to_cols_array();
+                    }
+                }
+                if let Some(node) = self.scene.nodes.get_mut(&id) {
+                    node.transform = Mat3::from_translation(Vec2::new(tx, ty)).to_cols_array();
+                }
+                self.update_node_global_transform(id);
+                self.update_spatial_index_recursive(id);
+                self.update_ancestor_group_bounds(id);
+                self.mark_dirty(id);
+                true
+            }
+            NodeType::Text => false,
+        }
+    }
+
+    /// Apply a linear transform to a path node's geometry and reset to
+    /// translation-only. Returns true on success.
+    fn flatten_path_geometry(&mut self, id: u32, linear: Mat3, tx: f32, ty: f32) -> bool {
+        let subpaths = match self.scene.nodes.get(&id) {
+            Some(n) => match &n.geometry {
+                Geometry::Path { subpaths, .. } => subpaths.clone(),
+                _ => return false,
+            },
+            None => return false,
+        };
+
+        let mut new_subpaths = subpaths;
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+
+        for sp in &mut new_subpaths {
+            for pt in &mut sp.points {
+                let p = linear.transform_point2(Vec2::new(pt.x, pt.y));
+                let c1 = linear.transform_point2(pt.cp1);
+                let c2 = linear.transform_point2(pt.cp2);
+                pt.x = p.x;
+                pt.y = p.y;
+                pt.cp1 = c1;
+                pt.cp2 = c2;
+                min_x = min_x.min(p.x).min(c1.x).min(c2.x);
+                min_y = min_y.min(p.y).min(c1.y).min(c2.y);
+            }
+        }
+
+        if !min_x.is_finite() || !min_y.is_finite() {
+            min_x = 0.0;
+            min_y = 0.0;
+        }
+
+        // Offset geometry so it starts near the origin
+        for sp in &mut new_subpaths {
+            for pt in &mut sp.points {
+                pt.x -= min_x;
+                pt.y -= min_y;
+                pt.cp1.x -= min_x;
+                pt.cp1.y -= min_y;
+                pt.cp2.x -= min_x;
+                pt.cp2.y -= min_y;
+            }
+        }
+
+        let network = Some(NodeVectorNetwork::from_subpaths(&new_subpaths));
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            node.geometry = Geometry::Path { subpaths: new_subpaths, network };
+            node.transform = Mat3::from_translation(Vec2::new(tx + min_x, ty + min_y)).to_cols_array();
+        }
+
+        self.update_node_global_transform(id);
+        self.update_spatial_index_recursive(id);
+        self.update_ancestor_group_bounds(id);
+        self.mark_dirty(id);
+        true
+    }
+
     /// Duplicate a node (and its entire subtree if a group) and return the new id.
     pub fn duplicate_node(&mut self, id: u32) -> u32 {
         let new_id = self.deep_clone_subtree(id);
@@ -2178,7 +2416,7 @@ impl Engine {
                 miter_limit: 4.0,
                 fill_opacity: 1.0,
             },
-            geometry: Geometry::Text { content: content.to_string(), font_size },
+            geometry: Geometry::Text { content: content.to_string(), font_size, font_family: String::new(), text_align: 0, line_height: 1.2 },
             children: Vec::new(),
             parent: None,
             visible: true,
@@ -2204,9 +2442,30 @@ impl Engine {
     /// Update a text node's content and font size.
     pub fn set_text_content(&mut self, id: u32, content: &str, font_size: f32) {
         let updated = if let Some(node) = self.scene.nodes.get_mut(&id) {
-            if let Geometry::Text { content: c, font_size: fs } = &mut node.geometry {
+            if let Geometry::Text { content: c, font_size: fs, .. } = &mut node.geometry {
                 *c = content.to_string();
                 *fs = font_size.max(1.0);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if updated {
+            self.update_spatial_index(id);
+            self.update_ancestor_group_bounds(id);
+            self.mark_dirty(id);
+        }
+    }
+
+    /// Update a text node's typography properties (font family, alignment, line height).
+    pub fn set_text_properties(&mut self, id: u32, font_family: &str, text_align: u8, line_height: f32) {
+        let updated = if let Some(node) = self.scene.nodes.get_mut(&id) {
+            if let Geometry::Text { font_family: ff, text_align: ta, line_height: lh, .. } = &mut node.geometry {
+                *ff = font_family.to_string();
+                *ta = text_align;
+                *lh = if line_height > 0.0 { line_height } else { 1.2 };
                 true
             } else {
                 false
