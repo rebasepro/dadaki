@@ -438,14 +438,14 @@ export function transformPoint(m: number[], x: number, y: number): [number, numb
 /**
  * Build a column-major 3×3 translation matrix.
  */
-function translateMatrix(tx: number, ty: number): number[] {
+export function translateMatrix(tx: number, ty: number): number[] {
     return [1, 0, 0, 0, 1, 0, tx, ty, 1];
 }
 
 /**
  * Build a column-major 3×3 scale matrix.
  */
-function scaleMatrix(sx: number, sy: number): number[] {
+export function scaleMatrix(sx: number, sy: number): number[] {
     return [sx, 0, 0, 0, sy, 0, 0, 0, 1];
 }
 
@@ -553,6 +553,94 @@ export function matrixToSVGTransform(m: number[]): string {
     return `matrix(${m[0]},${m[1]},${m[3]},${m[4]},${m[6]},${m[7]})`;
 }
 
+// ─── preserveAspectRatio ───────────────────────────────────────────────────
+
+/**
+ * Parse an SVG `preserveAspectRatio` attribute and compute the combined
+ * translate + scale matrix that maps viewBox coordinates to viewport
+ * coordinates.
+ *
+ * @param par     The `preserveAspectRatio` value (e.g. "xMidYMid meet").
+ *                Defaults to "xMidYMid meet" when null/empty (SVG spec default).
+ * @param vbMinX  viewBox min-X
+ * @param vbMinY  viewBox min-Y
+ * @param vbW     viewBox width
+ * @param vbH     viewBox height
+ * @param vpW     Viewport (element) width
+ * @param vpH     Viewport (element) height
+ * @returns       Column-major 3×3 matrix
+ */
+export function parsePreserveAspectRatio(
+    par: string | null,
+    vbMinX: number, vbMinY: number,
+    vbW: number, vbH: number,
+    vpW: number, vpH: number,
+): number[] {
+    if (vbW <= 0 || vbH <= 0 || vpW <= 0 || vpH <= 0) {
+        // Degenerate — just translate the origin
+        if (vbMinX !== 0 || vbMinY !== 0) {
+            return translateMatrix(-vbMinX, -vbMinY);
+        }
+        return identityMatrix();
+    }
+
+    const value = (par || 'xMidYMid meet').trim();
+
+    // "none" → non-uniform stretch
+    if (value === 'none') {
+        const sx = vpW / vbW;
+        const sy = vpH / vbH;
+        return composeMatrices(
+            scaleMatrix(sx, sy),
+            translateMatrix(-vbMinX, -vbMinY),
+        );
+    }
+
+    // Parse alignment + meetOrSlice
+    const parts = value.split(/\s+/);
+    const align = parts[0] || 'xMidYMid';
+    const meetOrSlice = (parts[1] || 'meet').toLowerCase();
+
+    // Compute uniform scale
+    const scaleX = vpW / vbW;
+    const scaleY = vpH / vbH;
+    const s = meetOrSlice === 'slice'
+        ? Math.max(scaleX, scaleY)
+        : Math.min(scaleX, scaleY);
+
+    // Parse x/y alignment from the combined token (e.g. "xMidYMid")
+    const xAlign = align.slice(0, 4); // xMin, xMid, xMax
+    const yAlign = align.slice(4, 8); // YMin, YMid, YMax
+
+    let tx = 0;
+    let ty = 0;
+
+    // X alignment: how to distribute remaining horizontal space
+    if (xAlign === 'xMid') {
+        tx = (vpW - vbW * s) / 2;
+    } else if (xAlign === 'xMax') {
+        tx = vpW - vbW * s;
+    }
+    // xMin → tx = 0
+
+    // Y alignment: how to distribute remaining vertical space
+    if (yAlign === 'YMid') {
+        ty = (vpH - vbH * s) / 2;
+    } else if (yAlign === 'YMax') {
+        ty = vpH - vbH * s;
+    }
+    // YMin → ty = 0
+
+    // Result: translate(tx, ty) * scale(s, s) * translate(-vbMinX, -vbMinY)
+    return composeMatrices(
+        composeMatrices(
+            translateMatrix(tx, ty),
+            scaleMatrix(s, s),
+        ),
+        translateMatrix(-vbMinX, -vbMinY),
+    );
+}
+
 // ─── XML / Attribute Escaping ──────────────────────────────────────────────
 
 /** Escape special XML characters for safe use in attributes and text content. */
@@ -565,16 +653,124 @@ export function escapeXml(str: string): string {
         .replace(/'/g, '&apos;');
 }
 
-// ─── Gradient Resolution ───────────────────────────────────────────────────
+// ─── CSS Color Parsing ─────────────────────────────────────────────────────
+
+/** CSS named colors (the common subset; canvas normalization is not available
+ *  in the test environment, so this stays a pure lookup). */
+const CSS_NAMED_COLORS: Record<string, string> = {
+    black: '#000000', white: '#ffffff', red: '#ff0000', green: '#008000',
+    blue: '#0000ff', yellow: '#ffff00', orange: '#ffa500', purple: '#800080',
+    gray: '#808080', grey: '#808080', pink: '#ffc0cb', brown: '#a52a2a',
+    cyan: '#00ffff', magenta: '#ff00ff', lime: '#00ff00', navy: '#000080',
+    teal: '#008080', silver: '#c0c0c0', maroon: '#800000', olive: '#808000',
+    aqua: '#00ffff', fuchsia: '#ff00ff', crimson: '#dc143c', coral: '#ff7f50',
+    gold: '#ffd700', indigo: '#4b0082', violet: '#ee82ee', khaki: '#f0e68c',
+    salmon: '#fa8072', turquoise: '#40e0d0', tan: '#d2b48c', orchid: '#da70d6',
+    skyblue: '#87ceeb', steelblue: '#4682b4', tomato: '#ff6347', wheat: '#f5deb3',
+    beige: '#f5f5dc', ivory: '#fffff0', lavender: '#e6e6fa', plum: '#dda0dd',
+    darkred: '#8b0000', darkgreen: '#006400', darkblue: '#00008b', darkgray: '#a9a9a9',
+    darkgrey: '#a9a9a9', lightgray: '#d3d3d3', lightgrey: '#d3d3d3', lightblue: '#add8e6',
+    lightgreen: '#90ee90', lightyellow: '#ffffe0', lightpink: '#ffb6c1',
+    dimgray: '#696969', dimgrey: '#696969', slategray: '#708090', slategrey: '#708090',
+    royalblue: '#4169e1', dodgerblue: '#1e90ff', firebrick: '#b22222',
+    forestgreen: '#228b22', seagreen: '#2e8b57', midnightblue: '#191970',
+    goldenrod: '#daa520', chocolate: '#d2691e', sienna: '#a0522d',
+    rebeccapurple: '#663399', hotpink: '#ff69b4', deeppink: '#ff1493',
+    currentcolor: '#000000', inherit: '#000000',
+};
 
 /**
- * Resolve a `fill="url(#id)"` reference to the first stop color of the
- * referenced gradient element. Returns a hex color string or null.
- *
- * TODO: Real gradient support — this only approximates with the first stop color.
+ * Parse any CSS color into a normalized 6-digit hex + alpha.
+ * Handles: #rgb, #rgba, #rrggbb, #rrggbbaa, rgb(), rgba(), hsl(), hsla(),
+ * named colors. Returns null for anything unparseable (url refs, var(), etc.)
+ * — callers must NOT feed the raw string onward, that renders as black.
  */
-export function resolveGradientColor(svgDoc: Document, fillUrl: string): string | null {
-    const idMatch = fillUrl.match(/url\(\s*#([^)]+)\s*\)/);
+export function parseCssColor(input: string): { hex: string; alpha: number } | null {
+    const s = input.trim();
+    const toHex = (r: number, g: number, b: number) =>
+        '#' + [r, g, b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+
+    // Hex forms
+    if (s.startsWith('#')) {
+        const h = s.slice(1);
+        if (/^[0-9a-fA-F]{3}$/.test(h)) {
+            return { hex: '#' + h.split('').map(c => c + c).join(''), alpha: 1 };
+        }
+        if (/^[0-9a-fA-F]{4}$/.test(h)) {
+            const [r, g, b, a] = h.split('').map(c => parseInt(c + c, 16));
+            return { hex: toHex(r, g, b), alpha: a / 255 };
+        }
+        if (/^[0-9a-fA-F]{6}$/.test(h)) return { hex: s.toLowerCase(), alpha: 1 };
+        if (/^[0-9a-fA-F]{8}$/.test(h)) {
+            return { hex: '#' + h.slice(0, 6).toLowerCase(), alpha: parseInt(h.slice(6, 8), 16) / 255 };
+        }
+        return null;
+    }
+
+    // rgb() / rgba() — ints or percentages, comma or space separated
+    const rgbMatch = s.match(/^rgba?\(\s*([\d.]+%?)[\s,]+([\d.]+%?)[\s,]+([\d.]+%?)(?:[\s,/]+([\d.]+%?))?\s*\)$/i);
+    if (rgbMatch) {
+        const chan = (v: string) => v.endsWith('%') ? parseFloat(v) / 100 * 255 : parseFloat(v);
+        const alpha = rgbMatch[4] !== undefined
+            ? (rgbMatch[4].endsWith('%') ? parseFloat(rgbMatch[4]) / 100 : parseFloat(rgbMatch[4]))
+            : 1;
+        return { hex: toHex(chan(rgbMatch[1]), chan(rgbMatch[2]), chan(rgbMatch[3])), alpha };
+    }
+
+    // hsl() / hsla()
+    const hslMatch = s.match(/^hsla?\(\s*([\d.]+)(?:deg)?[\s,]+([\d.]+)%[\s,]+([\d.]+)%(?:[\s,/]+([\d.]+%?))?\s*\)$/i);
+    if (hslMatch) {
+        const hDeg = ((parseFloat(hslMatch[1]) % 360) + 360) % 360;
+        const sat = parseFloat(hslMatch[2]) / 100;
+        const light = parseFloat(hslMatch[3]) / 100;
+        const alpha = hslMatch[4] !== undefined
+            ? (hslMatch[4].endsWith('%') ? parseFloat(hslMatch[4]) / 100 : parseFloat(hslMatch[4]))
+            : 1;
+        const c = (1 - Math.abs(2 * light - 1)) * sat;
+        const x = c * (1 - Math.abs(((hDeg / 60) % 2) - 1));
+        const m = light - c / 2;
+        let r = 0, g = 0, b = 0;
+        if (hDeg < 60) { r = c; g = x; } else if (hDeg < 120) { r = x; g = c; }
+        else if (hDeg < 180) { g = c; b = x; } else if (hDeg < 240) { g = x; b = c; }
+        else if (hDeg < 300) { r = x; b = c; } else { r = c; b = x; }
+        return { hex: toHex((r + m) * 255, (g + m) * 255, (b + m) * 255), alpha };
+    }
+
+    // Named colors
+    const named = CSS_NAMED_COLORS[s.toLowerCase()];
+    if (named) return { hex: named, alpha: 1 };
+
+    return null;
+}
+
+// ─── Gradient Resolution ───────────────────────────────────────────────────
+
+/** Parsed SVG gradient data ready for the engine's Paint::Gradient format. */
+export interface SVGGradientData {
+    gradient_type: 'Linear' | 'Radial';
+    stops: { offset: number; color: { r: number; g: number; b: number; a: number } }[];
+    /** Start point in local coordinate space */
+    start_x: number; start_y: number;
+    /** End point in local coordinate space */
+    end_x: number; end_y: number;
+}
+
+/**
+ * Resolve a `fill="url(#id)"` to full gradient data.
+ * Parses <linearGradient> and <radialGradient> with their stops and coordinates.
+ * Coordinates use objectBoundingBox by default (0–1 space), converted to local
+ * coords using the provided bounding box dimensions.
+ */
+export function resolveGradient(
+    svgDoc: Document,
+    fillUrl: string,
+    /** Node's local bounding box width (for objectBoundingBox→local conversion) */
+    bboxWidth = 100,
+    /** Node's local bounding box height */
+    bboxHeight = 100,
+): SVGGradientData | null {
+    // Accept quoted references too: url('#id') / url("#id") (Illustrator output)
+    const idMatch = fillUrl.match(/url\(\s*['"]?#([^'")]+)['"]?\s*\)/);
     if (!idMatch) return null;
 
     const el = svgDoc.getElementById(idMatch[1]);
@@ -583,39 +779,151 @@ export function resolveGradientColor(svgDoc: Document, fillUrl: string): string 
     const tag = el.tagName.toLowerCase();
     if (tag !== 'lineargradient' && tag !== 'radialgradient') return null;
 
-    // Find first <stop> child
-    const stop = el.querySelector('stop');
-    if (!stop) return null;
+    // Stops may live on a referenced template gradient (href / xlink:href
+    // indirection, standard in Illustrator exports). Follow the chain.
+    let stopSource: Element | null = el;
+    for (let hops = 0; stopSource && stopSource.querySelectorAll('stop').length === 0 && hops < 4; hops++) {
+        const href: string | null | undefined = stopSource.getAttribute('href') ?? stopSource.getAttribute('xlink:href');
+        stopSource = href?.startsWith('#') ? svgDoc.getElementById(href.slice(1)) : null;
+    }
+    if (!stopSource) return null;
 
-    // Get stop-color from attribute or style
-    let color = stop.getAttribute('stop-color');
-    if (!color) {
-        const styleAttr = stop.getAttribute('style');
-        if (styleAttr) {
-            const match = styleAttr.match(/stop-color\s*:\s*([^;]+)/);
-            if (match) color = match[1].trim();
+    // Parse gradient stops
+    const stopEls = stopSource.querySelectorAll('stop');
+    const stops: SVGGradientData['stops'] = [];
+    for (const stopEl of stopEls) {
+        const offset = parseFloat(stopEl.getAttribute('offset') || '0');
+        const opacity = parseFloat(stopEl.getAttribute('stop-opacity') || '1');
+
+        let colorStr = stopEl.getAttribute('stop-color');
+        if (!colorStr) {
+            const styleAttr = stopEl.getAttribute('style');
+            if (styleAttr) {
+                const match = styleAttr.match(/stop-color\s*:\s*([^;]+)/);
+                if (match) colorStr = match[1].trim();
+                // Also check for stop-opacity in style
+                const opMatch = styleAttr.match(/stop-opacity\s*:\s*([^;]+)/);
+                if (opMatch) {
+                    const styleOpacity = parseFloat(opMatch[1].trim());
+                    if (!isNaN(styleOpacity)) {
+                        stops.push({
+                            offset: isNaN(offset) ? 0 : offset,
+                            color: parseStopColor(colorStr || '#000000', styleOpacity),
+                        });
+                        continue;
+                    }
+                }
+            }
         }
+
+        stops.push({
+            offset: isNaN(offset) ? 0 : offset,
+            color: parseStopColor(colorStr || '#000000', opacity),
+        });
     }
 
-    if (!color) return null;
+    if (stops.length === 0) return null;
 
-    // If it's already hex, return as-is
-    if (color.startsWith('#')) return color;
+    // Check gradientUnits (default: objectBoundingBox)
+    const units = el.getAttribute('gradientUnits') || 'objectBoundingBox';
+    const isOBB = units === 'objectBoundingBox';
 
-    // Try rgb()
-    const rgbMatch = color.match(/rgb\s*\(\s*(\d+)\s*[,\s]\s*(\d+)\s*[,\s]\s*(\d+)\s*\)/);
+    let start_x: number, start_y: number, end_x: number, end_y: number;
+
+    if (tag === 'lineargradient') {
+        // Default: x1=0, y1=0, x2=1, y2=0 (left to right)
+        let x1 = parseFloat(el.getAttribute('x1') || '0');
+        let y1 = parseFloat(el.getAttribute('y1') || '0');
+        let x2 = parseFloat(el.getAttribute('x2') || '1');
+        let y2 = parseFloat(el.getAttribute('y2') || '0');
+
+        // Handle percentage values
+        if (el.getAttribute('x1')?.endsWith('%')) x1 /= 100;
+        if (el.getAttribute('y1')?.endsWith('%')) y1 /= 100;
+        if (el.getAttribute('x2')?.endsWith('%')) x2 /= 100;
+        if (el.getAttribute('y2')?.endsWith('%')) y2 /= 100;
+
+        if (isOBB) {
+            start_x = x1 * bboxWidth;
+            start_y = y1 * bboxHeight;
+            end_x = x2 * bboxWidth;
+            end_y = y2 * bboxHeight;
+        } else {
+            start_x = x1; start_y = y1;
+            end_x = x2; end_y = y2;
+        }
+
+        return { gradient_type: 'Linear', stops, start_x, start_y, end_x, end_y };
+    } else {
+        // radialGradient
+        // Default: cx=0.5, cy=0.5, r=0.5
+        let cx = parseFloat(el.getAttribute('cx') || '0.5');
+        let cy = parseFloat(el.getAttribute('cy') || '0.5');
+        let r = parseFloat(el.getAttribute('r') || '0.5');
+
+        if (el.getAttribute('cx')?.endsWith('%')) cx /= 100;
+        if (el.getAttribute('cy')?.endsWith('%')) cy /= 100;
+        if (el.getAttribute('r')?.endsWith('%')) r /= 100;
+
+        if (isOBB) {
+            start_x = cx * bboxWidth;
+            start_y = cy * bboxHeight;
+            // End point defines the radius edge
+            end_x = start_x + r * bboxWidth;
+            end_y = start_y;
+        } else {
+            start_x = cx; start_y = cy;
+            end_x = cx + r; end_y = cy;
+        }
+
+        return { gradient_type: 'Radial', stops, start_x, start_y, end_x, end_y };
+    }
+}
+
+/** Parse a stop-color string into an RGBA color object (0–1 range). */
+function parseStopColor(colorStr: string, opacity: number): { r: number; g: number; b: number; a: number } {
+    // Hex
+    if (colorStr.startsWith('#')) {
+        let hex = colorStr.slice(1);
+        if (hex.length === 3) hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
+        return {
+            r: parseInt(hex.slice(0, 2), 16) / 255,
+            g: parseInt(hex.slice(2, 4), 16) / 255,
+            b: parseInt(hex.slice(4, 6), 16) / 255,
+            a: opacity,
+        };
+    }
+    // rgb()
+    const rgbMatch = colorStr.match(/rgb\s*\(\s*(\d+)\s*[,\s]\s*(\d+)\s*[,\s]\s*(\d+)\s*\)/);
     if (rgbMatch) {
-        const r = parseInt(rgbMatch[1]).toString(16).padStart(2, '0');
-        const g = parseInt(rgbMatch[2]).toString(16).padStart(2, '0');
-        const b = parseInt(rgbMatch[3]).toString(16).padStart(2, '0');
-        return `#${r}${g}${b}`;
+        return {
+            r: parseInt(rgbMatch[1]) / 255,
+            g: parseInt(rgbMatch[2]) / 255,
+            b: parseInt(rgbMatch[3]) / 255,
+            a: opacity,
+        };
     }
-
-    // Named colors (basic subset)
-    const namedColors: Record<string, string> = {
-        black: '#000000', white: '#ffffff', red: '#ff0000', green: '#008000',
-        blue: '#0000ff', yellow: '#ffff00', orange: '#ffa500', purple: '#800080',
-        gray: '#808080', grey: '#808080',
+    // Named colors
+    const namedColors: Record<string, [number, number, number]> = {
+        black: [0, 0, 0], white: [1, 1, 1], red: [1, 0, 0], green: [0, 0.5, 0],
+        blue: [0, 0, 1], yellow: [1, 1, 0], orange: [1, 0.65, 0], purple: [0.5, 0, 0.5],
+        gray: [0.5, 0.5, 0.5], grey: [0.5, 0.5, 0.5],
     };
-    return namedColors[color.toLowerCase()] || color;
+    const named = namedColors[colorStr.toLowerCase()];
+    if (named) return { r: named[0], g: named[1], b: named[2], a: opacity };
+    // Fallback: black
+    return { r: 0, g: 0, b: 0, a: opacity };
+}
+
+/**
+ * Resolve a `fill="url(#id)"` reference to the first stop color of the
+ * referenced gradient element. Returns a hex color string or null.
+ * (Legacy compatibility — use resolveGradient() for full gradient data.)
+ */
+export function resolveGradientColor(svgDoc: Document, fillUrl: string): string | null {
+    const grad = resolveGradient(svgDoc, fillUrl);
+    if (!grad || grad.stops.length === 0) return null;
+    const c = grad.stops[0].color;
+    const toHex = (v: number) => Math.round(v * 255).toString(16).padStart(2, '0');
+    return `#${toHex(c.r)}${toHex(c.g)}${toHex(c.b)}`;
 }

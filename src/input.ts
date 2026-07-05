@@ -913,6 +913,36 @@ export class InputManager {
         };
     }
 
+    /**
+     * Convert a world-space delta vector into a node's parent local space.
+     * move_node applies dx/dy directly to the node's local transform, so we
+     * need to compensate for the parent group's cumulative transform (scale,
+     * rotation, skew). Without this, dragging a deeply nested element makes
+     * it lag behind the cursor because the world-space delta is larger/smaller
+     * than the local-space delta.
+     *
+     * For a delta *vector* (not a point) we only invert the linear part (2×2
+     * upper-left of the 3×3 matrix), ignoring translation.
+     */
+    worldDeltaToLocal(nodeId: number, wdx: number, wdy: number): { dx: number; dy: number } {
+        const parentId = this.scene.engine!.get_node_parent(nodeId);
+        if (parentId < 0) {
+            // Node is at root level — world space == local space
+            return { dx: wdx, dy: wdy };
+        }
+        // getTransform returns the row-major global transform:
+        //   [scaleX, skewX, transX,  skewY, scaleY, transY,  p0, p1, p2]
+        const t = this.scene.getTransform(parentId);
+        const a = t[0], b = t[1]; // row0: scaleX, skewX
+        const d = t[3], e = t[4]; // row1: skewY,  scaleY
+        const det = a * e - b * d;
+        if (Math.abs(det) < 1e-10) return { dx: wdx, dy: wdy };
+        return {
+            dx: ( e * wdx - b * wdy) / det,
+            dy: (-d * wdx + a * wdy) / det,
+        };
+    }
+
     duplicateSelection() {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
@@ -1169,7 +1199,8 @@ export class InputManager {
                     const dx = targetX - nb[0];
                     const dy = targetY - nb[1];
                     if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
-                        this.scene.engine!.move_node(id, dx, dy);
+                        const local = this.worldDeltaToLocal(id, dx, dy);
+                        this.scene.engine!.move_node(id, local.dx, local.dy);
                     }
                 }
 
@@ -1248,7 +1279,8 @@ export class InputManager {
                 }
 
                 for (const id of moveTargets) {
-                    this.scene.engine!.move_node(id, totalDx, totalDy);
+                    const local = this.worldDeltaToLocal(id, totalDx, totalDy);
+                    this.scene.engine!.move_node(id, local.dx, local.dy);
                 }
                 this.scene.invalidateCache();
                 // Update property panel position values without rebuilding chrome DOM

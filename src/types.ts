@@ -11,10 +11,39 @@ export interface Color {
     a: number;
 }
 
+/** A gradient color stop. */
+export interface GradientStop {
+    offset: number;
+    color: Color;
+}
+
+/** Gradient definition. */
+export interface Gradient {
+    gradient_type: 'Linear' | 'Radial';
+    stops: GradientStop[];
+    start_x: number;
+    start_y: number;
+    end_x: number;
+    end_y: number;
+}
+
+/**
+ * A paint can be either a solid color or a gradient.
+ * Matches the Rust engine's `#[serde(untagged)]` Paint enum:
+ * - Solid: `{ r, g, b, a }`
+ * - Gradient: `{ gradient_type, stops, start_x, start_y, end_x, end_y }`
+ */
+export type Paint = Color | Gradient;
+
+/** Type guard: check if a Paint is a Gradient. */
+export function isGradient(paint: Paint): paint is Gradient {
+    return 'gradient_type' in paint;
+}
+
 /** Style properties for a scene node. */
 export interface NodeStyle {
-    fill: Color | null;
-    stroke: Color | null;
+    fill: Paint | null;
+    stroke: Paint | null;
     stroke_width: number;
     opacity: number;
     stroke_cap: number;

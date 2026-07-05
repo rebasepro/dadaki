@@ -12,6 +12,7 @@ import {
     matrixToSVGTransform,
     escapeXml,
     resolveGradientColor,
+    parseCssColor,
 } from './svg_utils';
 
 // ─── Color Conversion ───────────────────────────────────────────────────────
@@ -347,7 +348,7 @@ describe('escapeXml', () => {
 
 // ─── Gradient Resolution ─────────────────────────────────────────────────────
 
-/** Minimal stub implementing the Document surface resolveGradientColor uses. */
+/** Minimal stub implementing the Document surface resolveGradient uses. */
 function stubGradientDoc(tagName: string, stopColor: string | null, stopStyle?: string): Document {
     const stop = stopColor !== null || stopStyle ? {
         getAttribute: (name: string) => {
@@ -356,9 +357,12 @@ function stubGradientDoc(tagName: string, stopColor: string | null, stopStyle?: 
             return null;
         },
     } : null;
+    const stops = stop ? [stop] : [];
     const gradientEl = {
         tagName,
+        getAttribute: () => null,
         querySelector: (sel: string) => (sel === 'stop' ? stop : null),
+        querySelectorAll: (sel: string) => (sel === 'stop' ? stops : []),
     };
     return {
         getElementById: (id: string) => (id === 'grad1' ? gradientEl : null),
@@ -385,5 +389,41 @@ describe('resolveGradientColor', () => {
         const doc = stubGradientDoc('linearGradient', '#ffffff');
         expect(resolveGradientColor(doc, 'url(#missing)')).toBeNull();
         expect(resolveGradientColor(doc, 'not-a-url')).toBeNull();
+    });
+});
+
+describe('parseCssColor', () => {
+    it('parses 6-digit and 3-digit hex', () => {
+        expect(parseCssColor('#ff8800')).toEqual({ hex: '#ff8800', alpha: 1 });
+        expect(parseCssColor('#f80')).toEqual({ hex: '#ff8800', alpha: 1 });
+    });
+
+    it('parses 8-digit and 4-digit hex with alpha', () => {
+        expect(parseCssColor('#ff880080')?.hex).toBe('#ff8800');
+        expect(parseCssColor('#ff880080')?.alpha).toBeCloseTo(0.5, 1);
+        expect(parseCssColor('#f808')?.hex).toBe('#ff8800');
+    });
+
+    it('parses rgb() and rgba() — the Figma export formats', () => {
+        expect(parseCssColor('rgb(255, 136, 0)')).toEqual({ hex: '#ff8800', alpha: 1 });
+        expect(parseCssColor('rgba(255, 136, 0, 0.5)')).toEqual({ hex: '#ff8800', alpha: 0.5 });
+        expect(parseCssColor('rgb(100% 50% 0%)')?.hex).toBe('#ff8000');
+    });
+
+    it('parses hsl() and hsla()', () => {
+        expect(parseCssColor('hsl(0, 100%, 50%)')?.hex).toBe('#ff0000');
+        expect(parseCssColor('hsl(120, 100%, 25%)')?.hex).toBe('#008000');
+        expect(parseCssColor('hsla(240, 100%, 50%, 0.3)')).toEqual({ hex: '#0000ff', alpha: 0.3 });
+    });
+
+    it('parses named colors', () => {
+        expect(parseCssColor('tomato')?.hex).toBe('#ff6347');
+        expect(parseCssColor('RebeccaPurple')?.hex).toBe('#663399');
+    });
+
+    it('returns null for unparseable values instead of garbage', () => {
+        expect(parseCssColor('var(--brand)')).toBeNull();
+        expect(parseCssColor('url(#grad)')).toBeNull();
+        expect(parseCssColor('#zzz')).toBeNull();
     });
 });

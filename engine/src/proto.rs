@@ -8,13 +8,13 @@ use base64::{Engine as B64Engine, engine::general_purpose::STANDARD as BASE64};
 use glam::Vec2;
 
 use crate::{
-    Color, Geometry, Node, NodeType, PathPoint, Scene, Style,
+    Color, Geometry, Gradient, GradientStop, GradientType, Node, NodeType, Paint, PathPoint, Scene, Style,
     vector_network::{VectorNetwork, NodeVectorNetwork, NetworkVertex, NetworkEdge, NetworkRegion},
 };
 
 /// Current file format version. Bump when schema changes.
 /// v3: per-node vector network.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 // ─── Proto Message Types ────────────────────────────────────────────────────────
 
@@ -58,6 +58,34 @@ pub struct ProtoStyle {
     pub miter_limit: Option<f32>,
     #[prost(float, optional, tag = "13")]
     pub fill_opacity: Option<f32>,
+    #[prost(message, optional, tag = "14")]
+    pub fill_gradient: Option<ProtoGradient>,
+    #[prost(message, optional, tag = "15")]
+    pub stroke_gradient: Option<ProtoGradient>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoGradientStop {
+    #[prost(float, tag = "1")]
+    pub offset: f32,
+    #[prost(message, optional, tag = "2")]
+    pub color: Option<ProtoColor>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoGradient {
+    #[prost(uint32, tag = "1")]
+    pub gradient_type: u32,
+    #[prost(message, repeated, tag = "2")]
+    pub stops: Vec<ProtoGradientStop>,
+    #[prost(float, tag = "3")]
+    pub start_x: f32,
+    #[prost(float, tag = "4")]
+    pub start_y: f32,
+    #[prost(float, tag = "5")]
+    pub end_x: f32,
+    #[prost(float, tag = "6")]
+    pub end_y: f32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -253,11 +281,59 @@ impl From<&ProtoColor> for Color {
     }
 }
 
+impl From<&Gradient> for ProtoGradient {
+    fn from(g: &Gradient) -> Self {
+        ProtoGradient {
+            gradient_type: match g.gradient_type {
+                GradientType::Linear => 0,
+                GradientType::Radial => 1,
+            },
+            stops: g.stops.iter().map(|s| ProtoGradientStop {
+                offset: s.offset,
+                color: Some(ProtoColor { r: s.color.r, g: s.color.g, b: s.color.b, a: s.color.a }),
+            }).collect(),
+            start_x: g.start_x,
+            start_y: g.start_y,
+            end_x: g.end_x,
+            end_y: g.end_y,
+        }
+    }
+}
+
+impl From<&ProtoGradient> for Gradient {
+    fn from(g: &ProtoGradient) -> Self {
+        Gradient {
+            gradient_type: if g.gradient_type == 1 { GradientType::Radial } else { GradientType::Linear },
+            stops: g.stops.iter().map(|s| {
+                let c = s.color.as_ref().map(|c| Color { r: c.r, g: c.g, b: c.b, a: c.a })
+                    .unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
+                GradientStop { offset: s.offset, color: c }
+            }).collect(),
+            start_x: g.start_x,
+            start_y: g.start_y,
+            end_x: g.end_x,
+            end_y: g.end_y,
+        }
+    }
+}
+
 impl From<&Style> for ProtoStyle {
     fn from(s: &Style) -> Self {
+        let (fill_color, fill_gradient) = match &s.fill {
+            Some(Paint::Solid(c)) => (Some(c.into()), None),
+            Some(Paint::Gradient(g)) => (None, Some(g.into())),
+            None => (None, None),
+        };
+        let (stroke_color, stroke_gradient) = match &s.stroke {
+            Some(Paint::Solid(c)) => (Some(c.into()), None),
+            Some(Paint::Gradient(g)) => (None, Some(g.into())),
+            None => (None, None),
+        };
         ProtoStyle {
-            fill: s.fill.as_ref().map(|c| c.into()),
-            stroke: s.stroke.as_ref().map(|c| c.into()),
+            fill: fill_color,
+            stroke: stroke_color,
+            fill_gradient,
+            stroke_gradient,
             stroke_width: s.stroke_width,
             opacity: Some(s.opacity),
             stroke_cap: s.stroke_cap as u32,
@@ -275,9 +351,19 @@ impl From<&Style> for ProtoStyle {
 
 impl From<&ProtoStyle> for Style {
     fn from(s: &ProtoStyle) -> Self {
+        let fill = if let Some(g) = &s.fill_gradient {
+            Some(Paint::Gradient(g.into()))
+        } else {
+            s.fill.as_ref().map(|c| Paint::Solid(c.into()))
+        };
+        let stroke = if let Some(g) = &s.stroke_gradient {
+            Some(Paint::Gradient(g.into()))
+        } else {
+            s.stroke.as_ref().map(|c| Paint::Solid(c.into()))
+        };
         Style {
-            fill: s.fill.as_ref().map(|c| c.into()),
-            stroke: s.stroke.as_ref().map(|c| c.into()),
+            fill,
+            stroke,
             stroke_width: s.stroke_width,
             opacity: s.opacity.unwrap_or(1.0),
             stroke_cap: s.stroke_cap as u8,
@@ -478,7 +564,7 @@ fn proto_to_node(pn: &ProtoNode) -> Node {
         node_type: u32_to_node_type(pn.node_type),
         transform,
         style: pn.style.as_ref().map(|s| s.into()).unwrap_or_else(|| Style {
-            fill: Some(Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }),
+            fill: Some(Paint::Solid(Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 })),
             stroke: None,
             stroke_width: 1.0,
             opacity: 1.0,
@@ -664,6 +750,8 @@ mod tests {
             fill_rule: 0,
             miter_limit: Some(4.0),
             fill_opacity: Some(1.0),
+            fill_gradient: None,
+            stroke_gradient: None,
         }
     }
 
@@ -787,8 +875,8 @@ mod tests {
             node_type: NodeType::Path,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 25.0, 30.0, 1.0],
             style: Style {
-                fill: Some(Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 }),
-                stroke: Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                fill: Some(Paint::Solid(Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 })),
+                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
                 stroke_width: 3.0,
                 opacity: 0.5,
                 stroke_cap: 1,

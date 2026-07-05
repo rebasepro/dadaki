@@ -240,14 +240,62 @@ export class Renderer {
                 const nodeType = reader.u32();
                 const matrix = reader.f32Array(9);
                 
-                // Style (13 x f32 — must match write_node_recursive in lib.rs)
-                const fr = reader.f32(); const fg = reader.f32(); const fb = reader.f32(); const fa = reader.f32();
-                const sr = reader.f32(); const sg = reader.f32(); const sb = reader.f32(); const sa = reader.f32();
+                // ─── Read Fill Paint (variable-length) ─────────────────
+                const fillType = reader.u32(); // 0=none, 1=solid, 2=linear, 3=radial
+                let fr = 0, fg = 0, fb = 0, fa = 0;
+                let fillGradientStops: { offset: number; r: number; g: number; b: number; a: number }[] | null = null;
+                let fillGradStart: [number, number] = [0, 0];
+                let fillGradEnd: [number, number] = [0, 0];
+                if (fillType === 1) { // Solid
+                    fr = reader.f32(); fg = reader.f32(); fb = reader.f32(); fa = reader.f32();
+                } else if (fillType === 2 || fillType === 3) { // Gradient
+                    const stopCount = reader.u32();
+                    fillGradientStops = [];
+                    for (let s = 0; s < stopCount; s++) {
+                        fillGradientStops.push({
+                            offset: reader.f32(),
+                            r: reader.f32(), g: reader.f32(), b: reader.f32(), a: reader.f32(),
+                        });
+                    }
+                    fillGradStart = [reader.f32(), reader.f32()];
+                    fillGradEnd = [reader.f32(), reader.f32()];
+                    fa = 1; // gradient is visible
+                }
+
+                // ─── Read Stroke Paint (variable-length) ───────────────
+                const strokeType = reader.u32();
+                let sr = 0, sg = 0, sb = 0, sa = 0;
+                let strokeGradientStops: typeof fillGradientStops = null;
+                let strokeGradStart: [number, number] = [0, 0];
+                let strokeGradEnd: [number, number] = [0, 0];
+                if (strokeType === 1) { // Solid
+                    sr = reader.f32(); sg = reader.f32(); sb = reader.f32(); sa = reader.f32();
+                } else if (strokeType === 2 || strokeType === 3) { // Gradient
+                    const stopCount = reader.u32();
+                    strokeGradientStops = [];
+                    for (let s = 0; s < stopCount; s++) {
+                        strokeGradientStops.push({
+                            offset: reader.f32(),
+                            r: reader.f32(), g: reader.f32(), b: reader.f32(), a: reader.f32(),
+                        });
+                    }
+                    strokeGradStart = [reader.f32(), reader.f32()];
+                    strokeGradEnd = [reader.f32(), reader.f32()];
+                    sa = 1; // gradient is visible
+                }
+
+                // ─── Fixed-length style fields ─────────────────────────
                 const strokeWidth = reader.f32();
                 const cornerRadius = reader.f32();
                 const dashOn = reader.f32();
                 const dashOff = reader.f32();
                 const dashPhase = reader.f32();
+                const miterLimit = reader.f32();
+                const styleFlags = reader.u32();
+                const strokeCap  =  styleFlags        & 0xFF;
+                const strokeJoin = (styleFlags >>> 8)  & 0xFF;
+                const blendMode  = (styleFlags >>> 16) & 0xFF;
+                const fillRule   = (styleFlags >>> 24) & 0xFF;
 
                 canvas.save();
                 canvas.concat(matrix);
@@ -255,11 +303,58 @@ export class Renderer {
                 const startGeoOffset = reader.offset;
                 const geoSize = reader.view.getUint32(startGeoOffset, true);
 
+                // Apply blend mode (shared across fill + stroke passes)
+                // Map our u8 index → CanvasKit BlendMode enum entity
+                const ckBlendModes = [
+                    this.ck.BlendMode.SrcOver,    // 0: Normal
+                    this.ck.BlendMode.Multiply,   // 1
+                    this.ck.BlendMode.Screen,     // 2
+                    this.ck.BlendMode.Overlay,    // 3
+                    this.ck.BlendMode.Darken,     // 4
+                    this.ck.BlendMode.Lighten,    // 5
+                    this.ck.BlendMode.ColorDodge, // 6
+                    this.ck.BlendMode.ColorBurn,  // 7
+                    this.ck.BlendMode.HardLight,  // 8
+                    this.ck.BlendMode.SoftLight,  // 9
+                    this.ck.BlendMode.Difference, // 10
+                    this.ck.BlendMode.Exclusion,  // 11
+                    this.ck.BlendMode.Hue,        // 12
+                    this.ck.BlendMode.Saturation, // 13
+                    this.ck.BlendMode.Color,      // 14
+                    this.ck.BlendMode.Luminosity,  // 15
+                ];
+                if (blendMode > 0 && blendMode < ckBlendModes.length) {
+                    p.setBlendMode(ckBlendModes[blendMode]);
+                }
+
                 // Fill Pass
                 if (fa > 0) {
-                    p.setColor(this.ck.Color4f(fr, fg, fb, fa));
+                    let fillShader: ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null = null;
+                    if (fillType === 1) {
+                        p.setColor(this.ck.Color4f(fr, fg, fb, fa));
+                    } else if (fillGradientStops) {
+                        const colors = fillGradientStops.map(s => this.ck.Color4f(s.r, s.g, s.b, s.a));
+                        const offsets = fillGradientStops.map(s => s.offset);
+                        if (fillType === 2) { // Linear
+                            fillShader = this.ck.Shader.MakeLinearGradient(
+                                fillGradStart, fillGradEnd,
+                                colors, offsets, this.ck.TileMode.Clamp,
+                            );
+                        } else { // Radial
+                            const radius = Math.hypot(fillGradEnd[0] - fillGradStart[0], fillGradEnd[1] - fillGradStart[1]);
+                            fillShader = this.ck.Shader.MakeTwoPointConicalGradient(
+                                fillGradStart, 0, fillGradStart, radius,
+                                colors, offsets, this.ck.TileMode.Clamp,
+                            );
+                        }
+                        p.setShader(fillShader);
+                    }
                     p.setStyle(this.ck.PaintStyle.Fill);
-                    this.drawBinaryGeometry(canvas, nodeType, reader, p, cornerRadius);
+                    this.drawBinaryGeometry(canvas, nodeType, reader, p, cornerRadius, fillRule);
+                    if (fillShader) {
+                        p.setShader(null);
+                        fillShader.delete();
+                    }
                 } else {
                     reader.offset += 4 + geoSize;
                 }
@@ -267,9 +362,34 @@ export class Renderer {
                 // Stroke Pass
                 if (sa > 0 && strokeWidth > 0) {
                     reader.offset = startGeoOffset; // Rewind
-                    p.setColor(this.ck.Color4f(sr, sg, sb, sa));
+                    let strokeShader: ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null = null;
+                    if (strokeType === 1) {
+                        p.setColor(this.ck.Color4f(sr, sg, sb, sa));
+                    } else if (strokeGradientStops) {
+                        const colors = strokeGradientStops.map(s => this.ck.Color4f(s.r, s.g, s.b, s.a));
+                        const offsets = strokeGradientStops.map(s => s.offset);
+                        if (strokeType === 2) {
+                            strokeShader = this.ck.Shader.MakeLinearGradient(
+                                strokeGradStart, strokeGradEnd,
+                                colors, offsets, this.ck.TileMode.Clamp,
+                            );
+                        } else {
+                            const radius = Math.hypot(strokeGradEnd[0] - strokeGradStart[0], strokeGradEnd[1] - strokeGradStart[1]);
+                            strokeShader = this.ck.Shader.MakeTwoPointConicalGradient(
+                                strokeGradStart, 0, strokeGradStart, radius,
+                                colors, offsets, this.ck.TileMode.Clamp,
+                            );
+                        }
+                        p.setShader(strokeShader);
+                    }
                     p.setStyle(this.ck.PaintStyle.Stroke);
                     p.setStrokeWidth(strokeWidth);
+                    // Stroke cap, join, miter
+                    const ckCaps = [this.ck.StrokeCap.Butt, this.ck.StrokeCap.Round, this.ck.StrokeCap.Square];
+                    const ckJoins = [this.ck.StrokeJoin.Miter, this.ck.StrokeJoin.Round, this.ck.StrokeJoin.Bevel];
+                    p.setStrokeCap(ckCaps[strokeCap] ?? this.ck.StrokeCap.Butt);
+                    p.setStrokeJoin(ckJoins[strokeJoin] ?? this.ck.StrokeJoin.Miter);
+                    p.setStrokeMiter(miterLimit);
                     let dashEffect = null;
                     if (dashOn > 0) {
                         dashEffect = this.ck.PathEffect.MakeDash([dashOn, dashOff], dashPhase);
@@ -280,10 +400,23 @@ export class Renderer {
                         p.setPathEffect(null);
                         dashEffect.delete();
                     }
+                    if (strokeShader) {
+                        p.setShader(null);
+                        strokeShader.delete();
+                    }
+                    // Reset stroke state to defaults for next node
+                    p.setStrokeCap(this.ck.StrokeCap.Butt);
+                    p.setStrokeJoin(this.ck.StrokeJoin.Miter);
+                    p.setStrokeMiter(4);
                 } else {
                     if (reader.offset === startGeoOffset) {
                         reader.offset += 4 + geoSize;
                     }
+                }
+
+                // Reset blend mode after both passes
+                if (blendMode > 0) {
+                    p.setBlendMode(this.ck.BlendMode.SrcOver);
                 }
 
                 canvas.restore();
@@ -322,7 +455,7 @@ export class Renderer {
         this.surface.flush();
     }
 
-    private drawBinaryGeometry(canvas: Canvas, type: number, reader: BinaryReader, paint: Paint, cornerRadius: number = 0) {
+    private drawBinaryGeometry(canvas: Canvas, type: number, reader: BinaryReader, paint: Paint, cornerRadius: number = 0, fillRule: number = 0) {
         reader.u32(); // skip size
 
         if (type === 1) { // Rect
@@ -368,6 +501,10 @@ export class Renderer {
                 } else if (closed) {
                     path.close();
                 }
+            }
+            // Apply fill rule (EvenOdd vs NonZero/Winding)
+            if (fillRule === 1) {
+                path.setFillType(this.ck.FillType.EvenOdd);
             }
             canvas.drawPath(path, paint);
             path.delete();

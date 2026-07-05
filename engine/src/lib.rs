@@ -44,9 +44,132 @@ pub struct Color {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GradientStop {
+    pub offset: f32,
+    pub color: Color,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum GradientType {
+    Linear,
+    Radial,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Gradient {
+    pub gradient_type: GradientType,
+    pub stops: Vec<GradientStop>,
+    /// Start point in node-local coordinate space
+    pub start_x: f32,
+    pub start_y: f32,
+    /// End point in node-local coordinate space  
+    pub end_x: f32,
+    pub end_y: f32,
+}
+
+/// A paint can be a solid color or a gradient.
+/// Custom Serialize/Deserialize to support both JSON (from JS) and bincode (snapshots).
+#[derive(Clone, Debug)]
+pub enum Paint {
+    Gradient(Gradient),
+    Solid(Color),
+}
+
+/// Flat intermediate struct for bincode serialization of Paint.
+#[derive(Serialize, Deserialize)]
+struct BincodePaint {
+    tag: u8, // 0 = Solid, 1 = Gradient
+    // Solid fields (always present, zero-filled for gradients)
+    r: f32, g: f32, b: f32, a: f32,
+    // Gradient fields
+    gradient_type: u8, // 0=Linear, 1=Radial
+    stops: Vec<(f32, f32, f32, f32, f32)>, // (offset, r, g, b, a)
+    start_x: f32, start_y: f32, end_x: f32, end_y: f32,
+}
+
+impl serde::Serialize for Paint {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            // JSON: serialize naturally so JS can read it
+            match self {
+                Paint::Solid(c) => c.serialize(serializer),
+                Paint::Gradient(g) => g.serialize(serializer),
+            }
+        } else {
+            // Bincode: flatten into BincodePaint
+            let bp = match self {
+                Paint::Solid(c) => BincodePaint {
+                    tag: 0, r: c.r, g: c.g, b: c.b, a: c.a,
+                    gradient_type: 0, stops: vec![], start_x: 0.0, start_y: 0.0, end_x: 0.0, end_y: 0.0,
+                },
+                Paint::Gradient(g) => BincodePaint {
+                    tag: 1, r: 0.0, g: 0.0, b: 0.0, a: 0.0,
+                    gradient_type: match g.gradient_type { GradientType::Linear => 0, GradientType::Radial => 1 },
+                    stops: g.stops.iter().map(|s| (s.offset, s.color.r, s.color.g, s.color.b, s.color.a)).collect(),
+                    start_x: g.start_x, start_y: g.start_y, end_x: g.end_x, end_y: g.end_y,
+                },
+            };
+            bp.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Paint {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            // JSON: try Gradient first (has gradient_type field), fallback to Color
+            let value = serde_json::Value::deserialize(deserializer)?;
+            if value.get("gradient_type").is_some() {
+                let g: Gradient = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Paint::Gradient(g))
+            } else {
+                let c: Color = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Paint::Solid(c))
+            }
+        } else {
+            // Bincode: read BincodePaint
+            let bp = BincodePaint::deserialize(deserializer)?;
+            if bp.tag == 1 {
+                let grad_type = if bp.gradient_type == 1 { GradientType::Radial } else { GradientType::Linear };
+                let stops = bp.stops.into_iter().map(|(offset, r, g, b, a)| {
+                    GradientStop { offset, color: Color { r, g, b, a } }
+                }).collect();
+                Ok(Paint::Gradient(Gradient {
+                    gradient_type: grad_type, stops,
+                    start_x: bp.start_x, start_y: bp.start_y,
+                    end_x: bp.end_x, end_y: bp.end_y,
+                }))
+            } else {
+                Ok(Paint::Solid(Color { r: bp.r, g: bp.g, b: bp.b, a: bp.a }))
+            }
+        }
+    }
+}
+
+impl Paint {
+    /// Extract solid color if this paint is solid, or the first gradient stop color.
+    pub fn solid_color(&self) -> Color {
+        match self {
+            Paint::Solid(c) => c.clone(),
+            Paint::Gradient(g) => g.stops.first()
+                .map(|s| s.color.clone())
+                .unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+        }
+    }
+    
+    /// Check if this paint has any visible content (non-zero alpha).
+    pub fn is_visible(&self) -> bool {
+        match self {
+            Paint::Solid(c) => c.a > 0.0,
+            Paint::Gradient(g) => g.stops.iter().any(|s| s.color.a > 0.0),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Style {
-    pub fill: Option<Color>,
-    pub stroke: Option<Color>,
+    pub fill: Option<Paint>,
+    pub stroke: Option<Paint>,
     pub stroke_width: f32,
     pub opacity: f32,
     pub stroke_cap: u8, // 0: butt, 1: round, 2: square
@@ -223,6 +346,41 @@ pub struct Node {
 
 use rstar::{RTree, RTreeObject, AABB, PointDistance};
 
+/// Write a paint value (solid color or gradient) to a byte buffer.
+fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>) {
+    match paint {
+        None => {
+            buf.extend_from_slice(&0u32.to_le_bytes()); // type: none
+        }
+        Some(Paint::Solid(c)) => {
+            buf.extend_from_slice(&1u32.to_le_bytes()); // type: solid
+            buf.extend_from_slice(&c.r.to_le_bytes());
+            buf.extend_from_slice(&c.g.to_le_bytes());
+            buf.extend_from_slice(&c.b.to_le_bytes());
+            buf.extend_from_slice(&c.a.to_le_bytes());
+        }
+        Some(Paint::Gradient(g)) => {
+            let type_tag = match g.gradient_type {
+                GradientType::Linear => 2u32,
+                GradientType::Radial => 3u32,
+            };
+            buf.extend_from_slice(&type_tag.to_le_bytes());
+            buf.extend_from_slice(&(g.stops.len() as u32).to_le_bytes());
+            for stop in &g.stops {
+                buf.extend_from_slice(&stop.offset.to_le_bytes());
+                buf.extend_from_slice(&stop.color.r.to_le_bytes());
+                buf.extend_from_slice(&stop.color.g.to_le_bytes());
+                buf.extend_from_slice(&stop.color.b.to_le_bytes());
+                buf.extend_from_slice(&stop.color.a.to_le_bytes());
+            }
+            buf.extend_from_slice(&g.start_x.to_le_bytes());
+            buf.extend_from_slice(&g.start_y.to_le_bytes());
+            buf.extend_from_slice(&g.end_x.to_le_bytes());
+            buf.extend_from_slice(&g.end_y.to_le_bytes());
+        }
+    }
+}
+
 #[wasm_bindgen]
 pub struct Engine {
     scene: Scene,
@@ -389,20 +547,11 @@ impl Engine {
                 self.render_buffer.extend_from_slice(&f.to_le_bytes());
             }
 
-            // Style: Fill (4xf32), Stroke (4xf32), StrokeWidth, CornerRadius,
-            // Dash (on, off, phase) — 13 x f32 total
+            // Style: Fill paint, Stroke paint, StrokeWidth, CornerRadius,
+            // Dash (on, off, phase), MiterLimit, StyleFlags
             let s = &node.style;
-            let f = s.fill.clone().unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 });
-            self.render_buffer.extend_from_slice(&f.r.to_le_bytes());
-            self.render_buffer.extend_from_slice(&f.g.to_le_bytes());
-            self.render_buffer.extend_from_slice(&f.b.to_le_bytes());
-            self.render_buffer.extend_from_slice(&f.a.to_le_bytes());
-
-            let st = s.stroke.clone().unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 });
-            self.render_buffer.extend_from_slice(&st.r.to_le_bytes());
-            self.render_buffer.extend_from_slice(&st.g.to_le_bytes());
-            self.render_buffer.extend_from_slice(&st.b.to_le_bytes());
-            self.render_buffer.extend_from_slice(&st.a.to_le_bytes());
+            write_paint(&mut self.render_buffer, &s.fill);
+            write_paint(&mut self.render_buffer, &s.stroke);
 
             self.render_buffer.extend_from_slice(&s.stroke_width.to_le_bytes());
             self.render_buffer.extend_from_slice(&s.corner_radius.to_le_bytes());
@@ -411,6 +560,14 @@ impl Engine {
             self.render_buffer.extend_from_slice(&dash_on.to_le_bytes());
             self.render_buffer.extend_from_slice(&dash_off.to_le_bytes());
             self.render_buffer.extend_from_slice(&s.dash_offset.to_le_bytes());
+            // Miter limit (f32)
+            self.render_buffer.extend_from_slice(&s.miter_limit.to_le_bytes());
+            // Pack cap/join/blend/fill_rule into one u32 to preserve 4-byte alignment
+            let style_flags: u32 = (s.stroke_cap as u32)
+                | ((s.stroke_join as u32) << 8)
+                | ((s.blend_mode as u32) << 16)
+                | ((s.fill_rule as u32) << 24);
+            self.render_buffer.extend_from_slice(&style_flags.to_le_bytes());
 
             // Geometry
             match &node.geometry {
@@ -491,8 +648,8 @@ impl Engine {
             node_type: NodeType::Rect,
             transform: Mat3::from_translation(Vec2::new(x, y)).to_cols_array(),
             style: Style {
-                fill: Some(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 }),
-                stroke: Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                fill: Some(Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })),
+                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
                 stroke_width: 2.0,
                 opacity: 1.0,
                 stroke_cap: 0,
@@ -530,8 +687,8 @@ impl Engine {
             node_type: NodeType::Ellipse,
             transform: Mat3::from_translation(Vec2::new(cx, cy)).to_cols_array(),
             style: Style {
-                fill: Some(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 }),
-                stroke: Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                fill: Some(Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })),
+                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
                 stroke_width: 2.0,
                 opacity: 1.0,
                 stroke_cap: 0,
@@ -601,8 +758,8 @@ impl Engine {
             node_type: NodeType::Path,
             transform: Mat3::from_translation(Vec2::new(center_x, center_y)).to_cols_array(),
             style: Style {
-                fill: Some(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 }),
-                stroke: Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                fill: Some(Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })),
+                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
                 stroke_width: 2.0,
                 opacity: 1.0,
                 stroke_cap: 0,
@@ -660,8 +817,8 @@ impl Engine {
             node_type: NodeType::Path,
             transform: Mat3::from_translation(Vec2::new(cx, cy)).to_cols_array(),
             style: Style {
-                fill: Some(Color { r: 0.5, g: 0.8, b: 0.5, a: 1.0 }),
-                stroke: Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                fill: Some(Paint::Solid(Color { r: 0.5, g: 0.8, b: 0.5, a: 1.0 })),
+                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
                 stroke_width: 2.0,
                 opacity: 1.0,
                 stroke_cap: 0,
@@ -721,8 +878,8 @@ impl Engine {
             node_type: NodeType::Path,
             transform: Mat3::from_translation(Vec2::new(cx, cy)).to_cols_array(),
             style: Style {
-                fill: Some(Color { r: 1.0, g: 0.8, b: 0.2, a: 1.0 }),
-                stroke: Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                fill: Some(Paint::Solid(Color { r: 1.0, g: 0.8, b: 0.2, a: 1.0 })),
+                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
                 stroke_width: 2.0,
                 opacity: 1.0,
                 stroke_cap: 0,
@@ -2007,7 +2164,7 @@ impl Engine {
             node_type: NodeType::Text,
             transform: Mat3::from_translation(Vec2::new(x, y)).to_cols_array(),
             style: Style {
-                fill: Some(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                fill: Some(Paint::Solid(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })),
                 stroke: None,
                 stroke_width: 0.0,
                 opacity: 1.0,

@@ -2,8 +2,11 @@ import type { CanvasKit } from 'canvaskit-wasm';
 import type { WasmScene } from './wasm_scene';
 import { FileIO } from './file_io';
 import type { Color } from './types';
-import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, escapeXml, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor } from './svg_utils';
-import type { SVGSubpath } from './svg_utils';
+import { isGradient } from './types';
+import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix } from './svg_utils';
+import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
+import type { SVGExportInput, FilledFace } from './svg_export';
+import type { SVGSubpath, SVGGradientData } from './svg_utils';
 import type { ContextBar } from './context_bar';
 import type { BreadcrumbBar } from './breadcrumb';
 import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock } from './icons';
@@ -29,9 +32,6 @@ export class UIEngine {
         'Path': () => iconPenTool(14),
         'Text': () => iconType(14),
     };
-    private static readonly CAP_MAP = ['butt', 'round', 'square'] as const;
-    private static readonly JOIN_MAP = ['miter', 'round', 'bevel'] as const;
-    private static readonly FILL_RULE_MAP = ['nonzero', 'evenodd'] as const;
     
     // DOM Elements — basic
     fillInput: HTMLInputElement;
@@ -417,7 +417,15 @@ export class UIEngine {
 
         // Fill
         if (style.fill) {
-            this.fillInput.value = this.rgbToHex(style.fill);
+            if (isGradient(style.fill)) {
+                // Gradient fill — show first stop color in picker
+                const firstStop = style.fill.stops?.[0]?.color;
+                if (firstStop) {
+                    this.fillInput.value = this.rgbToHex(firstStop);
+                }
+            } else {
+                this.fillInput.value = this.rgbToHex(style.fill);
+            }
             if (this.fillEnabled) this.fillEnabled.checked = true;
         } else {
             if (this.fillEnabled) this.fillEnabled.checked = false;
@@ -425,7 +433,14 @@ export class UIEngine {
 
         // Stroke
         if (style.stroke) {
-            this.strokeInput.value = this.rgbToHex(style.stroke);
+            if (isGradient(style.stroke)) {
+                const firstStop = style.stroke.stops?.[0]?.color;
+                if (firstStop) {
+                    this.strokeInput.value = this.rgbToHex(firstStop);
+                }
+            } else {
+                this.strokeInput.value = this.rgbToHex(style.stroke);
+            }
             if (this.strokeEnabled) this.strokeEnabled.checked = true;
         } else {
             if (this.strokeEnabled) this.strokeEnabled.checked = false;
@@ -750,94 +765,48 @@ export class UIEngine {
     buildSVGString(): string {
         const docW = this.scene.engine?.get_document_width() ?? 1000;
         const docH = this.scene.engine?.get_document_height() ?? 1000;
-        let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${docW}" height="${docH}" viewBox="0 0 ${docW} ${docH}">`;
 
-        const rootNodes = this.scene.getRootNodes();
+        const rootNodeIds = Array.from(this.scene.getRootNodes());
 
-        /** Build SVG style attributes string for a node. */
-        const buildStyleAttrs = (node: any): string => {
-            const style = node.style;
-            const fill = style.fill ? escapeXml(this.rgbToHex(style.fill)) : 'none';
-            const stroke = style.stroke ? escapeXml(this.rgbToHex(style.stroke)) : 'none';
-            const sw = style.stroke_width;
-            const op = style.opacity ?? 1.0;
+        // Collect all node data and local transforms
+        const nodes: SVGExportInput['nodes'] = {};
+        const localTransforms: SVGExportInput['localTransforms'] = {};
 
-            let attrs = `fill="${fill}" stroke="${stroke}" stroke-width="${sw}" opacity="${op}"`;
-            attrs += ` stroke-linecap="${UIEngine.CAP_MAP[style.stroke_cap || 0]}"`;
-            attrs += ` stroke-linejoin="${UIEngine.JOIN_MAP[style.stroke_join || 0]}"`;
-
-            // Dash array and offset
-            if (style.dash_array && style.dash_array.length > 0) {
-                attrs += ` stroke-dasharray="${style.dash_array.join(',')}"`;
-                if (style.dash_offset) attrs += ` stroke-dashoffset="${style.dash_offset}"`;
-            }
-
-            // Miter limit
-            if (style.miter_limit !== undefined && style.miter_limit !== 4) {
-                attrs += ` stroke-miterlimit="${style.miter_limit}"`;
-            }
-
-            // Fill opacity
-            if (style.fill_opacity !== undefined && style.fill_opacity !== 1) {
-                attrs += ` fill-opacity="${style.fill_opacity}"`;
-            }
-
-            const fillRuleIdx = style.fill_rule || 0;
-            if (fillRuleIdx > 0) {
-                attrs += ` fill-rule="${UIEngine.FILL_RULE_MAP[fillRuleIdx]}"`;
-            }
-
-            return attrs;
-        };
-
-        const renderNodeToSVG = (id: number): string => {
+        const collectNodeData = (id: number) => {
             const node = this.scene.getNode(id);
-            if (!node || !node.visible) return '';
-
-            const transform = this.scene.getTransform(id);
-            const matrix = `matrix(${transform[0]} ${transform[3]} ${transform[1]} ${transform[4]} ${transform[2]} ${transform[5]})`;
-            
-            let nodeSvg = `<g transform="${matrix}">`;
-            
+            if (!node) return;
+            nodes[id] = node;
+            localTransforms[id] = Array.from(this.scene.getNodeLocalTransform(id));
             if (node.node_type === 'Group') {
                 const children = this.scene.getNodeChildren(id);
                 for (const childId of Array.from(children)) {
-                    nodeSvg += renderNodeToSVG(childId);
-                }
-            } else {
-                const attrs = buildStyleAttrs(node);
-                const geo = node.geometry;
-                if (geo.Rect) {
-                    nodeSvg += `<rect x="0" y="0" width="${geo.Rect.width}" height="${geo.Rect.height}" ${attrs} />`;
-                } else if (geo.Ellipse) {
-                    nodeSvg += `<ellipse cx="0" cy="0" rx="${geo.Ellipse.radius_x}" ry="${geo.Ellipse.radius_y}" ${attrs} />`;
-                } else if (geo.Path) {
-                    let d = '';
-                    for (const sp of geo.Path.subpaths) {
-                        if (sp.points.length < 2) continue;
-                        d += `M ${sp.points[0].x} ${sp.points[0].y} `;
-                        for (let i = 1; i < sp.points.length; i++) {
-                            const prev = sp.points[i-1];
-                            const p = sp.points[i];
-                            d += `C ${prev.cp2[0]} ${prev.cp2[1]} ${p.cp1[0]} ${p.cp1[1]} ${p.x} ${p.y} `;
-                        }
-                        if (sp.closed) d += 'Z ';
-                    }
-                    nodeSvg += `<path d="${d.trim()}" ${attrs} />`;
-                } else if (geo.Text) {
-                    nodeSvg += `<text x="0" y="0" font-size="${geo.Text.font_size}" ${attrs}>${escapeXml(geo.Text.content)}</text>`;
+                    collectNodeData(childId);
                 }
             }
-            nodeSvg += `</g>`;
-            return nodeSvg;
         };
-
-        for (const rootId of Array.from(rootNodes)) {
-            svg += renderNodeToSVG(rootId);
+        for (const rootId of rootNodeIds) {
+            collectNodeData(rootId);
         }
 
-        svg += `</svg>`;
-        
+        // Collect live-paint face fills
+        let filledFaces: FilledFace[] | undefined;
+        if (this.scene.engine) {
+            try {
+                const facesJson = this.scene.engine.get_filled_faces();
+                const parsed = JSON.parse(facesJson) as FilledFace[];
+                if (parsed.length > 0) filledFaces = parsed;
+            } catch { /* no faces */ }
+        }
+
+        let svg = buildSVGFromData({
+            docWidth: docW,
+            docHeight: docH,
+            nodes,
+            rootNodeIds,
+            localTransforms,
+            filledFaces,
+        });
+
         // Embed the binary .vec payload for round-tripping
         if (this.scene.engine) {
             svg = FileIO.embedPayloadInSVG(this.scene.engine, svg);
@@ -865,7 +834,7 @@ export class UIEngine {
         const svg = doc.querySelector('svg');
         if (!svg) return;
 
-        // Parse viewBox for offset/scaling
+        // Parse viewBox for offset/scaling with preserveAspectRatio
         let vbMatrix = identityMatrix();
         const viewBox = svg.getAttribute('viewBox');
         if (viewBox) {
@@ -878,53 +847,35 @@ export class UIEngine {
                 const svgWidth = parseFloat(svg.getAttribute('width') || '0');
                 const svgHeight = parseFloat(svg.getAttribute('height') || '0');
 
-                // Compute scale: if the SVG has explicit width/height that differ
-                // from the viewBox, we need to scale content accordingly.
-                let sx = 1, sy = 1;
                 if (svgWidth > 0 && svgHeight > 0 && vbWidth > 0 && vbHeight > 0) {
-                    sx = svgWidth / vbWidth;
-                    sy = svgHeight / vbHeight;
-                }
-
-                // Build composed matrix: scale(sx,sy) * translate(-vbMinX, -vbMinY)
-                if (sx !== 1 || sy !== 1 || vbMinX !== 0 || vbMinY !== 0) {
-                    const translateMat = parseSVGTransform(`translate(${-vbMinX},${-vbMinY})`);
-                    const scaleMat = parseSVGTransform(`scale(${sx},${sy})`);
-                    vbMatrix = composeMatrices(scaleMat, translateMat);
+                    // Use preserveAspectRatio to compute the correct viewBox transform
+                    const par = svg.getAttribute('preserveAspectRatio');
+                    vbMatrix = parsePreserveAspectRatio(par, vbMinX, vbMinY, vbWidth, vbHeight, svgWidth, svgHeight);
+                } else if (vbMinX !== 0 || vbMinY !== 0) {
+                    // No explicit size — just translate away the viewBox origin
+                    vbMatrix = translateMatrix(-vbMinX, -vbMinY);
                 }
             } else if (parts.length >= 2 && (parts[0] !== 0 || parts[1] !== 0)) {
                 // Fallback: only offset, no width/height in viewBox
-                vbMatrix = parseSVGTransform(`translate(${-parts[0]},${-parts[1]})`);
+                vbMatrix = translateMatrix(-parts[0], -parts[1]);
             }
         }
 
-        // Color parser that handles hex, rgb(), rgba(), and named colors
+        // Color parser: hex (3/4/6/8), rgb[a](), hsl[a](), named colors, url() refs
         const parseColor = (colorStr: string | null): string | null => {
             if (!colorStr || colorStr === 'none' || colorStr === 'transparent') return null;
-            // Check for gradient URL reference
+            // Gradient / paint-server reference: resolve to a representative
+            // solid color (real gradient import replaces this path).
             if (colorStr.match(/url\s*\(/)) {
-                return resolveGradientColor(doc, colorStr);
+                const resolved = resolveGradientColor(doc, colorStr);
+                if (resolved) return resolved;
+                // SVG allows a fallback color after the url() reference
+                const fallback = colorStr.replace(/url\s*\([^)]*\)\s*/, '').trim();
+                return fallback ? parseColor(fallback) : null;
             }
-            if (colorStr.startsWith('#')) return colorStr;
-            // rgb(r,g,b) or rgb(r g b)
-            const rgbMatch = colorStr.match(/rgb\s*\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)\s*\)/);
-            if (rgbMatch) {
-                const r = parseInt(rgbMatch[1]).toString(16).padStart(2, '0');
-                const g = parseInt(rgbMatch[2]).toString(16).padStart(2, '0');
-                const b = parseInt(rgbMatch[3]).toString(16).padStart(2, '0');
-                return `#${r}${g}${b}`;
-            }
-            // Named colors (basic set)
-            const namedColors: Record<string, string> = {
-                black: '#000000', white: '#ffffff', red: '#ff0000', green: '#008000',
-                blue: '#0000ff', yellow: '#ffff00', orange: '#ffa500', purple: '#800080',
-                gray: '#808080', grey: '#808080', pink: '#ffc0cb', brown: '#a52a2a',
-                cyan: '#00ffff', magenta: '#ff00ff', lime: '#00ff00', navy: '#000080',
-                teal: '#008080', silver: '#c0c0c0', maroon: '#800000', olive: '#808000',
-                aqua: '#00ffff', fuchsia: '#ff00ff', crimson: '#dc143c', coral: '#ff7f50',
-                currentColor: '#000000', inherit: '#000000',
-            };
-            return namedColors[colorStr.toLowerCase()] || colorStr;
+            // Never return the raw string: hexToRgb turns unparsed values
+            // (rgba(), hsl(), var(), …) into black, which reads as broken import.
+            return parseCssColor(colorStr)?.hex ?? null;
         };
 
         // ─── CSS <style> block parsing ─────────────────────────────────
@@ -1015,7 +966,7 @@ export class UIEngine {
         const INHERITABLE_ATTRS = [
             'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
             'stroke-dasharray', 'stroke-dashoffset', 'stroke-miterlimit',
-            'opacity', 'fill-opacity', 'fill-rule', 'visibility',
+            'opacity', 'fill-opacity', 'fill-rule', 'visibility', 'font-size',
         ];
 
         /** Read an element's own presentation attributes (explicit attr + inline style)
@@ -1040,27 +991,77 @@ export class UIEngine {
             return fallback;
         };
 
-        const parseFill = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles): string | null => {
+        /** Result of parsing a fill/stroke attribute: either a solid hex (with alpha) or a gradient. */
+        type ParsedPaint = { type: 'solid'; hex: string; alpha: number } | { type: 'gradient'; data: SVGGradientData };
+
+        const parseFill = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles): ParsedPaint | null => {
             const fill = resolveAttr(el, 'fill', inlineStyles, inherited, '#000000');
             if (fill === 'none' || fill === 'transparent') return null;
-            return parseColor(fill);
+            // Check for gradient url(#...)
+            if (fill && fill.match(/url\s*\(/)) {
+                const grad = resolveGradient(doc, fill);
+                if (grad) return { type: 'gradient', data: grad };
+                // Fallback to first stop color if gradient parsing fails
+                const hex = resolveGradientColor(doc, fill);
+                if (hex) return { type: 'solid', hex, alpha: 1 };
+                return null;
+            }
+            const parsed = parseCssColor(fill || '');
+            return parsed ? { type: 'solid', hex: parsed.hex, alpha: parsed.alpha } : null;
         };
 
-        const parseStroke = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles): string | null => {
+        const parseStroke = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles): ParsedPaint | null => {
             const stroke = resolveAttr(el, 'stroke', inlineStyles, inherited, null);
             if (!stroke || stroke === 'none' || stroke === 'transparent') return null;
-            return parseColor(stroke);
+            if (stroke.match(/url\s*\(/)) {
+                const grad = resolveGradient(doc, stroke);
+                if (grad) return { type: 'gradient', data: grad };
+                const hex = resolveGradientColor(doc, stroke);
+                if (hex) return { type: 'solid', hex, alpha: 1 };
+                return null;
+            }
+            const parsed = parseCssColor(stroke);
+            return parsed ? { type: 'solid', hex: parsed.hex, alpha: parsed.alpha } : null;
+        };
+
+        /** Convert a ParsedPaint to the JSON format expected by the Rust engine's Paint enum.
+         *  @param opacityMul  Extra opacity multiplier (e.g. fill-opacity / stroke-opacity)
+         */
+        const paintToJson = (paint: ParsedPaint | null, opacityMul: number = 1): Record<string, unknown> | null => {
+            if (!paint) return null;
+            if (paint.type === 'solid') {
+                const c = this.hexToRgb(paint.hex);
+                // Multiply CSS color alpha and the SVG fill-opacity / stroke-opacity
+                c.a = paint.alpha * opacityMul;
+                return { ...c };
+            }
+            // Gradient: matches Rust's Gradient struct for serde(untagged) deserialization
+            return {
+                gradient_type: paint.data.gradient_type,
+                stops: paint.data.stops.map(s => ({
+                    offset: s.offset,
+                    color: s.color,
+                })),
+                start_x: paint.data.start_x,
+                start_y: paint.data.start_y,
+                end_x: paint.data.end_x,
+                end_y: paint.data.end_y,
+            };
         };
 
         const applyStyle = (id: number, el: Element, inherited: InheritedStyles) => {
             const inlineStyles = parseInlineStyle(el);
-            const fillHex = parseFill(el, inlineStyles, inherited);
-            const strokeHex = parseStroke(el, inlineStyles, inherited);
+            const fillPaint = parseFill(el, inlineStyles, inherited);
+            const strokePaint = parseStroke(el, inlineStyles, inherited);
             const sw = parseFloat(resolveAttr(el, 'stroke-width', inlineStyles, inherited, '1') || '1');
             const op = parseFloat(resolveAttr(el, 'opacity', inlineStyles, inherited, '1') || '1');
 
-            const fill = fillHex ? this.hexToRgb(fillHex) : null;
-            const stroke = strokeHex ? this.hexToRgb(strokeHex) : null;
+            // Parse fill-opacity and stroke-opacity (multiply into paint alpha)
+            const fillOpacity = parseFloat(resolveAttr(el, 'fill-opacity', inlineStyles, inherited, '1') || '1');
+            const strokeOpacity = parseFloat(resolveAttr(el, 'stroke-opacity', inlineStyles, inherited, '1') || '1');
+
+            const fill = paintToJson(fillPaint, fillOpacity);
+            const stroke = paintToJson(strokePaint, strokeOpacity);
 
             // Parse stroke-linecap
             const capStr = resolveAttr(el, 'stroke-linecap', inlineStyles, inherited, 'butt') || 'butt';
@@ -1080,8 +1081,6 @@ export class UIEngine {
             // Parse miter limit
             const miterLimit = parseFloat(resolveAttr(el, 'stroke-miterlimit', inlineStyles, inherited, '4') || '4');
 
-            // Parse fill-opacity
-            const fillOpacity = parseFloat(resolveAttr(el, 'fill-opacity', inlineStyles, inherited, '1') || '1');
 
             const style = {
                 fill, stroke,
@@ -1092,7 +1091,7 @@ export class UIEngine {
                 dash_array: [] as number[],
                 dash_offset: 0,
                 corner_radius: 0,
-                blend_mode: 0,
+                blend_mode: 0 as number,
                 fill_rule: fillRule,
                 miter_limit: miterLimit,
                 fill_opacity: fillOpacity,
@@ -1114,6 +1113,13 @@ export class UIEngine {
             const rx = el.getAttribute('rx');
             if (rx) style.corner_radius = parseFloat(rx);
 
+            // Parse mix-blend-mode from inline style
+            const blendStr = inlineStyles['mix-blend-mode'];
+            if (blendStr) {
+                const bmIdx = BLEND_MODE_MAP.indexOf(blendStr.trim() as typeof BLEND_MODE_MAP[number]);
+                if (bmIdx > 0) style.blend_mode = bmIdx;
+            }
+
             this.scene.setNodeStyle(id, JSON.stringify(style));
 
             // Handle visibility
@@ -1130,17 +1136,69 @@ export class UIEngine {
         // Collect inherited styles from the root <svg> element
         const rootInherited: InheritedStyles = collectInheritedStyles(svg, {});
 
+        /** Helper: process children of a container element, optionally grouping results.
+         *  Returns the IDs created. */
+        const processChildren = (container: Element, mat: number[], inherited: InheritedStyles, useRefStack: Set<string>) => {
+            const childIds: number[] = [];
+            for (const child of container.children) {
+                const beforeLen = createdIds.length;
+                processElement(child, mat, inherited, useRefStack);
+                for (let i = beforeLen; i < createdIds.length; i++) {
+                    childIds.push(createdIds[i]);
+                }
+            }
+            return childIds;
+        };
+
+        /** Helper: turn a list of child IDs into a group (or leave as-is for 0–1 children).
+         *  Removes child IDs from createdIds and pushes the group ID instead. */
+        const groupChildIds = (childIds: number[], name: string) => {
+            if (childIds.length > 1) {
+                for (const cid of childIds) {
+                    const idx = createdIds.indexOf(cid);
+                    if (idx !== -1) createdIds.splice(idx, 1);
+                }
+                const groupId = this.scene.groupNodes(childIds);
+                try { this.scene.engine!.set_node_name(groupId, name); } catch { /* noop */ }
+                createdIds.push(groupId);
+            } else if (childIds.length === 1 && name) {
+                try { this.scene.engine!.set_node_name(childIds[0], name); } catch { /* noop */ }
+            }
+        };
+
+        /** Compute a viewBox transform matrix for an element with viewBox/width/height/preserveAspectRatio. */
+        const computeViewBoxMatrix = (el: Element): number[] => {
+            const vb = el.getAttribute('viewBox');
+            if (!vb) return identityMatrix();
+            const p = vb.trim().split(/[\s,]+/).map(Number);
+            if (p.length < 4 || p[2] <= 0 || p[3] <= 0) return identityMatrix();
+            const vpW = parseFloat(el.getAttribute('width') || '0');
+            const vpH = parseFloat(el.getAttribute('height') || '0');
+            if (vpW > 0 && vpH > 0) {
+                const par = el.getAttribute('preserveAspectRatio');
+                return parsePreserveAspectRatio(par, p[0], p[1], p[2], p[3], vpW, vpH);
+            }
+            // No explicit size — just translate away the viewBox origin
+            if (p[0] !== 0 || p[1] !== 0) return translateMatrix(-p[0], -p[1]);
+            return identityMatrix();
+        };
+
         /**
          * Recursive element processor — handles <g>, shapes, and nested structure.
-         * @param el         The SVG element to process
-         * @param parentMat  Composed parent transform matrix (column-major [f32; 9])
-         * @param inherited  Cascaded presentation attributes from ancestor elements
+         * @param el          The SVG element to process
+         * @param parentMat   Composed parent transform matrix (column-major [f32; 9])
+         * @param inherited    Cascaded presentation attributes from ancestor elements
+         * @param useRefStack  Set of href IDs currently being resolved (cycle detection)
          */
-        const processElement = (el: Element, parentMat: number[], inherited: InheritedStyles) => {
+        const processElement = (el: Element, parentMat: number[], inherited: InheritedStyles, useRefStack: Set<string> = new Set()) => {
             const tag = el.tagName.toLowerCase();
 
             // Skip metadata, defs, style, desc, title, clipPath
-            if (['defs', 'style', 'metadata', 'desc', 'title', 'clippath', 'mask', 'symbol', 'pattern', 'lineargradient', 'radialgradient'].includes(tag)) return;
+            // Note: <symbol> is NOT skipped — it is processed when referenced by <use>
+            if (['defs', 'style', 'metadata', 'desc', 'title', 'clippath', 'mask', 'pattern', 'lineargradient', 'radialgradient', 'filter'].includes(tag)) return;
+
+            // <symbol> is only renderable when referenced by <use>, not as a top-level element
+            if (tag === 'symbol') return;
 
             // Parse this element's transform and compose with parent
             const transformAttr = el.getAttribute('transform');
@@ -1152,47 +1210,87 @@ export class UIEngine {
 
             // Handle <g> groups — recurse into children
             if (tag === 'g') {
-                const childIds: number[] = [];
+                const childIds = processChildren(el, composedMat, mergedStyles, useRefStack);
+                const groupName = el.getAttribute('id') || el.getAttribute('class') || 'Group';
+                groupChildIds(childIds, groupName);
+                return;
+            }
+
+            // Handle nested <svg> — treat as group with its own viewBox transform
+            if (tag === 'svg') {
+                const x = parseFloat(el.getAttribute('x') || '0');
+                const y = parseFloat(el.getAttribute('y') || '0');
+                const offsetMat = (x !== 0 || y !== 0)
+                    ? composeMatrices(composedMat, translateMatrix(x, y))
+                    : composedMat;
+                const nestedVbMat = computeViewBoxMatrix(el);
+                const nestedMat = composeMatrices(offsetMat, nestedVbMat);
+                const childIds = processChildren(el, nestedMat, mergedStyles, useRefStack);
+                const groupName = el.getAttribute('id') || 'Nested SVG';
+                groupChildIds(childIds, groupName);
+                return;
+            }
+
+            // Handle <switch> — import only the first renderable child
+            if (tag === 'switch') {
+                const nonRenderable = new Set(['foreignobject', 'desc', 'title', 'metadata']);
                 for (const child of el.children) {
-                    const beforeLen = createdIds.length;
-                    processElement(child, composedMat, mergedStyles);
-                    // Collect IDs created by children
-                    for (let i = beforeLen; i < createdIds.length; i++) {
-                        childIds.push(createdIds[i]);
-                    }
-                }
-                // If the group had children, group them
-                if (childIds.length > 1) {
-                    // Remove child IDs from createdIds (they'll be in the group)
-                    for (const cid of childIds) {
-                        const idx = createdIds.indexOf(cid);
-                        if (idx !== -1) createdIds.splice(idx, 1);
-                    }
-                    const groupId = this.scene.groupNodes(childIds);
-                    // Set group name from id or class
-                    const groupName = el.getAttribute('id') || el.getAttribute('class') || 'Group';
-                    try { this.scene.engine!.set_node_name(groupId, groupName); } catch { /* noop */ }
-                    createdIds.push(groupId);
-                } else if (childIds.length === 1) {
-                    // Single child — optionally name it from the group
-                    const childName = el.getAttribute('id') || el.getAttribute('class');
-                    if (childName) {
-                        try { this.scene.engine!.set_node_name(childIds[0], childName); } catch { /* noop */ }
+                    if (!nonRenderable.has(child.tagName.toLowerCase())) {
+                        processElement(child, composedMat, mergedStyles, useRefStack);
+                        return; // only first renderable child
                     }
                 }
                 return;
             }
 
-            // Handle <use> — basic support (inline the referenced element)
+            // Handle <use> — inline the referenced element with cycle guard
             if (tag === 'use') {
                 const href = el.getAttribute('href') || el.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
                 if (href && href.startsWith('#')) {
-                    const refEl = svg!.querySelector(href);
+                    const refId = href.slice(1);
+
+                    // Cycle detection: prevent infinite recursion
+                    if (useRefStack.has(refId)) return;
+
+                    const refEl = doc.getElementById(refId);
                     if (refEl) {
                         const useX = parseFloat(el.getAttribute('x') || '0');
                         const useY = parseFloat(el.getAttribute('y') || '0');
-                        const useMat = composeMatrices(composedMat, parseSVGTransform(`translate(${useX},${useY})`));
-                        processElement(refEl, useMat, mergedStyles);
+                        const useMat = (useX !== 0 || useY !== 0)
+                            ? composeMatrices(composedMat, translateMatrix(useX, useY))
+                            : composedMat;
+
+                        // Push this ref onto the cycle-detection stack
+                        const newStack = new Set(useRefStack);
+                        newStack.add(refId);
+
+                        const refTag = refEl.tagName.toLowerCase();
+                        if (refTag === 'symbol') {
+                            // <symbol> acts like a nested viewport:
+                            // compute viewBox transform using <use>'s width/height (or <symbol>'s)
+                            const useW = parseFloat(el.getAttribute('width') || refEl.getAttribute('width') || '0');
+                            const useH = parseFloat(el.getAttribute('height') || refEl.getAttribute('height') || '0');
+                            const symVb = refEl.getAttribute('viewBox');
+                            let symMat = useMat;
+                            if (symVb) {
+                                const p = symVb.trim().split(/[\s,]+/).map(Number);
+                                if (p.length >= 4 && p[2] > 0 && p[3] > 0 && useW > 0 && useH > 0) {
+                                    const par = refEl.getAttribute('preserveAspectRatio');
+                                    const vbMat = parsePreserveAspectRatio(par, p[0], p[1], p[2], p[3], useW, useH);
+                                    symMat = composeMatrices(useMat, vbMat);
+                                } else if (p.length >= 2 && (p[0] !== 0 || p[1] !== 0)) {
+                                    symMat = composeMatrices(useMat, translateMatrix(-p[0], -p[1]));
+                                }
+                            }
+                            // Process symbol's children
+                            const symStyles = collectInheritedStyles(refEl, mergedStyles);
+                            const childIds = processChildren(refEl, symMat, symStyles, newStack);
+                            const groupName = refEl.getAttribute('id') || el.getAttribute('id') || 'Symbol';
+                            groupChildIds(childIds, groupName);
+                        } else {
+                            // Regular element reference (<g>, <rect>, etc.)
+                            processElement(refEl, useMat, mergedStyles, newStack);
+                        }
                     }
                 }
                 return;
@@ -1208,7 +1306,7 @@ export class UIEngine {
                 const h = parseFloat(el.getAttribute('height') || '100');
                 // Create at origin, then set full transform (origin offset baked into matrix)
                 nodeId = this.scene.addRect(0, 0, w, h);
-                const offsetMat = composeMatrices(composedMat, parseSVGTransform(`translate(${x},${y})`));
+                const offsetMat = composeMatrices(composedMat, translateMatrix(x, y));
                 this.scene.setNodeTransform(nodeId, offsetMat);
             } else if (tag === 'ellipse') {
                 const cx = parseFloat(el.getAttribute('cx') || '0');
@@ -1217,22 +1315,58 @@ export class UIEngine {
                 const ry = parseFloat(el.getAttribute('ry') || '50');
                 // Create at origin, then set full transform (center offset baked into matrix)
                 nodeId = this.scene.addEllipse(0, 0, rx, ry);
-                const offsetMat = composeMatrices(composedMat, parseSVGTransform(`translate(${cx},${cy})`));
+                const offsetMat = composeMatrices(composedMat, translateMatrix(cx, cy));
                 this.scene.setNodeTransform(nodeId, offsetMat);
             } else if (tag === 'circle') {
                 const cx = parseFloat(el.getAttribute('cx') || '0');
                 const cy = parseFloat(el.getAttribute('cy') || '0');
                 const r = parseFloat(el.getAttribute('r') || '50');
                 nodeId = this.scene.addEllipse(0, 0, r, r);
-                const offsetMat = composeMatrices(composedMat, parseSVGTransform(`translate(${cx},${cy})`));
+                const offsetMat = composeMatrices(composedMat, translateMatrix(cx, cy));
                 this.scene.setNodeTransform(nodeId, offsetMat);
             } else if (tag === 'text') {
-                const x = parseFloat(el.getAttribute('x') || '0');
-                const y = parseFloat(el.getAttribute('y') || '0');
-                const content = el.textContent || 'Text';
-                const fontSize = parseFloat(el.getAttribute('font-size') || '24');
+                // Resolve font-size through the CSS cascade
+                const inlineStyles = parseInlineStyle(el);
+                const fontSize = parseFloat(resolveAttr(el, 'font-size', inlineStyles, mergedStyles, '24') || '24');
+                const textX = parseFloat(el.getAttribute('x') || '0');
+                const textY = parseFloat(el.getAttribute('y') || '0');
+
+                // Check for <tspan> children
+                const tspans = el.querySelectorAll('tspan');
+                if (tspans.length > 0) {
+                    const tspanIds: number[] = [];
+                    for (const tspan of tspans) {
+                        const tspanInline = parseInlineStyle(tspan);
+                        const tspanStyles = collectInheritedStyles(tspan, mergedStyles);
+                        const tx = parseFloat(tspan.getAttribute('x') ?? String(textX));
+                        const ty = parseFloat(tspan.getAttribute('y') ?? String(textY));
+                        const tfs = parseFloat(resolveAttr(tspan, 'font-size', tspanInline, tspanStyles, String(fontSize)) || String(fontSize));
+                        const content = tspan.textContent?.trim() || '';
+                        if (!content) continue;
+                        const tid = this.scene.addText(0, 0, content, tfs);
+                        const tMat = composeMatrices(composedMat, translateMatrix(tx, ty));
+                        this.scene.setNodeTransform(tid, tMat);
+                        applyStyle(tid, tspan, tspanStyles);
+                        createdIds.push(tid);
+                        tspanIds.push(tid);
+                    }
+                    // Group multiple tspan nodes
+                    if (tspanIds.length > 1) {
+                        const groupName = el.getAttribute('id') || 'Text';
+                        groupChildIds(tspanIds, groupName);
+                    } else if (tspanIds.length === 1) {
+                        const elName = el.getAttribute('id') || el.getAttribute('class');
+                        if (elName) {
+                            try { this.scene.engine!.set_node_name(tspanIds[0], elName); } catch { /* noop */ }
+                        }
+                    }
+                    return; // tspan IDs already added to createdIds
+                }
+
+                // No tspan — use textContent directly
+                const content = el.textContent?.trim() || 'Text';
                 nodeId = this.scene.addText(0, 0, content, fontSize);
-                const offsetMat = composeMatrices(composedMat, parseSVGTransform(`translate(${x},${y})`));
+                const offsetMat = composeMatrices(composedMat, translateMatrix(textX, textY));
                 this.scene.setNodeTransform(nodeId, offsetMat);
             } else if (tag === 'line') {
                 const x1 = parseFloat(el.getAttribute('x1') || '0');
