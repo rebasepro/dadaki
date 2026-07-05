@@ -92,14 +92,20 @@ export class InputManager {
     }
 
     init() {
-        this.canvas.addEventListener('mousedown', (e) => this.onMouseDown(e));
-        this.canvas.addEventListener('dblclick', (e) => this.onDoubleClick(e));
+        // Helper: wrap handler to request a render frame after every interaction
+        const withRender = <E extends Event>(handler: (e: E) => void) => (e: E) => {
+            handler.call(this, e);
+            this.renderer.requestRender();
+        };
+
+        this.canvas.addEventListener('mousedown', withRender((e: MouseEvent) => this.onMouseDown(e)));
+        this.canvas.addEventListener('dblclick', withRender((e: MouseEvent) => this.onDoubleClick(e)));
         this.canvas.addEventListener('contextmenu', (e) => this.onContextMenu(e));
-        window.addEventListener('mousemove', (e) => this.onMouseMove(e));
-        window.addEventListener('mouseup', (e) => this.onMouseUp(e));
-        window.addEventListener('keydown', (e) => this.onKeyDown(e));
-        window.addEventListener('keyup', (e) => this.onKeyUp(e));
-        window.addEventListener('wheel', (e) => this.onWheel(e), { passive: false, capture: true });
+        window.addEventListener('mousemove', withRender((e: MouseEvent) => this.onMouseMove(e)));
+        window.addEventListener('mouseup', withRender((e: MouseEvent) => this.onMouseUp(e)));
+        window.addEventListener('keydown', withRender((e: KeyboardEvent) => this.onKeyDown(e)));
+        window.addEventListener('keyup', withRender((e: KeyboardEvent) => this.onKeyUp(e)));
+        window.addEventListener('wheel', withRender((e: WheelEvent) => this.onWheel(e)), { passive: false, capture: true });
 
         // Import .svg / .vec files by dropping them onto the canvas area
         const dropTarget = document.getElementById('canvas-container') ?? this.canvas;

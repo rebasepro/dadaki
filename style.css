@@ -304,8 +304,27 @@ body, html {
     display: flex;
     flex-direction: column;
     z-index: 10;
+    overflow: hidden;
+}
+
+.properties-scroll {
+    flex: 0 1 auto;
     overflow-y: auto;
     overflow-x: hidden;
+    min-height: 0;
+}
+
+.properties-scroll::-webkit-scrollbar {
+    width: 4px;
+}
+
+.properties-scroll::-webkit-scrollbar-thumb {
+    background: var(--border-light);
+    border-radius: 2px;
+}
+
+.properties-scroll::-webkit-scrollbar-track {
+    background: transparent;
 }
 
 #side-panel::-webkit-scrollbar {
@@ -628,7 +647,7 @@ body, html {
 /* ─── Layers ─── */
 
 .panel-section.layers-section {
-    flex: 1 0 auto;
+    flex: 1 0 120px;
     min-height: 120px;
     display: flex;
     flex-direction: column;
@@ -640,7 +659,6 @@ body, html {
     overflow-y: auto;
     padding: 2px 4px;
     min-height: 0;
-    max-height: 50vh;
 }
 
 #layer-list::-webkit-scrollbar {

@@ -62,6 +62,30 @@ export class Renderer {
     // ─── Cached Resources (avoid per-frame allocation) ───
     private paint: Paint | null = null;
 
+    // ─── Dirty-frame gating ───
+    /** When false, the rAF loop skips rendering. Set to true by requestRender(). */
+    private _needsRender = true;
+
+    // ─── Path object cache (avoid rebuilding CanvasKit paths every frame) ───
+    private _pathCache: Map<number, { path: ReturnType<CanvasKit['Path']['prototype']['copy']>; fillRule: number }> = new Map();
+
+    // ─── Gradient shader cache ───
+    private _gradientCache: Map<string, ReturnType<CanvasKit['Shader']['MakeLinearGradient']>> = new Map();
+
+    // ─── Filled faces cache ───
+    private _filledFacesCache: { data: { boundary: number[][]; fill: { r: number; g: number; b: number; a: number } }[] } | null = null;
+
+    // ─── Cached overlay paints (created once, reused every frame) ───
+    private _overlayPaints: {
+        selOutline: Paint;
+        selHandleFill: Paint;
+        selHandleStroke: Paint;
+        hoverOutline: Paint;
+        gridPaint: Paint;
+        artboardFill: Paint;
+        artboardStroke: Paint;
+    } | null = null;
+
     constructor(ck: CanvasKit, canvas: HTMLCanvasElement, scene: WasmScene) {
         this.ck = ck;
         this.canvas = canvas;
@@ -73,6 +97,68 @@ export class Renderer {
         this.pan = { x: 0, y: 0 };
 
         this.initGL();
+    }
+
+    /** Signal that the scene or view changed and a new frame is needed. */
+    requestRender() {
+        this._needsRender = true;
+    }
+
+    /** Invalidate all cached rendering resources. Call when the scene mutates. */
+    invalidateRenderCaches() {
+        // Clear path cache
+        for (const entry of this._pathCache.values()) {
+            entry.path.delete();
+        }
+        this._pathCache.clear();
+
+        // Clear gradient cache
+        for (const shader of this._gradientCache.values()) {
+            if (shader) shader.delete();
+        }
+        this._gradientCache.clear();
+
+        // Clear filled faces cache
+        this._filledFacesCache = null;
+
+        this._needsRender = true;
+    }
+
+    /** Ensure the reusable overlay Paint objects exist. */
+    private ensureOverlayPaints() {
+        if (this._overlayPaints) return this._overlayPaints;
+        const ck = this.ck;
+        const selOutline = new ck.Paint();
+        selOutline.setColor(ck.Color(0, 162, 255, 1.0));
+        selOutline.setStyle(ck.PaintStyle.Stroke);
+
+        const selHandleFill = new ck.Paint();
+        selHandleFill.setColor(ck.Color(255, 255, 255, 1.0));
+        selHandleFill.setStyle(ck.PaintStyle.Fill);
+
+        const selHandleStroke = new ck.Paint();
+        selHandleStroke.setColor(ck.Color(0, 162, 255, 1.0));
+        selHandleStroke.setStyle(ck.PaintStyle.Stroke);
+
+        const hoverOutline = new ck.Paint();
+        hoverOutline.setColor(ck.Color(0, 162, 255, 0.55));
+        hoverOutline.setStyle(ck.PaintStyle.Stroke);
+        hoverOutline.setAntiAlias(true);
+
+        const gridPaint = new ck.Paint();
+        gridPaint.setColor(ck.Color(255, 255, 255, 0.04));
+        gridPaint.setStyle(ck.PaintStyle.Stroke);
+
+        const artboardFill = new ck.Paint();
+        artboardFill.setColor(ck.Color(255, 255, 255, 1.0));
+        artboardFill.setStyle(ck.PaintStyle.Fill);
+
+        const artboardStroke = new ck.Paint();
+        artboardStroke.setColor(ck.Color(80, 80, 80, 1.0));
+        artboardStroke.setStyle(ck.PaintStyle.Stroke);
+
+        this._overlayPaints = { selOutline, selHandleFill, selHandleStroke, hoverOutline, gridPaint, artboardFill, artboardStroke };
+        return this._overlayPaints;
     }
 
 
@@ -94,6 +180,18 @@ export class Renderer {
         if (this.surface) {
             this.surface.delete();
             this.surface = null;
+        }
+        // Clean up cached CanvasKit objects
+        this.invalidateRenderCaches();
+        if (this._overlayPaints) {
+            this._overlayPaints.selOutline.delete();
+            this._overlayPaints.selHandleFill.delete();
+            this._overlayPaints.selHandleStroke.delete();
+            this._overlayPaints.hoverOutline.delete();
+            this._overlayPaints.gridPaint.delete();
+            this._overlayPaints.artboardFill.delete();
+            this._overlayPaints.artboardStroke.delete();
+            this._overlayPaints = null;
         }
     }
 
@@ -172,7 +270,10 @@ export class Renderer {
 
     loop() {
         if (!this.isRunning) return;
-        this.render();
+        if (this._needsRender) {
+            this._needsRender = false;
+            this.render();
+        }
         requestAnimationFrame(() => this.loop());
     }
 
@@ -223,7 +324,7 @@ export class Renderer {
 
         for (let i = 0; i < commandCount; i++) {
             const cmdType = reader.u32();
-            reader.u32(); // skip id
+            const nodeId = reader.u32();
 
             if (cmdType === 1) { // CMD_START_GROUP
                 const opacity = reader.f32();
@@ -329,32 +430,19 @@ export class Renderer {
 
                 // Fill Pass
                 if (fa > 0) {
-                    let fillShader: ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null = null;
                     if (fillType === 1) {
                         p.setColor(this.ck.Color4f(fr, fg, fb, fa));
+                        p.setShader(null);
                     } else if (fillGradientStops) {
-                        const colors = fillGradientStops.map(s => this.ck.Color4f(s.r, s.g, s.b, s.a));
-                        const offsets = fillGradientStops.map(s => s.offset);
-                        if (fillType === 2) { // Linear
-                            fillShader = this.ck.Shader.MakeLinearGradient(
-                                fillGradStart, fillGradEnd,
-                                colors, offsets, this.ck.TileMode.Clamp,
-                            );
-                        } else { // Radial
-                            const radius = Math.hypot(fillGradEnd[0] - fillGradStart[0], fillGradEnd[1] - fillGradStart[1]);
-                            fillShader = this.ck.Shader.MakeTwoPointConicalGradient(
-                                fillGradStart, 0, fillGradStart, radius,
-                                colors, offsets, this.ck.TileMode.Clamp,
-                            );
-                        }
+                        const fillShader = this.getOrCreateGradientShader(
+                            fillType, fillGradientStops, fillGradStart, fillGradEnd,
+                        );
                         p.setShader(fillShader);
                     }
                     p.setStyle(this.ck.PaintStyle.Fill);
-                    this.drawBinaryGeometry(canvas, nodeType, reader, p, cornerRadius, fillRule);
-                    if (fillShader) {
-                        p.setShader(null);
-                        fillShader.delete();
-                    }
+                    this.drawBinaryGeometry(canvas, nodeType, reader, p, cornerRadius, fillRule, nodeId);
+                    // Don't delete cached shaders — they live in the gradient cache
+                    p.setShader(null);
                 } else {
                     reader.offset += 4 + geoSize;
                 }
@@ -362,24 +450,13 @@ export class Renderer {
                 // Stroke Pass
                 if (sa > 0 && strokeWidth > 0) {
                     reader.offset = startGeoOffset; // Rewind
-                    let strokeShader: ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null = null;
                     if (strokeType === 1) {
                         p.setColor(this.ck.Color4f(sr, sg, sb, sa));
+                        p.setShader(null);
                     } else if (strokeGradientStops) {
-                        const colors = strokeGradientStops.map(s => this.ck.Color4f(s.r, s.g, s.b, s.a));
-                        const offsets = strokeGradientStops.map(s => s.offset);
-                        if (strokeType === 2) {
-                            strokeShader = this.ck.Shader.MakeLinearGradient(
-                                strokeGradStart, strokeGradEnd,
-                                colors, offsets, this.ck.TileMode.Clamp,
-                            );
-                        } else {
-                            const radius = Math.hypot(strokeGradEnd[0] - strokeGradStart[0], strokeGradEnd[1] - strokeGradStart[1]);
-                            strokeShader = this.ck.Shader.MakeTwoPointConicalGradient(
-                                strokeGradStart, 0, strokeGradStart, radius,
-                                colors, offsets, this.ck.TileMode.Clamp,
-                            );
-                        }
+                        const strokeShader = this.getOrCreateGradientShader(
+                            strokeType, strokeGradientStops, strokeGradStart, strokeGradEnd,
+                        );
                         p.setShader(strokeShader);
                     }
                     p.setStyle(this.ck.PaintStyle.Stroke);
@@ -395,15 +472,12 @@ export class Renderer {
                         dashEffect = this.ck.PathEffect.MakeDash([dashOn, dashOff], dashPhase);
                         p.setPathEffect(dashEffect);
                     }
-                    this.drawBinaryGeometry(canvas, nodeType, reader, p, cornerRadius);
+                    this.drawBinaryGeometry(canvas, nodeType, reader, p, cornerRadius, undefined, nodeId);
                     if (dashEffect) {
                         p.setPathEffect(null);
                         dashEffect.delete();
                     }
-                    if (strokeShader) {
-                        p.setShader(null);
-                        strokeShader.delete();
-                    }
+                    p.setShader(null);
                     // Reset stroke state to defaults for next node
                     p.setStrokeCap(this.ck.StrokeCap.Butt);
                     p.setStrokeJoin(this.ck.StrokeJoin.Miter);
@@ -455,7 +529,39 @@ export class Renderer {
         this.surface.flush();
     }
 
-    private drawBinaryGeometry(canvas: Canvas, type: number, reader: BinaryReader, paint: Paint, cornerRadius: number = 0, fillRule: number = 0) {
+    /** Build a cache key for a gradient and return a cached or newly created shader. */
+    private getOrCreateGradientShader(
+        gradType: number,
+        stops: { offset: number; r: number; g: number; b: number; a: number }[],
+        start: [number, number],
+        end: [number, number],
+    ): ReturnType<CanvasKit['Shader']['MakeLinearGradient']> {
+        // Build a compact cache key from gradient parameters
+        let key = `${gradType}|${start[0]},${start[1]}|${end[0]},${end[1]}`;
+        for (const s of stops) {
+            key += `|${s.offset},${s.r},${s.g},${s.b},${s.a}`;
+        }
+        const cached = this._gradientCache.get(key);
+        if (cached) return cached;
+
+        const colors = stops.map(s => this.ck.Color4f(s.r, s.g, s.b, s.a));
+        const offsets = stops.map(s => s.offset);
+        let shader: ReturnType<CanvasKit['Shader']['MakeLinearGradient']>;
+        if (gradType === 2) { // Linear
+            shader = this.ck.Shader.MakeLinearGradient(
+                start, end, colors, offsets, this.ck.TileMode.Clamp,
+            );
+        } else { // Radial
+            const radius = Math.hypot(end[0] - start[0], end[1] - start[1]);
+            shader = this.ck.Shader.MakeTwoPointConicalGradient(
+                start, 0, start, radius, colors, offsets, this.ck.TileMode.Clamp,
+            );
+        }
+        this._gradientCache.set(key, shader);
+        return shader;
+    }
+
+    private drawBinaryGeometry(canvas: Canvas, type: number, reader: BinaryReader, paint: Paint, cornerRadius: number = 0, fillRule: number = 0, nodeId: number = 0) {
         reader.u32(); // skip size
 
         if (type === 1) { // Rect
@@ -474,6 +580,27 @@ export class Renderer {
             canvas.drawOval(this.ck.LTRBRect(-rx, -ry, rx, ry), paint);
         } else if (type === 0) { // Path
             const numSubpaths = reader.u32();
+
+            // Check path cache first
+            const cached = this._pathCache.get(nodeId);
+            if (cached && nodeId > 0) {
+                // Skip past the binary path data (we already have the cached CK path)
+                for (let s = 0; s < numSubpaths; s++) {
+                    reader.u32(); // closed
+                    const numPoints = reader.u32();
+                    reader.offset += numPoints * 6 * 4; // 6 floats per point × 4 bytes
+                }
+                // Apply fill rule if it changed
+                if (fillRule !== cached.fillRule) {
+                    cached.path.setFillType(
+                        fillRule === 1 ? this.ck.FillType.EvenOdd : this.ck.FillType.Winding,
+                    );
+                    cached.fillRule = fillRule;
+                }
+                canvas.drawPath(cached.path, paint);
+                return;
+            }
+
             const path = new this.ck.Path();
             for (let s = 0; s < numSubpaths; s++) {
                 const closed = reader.u32() === 1;
@@ -507,6 +634,11 @@ export class Renderer {
                 path.setFillType(this.ck.FillType.EvenOdd);
             }
             canvas.drawPath(path, paint);
+
+            // Cache the path for future frames (copy so it survives reuse)
+            if (nodeId > 0) {
+                this._pathCache.set(nodeId, { path: path.copy(), fillRule });
+            }
             path.delete();
         } else if (type === 4) { // Text
             const fontSize = reader.f32();
@@ -537,13 +669,9 @@ export class Renderer {
         canvas.translate(this.pan.x, this.pan.y);
         canvas.scale(this.zoom, this.zoom);
 
-        const paint = new this.ck.Paint();
-        paint.setColor(this.ck.Color(0, 162, 255, 0.55));
-        paint.setStyle(this.ck.PaintStyle.Stroke);
-        paint.setStrokeWidth(1.5 / this.zoom);
-        paint.setAntiAlias(true);
-        canvas.drawRect(this.ck.LTRBRect(b[0], b[1], b[2], b[3]), paint);
-        paint.delete();
+        const op = this.ensureOverlayPaints();
+        op.hoverOutline.setStrokeWidth(1.5 / this.zoom);
+        canvas.drawRect(this.ck.LTRBRect(b[0], b[1], b[2], b[3]), op.hoverOutline);
         canvas.restore();
     }
 
@@ -558,10 +686,8 @@ export class Renderer {
         canvas.translate(this.pan.x, this.pan.y);
         canvas.scale(this.zoom, this.zoom);
 
-        const outlinePaint = new this.ck.Paint();
-        outlinePaint.setColor(this.ck.Color(0, 162, 255, 1.0));
-        outlinePaint.setStyle(this.ck.PaintStyle.Stroke);
-        outlinePaint.setStrokeWidth(1.0 / this.zoom);
+        const op = this.ensureOverlayPaints();
+        op.selOutline.setStrokeWidth(1.0 / this.zoom);
 
         let totalMinX = Infinity, totalMinY = Infinity, totalMaxX = -Infinity, totalMaxY = -Infinity;
 
@@ -581,7 +707,7 @@ export class Renderer {
 
             if (nodeTypeNum === 3) { // Group
                 const [gMinX, gMinY, gMaxX, gMaxY] = bounds;
-                canvas.drawRect(this.ck.LTRBRect(gMinX, gMinY, gMaxX, gMaxY), outlinePaint);
+                canvas.drawRect(this.ck.LTRBRect(gMinX, gMinY, gMaxX, gMaxY), op.selOutline);
             } else {
                 const transform = this.scene.getTransform(id);
                 canvas.save();
@@ -589,15 +715,15 @@ export class Renderer {
                 
                 const geo = this.scene.getNodeGeometry(id);
                 if (geo.Rect) {
-                    canvas.drawRect(this.ck.LTRBRect(0, 0, geo.Rect.width, geo.Rect.height), outlinePaint);
+                    canvas.drawRect(this.ck.LTRBRect(0, 0, geo.Rect.width, geo.Rect.height), op.selOutline);
                 } else if (geo.Ellipse) {
-                    canvas.drawOval(this.ck.LTRBRect(-geo.Ellipse.radius_x, -geo.Ellipse.radius_y, geo.Ellipse.radius_x, geo.Ellipse.radius_y), outlinePaint);
+                    canvas.drawOval(this.ck.LTRBRect(-geo.Ellipse.radius_x, -geo.Ellipse.radius_y, geo.Ellipse.radius_x, geo.Ellipse.radius_y), op.selOutline);
                 } else if (geo.Path) {
                     const pathBounds = this.calculatePathBounds(geo.Path);
-                    canvas.drawRect(this.ck.LTRBRect(pathBounds.minX, pathBounds.minY, pathBounds.maxX, pathBounds.maxY), outlinePaint);
+                    canvas.drawRect(this.ck.LTRBRect(pathBounds.minX, pathBounds.minY, pathBounds.maxX, pathBounds.maxY), op.selOutline);
                 } else if (geo.Text) {
                     const approxW = geo.Text.content.length * geo.Text.font_size * 0.6;
-                    canvas.drawRect(this.ck.LTRBRect(0, -geo.Text.font_size, approxW, 0), outlinePaint);
+                    canvas.drawRect(this.ck.LTRBRect(0, -geo.Text.font_size, approxW, 0), op.selOutline);
                 }
                 canvas.restore();
             }
@@ -615,7 +741,7 @@ export class Renderer {
         // Draw global bounding box and handles
         if (hMaxX > hMinX && hMaxY > hMinY) {
             if (selection.length > 1 || live) {
-                canvas.drawRect(this.ck.LTRBRect(hMinX, hMinY, hMaxX, hMaxY), outlinePaint);
+                canvas.drawRect(this.ck.LTRBRect(hMinX, hMinY, hMaxX, hMaxY), op.selOutline);
             }
 
             const hSize = 4 / this.zoom;
@@ -628,25 +754,14 @@ export class Renderer {
                 [hMinX, hMaxY], [midX, hMaxY], [hMaxX, hMaxY],
             ];
 
-            const handleFill = new this.ck.Paint();
-            handleFill.setColor(this.ck.Color(255, 255, 255, 1.0));
-            handleFill.setStyle(this.ck.PaintStyle.Fill);
-
-            const handleStroke = new this.ck.Paint();
-            handleStroke.setColor(this.ck.Color(0, 162, 255, 1.0));
-            handleStroke.setStyle(this.ck.PaintStyle.Stroke);
-            handleStroke.setStrokeWidth(1.0 / this.zoom);
+            op.selHandleStroke.setStrokeWidth(1.0 / this.zoom);
 
             for (const [hx, hy] of handlePositions) {
-                canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), handleFill);
-                canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), handleStroke);
+                canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), op.selHandleFill);
+                canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), op.selHandleStroke);
             }
-
-            handleFill.delete();
-            handleStroke.delete();
         }
 
-        outlinePaint.delete();
         canvas.restore();
     }
 
@@ -727,10 +842,8 @@ export class Renderer {
         canvas.translate(this.pan.x, this.pan.y);
         canvas.scale(this.zoom, this.zoom);
 
-        const gridPaint = new this.ck.Paint();
-        gridPaint.setColor(this.ck.Color(255, 255, 255, 0.04));
-        gridPaint.setStyle(this.ck.PaintStyle.Stroke);
-        gridPaint.setStrokeWidth(0.5 / this.zoom);
+        const op = this.ensureOverlayPaints();
+        op.gridPaint.setStrokeWidth(0.5 / this.zoom);
 
         // Compute visible area in world coords
         const w = this.canvas.width / dpr;
@@ -741,35 +854,28 @@ export class Renderer {
         const endY = startY + h / this.zoom + 100;
 
         for (let x = startX; x <= endX; x += 50) {
-            canvas.drawLine(x, startY, x, endY, gridPaint);
+            canvas.drawLine(x, startY, x, endY, op.gridPaint);
         }
         for (let y = startY; y <= endY; y += 50) {
-            canvas.drawLine(startX, y, endX, y, gridPaint);
+            canvas.drawLine(startX, y, endX, y, op.gridPaint);
         }
 
-        gridPaint.delete();
         canvas.restore();
     }
 
     drawArtboard(canvas: Canvas) {
-        const paint = new this.ck.Paint();
-        paint.setColor(this.ck.Color(255, 255, 255, 1.0));
-        paint.setStyle(this.ck.PaintStyle.Fill);
+        const op = this.ensureOverlayPaints();
 
         // Use dynamic document size from engine
         const w = this.scene.engine?.get_document_width() ?? 1000;
         const h = this.scene.engine?.get_document_height() ?? 1000;
 
         // Artboard is at world origin (0,0)
-        canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), paint);
+        canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), op.artboardFill);
         
         // Artboard border
-        paint.setColor(this.ck.Color(80, 80, 80, 1.0));
-        paint.setStyle(this.ck.PaintStyle.Stroke);
-        paint.setStrokeWidth(1 / this.zoom);
-        canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), paint);
-
-        paint.delete();
+        op.artboardStroke.setStrokeWidth(1 / this.zoom);
+        canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), op.artboardStroke);
     }
 
     private drawDirectEditHandles(canvas: Canvas, dpr: number) {
@@ -1008,11 +1114,17 @@ export class Renderer {
     private drawFilledFaces(canvas: Canvas) {
         if (!this.scene.engine) return;
         try {
-            const json = this.scene.engine.get_filled_faces();
-            const faces = JSON.parse(json);
-            if (!faces || faces.length === 0) return;
+            // Use cached faces data to avoid JSON.parse every frame
+            if (!this._filledFacesCache) {
+                const json = this.scene.engine.get_filled_faces();
+                const parsed = JSON.parse(json);
+                this._filledFacesCache = { data: parsed || [] };
+            }
+            const faces = this._filledFacesCache.data;
+            if (faces.length === 0) return;
 
-            const paint = new this.ck.Paint();
+            if (!this.paint) this.paint = new this.ck.Paint();
+            const paint = this.paint;
             paint.setStyle(this.ck.PaintStyle.Fill);
             paint.setAntiAlias(true);
 
@@ -1032,7 +1144,6 @@ export class Renderer {
                 canvas.drawPath(path, paint);
                 path.delete();
             }
-            paint.delete();
         } catch {}
     }
 

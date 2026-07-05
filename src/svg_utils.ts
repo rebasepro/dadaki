@@ -880,6 +880,13 @@ export function resolveGradient(
     }
 }
 
+/** Named CSS colors for stop-color parsing (hoisted to module scope to avoid re-allocation). */
+const NAMED_STOP_COLORS: Record<string, [number, number, number]> = {
+    black: [0, 0, 0], white: [1, 1, 1], red: [1, 0, 0], green: [0, 0.5, 0],
+    blue: [0, 0, 1], yellow: [1, 1, 0], orange: [1, 0.65, 0], purple: [0.5, 0, 0.5],
+    gray: [0.5, 0.5, 0.5], grey: [0.5, 0.5, 0.5],
+};
+
 /** Parse a stop-color string into an RGBA color object (0–1 range). */
 function parseStopColor(colorStr: string, opacity: number): { r: number; g: number; b: number; a: number } {
     // Hex
@@ -904,12 +911,7 @@ function parseStopColor(colorStr: string, opacity: number): { r: number; g: numb
         };
     }
     // Named colors
-    const namedColors: Record<string, [number, number, number]> = {
-        black: [0, 0, 0], white: [1, 1, 1], red: [1, 0, 0], green: [0, 0.5, 0],
-        blue: [0, 0, 1], yellow: [1, 1, 0], orange: [1, 0.65, 0], purple: [0.5, 0, 0.5],
-        gray: [0.5, 0.5, 0.5], grey: [0.5, 0.5, 0.5],
-    };
-    const named = namedColors[colorStr.toLowerCase()];
+    const named = NAMED_STOP_COLORS[colorStr.toLowerCase()];
     if (named) return { r: named[0], g: named[1], b: named[2], a: opacity };
     // Fallback: black
     return { r: 0, g: 0, b: 0, a: opacity };

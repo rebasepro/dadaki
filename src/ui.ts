@@ -1001,9 +1001,6 @@ export class UIEngine {
             if (fill && fill.match(/url\s*\(/)) {
                 const grad = resolveGradient(doc, fill);
                 if (grad) return { type: 'gradient', data: grad };
-                // Fallback to first stop color if gradient parsing fails
-                const hex = resolveGradientColor(doc, fill);
-                if (hex) return { type: 'solid', hex, alpha: 1 };
                 return null;
             }
             const parsed = parseCssColor(fill || '');
@@ -1016,8 +1013,6 @@ export class UIEngine {
             if (stroke.match(/url\s*\(/)) {
                 const grad = resolveGradient(doc, stroke);
                 if (grad) return { type: 'gradient', data: grad };
-                const hex = resolveGradientColor(doc, stroke);
-                if (hex) return { type: 'solid', hex, alpha: 1 };
                 return null;
             }
             const parsed = parseCssColor(stroke);
@@ -1154,10 +1149,14 @@ export class UIEngine {
          *  Removes child IDs from createdIds and pushes the group ID instead. */
         const groupChildIds = (childIds: number[], name: string) => {
             if (childIds.length > 1) {
-                for (const cid of childIds) {
-                    const idx = createdIds.indexOf(cid);
-                    if (idx !== -1) createdIds.splice(idx, 1);
+                const removeSet = new Set(childIds);
+                let write = 0;
+                for (let read = 0; read < createdIds.length; read++) {
+                    if (!removeSet.has(createdIds[read])) {
+                        createdIds[write++] = createdIds[read];
+                    }
                 }
+                createdIds.length = write;
                 const groupId = this.scene.groupNodes(childIds);
                 try { this.scene.engine!.set_node_name(groupId, name); } catch { /* noop */ }
                 createdIds.push(groupId);

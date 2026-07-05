@@ -3,6 +3,8 @@ import { PersistenceManager, AutosaveManager } from './persistence';
 import type { SceneData } from './types';
 import type { CanvasKit } from 'canvaskit-wasm';
 
+import type { Renderer } from './renderer';
+
 export class WasmScene {
     engine: Engine | null = null;
     history: History | null = null;
@@ -14,6 +16,9 @@ export class WasmScene {
     /** Cached scene data, invalidated on mutation. */
     private _cachedSceneData: SceneData | null = null;
     private _sceneDataDirty: boolean = true;
+
+    /** Back-reference to the renderer for cache invalidation. */
+    renderer: Renderer | null = null;
 
     constructor(ck: CanvasKit) {
         this.ck = ck;
@@ -47,6 +52,10 @@ export class WasmScene {
     invalidateCache() {
         this._sceneDataDirty = true;
         this._cachedSceneData = null;
+        // Invalidate renderer caches (paths, gradients, filled faces) and request a new frame
+        if (this.renderer) {
+            this.renderer.invalidateRenderCaches();
+        }
     }
 
     addRect(x: number, y: number, w: number, h: number): number {

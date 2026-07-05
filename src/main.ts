@@ -16,6 +16,7 @@ async function bootstrap() {
 
     const canvas = document.getElementById('editor-canvas') as HTMLCanvasElement;
     const renderer = new Renderer(ck, canvas, wasmScene);
+    wasmScene.renderer = renderer;
     const ui = new UIEngine(ck, wasmScene);
     const input = new InputManager(canvas, wasmScene, ui, renderer);
     renderer.inputManager = input;
