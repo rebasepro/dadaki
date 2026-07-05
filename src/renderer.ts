@@ -113,6 +113,36 @@ export class Renderer {
         this.isRunning = false;
     }
 
+    /** Fit the artboard (document rect at world 0,0) in the viewport with a margin. */
+    fitToArtboard() {
+        const docW = this.scene.engine?.get_document_width() ?? 1000;
+        const docH = this.scene.engine?.get_document_height() ?? 1000;
+        const viewW = this.canvas.clientWidth;
+        const viewH = this.canvas.clientHeight;
+        if (viewW <= 0 || viewH <= 0) return;
+
+        const margin = 48; // css px on each side
+        const scale = Math.min(
+            (viewW - margin * 2) / docW,
+            (viewH - margin * 2) / docH,
+        );
+        this.zoom = Math.max(0.02, Math.min(4, scale));
+        this.pan.x = (viewW - docW * this.zoom) / 2;
+        this.pan.y = (viewH - docH * this.zoom) / 2;
+    }
+
+    /** Set zoom keeping the viewport center fixed. */
+    setZoomCentered(newZoom: number) {
+        const viewW = this.canvas.clientWidth;
+        const viewH = this.canvas.clientHeight;
+        const cx = viewW / 2, cy = viewH / 2;
+        const worldX = (cx - this.pan.x) / this.zoom;
+        const worldY = (cy - this.pan.y) / this.zoom;
+        this.zoom = Math.max(0.01, Math.min(100, newZoom));
+        this.pan.x = cx - worldX * this.zoom;
+        this.pan.y = cy - worldY * this.zoom;
+    }
+
     loop() {
         if (!this.isRunning) return;
         this.render();

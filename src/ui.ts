@@ -726,6 +726,8 @@ export class UIEngine {
 
     setZoom(level: number) {
         this.zoomText.innerText = `${Math.round(level * 100)}%`;
+        // Keep the context bar's zoom label in sync
+        this.contextBar?.refresh();
     }
 
     exportSVG() {

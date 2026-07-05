@@ -102,7 +102,8 @@ impl VectorNetwork {
 // ─── Bezier Flattening ─────────────────────────────────────────────────────────
 
 /// Flatten a cubic bezier (p0→p1→p2→p3) into a polyline via adaptive de Casteljau.
-fn flatten_cubic(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, tolerance: f32, out: &mut Vec<Vec2>) {
+/// Pushes interior and end points into `out` (caller seeds `out` with p0).
+pub(crate) fn flatten_cubic(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, tolerance: f32, out: &mut Vec<Vec2>) {
     // Check if the curve is flat enough
     let d1 = (p1 - p0).length() + (p2 - p1).length() + (p3 - p2).length();
     let d2 = (p3 - p0).length();

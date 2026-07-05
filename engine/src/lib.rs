@@ -61,6 +61,111 @@ pub struct Style {
 fn default_miter_limit() -> f32 { 4.0 }
 fn default_opacity() -> f32 { 1.0 }
 
+// ─── Precise Path Hit-Testing ───────────────────────────────────────────────────
+
+/// World-space pick tolerance in document pixels (scaled to local space at use).
+const HIT_TOLERANCE: f32 = 4.0;
+
+/// Flatten a subpath's cubic segments into a polyline in local space.
+/// Includes the closing curve when `closed`.
+fn flatten_subpath(sp: &Subpath) -> Vec<Vec2> {
+    let n = sp.points.len();
+    let mut out = Vec::new();
+    if n == 0 {
+        return out;
+    }
+    out.push(Vec2::new(sp.points[0].x, sp.points[0].y));
+    for i in 1..n {
+        let a = &sp.points[i - 1];
+        let b = &sp.points[i];
+        vector_network::flatten_cubic(
+            Vec2::new(a.x, a.y), a.cp2, b.cp1, Vec2::new(b.x, b.y), 0.25, &mut out,
+        );
+    }
+    if sp.closed && n >= 2 {
+        let a = &sp.points[n - 1];
+        let b = &sp.points[0];
+        vector_network::flatten_cubic(
+            Vec2::new(a.x, a.y), a.cp2, b.cp1, Vec2::new(b.x, b.y), 0.25, &mut out,
+        );
+    }
+    out
+}
+
+/// Containment test across all subpaths (ray cast toward +x).
+/// Open subpaths are implicitly closed for filling, matching SVG semantics.
+fn point_in_path_fill(subpaths: &[Subpath], p: Vec2, even_odd: bool) -> bool {
+    let mut winding: i32 = 0;
+    let mut crossings: u32 = 0;
+    for sp in subpaths {
+        let poly = flatten_subpath(sp);
+        let n = poly.len();
+        if n < 3 {
+            continue;
+        }
+        for i in 0..n {
+            let a = poly[i];
+            let b = poly[(i + 1) % n]; // wrap = implicit close for fill
+            if (a.y <= p.y) != (b.y <= p.y) {
+                let t = (p.y - a.y) / (b.y - a.y);
+                let x = a.x + t * (b.x - a.x);
+                if x > p.x {
+                    crossings += 1;
+                    if b.y > a.y { winding += 1 } else { winding -= 1 }
+                }
+            }
+        }
+    }
+    if even_odd { crossings % 2 == 1 } else { winding != 0 }
+}
+
+/// Squared distance from a point to a polyline (optionally closed).
+fn dist_sq_to_polyline(poly: &[Vec2], p: Vec2, closed: bool) -> f32 {
+    let n = poly.len();
+    if n == 0 {
+        return f32::MAX;
+    }
+    if n == 1 {
+        return (poly[0] - p).length_squared();
+    }
+    let mut best = f32::MAX;
+    let seg_count = if closed { n } else { n - 1 };
+    for i in 0..seg_count {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        let ab = b - a;
+        let len_sq = ab.length_squared();
+        let t = if len_sq > 1e-12 {
+            ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        best = best.min((a + ab * t - p).length_squared());
+    }
+    best
+}
+
+/// Hit test a path node in local space: stroke outline first (within
+/// stroke_width/2 + tolerance), then fill containment if the path is filled.
+fn path_hit(subpaths: &[Subpath], style: &Style, p: Vec2, tol: f32) -> bool {
+    let stroke_reach = if style.stroke.is_some() {
+        style.stroke_width * 0.5 + tol
+    } else {
+        tol
+    };
+    let reach_sq = stroke_reach * stroke_reach;
+    for sp in subpaths {
+        let poly = flatten_subpath(sp);
+        if poly.len() >= 2 && dist_sq_to_polyline(&poly, p, sp.closed) <= reach_sq {
+            return true;
+        }
+    }
+    if style.fill.is_some() {
+        return point_in_path_fill(subpaths, p, style.fill_rule == 1);
+    }
+    false
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Geometry {
     Rect { width: f32, height: f32 },
@@ -929,23 +1034,14 @@ impl Engine {
                         (dx * dx) / (radius_x * radius_x) + (dy * dy) / (radius_y * radius_y) <= 1.0
                     },
                     Geometry::Path { ref subpaths } => {
-                        let mut min_x = f32::MAX;
-                        let mut min_y = f32::MAX;
-                        let mut max_x = f32::MIN;
-                        let mut max_y = f32::MIN;
-                        let mut has_points = false;
-                        for sp in subpaths {
-                            for pt in &sp.points {
-                                has_points = true;
-                                min_x = min_x.min(pt.x);
-                                min_y = min_y.min(pt.y);
-                                max_x = max_x.max(pt.x);
-                                max_y = max_y.max(pt.y);
-                            }
-                        }
-                        has_points &&
-                        local_point.x >= min_x && local_point.x <= max_x &&
-                        local_point.y >= min_y && local_point.y <= max_y
+                        // Precise geometric test against the actual outline.
+                        // Tolerance is in world pixels; convert to local space
+                        // by dividing by the transform's average scale factor.
+                        let det = (global_transform.x_axis.x * global_transform.y_axis.y
+                            - global_transform.x_axis.y * global_transform.y_axis.x).abs();
+                        let scale = det.sqrt().max(1e-6);
+                        let local_tol = HIT_TOLERANCE / scale;
+                        path_hit(subpaths, &node.style, local_point, local_tol)
                     },
                     Geometry::Text { ref content, font_size } => {
                         let approx_w = content.len() as f32 * font_size * 0.6;
@@ -1159,6 +1255,17 @@ impl Engine {
 
     /// Resize a node's geometry to new width/height.
     pub fn resize_node(&mut self, id: u32, new_w: f32, new_h: f32) {
+        // Groups have placeholder geometry — resize them by scaling the
+        // group's transform about the bounds' top-left corner, so the whole
+        // subtree scales together.
+        let is_group = matches!(
+            self.scene.nodes.get(&id).map(|n| n.node_type),
+            Some(NodeType::Group)
+        );
+        if is_group {
+            self.resize_group(id, new_w.max(1.0), new_h.max(1.0));
+            return;
+        }
         if let Some(node) = self.scene.nodes.get_mut(&id) {
             match &mut node.geometry {
                 Geometry::Rect { width, height } => {
@@ -1209,6 +1316,49 @@ impl Engine {
             self.update_ancestor_group_bounds(id);
             self.mark_dirty(id);
         }
+    }
+
+    /// Resize a group by scaling its transform about its bounds' top-left
+    /// corner (world space), so all descendants scale together.
+    fn resize_group(&mut self, id: u32, new_w: f32, new_h: f32) {
+        let bounds = self.get_node_bounds(id); // [min_x, min_y, max_x, max_y] world
+        let old_w = (bounds[2] - bounds[0]).max(1e-3);
+        let old_h = (bounds[3] - bounds[1]).max(1e-3);
+        let sx = new_w / old_w;
+        let sy = new_h / old_h;
+        let anchor = Vec2::new(bounds[0], bounds[1]);
+
+        let global = match self.global_transforms.get(&id) {
+            Some(m) => Mat3::from_cols_array(m),
+            None => return,
+        };
+        let parent_global = self.scene.nodes.get(&id)
+            .and_then(|n| n.parent)
+            .and_then(|pid| self.global_transforms.get(&pid))
+            .map(Mat3::from_cols_array)
+            .unwrap_or(Mat3::IDENTITY);
+
+        // World-space scale about the anchor, applied on top of the global transform
+        let scale_about = Mat3::from_translation(anchor)
+            * Mat3::from_scale(Vec2::new(sx, sy))
+            * Mat3::from_translation(-anchor);
+        let new_local = parent_global.inverse() * scale_about * global;
+
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            node.transform = new_local.to_cols_array();
+        }
+        self.update_node_global_transform(id);
+        self.update_spatial_index_recursive(id);
+        self.update_ancestor_group_bounds(id);
+        // Mark the whole subtree dirty so every descendant re-renders
+        let mut stack = vec![id];
+        while let Some(cur) = stack.pop() {
+            self.dirty_flags.insert(cur, true);
+            if let Some(n) = self.scene.nodes.get(&cur) {
+                stack.extend(n.children.iter().copied());
+            }
+        }
+        self.scene.vector_network.dirty = true;
     }
 
     /// Set a node's absolute position (translation part of its local transform).
@@ -2178,5 +2328,98 @@ mod tests {
         // Selecting only leaves: both should remain
         let deduped2 = engine.dedup_selection(&format!("[{},{}]", a, b));
         assert_eq!(deduped2.len(), 2, "Dedup should keep both when neither is ancestor");
+    }
+
+    #[test]
+    fn test_path_hit_precise_triangle() {
+        let mut engine = Engine::new();
+        // Right triangle with vertices (0,0), (100,0), (0,100).
+        // Its bbox is (0,0)-(100,100), but the region near (90,90) is OUTSIDE.
+        let subpaths = r#"[{"points":[
+            {"x":0,"y":0,"cp1":[0,0],"cp2":[0,0]},
+            {"x":100,"y":0,"cp1":[100,0],"cp2":[100,0]},
+            {"x":0,"y":100,"cp1":[0,100],"cp2":[0,100]}
+        ],"closed":true}]"#;
+        let id = engine.add_path(subpaths);
+
+        assert_eq!(engine.hit_test(20.0, 20.0), Some(id), "inside the triangle");
+        assert_eq!(engine.hit_test(90.0, 90.0), None, "bbox corner outside the triangle must miss");
+        // On the hypotenuse (stroke) — should hit
+        assert_eq!(engine.hit_test(50.0, 50.0), Some(id), "point on the hypotenuse stroke");
+    }
+
+    #[test]
+    fn test_path_hit_open_stroke_only() {
+        let mut engine = Engine::new();
+        // Open diagonal line from (0,0) to (100,100), no fill.
+        let subpaths = r#"[{"points":[
+            {"x":0,"y":0,"cp1":[0,0],"cp2":[0,0]},
+            {"x":100,"y":100,"cp1":[100,100],"cp2":[100,100]}
+        ],"closed":false}]"#;
+        let id = engine.add_path(subpaths);
+        // Remove the fill so only the stroke hits
+        let style = r#"{"fill":null,"stroke":{"r":0,"g":0,"b":0,"a":1},"stroke_width":2.0,
+            "opacity":1.0,"stroke_cap":0,"stroke_join":0,"dash_array":[],"dash_offset":0,
+            "corner_radius":0,"blend_mode":0,"fill_rule":0,"miter_limit":4.0,"fill_opacity":1.0}"#;
+        engine.set_node_style(id, style);
+
+        assert_eq!(engine.hit_test(50.0, 50.0), Some(id), "on the line");
+        assert_eq!(engine.hit_test(50.0, 53.0), Some(id), "within tolerance of the line");
+        assert_eq!(engine.hit_test(30.0, 70.0), None, "inside bbox but far from the line");
+    }
+
+    #[test]
+    fn test_path_hit_donut_even_odd() {
+        let mut engine = Engine::new();
+        // Outer square (0,0)-(100,100) and inner square (30,30)-(70,70) hole.
+        let subpaths = r#"[
+            {"points":[
+                {"x":0,"y":0,"cp1":[0,0],"cp2":[0,0]},
+                {"x":100,"y":0,"cp1":[100,0],"cp2":[100,0]},
+                {"x":100,"y":100,"cp1":[100,100],"cp2":[100,100]},
+                {"x":0,"y":100,"cp1":[0,100],"cp2":[0,100]}
+            ],"closed":true},
+            {"points":[
+                {"x":30,"y":30,"cp1":[30,30],"cp2":[30,30]},
+                {"x":70,"y":30,"cp1":[70,30],"cp2":[70,30]},
+                {"x":70,"y":70,"cp1":[70,70],"cp2":[70,70]},
+                {"x":30,"y":70,"cp1":[30,70],"cp2":[30,70]}
+            ],"closed":true}
+        ]"#;
+        let id = engine.add_path(subpaths);
+        // Even-odd fill rule, no stroke (so the hole isn't hit via stroke reach)
+        let style = r#"{"fill":{"r":0,"g":0,"b":0,"a":1},"stroke":null,"stroke_width":0.0,
+            "opacity":1.0,"stroke_cap":0,"stroke_join":0,"dash_array":[],"dash_offset":0,
+            "corner_radius":0,"blend_mode":0,"fill_rule":1,"miter_limit":4.0,"fill_opacity":1.0}"#;
+        engine.set_node_style(id, style);
+
+        assert_eq!(engine.hit_test(15.0, 50.0), Some(id), "in the ring");
+        assert_eq!(engine.hit_test(50.0, 50.0), None, "center of the hole must miss");
+    }
+
+    #[test]
+    fn test_group_resize_scales_children() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 50.0, 50.0);
+        let b = engine.add_rect(150.0, 150.0, 50.0, 50.0);
+        let group_id = engine.group_nodes(&format!("[{},{}]", a, b));
+
+        // Group bounds: (0,0)-(200,200). Resize to 100x100 → everything halves.
+        engine.resize_node(group_id, 100.0, 100.0);
+
+        let gb = engine.get_node_bounds(group_id);
+        assert!((gb[0] - 0.0).abs() < 0.5 && (gb[1] - 0.0).abs() < 0.5,
+            "anchor (top-left) stays fixed, got {:?}", gb);
+        assert!((gb[2] - 100.0).abs() < 0.5 && (gb[3] - 100.0).abs() < 0.5,
+            "new bounds must be 100x100, got {:?}", gb);
+
+        // Child b was at (150,150)-(200,200) → now (75,75)-(100,100)
+        let bb = engine.get_node_bounds(b);
+        assert!((bb[0] - 75.0).abs() < 0.5 && (bb[2] - 100.0).abs() < 0.5,
+            "child scales with the group, got {:?}", bb);
+
+        // Hit-testing still works at the new positions
+        assert_eq!(engine.hit_test_grouped(90.0, 90.0), Some(group_id));
+        assert_eq!(engine.hit_test(150.0, 150.0), None, "old position must miss");
     }
 }

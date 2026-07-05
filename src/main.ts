@@ -24,6 +24,10 @@ async function bootstrap() {
     const contextBar = new ContextBar(canvasContainer, ui, input, wasmScene, renderer);
     ui.contextBar = contextBar;
 
+    // Start with the artboard centered and fitted in the viewport
+    renderer.fitToArtboard();
+    ui.setZoom(renderer.zoom);
+
     renderer.start();
 
     // Dev-only handle for debugging and automated testing

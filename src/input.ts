@@ -220,6 +220,26 @@ export class InputManager {
 
             if (e.key === 'b' || e.key === 'B') this.ui.setActiveTool('paint-bucket');
             if (e.key === 't' || e.key === 'T') this.ui.setActiveTool('text');
+
+            // View shortcuts (Figma-style)
+            if (e.key === '!' || (e.shiftKey && e.key === '1')) {
+                // Shift+1: fit artboard in view
+                this.renderer.fitToArtboard();
+                this.ui.setZoom(this.renderer.zoom);
+            }
+            if (e.key === ')' || (e.shiftKey && e.key === '0')) {
+                // Shift+0: zoom to 100%
+                this.renderer.setZoomCentered(1.0);
+                this.ui.setZoom(this.renderer.zoom);
+            }
+            if (e.key === '+' || e.key === '=') {
+                this.renderer.setZoomCentered(this.renderer.zoom * 1.25);
+                this.ui.setZoom(this.renderer.zoom);
+            }
+            if (e.key === '-' || e.key === '_') {
+                this.renderer.setZoomCentered(this.renderer.zoom / 1.25);
+                this.ui.setZoom(this.renderer.zoom);
+            }
         }
 
         // Delete
