@@ -12,6 +12,17 @@ pub use proto::FORMAT_VERSION;
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
     fn log(s: &str);
+
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(s: &str);
+}
+
+/// Log an error to the browser console (or stderr in native tests).
+fn log_error(msg: &str) {
+    #[cfg(target_arch = "wasm32")]
+    console_error(msg);
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("{}", msg);
 }
 
 #[wasm_bindgen]
@@ -174,7 +185,9 @@ pub enum Geometry {
         subpaths: Vec<Subpath>,
         /// Per-node vector network (graph-based editing source of truth).
         /// When present, editing goes through the network, which recomputes subpaths.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// NOTE: no `skip_serializing_if` here — bincode is positional, so
+        /// conditionally skipped fields corrupt history/drag snapshots.
+        #[serde(default)]
         network: Option<NodeVectorNetwork>,
     },
     Text { content: String, font_size: f32 },
@@ -310,11 +323,15 @@ impl Engine {
     }
 
     fn write_node_recursive(
-        &mut self, 
-        id: u32, 
-        visible_set: &HashSet<u32>, 
+        &mut self,
+        id: u32,
+        visible_set: &HashSet<u32>,
         total_nodes: &mut u32
     ) {
+        // Every command must start 4-byte aligned so the JS reader can take
+        // zero-copy Float32Array views over the buffer.
+        debug_assert_eq!(self.render_buffer.len() % 4, 0, "render buffer misaligned before command");
+
         let node = match self.scene.nodes.get(&id) {
             Some(n) => n,
             None => return,
@@ -329,7 +346,7 @@ impl Engine {
             // For now, let's be safe and always process groups if they are visible.
             
             // CMD_START_GROUP = 1
-            self.render_buffer.push(1);
+            self.render_buffer.extend_from_slice(&1u32.to_le_bytes());
             self.render_buffer.extend_from_slice(&id.to_le_bytes());
             self.render_buffer.extend_from_slice(&node.style.opacity.to_le_bytes());
             *total_nodes += 1;
@@ -340,7 +357,7 @@ impl Engine {
             }
 
             // CMD_END_GROUP = 3
-            self.render_buffer.push(3);
+            self.render_buffer.extend_from_slice(&3u32.to_le_bytes());
             self.render_buffer.extend_from_slice(&id.to_le_bytes());
             *total_nodes += 1;
         } else {
@@ -348,7 +365,7 @@ impl Engine {
             if !visible_set.contains(&id) { return; }
 
             // CMD_DRAW_NODE = 2
-            self.render_buffer.push(2);
+            self.render_buffer.extend_from_slice(&2u32.to_le_bytes());
             self.render_buffer.extend_from_slice(&id.to_le_bytes());
             
             // NodeType: Path=0, Rect=1, Ellipse=2, Text=4
@@ -359,7 +376,7 @@ impl Engine {
                 NodeType::Group => 3u8, // should not happen here
                 NodeType::Text => 4u8,
             };
-            self.render_buffer.push(type_u8);
+            self.render_buffer.extend_from_slice(&(type_u8 as u32).to_le_bytes());
 
             // Global Transform (9 x f32) - Transpose to row-major for Skia
             let m = self.global_transforms.get(&id).cloned().unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
@@ -372,7 +389,8 @@ impl Engine {
                 self.render_buffer.extend_from_slice(&f.to_le_bytes());
             }
 
-            // Style: Fill (4xf32), Stroke (4xf32), StrokeWidth (f32)
+            // Style: Fill (4xf32), Stroke (4xf32), StrokeWidth, CornerRadius,
+            // Dash (on, off, phase) — 13 x f32 total
             let s = &node.style;
             let f = s.fill.clone().unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 });
             self.render_buffer.extend_from_slice(&f.r.to_le_bytes());
@@ -387,6 +405,12 @@ impl Engine {
             self.render_buffer.extend_from_slice(&st.a.to_le_bytes());
 
             self.render_buffer.extend_from_slice(&s.stroke_width.to_le_bytes());
+            self.render_buffer.extend_from_slice(&s.corner_radius.to_le_bytes());
+            let dash_on = s.dash_array.first().copied().unwrap_or(0.0);
+            let dash_off = s.dash_array.get(1).copied().unwrap_or(dash_on);
+            self.render_buffer.extend_from_slice(&dash_on.to_le_bytes());
+            self.render_buffer.extend_from_slice(&dash_off.to_le_bytes());
+            self.render_buffer.extend_from_slice(&s.dash_offset.to_le_bytes());
 
             // Geometry
             match &node.geometry {
@@ -407,10 +431,10 @@ impl Engine {
                     self.render_buffer.extend_from_slice(&[0u8; 4]);
                     let start_len = self.render_buffer.len();
 
-                    self.render_buffer.extend_from_slice(&(subpaths.len() as u16).to_le_bytes());
+                    self.render_buffer.extend_from_slice(&(subpaths.len() as u32).to_le_bytes());
                     for sp in subpaths {
-                        self.render_buffer.push(if sp.closed { 1 } else { 0 });
-                        self.render_buffer.extend_from_slice(&(sp.points.len() as u16).to_le_bytes());
+                        self.render_buffer.extend_from_slice(&(if sp.closed { 1u32 } else { 0u32 }).to_le_bytes());
+                        self.render_buffer.extend_from_slice(&(sp.points.len() as u32).to_le_bytes());
                         for pt in &sp.points {
                             self.render_buffer.extend_from_slice(&pt.x.to_le_bytes());
                             self.render_buffer.extend_from_slice(&pt.y.to_le_bytes());
@@ -427,12 +451,16 @@ impl Engine {
                 }
                 Geometry::Text { content, font_size } => {
                     let bytes = content.as_bytes();
-                    let total_size = 4 + 4 + bytes.len() as u32; // font_size + len_prefix + bytes
+                    // Pad the UTF-8 payload so the next command stays 4-byte aligned
+                    let padding = (4 - (bytes.len() % 4)) % 4;
+                    let total_size = 4 + 4 + bytes.len() as u32 + padding as u32; // font_size + len_prefix + bytes + padding
                     self.render_buffer.extend_from_slice(&total_size.to_le_bytes());
-                    
+
                     self.render_buffer.extend_from_slice(&font_size.to_le_bytes());
                     self.render_buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                     self.render_buffer.extend_from_slice(bytes);
+                    let padded_len = self.render_buffer.len() + padding;
+                    self.render_buffer.resize(padded_len, 0);
                 }
             }
             *total_nodes += 1;
@@ -825,24 +853,17 @@ impl Engine {
                     let mut max_x = f32::MIN;
                     let mut max_y = f32::MIN;
                     let mut has_points = false;
+                    // Flatten each subpath into line segments so bounds
+                    // reflect the actual curve, not the control polygon.
                     for sp in subpaths {
-                        for pt in &sp.points {
+                        let flattened = flatten_subpath(sp);
+                        for lp in &flattened {
                             has_points = true;
-                            let p = transform.transform_point2(Vec2::new(pt.x, pt.y));
+                            let p = transform.transform_point2(*lp);
                             min_x = min_x.min(p.x);
                             min_y = min_y.min(p.y);
                             max_x = max_x.max(p.x);
                             max_y = max_y.max(p.y);
-                            let c1 = transform.transform_point2(pt.cp1);
-                            min_x = min_x.min(c1.x);
-                            min_y = min_y.min(c1.y);
-                            max_x = max_x.max(c1.x);
-                            max_y = max_y.max(c1.y);
-                            let c2 = transform.transform_point2(pt.cp2);
-                            min_x = min_x.min(c2.x);
-                            min_y = min_y.min(c2.y);
-                            max_x = max_x.max(c2.x);
-                            max_y = max_y.max(c2.y);
                         }
                     }
                     if !has_points {
@@ -889,10 +910,23 @@ impl Engine {
     pub fn update_all_spatial_indices(&mut self) {
         self.spatial_index = RTree::new();
         self.node_to_spatial.clear();
-        let ids: Vec<u32> = self.scene.nodes.keys().cloned().collect();
-        for id in ids {
-            self.update_spatial_index(id);
+        // Process nodes bottom-up (leaves before groups) so that group bounds
+        // can read child entries from node_to_spatial.
+        let root_ids: Vec<u32> = self.scene.root_nodes.clone();
+        for id in root_ids {
+            self.update_spatial_index_bottom_up(id);
         }
+    }
+
+    /// Recursively update spatial indices bottom-up: children first, then parent.
+    fn update_spatial_index_bottom_up(&mut self, id: u32) {
+        let children: Vec<u32> = self.scene.nodes.get(&id)
+            .map(|n| n.children.clone())
+            .unwrap_or_default();
+        for child_id in children {
+            self.update_spatial_index_bottom_up(child_id);
+        }
+        self.update_spatial_index(id);
     }
 
     pub fn set_node_name(&mut self, id: u32, name: &str) {
@@ -925,12 +959,23 @@ impl Engine {
         }
     }
 
-    pub fn deserialize_scene(&mut self, data: &[u8]) {
-        if let Ok(scene) = bincode::deserialize::<Scene>(data) {
-            self.scene = scene;
-            self.next_id = self.scene.nodes.keys().max().map(|id| id + 1).unwrap_or(1);
-            self.update_all_global_transforms();
-            self.update_all_spatial_indices();
+    /// Restore a scene from a bincode snapshot (history/undo/drag-restore).
+    /// Returns false — and leaves the scene untouched — if the bytes don't
+    /// decode. A silent failure here breaks undo invisibly, so callers should
+    /// surface it.
+    pub fn deserialize_scene(&mut self, data: &[u8]) -> bool {
+        match bincode::deserialize::<Scene>(data) {
+            Ok(scene) => {
+                self.scene = scene;
+                self.next_id = self.scene.nodes.keys().max().map(|id| id + 1).unwrap_or(1);
+                self.update_all_global_transforms();
+                self.update_all_spatial_indices();
+                true
+            }
+            Err(e) => {
+                log_error(&format!("deserialize_scene failed: {}", e));
+                false
+            }
         }
     }
 
@@ -1642,14 +1687,22 @@ impl Engine {
         }
     }
 
-    /// Apply a rotation (in radians) to a node's local transform.
+    /// Set a node's rotation (in radians), preserving its translation and
+    /// scale. The linear part is decomposed as rotation × scale; only the
+    /// rotation component is replaced (a resized group keeps its size).
     pub fn rotate_node(&mut self, id: u32, angle_rad: f32) {
         if let Some(node) = self.scene.nodes.get_mut(&id) {
             let old = Mat3::from_cols_array(&node.transform);
             let tx = old.z_axis.x;
             let ty = old.z_axis.y;
-            let rotation = Mat3::from_angle(angle_rad);
-            let new_transform = Mat3::from_translation(Vec2::new(tx, ty)) * rotation;
+            let sx = (old.x_axis.x * old.x_axis.x + old.x_axis.y * old.x_axis.y).sqrt();
+            let sy_len = (old.y_axis.x * old.y_axis.x + old.y_axis.y * old.y_axis.y).sqrt();
+            // Negative determinant means a flip — keep it on the y axis
+            let det = old.x_axis.x * old.y_axis.y - old.y_axis.x * old.x_axis.y;
+            let sy = if det < 0.0 { -sy_len } else { sy_len };
+            let new_transform = Mat3::from_translation(Vec2::new(tx, ty))
+                * Mat3::from_angle(angle_rad)
+                * Mat3::from_scale(Vec2::new(sx.max(1e-6), sy));
             node.transform = new_transform.to_cols_array();
             self.update_node_global_transform(id);
             self.update_spatial_index_recursive(id);
@@ -1989,6 +2042,26 @@ impl Engine {
         self.node_to_spatial.insert(id, spatial_node);
         self.mark_dirty(id);
         id
+    }
+
+    /// Update a text node's content and font size.
+    pub fn set_text_content(&mut self, id: u32, content: &str, font_size: f32) {
+        let updated = if let Some(node) = self.scene.nodes.get_mut(&id) {
+            if let Geometry::Text { content: c, font_size: fs } = &mut node.geometry {
+                *c = content.to_string();
+                *fs = font_size.max(1.0);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if updated {
+            self.update_spatial_index(id);
+            self.update_ancestor_group_bounds(id);
+            self.mark_dirty(id);
+        }
     }
 
     /// Get bounding box of a node in world coordinates: [minX, minY, maxX, maxY]
@@ -2812,5 +2885,65 @@ mod tests {
         // Hit-testing still works at the new positions
         assert_eq!(engine.hit_test_grouped(90.0, 90.0), Some(group_id));
         assert_eq!(engine.hit_test(150.0, 150.0), None, "old position must miss");
+    }
+
+    #[test]
+    fn test_rotate_preserves_scale() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 50.0, 50.0);
+        let b = engine.add_rect(150.0, 150.0, 50.0, 50.0);
+        let group_id = engine.group_nodes(&format!("[{},{}]", a, b));
+
+        // Bake a 2x scale into the group transform, then rotate it.
+        engine.resize_node(group_id, 400.0, 400.0);
+        engine.rotate_node(group_id, std::f32::consts::FRAC_PI_4);
+
+        // The linear part must still have magnitude 2 on both axes —
+        // rotation must not reset the scale that resize_group applied.
+        let node = engine.scene.nodes.get(&group_id).unwrap();
+        let m = Mat3::from_cols_array(&node.transform);
+        let sx = (m.x_axis.x * m.x_axis.x + m.x_axis.y * m.x_axis.y).sqrt();
+        let sy = (m.y_axis.x * m.y_axis.x + m.y_axis.y * m.y_axis.y).sqrt();
+        assert!((sx - 2.0).abs() < 1e-3, "x scale lost by rotate: {}", sx);
+        assert!((sy - 2.0).abs() < 1e-3, "y scale lost by rotate: {}", sy);
+
+        // Both children sit on the main diagonal, so at 45° they line up
+        // along the y axis: the far corner of child b (local 200,200 →
+        // scaled 400,400) rotates to (0, 400·√2). If the rotate had reset
+        // the scale, this span would be 200·√2 instead.
+        let gb = engine.get_node_bounds(group_id);
+        let h = gb[3] - gb[1];
+        assert!((h - 400.0 * std::f32::consts::SQRT_2).abs() < 1.0,
+            "rotated bounds must reflect the preserved 2x scale, got {}", h);
+    }
+
+    #[test]
+    fn test_snapshot_roundtrip_with_paths_and_fills() {
+        // Regression: `skip_serializing_if` on network fields corrupted the
+        // positional bincode stream, so undo/drag snapshots silently failed
+        // for any scene containing a Path node.
+        let mut engine = Engine::new();
+        let path_id = engine.add_path(
+            r#"[{"closed":true,"points":[
+                {"x":100.0,"y":100.0,"cp1":[100.0,100.0],"cp2":[100.0,100.0]},
+                {"x":400.0,"y":100.0,"cp1":[400.0,100.0],"cp2":[400.0,100.0]},
+                {"x":400.0,"y":400.0,"cp1":[400.0,400.0],"cp2":[400.0,400.0]}
+            ]}]"#,
+        );
+        // Compute faces and fill one, so the planar network has content too
+        let face = engine.query_face_at(300.0, 200.0);
+        assert!(face >= 0, "expected a face inside the triangle");
+        engine.set_face_fill(face as u32, 1.0, 0.0, 0.0, 1.0);
+
+        let snapshot = engine.serialize_scene();
+        engine.move_node(path_id, 50.0, 50.0);
+        engine.set_face_fill(face as u32, 0.0, 1.0, 0.0, 1.0);
+
+        assert!(engine.deserialize_scene(&snapshot), "snapshot must decode");
+
+        let b = engine.get_node_bounds(path_id);
+        assert!((b[0] - 100.0).abs() < 0.5, "position must be restored, got {:?}", b);
+        let filled = engine.get_filled_faces();
+        assert!(filled.contains("\"r\":1.0"), "face fill must be restored, got {}", filled);
     }
 }

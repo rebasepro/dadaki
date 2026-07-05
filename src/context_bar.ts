@@ -13,7 +13,14 @@ import { alignSelection, distributeSelection } from './align';
 import type { AlignMode } from './align';
 import { applyBooleanOp } from './boolean_ops';
 import type { BoolOp } from './boolean_ops';
-import { iconUndo, iconRedo, iconPencil, iconTrash } from './icons';
+import {
+    iconUndo, iconRedo, iconPencil, iconTrash, iconCopy,
+    iconAlignLeft, iconAlignCenterH, iconAlignRight,
+    iconAlignTop, iconAlignCenterV, iconAlignBottom,
+    iconDistributeH, iconDistributeV,
+    iconBoolUnion, iconBoolSubtract, iconBoolIntersect, iconBoolExclude,
+    iconGroup, iconUngroup, iconCornerDownRight,
+} from './icons';
 
 /** Tool-specific hint text for shape-tool and text-tool contexts. */
 const TOOL_HINTS: Record<string, string> = {
@@ -32,6 +39,9 @@ export class ContextBar {
     private input: InputManager;
     private scene: WasmScene;
     private renderer: Renderer;
+
+    /** Cache key for the last render — avoids redundant DOM rebuilds. */
+    private _lastSignature: string = '';
 
     constructor(
         canvasContainer: HTMLElement,
@@ -63,7 +73,19 @@ export class ContextBar {
         const isEditing = info.context === 'path-editing' || info.context === 'pen-drawing';
         this.canvasContainer.classList.toggle('editing-mode', isEditing);
 
+        // Build a signature from the context state that drives the bar's DOM.
+        // If nothing relevant changed, skip the expensive innerHTML rebuild.
+        const sig = this.buildSignature(info);
+        if (sig === this._lastSignature) return;
+        this._lastSignature = sig;
+
         this.render(info);
+    }
+
+    /** Build a cache key that captures everything affecting the bar's rendered output. */
+    private buildSignature(info: ContextInfo): string {
+        // Include values that the various render* methods read from the UI inputs
+        return `${info.context}|${info.selectedIds.join(',')}|${info.pointCount}|${info.primaryNodeType}|${this.ui.fillInput.value}|${this.ui.strokeInput.value}|${this.ui.opacityInput.value}|${this.ui.cornerRadius?.value ?? ''}|${Math.round(this.renderer.zoom * 100)}`;
     }
 
     /** Rebuild the bar DOM based on context info. */
@@ -180,7 +202,7 @@ export class ContextBar {
         }));
 
         // Duplicate
-        this.el.appendChild(this.createButton('Duplicate', '⧉', () => {
+        this.el.appendChild(this.createButton('Duplicate', iconCopy(14), () => {
             this.input.duplicateSelection();
         }));
 
@@ -207,12 +229,12 @@ export class ContextBar {
 
         // Align / distribute
         const alignActions: Array<[string, string, AlignMode]> = [
-            ['Align left', '⇤', 'left'],
-            ['Align center', '⇹', 'hcenter'],
-            ['Align right', '⇥', 'right'],
-            ['Align top', '⤒', 'top'],
-            ['Align middle', '⇳', 'vcenter'],
-            ['Align bottom', '⤓', 'bottom'],
+            ['Align left', iconAlignLeft(14), 'left'],
+            ['Align center', iconAlignCenterH(14), 'hcenter'],
+            ['Align right', iconAlignRight(14), 'right'],
+            ['Align top', iconAlignTop(14), 'top'],
+            ['Align middle', iconAlignCenterV(14), 'vcenter'],
+            ['Align bottom', iconAlignBottom(14), 'bottom'],
         ];
         for (const [title, icon, mode] of alignActions) {
             this.el.appendChild(this.createIconButton(title, icon, () => {
@@ -221,11 +243,11 @@ export class ContextBar {
             }));
         }
         if (info.selectedIds.length >= 3) {
-            this.el.appendChild(this.createIconButton('Distribute horizontally', '⫴', () => {
+            this.el.appendChild(this.createIconButton('Distribute horizontally', iconDistributeH(14), () => {
                 distributeSelection(this.scene, [...info.selectedIds], 'h');
                 this.ui.syncWithSelection();
             }));
-            this.el.appendChild(this.createIconButton('Distribute vertically', '⫶', () => {
+            this.el.appendChild(this.createIconButton('Distribute vertically', iconDistributeV(14), () => {
                 distributeSelection(this.scene, [...info.selectedIds], 'v');
                 this.ui.syncWithSelection();
             }));
@@ -235,10 +257,10 @@ export class ContextBar {
 
         // Boolean operations
         const boolActions: Array<[string, string, BoolOp]> = [
-            ['Union', '⊕', 'union'],
-            ['Subtract', '⊖', 'subtract'],
-            ['Intersect', '⊗', 'intersect'],
-            ['Exclude', '⊘', 'exclude'],
+            ['Union', iconBoolUnion(14), 'union'],
+            ['Subtract', iconBoolSubtract(14), 'subtract'],
+            ['Intersect', iconBoolIntersect(14), 'intersect'],
+            ['Exclude', iconBoolExclude(14), 'exclude'],
         ];
         for (const [title, icon, op] of boolActions) {
             this.el.appendChild(this.createIconButton(title, icon, () => {
@@ -253,7 +275,7 @@ export class ContextBar {
         this.el.appendChild(this.createSeparator());
 
         // Group
-        this.el.appendChild(this.createButton('Group ⌘G', '⊞', () => {
+        this.el.appendChild(this.createButton('Group ⌘G', iconGroup(14), () => {
             this.input.groupSelection();
         }));
 
@@ -265,12 +287,12 @@ export class ContextBar {
 
     private renderGroupSelected(info: ContextInfo) {
         // Ungroup
-        this.el.appendChild(this.createButton('Ungroup ⌘⇧G', '⊟', () => {
+        this.el.appendChild(this.createButton('Ungroup ⌘⇧G', iconUngroup(14), () => {
             this.input.ungroupSelection();
         }));
 
         // Enter Group
-        this.el.appendChild(this.createButton('Enter Group', '↳', () => {
+        this.el.appendChild(this.createButton('Enter Group', iconCornerDownRight(14), () => {
             if (info.selectedIds.length === 1) {
                 const children = Array.from(this.scene.getNodeChildren(info.selectedIds[0]));
                 if (children.length > 0) {
@@ -398,7 +420,7 @@ export class ContextBar {
         const btn = document.createElement('button');
         btn.className = 'cb-btn cb-btn-icon-only';
         btn.title = title;
-        btn.textContent = icon;
+        btn.innerHTML = icon;
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
             onClick();

@@ -16,9 +16,17 @@ class BinaryReader {
     f32() { const v = this.view.getFloat32(this.offset, true); this.offset += 4; return v; }
     
     f32Array(n: number): Float32Array {
+        // The protocol keeps every field 4-byte aligned relative to the buffer
+        // start, so a zero-copy view works whenever the WASM allocation itself
+        // is 4-byte aligned (true in practice, but not guaranteed for Vec<u8>).
+        const byteOffset = this.view.byteOffset + this.offset;
+        this.offset += n * 4;
+        if (byteOffset % 4 === 0) {
+            return new Float32Array(this.view.buffer, byteOffset, n);
+        }
         const arr = new Float32Array(n);
         for (let i = 0; i < n; i++) {
-            arr[i] = this.f32();
+            arr[i] = this.view.getFloat32(byteOffset + i * 4, true);
         }
         return arr;
     }
@@ -27,13 +35,14 @@ class BinaryReader {
         const len = this.u32();
         const bytes = new Uint8Array(this.view.buffer, this.view.byteOffset + this.offset, len);
         this.offset += len;
+        // Align to 4 bytes
+        this.offset = (this.offset + 3) & ~3;
         return this.decoder.decode(bytes);
     }
 }
 
 import type { WasmScene } from './wasm_scene';
 import type { InputManager } from './input';
-    /** Get a single node's full data as a SceneNode. */
 
 export class Renderer {
     ck: CanvasKit;
@@ -74,6 +83,18 @@ export class Renderer {
         this.grContext = ckAny.MakeGrContext(this.glContext);
         this.onResize();
         window.addEventListener('resize', () => this.onResize());
+    }
+
+    destroy() {
+        this.isRunning = false;
+        if (this.paint) {
+            this.paint.delete();
+            this.paint = null;
+        }
+        if (this.surface) {
+            this.surface.delete();
+            this.surface = null;
+        }
     }
 
     onResize() {
@@ -122,6 +143,19 @@ export class Renderer {
         this.zoom = Math.max(0.02, Math.min(4, scale));
         this.pan.x = (viewW - docW * this.zoom) / 2;
         this.pan.y = (viewH - docH * this.zoom) / 2;
+    }
+
+    /** Fit the given world-space bounds in the viewport (zoom to selection). */
+    zoomToBounds(b: { x: number; y: number; w: number; h: number }) {
+        const viewW = this.canvas.clientWidth;
+        const viewH = this.canvas.clientHeight;
+        if (viewW <= 0 || viewH <= 0 || b.w <= 0 || b.h <= 0) return;
+
+        const margin = 64; // css px on each side
+        const scale = Math.min((viewW - margin * 2) / b.w, (viewH - margin * 2) / b.h);
+        this.zoom = Math.max(0.02, Math.min(64, scale));
+        this.pan.x = (viewW - b.w * this.zoom) / 2 - b.x * this.zoom;
+        this.pan.y = (viewH - b.h * this.zoom) / 2 - b.y * this.zoom;
     }
 
     /** Set zoom keeping the viewport center fixed. */
@@ -188,7 +222,7 @@ export class Renderer {
         p.setAntiAlias(true);
 
         for (let i = 0; i < commandCount; i++) {
-            const cmdType = reader.u8();
+            const cmdType = reader.u32();
             reader.u32(); // skip id
 
             if (cmdType === 1) { // CMD_START_GROUP
@@ -203,13 +237,17 @@ export class Renderer {
             } else if (cmdType === 3) { // CMD_END_GROUP
                 canvas.restore();
             } else if (cmdType === 2) { // CMD_DRAW_NODE
-                const nodeType = reader.u8();
+                const nodeType = reader.u32();
                 const matrix = reader.f32Array(9);
                 
-                // Style
+                // Style (13 x f32 — must match write_node_recursive in lib.rs)
                 const fr = reader.f32(); const fg = reader.f32(); const fb = reader.f32(); const fa = reader.f32();
                 const sr = reader.f32(); const sg = reader.f32(); const sb = reader.f32(); const sa = reader.f32();
                 const strokeWidth = reader.f32();
+                const cornerRadius = reader.f32();
+                const dashOn = reader.f32();
+                const dashOff = reader.f32();
+                const dashPhase = reader.f32();
 
                 canvas.save();
                 canvas.concat(matrix);
@@ -221,7 +259,7 @@ export class Renderer {
                 if (fa > 0) {
                     p.setColor(this.ck.Color4f(fr, fg, fb, fa));
                     p.setStyle(this.ck.PaintStyle.Fill);
-                    this.drawBinaryGeometry(canvas, nodeType, reader, p);
+                    this.drawBinaryGeometry(canvas, nodeType, reader, p, cornerRadius);
                 } else {
                     reader.offset += 4 + geoSize;
                 }
@@ -232,7 +270,16 @@ export class Renderer {
                     p.setColor(this.ck.Color4f(sr, sg, sb, sa));
                     p.setStyle(this.ck.PaintStyle.Stroke);
                     p.setStrokeWidth(strokeWidth);
-                    this.drawBinaryGeometry(canvas, nodeType, reader, p);
+                    let dashEffect = null;
+                    if (dashOn > 0) {
+                        dashEffect = this.ck.PathEffect.MakeDash([dashOn, dashOff], dashPhase);
+                        p.setPathEffect(dashEffect);
+                    }
+                    this.drawBinaryGeometry(canvas, nodeType, reader, p, cornerRadius);
+                    if (dashEffect) {
+                        p.setPathEffect(null);
+                        dashEffect.delete();
+                    }
                 } else {
                     if (reader.offset === startGeoOffset) {
                         reader.offset += 4 + geoSize;
@@ -258,7 +305,13 @@ export class Renderer {
         // Draw marquee selection rectangle
         this.drawMarquee(canvas);
 
+        // Draw snapping alignment guides
+        this.drawSnapGuides(canvas, viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
+
         canvas.restore();
+
+        // Draw hover outline (shape under cursor, selection tool)
+        this.drawHoverOutline(canvas, dpr);
 
         // Draw selection overlay
         this.renderSelectionOverlay(canvas, dpr);
@@ -269,23 +322,29 @@ export class Renderer {
         this.surface.flush();
     }
 
-    private drawBinaryGeometry(canvas: Canvas, type: number, reader: BinaryReader, paint: Paint) {
+    private drawBinaryGeometry(canvas: Canvas, type: number, reader: BinaryReader, paint: Paint, cornerRadius: number = 0) {
         reader.u32(); // skip size
-        
+
         if (type === 1) { // Rect
             const w = reader.f32();
             const h = reader.f32();
-            canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), paint);
+            if (cornerRadius > 0) {
+                // Clamp the radius so opposite corners never overlap
+                const r = Math.min(cornerRadius, w / 2, h / 2);
+                canvas.drawRRect(this.ck.RRectXY(this.ck.LTRBRect(0, 0, w, h), r, r), paint);
+            } else {
+                canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), paint);
+            }
         } else if (type === 2) { // Ellipse
             const rx = reader.f32();
             const ry = reader.f32();
             canvas.drawOval(this.ck.LTRBRect(-rx, -ry, rx, ry), paint);
         } else if (type === 0) { // Path
-            const numSubpaths = reader.u16();
+            const numSubpaths = reader.u32();
             const path = new this.ck.Path();
             for (let s = 0; s < numSubpaths; s++) {
-                const closed = reader.u8() === 1;
-                const numPoints = reader.u16();
+                const closed = reader.u32() === 1;
+                const numPoints = reader.u32();
                 let prevCP2: [number, number] | null = null;
                 let firstX = 0, firstY = 0, firstCP1: [number, number] = [0, 0];
 
@@ -325,9 +384,37 @@ export class Renderer {
         }
     }
 
+    /** Light outline around the node under the cursor (Figma-style hover). */
+    private drawHoverOutline(canvas: Canvas, dpr: number) {
+        const im = this.inputManager;
+        if (!im || im.isMouseDown || im.hoverNodeId === null) return;
+        const id = im.hoverNodeId;
+        // Skip if already selected — the selection overlay covers it
+        if (this.scene.getSelection().includes(id)) return;
+
+        const b = this.scene.getNodeBounds(id);
+        if (b[2] <= b[0] || b[3] <= b[1]) return;
+
+        canvas.save();
+        canvas.scale(dpr, dpr);
+        canvas.translate(this.pan.x, this.pan.y);
+        canvas.scale(this.zoom, this.zoom);
+
+        const paint = new this.ck.Paint();
+        paint.setColor(this.ck.Color(0, 162, 255, 0.55));
+        paint.setStyle(this.ck.PaintStyle.Stroke);
+        paint.setStrokeWidth(1.5 / this.zoom);
+        paint.setAntiAlias(true);
+        canvas.drawRect(this.ck.LTRBRect(b[0], b[1], b[2], b[3]), paint);
+        paint.delete();
+        canvas.restore();
+    }
+
     private renderSelectionOverlay(canvas: Canvas, dpr: number) {
         const selection = this.scene.getSelection();
         if (selection.length === 0) return;
+
+        const live = this.inputManager?.liveResizeBounds;
 
         canvas.save();
         canvas.scale(dpr, dpr);
@@ -341,8 +428,8 @@ export class Renderer {
 
         let totalMinX = Infinity, totalMinY = Infinity, totalMaxX = -Infinity, totalMaxY = -Infinity;
 
+        // Draw individual outlines
         for (const id of selection) {
-            const node = this.scene.getNode(id);
             const nodeTypeNum = this.scene.getNodeType(id);
             if (nodeTypeNum === undefined) continue;
 
@@ -352,55 +439,56 @@ export class Renderer {
             totalMaxX = Math.max(totalMaxX, bounds[2]);
             totalMaxY = Math.max(totalMaxY, bounds[3]);
 
-            const transform = this.scene.getTransform(id);
+            // Skip individual outlines for multi-selection to avoid clutter/lag
+            if (selection.length > 5 && !live) continue;
 
-            // 0=Path, 1=Rect, 2=Ellipse, 3=Group, 4=Text
             if (nodeTypeNum === 3) { // Group
-                // Groups draw their world-space AABB
                 const [gMinX, gMinY, gMaxX, gMaxY] = bounds;
-                if (gMaxX > gMinX && gMaxY > gMinY) {
-                    canvas.drawRect(this.ck.LTRBRect(gMinX, gMinY, gMaxX, gMaxY), outlinePaint);
-                }
-            } else if (node) {
-                // Leaf nodes draw in local space
+                canvas.drawRect(this.ck.LTRBRect(gMinX, gMinY, gMaxX, gMaxY), outlinePaint);
+            } else {
+                const transform = this.scene.getTransform(id);
                 canvas.save();
                 canvas.concat(transform);
                 
-                const geo = node.geometry;
+                const geo = this.scene.getNodeGeometry(id);
                 if (geo.Rect) {
-                    const { width, height } = geo.Rect;
-                    canvas.drawRect(this.ck.LTRBRect(0, 0, width, height), outlinePaint);
+                    canvas.drawRect(this.ck.LTRBRect(0, 0, geo.Rect.width, geo.Rect.height), outlinePaint);
                 } else if (geo.Ellipse) {
-                    const { radius_x, radius_y } = geo.Ellipse;
-                    canvas.drawOval(this.ck.LTRBRect(-radius_x, -radius_y, radius_x, radius_y), outlinePaint);
+                    canvas.drawOval(this.ck.LTRBRect(-geo.Ellipse.radius_x, -geo.Ellipse.radius_y, geo.Ellipse.radius_x, geo.Ellipse.radius_y), outlinePaint);
                 } else if (geo.Path) {
                     const pathBounds = this.calculatePathBounds(geo.Path);
                     canvas.drawRect(this.ck.LTRBRect(pathBounds.minX, pathBounds.minY, pathBounds.maxX, pathBounds.maxY), outlinePaint);
                 } else if (geo.Text) {
-                    const { content, font_size } = geo.Text;
-                    const approxW = content.length * font_size * 0.6;
-                    canvas.drawRect(this.ck.LTRBRect(0, -font_size, approxW, 0), outlinePaint);
+                    const approxW = geo.Text.content.length * geo.Text.font_size * 0.6;
+                    canvas.drawRect(this.ck.LTRBRect(0, -geo.Text.font_size, approxW, 0), outlinePaint);
                 }
                 canvas.restore();
             }
         }
 
+        // Use live bounds if dragging a resize handle for zero-lag feedback
+        let hMinX = totalMinX, hMinY = totalMinY, hMaxX = totalMaxX, hMaxY = totalMaxY;
+        if (live) {
+            hMinX = live.x;
+            hMinY = live.y;
+            hMaxX = live.x + live.w;
+            hMaxY = live.y + live.h;
+        }
+
         // Draw global bounding box and handles
-        if (totalMaxX > totalMinX && totalMaxY > totalMinY) {
-            // Draw global bounding box for multi-selection
-            if (selection.length > 1) {
-                canvas.drawRect(this.ck.LTRBRect(totalMinX, totalMinY, totalMaxX, totalMaxY), outlinePaint);
+        if (hMaxX > hMinX && hMaxY > hMinY) {
+            if (selection.length > 1 || live) {
+                canvas.drawRect(this.ck.LTRBRect(hMinX, hMinY, hMaxX, hMaxY), outlinePaint);
             }
 
-            // Draw resize handles
             const hSize = 4 / this.zoom;
-            const midX = (totalMinX + totalMaxX) / 2;
-            const midY = (totalMinY + totalMaxY) / 2;
+            const midX = (hMinX + hMaxX) / 2;
+            const midY = (hMinY + hMaxY) / 2;
 
             const handlePositions = [
-                [totalMinX, totalMinY], [midX, totalMinY], [totalMaxX, totalMinY],
-                [totalMinX, midY],                         [totalMaxX, midY],
-                [totalMinX, totalMaxY], [midX, totalMaxY], [totalMaxX, totalMaxY],
+                [hMinX, hMinY], [midX, hMinY], [hMaxX, hMinY],
+                [hMinX, midY],                 [hMaxX, midY],
+                [hMinX, hMaxY], [midX, hMaxY], [hMaxX, hMaxY],
             ];
 
             const handleFill = new this.ck.Paint();
@@ -425,19 +513,75 @@ export class Renderer {
         canvas.restore();
     }
 
-    private calculatePathBounds(path: any) {
+    private calculatePathBounds(path: { subpaths: Array<{ points: Array<{ x: number; y: number; cp1: [number, number]; cp2: [number, number] }>; closed: boolean }> }) {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         let hasPoints = false;
         for (const sp of path.subpaths) {
-            for (const p of sp.points) {
-                hasPoints = true;
-                minX = Math.min(minX, p.x, p.cp1[0], p.cp2[0]);
-                minY = Math.min(minY, p.y, p.cp1[1], p.cp2[1]);
-                maxX = Math.max(maxX, p.x, p.cp1[0], p.cp2[0]);
-                maxY = Math.max(maxY, p.y, p.cp1[1], p.cp2[1]);
+            const pts = sp.points;
+            const n = pts.length;
+            if (n === 0) continue;
+            // Include the first anchor
+            hasPoints = true;
+            minX = Math.min(minX, pts[0].x);
+            minY = Math.min(minY, pts[0].y);
+            maxX = Math.max(maxX, pts[0].x);
+            maxY = Math.max(maxY, pts[0].y);
+            // Flatten each cubic segment and include sampled points
+            for (let i = 1; i < n; i++) {
+                const a = pts[i - 1];
+                const b = pts[i];
+                this.flattenCubicBounds(
+                    a.x, a.y, a.cp2[0], a.cp2[1],
+                    b.cp1[0], b.cp1[1], b.x, b.y,
+                    (x, y) => { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); }
+                );
+            }
+            if (sp.closed && n >= 2) {
+                const a = pts[n - 1];
+                const b = pts[0];
+                this.flattenCubicBounds(
+                    a.x, a.y, a.cp2[0], a.cp2[1],
+                    b.cp1[0], b.cp1[1], b.x, b.y,
+                    (x, y) => { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); }
+                );
             }
         }
         return hasPoints ? { minX, minY, maxX, maxY } : { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+    }
+
+    /** Subdivide a cubic Bézier and call cb for sampled points along the curve. */
+    private flattenCubicBounds(
+        x0: number, y0: number, x1: number, y1: number,
+        x2: number, y2: number, x3: number, y3: number,
+        cb: (x: number, y: number) => void
+    ) {
+        // Adaptive subdivision: split until segments are flat enough
+        const stack: [number, number, number, number, number, number, number, number][] =
+            [[x0, y0, x1, y1, x2, y2, x3, y3]];
+        const tolerance = 0.5;
+        while (stack.length > 0) {
+            const [ax, ay, bx, by, cx, cy, dx, dy] = stack.pop()!;
+            // Flatness test: max distance of control points from the line a→d
+            const ux = 3 * bx - 2 * ax - dx;
+            const uy = 3 * by - 2 * ay - dy;
+            const vx = 3 * cx - ax - 2 * dx;
+            const vy = 3 * cy - ay - 2 * dy;
+            const maxDist = Math.max(ux * ux, vx * vx) + Math.max(uy * uy, vy * vy);
+            if (maxDist <= 16 * tolerance * tolerance) {
+                cb(dx, dy);
+            } else {
+                // De Casteljau split at t=0.5
+                const abx = (ax + bx) / 2, aby = (ay + by) / 2;
+                const bcx = (bx + cx) / 2, bcy = (by + cy) / 2;
+                const cdx = (cx + dx) / 2, cdy = (cy + dy) / 2;
+                const abcx = (abx + bcx) / 2, abcy = (aby + bcy) / 2;
+                const bcdx = (bcx + cdx) / 2, bcdy = (bcy + cdy) / 2;
+                const mx = (abcx + bcdx) / 2, my = (abcy + bcdy) / 2;
+                // Push second half first so first half is processed next
+                stack.push([mx, my, bcdx, bcdy, cdx, cdy, dx, dy]);
+                stack.push([ax, ay, abx, aby, abcx, abcy, mx, my]);
+            }
+        }
     }
 
     private drawGrid(canvas: Canvas, dpr: number) {
@@ -620,6 +764,27 @@ export class Renderer {
             path.close();
         }
         return path;
+    }
+
+    /** Magenta alignment guides for active snaps, spanning the viewport. */
+    private drawSnapGuides(canvas: Canvas, minX: number, minY: number, maxX: number, maxY: number) {
+        const guides = this.inputManager?.activeSnapGuides;
+        if (!guides || guides.length === 0) return;
+
+        const paint = new this.ck.Paint();
+        paint.setColor(this.ck.Color(255, 51, 170, 0.9));
+        paint.setStyle(this.ck.PaintStyle.Stroke);
+        paint.setStrokeWidth(1 / this.zoom);
+        paint.setAntiAlias(true);
+
+        for (const g of guides) {
+            if (g.axis === 'x') {
+                canvas.drawLine(g.pos, minY, g.pos, maxY, paint);
+            } else {
+                canvas.drawLine(minX, g.pos, maxX, g.pos, paint);
+            }
+        }
+        paint.delete();
     }
 
     private drawMarquee(canvas: Canvas) {

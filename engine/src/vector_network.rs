@@ -723,14 +723,17 @@ pub struct NodeVectorNetwork {
     pub regions: Vec<NetworkRegion>,
 }
 
+// NOTE: these structs are bincode-serialized inside Scene (history/drag
+// snapshots), so fields must never use `skip_serializing_if` — bincode is
+// positional and a conditionally absent field corrupts the whole snapshot.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NetworkVertex {
     pub position: Vec2,
     /// Incoming control handle (absolute position). None = sharp corner.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub handle_in: Option<Vec2>,
     /// Outgoing control handle (absolute position). None = sharp corner.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub handle_out: Option<Vec2>,
 }
 
@@ -745,7 +748,7 @@ pub struct NetworkRegion {
     /// Ordered edge indices forming a closed loop.
     pub edge_loop: Vec<u32>,
     /// Fill style for this enclosed area.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub fill: Option<Color>,
 }
 

@@ -390,22 +390,27 @@ export class UIEngine {
         this.updateLayerList();
     }
 
-    syncWithSelection() {
+    syncWithSelection(opts: { interactive?: boolean } = {}) {
+        const interactive = opts.interactive === true;
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) {
             this.clearPropertyPanel();
-            this.updateLayerList();
-            this.contextBar?.refresh();
-            this.breadcrumbBar?.refresh();
+            if (!interactive) {
+                this.updateLayerList();
+                this.contextBar?.refresh();
+                this.breadcrumbBar?.refresh();
+            }
             return;
         }
         
         const node = this.scene.getNode(selection[0]);
         if (!node) {
             this.clearPropertyPanel();
-            this.updateLayerList();
-            this.contextBar?.refresh();
-            this.breadcrumbBar?.refresh();
+            if (!interactive) {
+                this.updateLayerList();
+                this.contextBar?.refresh();
+                this.breadcrumbBar?.refresh();
+            }
             return;
         }
         const style = node.style;
@@ -494,9 +499,13 @@ export class UIEngine {
             this.propRotation.value = Math.round(angle).toString();
         }
 
-        this.updateLayerList();
-        this.contextBar?.refresh();
-        this.breadcrumbBar?.refresh();
+        // During interactive drags, skip expensive DOM rebuilds — the mouseup
+        // handler will do a full syncWithSelection() to reconcile everything.
+        if (!interactive) {
+            this.updateLayerList();
+            this.contextBar?.refresh();
+            this.breadcrumbBar?.refresh();
+        }
     }
 
     /** When nothing is selected, show the CURRENT style (what a newly drawn
@@ -845,21 +854,46 @@ export class UIEngine {
         return rgbToHex(color);
     }
 
+    /** Import an SVG document as ONE undo step. */
     parseSVG(svgText: string) {
+        this.scene.transaction(() => this.parseSVGInternal(svgText));
+    }
+
+    private parseSVGInternal(svgText: string) {
         const parser = new DOMParser();
         const doc = parser.parseFromString(svgText, 'image/svg+xml');
         const svg = doc.querySelector('svg');
         if (!svg) return;
-
-        this.scene.saveMoveHistory();
 
         // Parse viewBox for offset/scaling
         let vbMatrix = identityMatrix();
         const viewBox = svg.getAttribute('viewBox');
         if (viewBox) {
             const parts = viewBox.trim().split(/[\s,]+/).map(Number);
-            if (parts.length >= 2 && (parts[0] !== 0 || parts[1] !== 0)) {
-                // Translate to compensate for viewBox origin
+            if (parts.length >= 4) {
+                const vbMinX = parts[0], vbMinY = parts[1];
+                const vbWidth = parts[2], vbHeight = parts[3];
+
+                // Determine the SVG element's intrinsic size
+                const svgWidth = parseFloat(svg.getAttribute('width') || '0');
+                const svgHeight = parseFloat(svg.getAttribute('height') || '0');
+
+                // Compute scale: if the SVG has explicit width/height that differ
+                // from the viewBox, we need to scale content accordingly.
+                let sx = 1, sy = 1;
+                if (svgWidth > 0 && svgHeight > 0 && vbWidth > 0 && vbHeight > 0) {
+                    sx = svgWidth / vbWidth;
+                    sy = svgHeight / vbHeight;
+                }
+
+                // Build composed matrix: scale(sx,sy) * translate(-vbMinX, -vbMinY)
+                if (sx !== 1 || sy !== 1 || vbMinX !== 0 || vbMinY !== 0) {
+                    const translateMat = parseSVGTransform(`translate(${-vbMinX},${-vbMinY})`);
+                    const scaleMat = parseSVGTransform(`scale(${sx},${sy})`);
+                    vbMatrix = composeMatrices(scaleMat, translateMat);
+                }
+            } else if (parts.length >= 2 && (parts[0] !== 0 || parts[1] !== 0)) {
+                // Fallback: only offset, no width/height in viewBox
                 vbMatrix = parseSVGTransform(`translate(${-parts[0]},${-parts[1]})`);
             }
         }
@@ -893,6 +927,64 @@ export class UIEngine {
             return namedColors[colorStr.toLowerCase()] || colorStr;
         };
 
+        // ─── CSS <style> block parsing ─────────────────────────────────
+        // Many SVGs (Figma, Illustrator, Inkscape exports) define styles
+        // via CSS class selectors inside <style> blocks. We parse these
+        // into a lookup map so class-based styles participate in the cascade.
+        //
+        // Cascade priority: inline style="..." > CSS class rule > presentation attribute
+        type CSSRuleMap = Map<string, Record<string, string>>;
+
+        const parseCSSBlocks = (svgEl: Element): CSSRuleMap => {
+            const rules: CSSRuleMap = new Map();
+            const styleEls = svgEl.querySelectorAll('style');
+            for (const styleEl of styleEls) {
+                const css = styleEl.textContent || '';
+                // Match simple rules: .className { prop: value; ... }
+                // Also handles multi-class selectors like .cls-1, .cls-2 { ... }
+                const ruleRegex = /([^{}]+)\{([^}]*)\}/g;
+                let match;
+                while ((match = ruleRegex.exec(css)) !== null) {
+                    const selectors = match[1];
+                    const body = match[2];
+                    // Parse declarations
+                    const props: Record<string, string> = {};
+                    for (const decl of body.split(';')) {
+                        const colonIdx = decl.indexOf(':');
+                        if (colonIdx < 0) continue;
+                        const key = decl.slice(0, colonIdx).trim();
+                        const val = decl.slice(colonIdx + 1).trim();
+                        if (key && val) props[key] = val;
+                    }
+                    // Apply to each selector (handles ".cls-1, .cls-2" comma-separated)
+                    for (const sel of selectors.split(',')) {
+                        const trimmed = sel.trim();
+                        // Support simple class selectors: .className
+                        if (trimmed.startsWith('.')) {
+                            const className = trimmed.slice(1);
+                            const existing = rules.get(className);
+                            rules.set(className, existing ? { ...existing, ...props } : props);
+                        }
+                    }
+                }
+            }
+            return rules;
+        };
+
+        const cssRules = parseCSSBlocks(svg);
+
+        /** Get CSS class styles for an element (merged from all its classes). */
+        const getCSSClassStyles = (el: Element): Record<string, string> => {
+            const classAttr = el.getAttribute('class');
+            if (!classAttr || cssRules.size === 0) return {};
+            const merged: Record<string, string> = {};
+            for (const cls of classAttr.trim().split(/\s+/)) {
+                const rule = cssRules.get(cls);
+                if (rule) Object.assign(merged, rule);
+            }
+            return merged;
+        };
+
         // Parse inline style attribute to get style properties
         const parseInlineStyle = (el: Element): Record<string, string> => {
             const styleAttr = el.getAttribute('style');
@@ -905,53 +997,91 @@ export class UIEngine {
             return props;
         };
 
-        // Get attribute with inline style fallback
-        const getStyleAttr = (el: Element, attr: string, inlineStyles: Record<string, string>): string | null => {
-            return inlineStyles[attr] || el.getAttribute(attr);
+        // Get attribute with cascade: inline style > CSS class > presentation attribute
+        const getStyleAttr = (el: Element, attr: string, inlineStyles: Record<string, string>, classStyles?: Record<string, string>): string | null => {
+            if (inlineStyles[attr]) return inlineStyles[attr];
+            const cs = classStyles ?? getCSSClassStyles(el);
+            if (cs[attr]) return cs[attr];
+            return el.getAttribute(attr);
         };
 
-        const parseFill = (el: Element, inlineStyles: Record<string, string>): string | null => {
-            const fill = getStyleAttr(el, 'fill', inlineStyles);
-            if (fill === 'none') return null;
-            return parseColor(fill) || '#808080';
+        // ─── SVG style inheritance ──────────────────────────────────────
+        // SVG presentation attributes cascade from parent to child.
+        // We track the inheritable properties as a record threaded through
+        // the recursive element tree.
+        type InheritedStyles = Record<string, string | null>;
+
+        /** SVG presentation attributes that inherit per the spec. */
+        const INHERITABLE_ATTRS = [
+            'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
+            'stroke-dasharray', 'stroke-dashoffset', 'stroke-miterlimit',
+            'opacity', 'fill-opacity', 'fill-rule', 'visibility',
+        ];
+
+        /** Read an element's own presentation attributes (explicit attr + inline style)
+         *  and merge them on top of the parent's inherited styles. */
+        const collectInheritedStyles = (el: Element, parentStyles: InheritedStyles): InheritedStyles => {
+            const merged: InheritedStyles = { ...parentStyles };
+            const inlineStyles = parseInlineStyle(el);
+            for (const attr of INHERITABLE_ATTRS) {
+                const val = getStyleAttr(el, attr, inlineStyles);
+                if (val !== null && val !== 'inherit') {
+                    merged[attr] = val;
+                }
+            }
+            return merged;
         };
 
-        const parseStroke = (el: Element, inlineStyles: Record<string, string>): string | null => {
-            const stroke = getStyleAttr(el, 'stroke', inlineStyles);
-            if (stroke === 'none' || !stroke) return null;
+        /** Resolve an attribute value: element's own value > inherited > fallback. */
+        const resolveAttr = (el: Element, attr: string, inlineStyles: Record<string, string>, inherited: InheritedStyles, fallback: string | null = null): string | null => {
+            const own = getStyleAttr(el, attr, inlineStyles);
+            if (own !== null && own !== 'inherit') return own;
+            if (inherited[attr] !== undefined && inherited[attr] !== null) return inherited[attr]!;
+            return fallback;
+        };
+
+        const parseFill = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles): string | null => {
+            const fill = resolveAttr(el, 'fill', inlineStyles, inherited, '#000000');
+            if (fill === 'none' || fill === 'transparent') return null;
+            return parseColor(fill);
+        };
+
+        const parseStroke = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles): string | null => {
+            const stroke = resolveAttr(el, 'stroke', inlineStyles, inherited, null);
+            if (!stroke || stroke === 'none' || stroke === 'transparent') return null;
             return parseColor(stroke);
         };
 
-        const applyStyle = (id: number, el: Element) => {
+        const applyStyle = (id: number, el: Element, inherited: InheritedStyles) => {
             const inlineStyles = parseInlineStyle(el);
-            const fillHex = parseFill(el, inlineStyles);
-            const strokeHex = parseStroke(el, inlineStyles);
-            const sw = parseFloat(getStyleAttr(el, 'stroke-width', inlineStyles) || '1');
-            const op = parseFloat(getStyleAttr(el, 'opacity', inlineStyles) || '1');
+            const fillHex = parseFill(el, inlineStyles, inherited);
+            const strokeHex = parseStroke(el, inlineStyles, inherited);
+            const sw = parseFloat(resolveAttr(el, 'stroke-width', inlineStyles, inherited, '1') || '1');
+            const op = parseFloat(resolveAttr(el, 'opacity', inlineStyles, inherited, '1') || '1');
 
             const fill = fillHex ? this.hexToRgb(fillHex) : null;
             const stroke = strokeHex ? this.hexToRgb(strokeHex) : null;
 
             // Parse stroke-linecap
-            const capStr = getStyleAttr(el, 'stroke-linecap', inlineStyles) || 'butt';
+            const capStr = resolveAttr(el, 'stroke-linecap', inlineStyles, inherited, 'butt') || 'butt';
             const capMap: Record<string, number> = { butt: 0, round: 1, square: 2 };
             const strokeCap = capMap[capStr] ?? 0;
 
             // Parse stroke-linejoin
-            const joinStr = getStyleAttr(el, 'stroke-linejoin', inlineStyles) || 'miter';
+            const joinStr = resolveAttr(el, 'stroke-linejoin', inlineStyles, inherited, 'miter') || 'miter';
             const joinMap: Record<string, number> = { miter: 0, round: 1, bevel: 2 };
             const strokeJoin = joinMap[joinStr] ?? 0;
 
             // Parse fill-rule
-            const fillRuleStr = getStyleAttr(el, 'fill-rule', inlineStyles) || 'nonzero';
+            const fillRuleStr = resolveAttr(el, 'fill-rule', inlineStyles, inherited, 'nonzero') || 'nonzero';
             const fillRuleMap: Record<string, number> = { nonzero: 0, evenodd: 1 };
             const fillRule = fillRuleMap[fillRuleStr] ?? 0;
 
             // Parse miter limit
-            const miterLimit = parseFloat(getStyleAttr(el, 'stroke-miterlimit', inlineStyles) || '4');
+            const miterLimit = parseFloat(resolveAttr(el, 'stroke-miterlimit', inlineStyles, inherited, '4') || '4');
 
             // Parse fill-opacity
-            const fillOpacity = parseFloat(getStyleAttr(el, 'fill-opacity', inlineStyles) || '1');
+            const fillOpacity = parseFloat(resolveAttr(el, 'fill-opacity', inlineStyles, inherited, '1') || '1');
 
             const style = {
                 fill, stroke,
@@ -969,13 +1099,13 @@ export class UIEngine {
             };
 
             // Parse stroke-dasharray
-            const dashArr = getStyleAttr(el, 'stroke-dasharray', inlineStyles);
+            const dashArr = resolveAttr(el, 'stroke-dasharray', inlineStyles, inherited, null);
             if (dashArr && dashArr !== 'none') {
                 style.dash_array = dashArr.split(/[,\s]+/).map(Number).filter(n => !isNaN(n));
             }
 
             // Parse stroke-dashoffset
-            const dashOff = getStyleAttr(el, 'stroke-dashoffset', inlineStyles);
+            const dashOff = resolveAttr(el, 'stroke-dashoffset', inlineStyles, inherited, null);
             if (dashOff) {
                 style.dash_offset = parseFloat(dashOff);
             }
@@ -987,7 +1117,7 @@ export class UIEngine {
             this.scene.setNodeStyle(id, JSON.stringify(style));
 
             // Handle visibility
-            const visibility = getStyleAttr(el, 'visibility', inlineStyles);
+            const visibility = resolveAttr(el, 'visibility', inlineStyles, inherited, null);
             const display = getStyleAttr(el, 'display', inlineStyles);
             if (visibility === 'hidden' || display === 'none') {
                 this.scene.setNodeVisible(id, false);
@@ -997,12 +1127,16 @@ export class UIEngine {
         // Collect all created node IDs for final grouping
         const createdIds: number[] = [];
 
+        // Collect inherited styles from the root <svg> element
+        const rootInherited: InheritedStyles = collectInheritedStyles(svg, {});
+
         /**
          * Recursive element processor — handles <g>, shapes, and nested structure.
          * @param el         The SVG element to process
          * @param parentMat  Composed parent transform matrix (column-major [f32; 9])
+         * @param inherited  Cascaded presentation attributes from ancestor elements
          */
-        const processElement = (el: Element, parentMat: number[]) => {
+        const processElement = (el: Element, parentMat: number[], inherited: InheritedStyles) => {
             const tag = el.tagName.toLowerCase();
 
             // Skip metadata, defs, style, desc, title, clipPath
@@ -1013,12 +1147,15 @@ export class UIEngine {
             const localMat = transformAttr ? parseSVGTransform(transformAttr) : identityMatrix();
             const composedMat = composeMatrices(parentMat, localMat);
 
+            // Merge this element's styles on top of inherited ones
+            const mergedStyles = collectInheritedStyles(el, inherited);
+
             // Handle <g> groups — recurse into children
             if (tag === 'g') {
                 const childIds: number[] = [];
                 for (const child of el.children) {
                     const beforeLen = createdIds.length;
-                    processElement(child, composedMat);
+                    processElement(child, composedMat, mergedStyles);
                     // Collect IDs created by children
                     for (let i = beforeLen; i < createdIds.length; i++) {
                         childIds.push(createdIds[i]);
@@ -1055,7 +1192,7 @@ export class UIEngine {
                         const useX = parseFloat(el.getAttribute('x') || '0');
                         const useY = parseFloat(el.getAttribute('y') || '0');
                         const useMat = composeMatrices(composedMat, parseSVGTransform(`translate(${useX},${useY})`));
-                        processElement(refEl, useMat);
+                        processElement(refEl, useMat, mergedStyles);
                     }
                 }
                 return;
@@ -1134,7 +1271,7 @@ export class UIEngine {
             }
 
             if (nodeId !== null) {
-                applyStyle(nodeId, el);
+                applyStyle(nodeId, el, mergedStyles);
                 // Set name from id attribute if present
                 const elName = el.getAttribute('id') || el.getAttribute('class');
                 if (elName) {
@@ -1146,7 +1283,7 @@ export class UIEngine {
 
         // Process all direct children of the SVG element recursively
         for (const child of svg.children) {
-            processElement(child, vbMatrix);
+            processElement(child, vbMatrix, rootInherited);
         }
 
         // Auto-group all imported elements

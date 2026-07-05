@@ -144,3 +144,153 @@ export function iconCircleDot(size = 14): string {
         size,
     );
 }
+
+// ─── Alignment icons ─────────────────────────────────────────────
+
+/** Align left – items flush to left edge */
+export function iconAlignLeft(size = 14): string {
+    return svg(
+        '<line x1="4" x2="4" y1="2" y2="22"/><rect x="9" y="6" width="11" height="4" rx="1"/><rect x="9" y="14" width="7" height="4" rx="1"/>',
+        size,
+    );
+}
+
+/** Align center horizontal */
+export function iconAlignCenterH(size = 14): string {
+    return svg(
+        '<line x1="12" x2="12" y1="2" y2="22"/><rect x="5" y="6" width="14" height="4" rx="1"/><rect x="7" y="14" width="10" height="4" rx="1"/>',
+        size,
+    );
+}
+
+/** Align right – items flush to right edge */
+export function iconAlignRight(size = 14): string {
+    return svg(
+        '<line x1="20" x2="20" y1="2" y2="22"/><rect x="4" y="6" width="11" height="4" rx="1"/><rect x="8" y="14" width="7" height="4" rx="1"/>',
+        size,
+    );
+}
+
+/** Align top – items flush to top edge */
+export function iconAlignTop(size = 14): string {
+    return svg(
+        '<line x1="2" x2="22" y1="4" y2="4"/><rect x="6" y="9" width="4" height="11" rx="1"/><rect x="14" y="9" width="4" height="7" rx="1"/>',
+        size,
+    );
+}
+
+/** Align center vertical */
+export function iconAlignCenterV(size = 14): string {
+    return svg(
+        '<line x1="2" x2="22" y1="12" y2="12"/><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="7" width="4" height="10" rx="1"/>',
+        size,
+    );
+}
+
+/** Align bottom – items flush to bottom edge */
+export function iconAlignBottom(size = 14): string {
+    return svg(
+        '<line x1="2" x2="22" y1="20" y2="20"/><rect x="6" y="4" width="4" height="11" rx="1"/><rect x="14" y="8" width="4" height="7" rx="1"/>',
+        size,
+    );
+}
+
+// ─── Distribution icons ──────────────────────────────────────────
+
+/** Distribute horizontal spacing */
+export function iconDistributeH(size = 14): string {
+    return svg(
+        '<rect x="4" y="5" width="4" height="14" rx="1"/><rect x="14" y="7" width="4" height="10" rx="1"/><line x1="1" x2="1" y1="2" y2="22"/><line x1="23" x2="23" y1="2" y2="22"/>',
+        size,
+    );
+}
+
+/** Distribute vertical spacing */
+export function iconDistributeV(size = 14): string {
+    return svg(
+        '<rect x="5" y="4" width="14" height="4" rx="1"/><rect x="7" y="14" width="10" height="4" rx="1"/><line x1="2" x2="22" y1="1" y2="1"/><line x1="2" x2="22" y1="23" y2="23"/>',
+        size,
+    );
+}
+
+// ─── Boolean operation icons ─────────────────────────────────────
+// Standard two-overlapping-rounded-rectangle convention (Figma/Sketch style).
+// Back shape sits top-left, front shape sits bottom-right.
+// The filled area shows the operation result.
+
+/** Union – entire combined area filled */
+export function iconBoolUnion(size = 14): string {
+    return svg(
+        '<rect x="2" y="2" width="14" height="14" rx="4" fill="currentColor" stroke="none"/>' +
+        '<rect x="8" y="8" width="14" height="14" rx="4" fill="currentColor" stroke="none"/>' +
+        '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
+        '<rect x="8" y="8" width="14" height="14" rx="4" fill="none"/>',
+        size,
+    );
+}
+
+/** Subtract – back shape minus the overlap */
+export function iconBoolSubtract(size = 14): string {
+    return svg(
+        '<path d="M6 2a4 4 0 0 0-4 4v8a4 4 0 0 0 4 4h2v-4a4 4 0 0 1 4-4h4V6a4 4 0 0 0-4-4H6Z" fill="currentColor" stroke="none"/>' +
+        '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
+        '<rect x="8" y="8" width="14" height="14" rx="4" fill="none" stroke-dasharray="3 2"/>',
+        size,
+    );
+}
+
+/** Intersect – only the overlap area filled */
+export function iconBoolIntersect(size = 14): string {
+    return svg(
+        '<path d="M12 8H8v4a4 4 0 0 0 4 4h4v-4a4 4 0 0 0-4-4Z" fill="currentColor" stroke="none"/>' +
+        '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
+        '<rect x="8" y="8" width="14" height="14" rx="4" fill="none"/>',
+        size,
+    );
+}
+
+/** Exclude – everything except the overlap filled */
+export function iconBoolExclude(size = 14): string {
+    return svg(
+        '<path d="M6 2a4 4 0 0 0-4 4v8a4 4 0 0 0 4 4h2v-4a4 4 0 0 1 4-4h4V6a4 4 0 0 0-4-4H6Z" fill="currentColor" stroke="none"/>' +
+        '<path d="M18 22a4 4 0 0 0 4-4v-8a4 4 0 0 0-4-4h-2v4a4 4 0 0 1-4 4H8v6a4 4 0 0 0 4 4h6Z" fill="currentColor" stroke="none"/>' +
+        '<path d="M12 8H8v4a4 4 0 0 0 4 4h4v-4a4 4 0 0 0-4-4Z" fill="var(--bg-panel, #2a2a2a)" stroke="none"/>' +
+        '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
+        '<rect x="8" y="8" width="14" height="14" rx="4" fill="none"/>',
+        size,
+    );
+}
+
+// ─── Grouping icons ──────────────────────────────────────────────
+
+/** Group – combine into group */
+export function iconGroup(size = 14): string {
+    return svg(
+        '<rect x="2" y="2" width="8" height="8" rx="1"/><rect x="14" y="14" width="8" height="8" rx="1"/><path d="M7 14v1a2 2 0 0 0 2 2h1"/><path d="M14 7h1a2 2 0 0 1 2 2v1"/>',
+        size,
+    );
+}
+
+/** Ungroup – dissolve group */
+export function iconUngroup(size = 14): string {
+    return svg(
+        '<rect x="2" y="2" width="8" height="8" rx="1"/><rect x="14" y="14" width="8" height="8" rx="1"/><path d="M7 14v1a2 2 0 0 0 2 2h1" stroke-dasharray="3 2"/><path d="M14 7h1a2 2 0 0 1 2 2v1" stroke-dasharray="3 2"/>',
+        size,
+    );
+}
+
+/** Enter/step-into a group */
+export function iconCornerDownRight(size = 14): string {
+    return svg(
+        '<polyline points="15 10 20 15 15 20"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/>',
+        size,
+    );
+}
+
+/** Duplicate / copy */
+export function iconCopy(size = 14): string {
+    return svg(
+        '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+        size,
+    );
+}

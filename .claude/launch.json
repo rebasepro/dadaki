@@ -6,7 +6,7 @@
       "runtimeExecutable": "pnpm",
       "runtimeArgs": ["dev", "--port", "5199", "--strictPort"],
       "port": 5199,
-      "autoPort": false
+      "autoPort": true
     }
   ]
 }

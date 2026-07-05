@@ -2,6 +2,7 @@
 import { UIEngine } from './ui';
 import { Renderer } from './renderer';
 import { FileIO } from './file_io';
+import { SnapEngine, type SnapGuide } from './snapping';
 import type { WasmScene } from './wasm_scene';
 import type { PenPathPoint, Subpath } from './types';
 
@@ -35,6 +36,22 @@ export class InputManager {
     moveSnapshot: Uint8Array | null = null;
     /** Original selection IDs captured at drag start. */
     moveOriginalIds: number[] = [];
+    /** Union bounds of the selection at move-drag start, used for snapping. */
+    moveStartBounds: { x: number; y: number; w: number; h: number } | null = null;
+
+    // --- Snapping ---
+    /** Snap engine; targets are collected at drag start. Hold Cmd/Ctrl to bypass. */
+    snap = new SnapEngine();
+    /** Guides from the latest snapped frame, drawn by the Renderer. */
+    activeSnapGuides: SnapGuide[] = [];
+
+    // --- Viewport navigation ---
+    /** True while the space bar is held (hand tool). */
+    isSpacePan: boolean = false;
+    /** Active pan drag: screen position and pan at drag start. */
+    panDrag: { screenX: number; screenY: number; panX: number; panY: number } | null = null;
+    /** Node under the cursor (selection tool, not dragging) — outlined by the Renderer. */
+    hoverNodeId: number | null = null;
 
     // --- Direct selection state ---
     /** Node being edited in direct selection mode. */
@@ -53,9 +70,12 @@ export class InputManager {
     // --- Resize handle state ---
     resizeHandleType: string | null = null; // 'nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w', or null
     resizeStartBounds: { x: number; y: number; w: number; h: number } | null = null;
-    resizeNodeId: number | null = null;
+    /** Deduped selection ids captured at resize start (ancestors only, no double-scaling). */
+    resizeTargetIds: number[] = [];
     /** Snapshot of the scene state before resize started, so we can restore and reapply cleanly. */
     resizeSnapshot: Uint8Array | null = null;
+    /** Current calculated bounds during a resize drag, read by Renderer for smooth sticky handles. */
+    liveResizeBounds: { x: number; y: number; w: number; h: number } | null = null;
 
     constructor(canvas: HTMLCanvasElement, scene: WasmScene, ui: UIEngine, renderer: Renderer) {
         this.canvas = canvas;
@@ -78,7 +98,69 @@ export class InputManager {
         window.addEventListener('mousemove', (e) => this.onMouseMove(e));
         window.addEventListener('mouseup', (e) => this.onMouseUp(e));
         window.addEventListener('keydown', (e) => this.onKeyDown(e));
+        window.addEventListener('keyup', (e) => this.onKeyUp(e));
         window.addEventListener('wheel', (e) => this.onWheel(e), { passive: false, capture: true });
+
+        // Import .svg / .vec files by dropping them onto the canvas area
+        const dropTarget = document.getElementById('canvas-container') ?? this.canvas;
+        dropTarget.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+        });
+        dropTarget.addEventListener('drop', (e) => { this.onFileDrop(e).catch(console.error); });
+
+        // Safari pinch-to-zoom prevention (page zoom would fight canvas zoom)
+        window.addEventListener('gesturestart', (e) => e.preventDefault(), { capture: true });
+        window.addEventListener('gesturechange', (e) => e.preventDefault(), { capture: true });
+        window.addEventListener('gestureend', (e) => e.preventDefault(), { capture: true });
+    }
+
+    /** Import dropped files: .svg content is centered at the drop point and
+     *  selected; .vec replaces the document (undoable — a history snapshot is
+     *  taken first). */
+    async onFileDrop(e: DragEvent) {
+        e.preventDefault();
+        const files = Array.from(e.dataTransfer?.files ?? []);
+        if (files.length === 0 || !this.scene.engine) return;
+        const dropWorld = this.getPos(e);
+
+        for (const file of files) {
+            const name = file.name.toLowerCase();
+            if (name.endsWith('.svg')) {
+                const text = await file.text();
+                // One transaction → the whole drop is a single undo step
+                this.scene.transaction(() => {
+                    const rootsBefore = new Set(this.scene.getRootNodes());
+                    this.ui.parseSVG(text);
+
+                    // Center the imported nodes at the drop point and select them
+                    const newRoots = Array.from(this.scene.getRootNodes()).filter(id => !rootsBefore.has(id));
+                    if (newRoots.length === 0) return;
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                    for (const id of newRoots) {
+                        const b = this.scene.getNodeBounds(id);
+                        minX = Math.min(minX, b[0]); minY = Math.min(minY, b[1]);
+                        maxX = Math.max(maxX, b[2]); maxY = Math.max(maxY, b[3]);
+                    }
+                    if (minX < maxX && minY < maxY) {
+                        const dx = dropWorld.x - (minX + maxX) / 2;
+                        const dy = dropWorld.y - (minY + maxY) / 2;
+                        for (const id of newRoots) this.scene.engine!.move_node(id, dx, dy);
+                    }
+                    this.scene.engine!.clear_selection();
+                    for (const id of newRoots) this.scene.selectNode(id, true);
+                });
+            } else if (name.endsWith('.vec')) {
+                const bytes = new Uint8Array(await file.arrayBuffer());
+                this.scene.saveMoveHistory(); // snapshot current doc so the drop is undoable
+                this.scene.engine.deserialize_proto(bytes);
+            }
+        }
+
+        this.scene.invalidateCache();
+        this.scene.autosave?.trigger();
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
     }
 
     onContextMenu(e: MouseEvent) {
@@ -107,16 +189,16 @@ export class InputManager {
 
         switch (action) {
             case 'bring-to-front':
-                for (const id of selection) this.scene.bringToFront(id);
+                this.scene.transaction(() => { for (const id of selection) this.scene.bringToFront(id); });
                 break;
             case 'bring-forward':
-                for (const id of selection) this.scene.bringForward(id);
+                this.scene.transaction(() => { for (const id of selection) this.scene.bringForward(id); });
                 break;
             case 'send-backward':
-                for (const id of selection) this.scene.sendBackward(id);
+                this.scene.transaction(() => { for (const id of selection) this.scene.sendBackward(id); });
                 break;
             case 'send-to-back':
-                for (const id of selection) this.scene.sendToBack(id);
+                this.scene.transaction(() => { for (const id of selection) this.scene.sendToBack(id); });
                 break;
             case 'duplicate':
                 this.duplicateSelection();
@@ -164,6 +246,14 @@ export class InputManager {
         const node = this.scene.getNode(hitId);
         if (!node) return;
 
+        // Double-click on text: edit its content inline
+        if (node.geometry.Text) {
+            this.scene.selectNode(hitId, false);
+            this.ui.syncWithSelection();
+            this.editTextNode(hitId);
+            return;
+        }
+
         if (node.geometry.Path || this.ui.activeTool === 'direct') {
             this.ui.setActiveTool('direct');
             this.scene.selectNode(hitId, false);
@@ -206,6 +296,29 @@ export class InputManager {
         if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
         if ((e.target as HTMLElement)?.isContentEditable) return;
 
+        // Space: hold for hand tool (pan-drag)
+        if (e.key === ' ') {
+            e.preventDefault(); // stop page scroll
+            if (!this.isSpacePan && !this.isMouseDown) {
+                this.isSpacePan = true;
+                this.canvas.style.cursor = 'grab';
+            }
+            return;
+        }
+
+        // Cmd+A: select all top-level nodes (skips locked/hidden)
+        if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+            e.preventDefault();
+            this.scene.engine!.clear_selection();
+            for (const id of this.scene.getRootNodes()) {
+                if (this.scene.getNodeLocked(id) || !this.scene.getNodeVisible(id)) continue;
+                this.scene.selectNode(id, true);
+            }
+            this.ui.syncWithSelection();
+            this.ui.updateLayerList();
+            return;
+        }
+
         // Tool shortcuts
         if (!e.metaKey && !e.ctrlKey) {
             if (e.key === 'v' || e.key === 'V') this.ui.setActiveTool('selection');
@@ -227,6 +340,14 @@ export class InputManager {
                 // Shift+0: zoom to 100%
                 this.renderer.setZoomCentered(1.0);
                 this.ui.setZoom(this.renderer.zoom);
+            }
+            if (e.key === '@' || (e.shiftKey && e.key === '2')) {
+                // Shift+2: zoom to selection
+                const b = this.getSelectionBounds();
+                if (b) {
+                    this.renderer.zoomToBounds(b);
+                    this.ui.setZoom(this.renderer.zoom);
+                }
             }
             if (e.key === '+' || e.key === '=') {
                 this.renderer.setZoomCentered(this.renderer.zoom * 1.25);
@@ -295,8 +416,12 @@ export class InputManager {
             this.ui.exportSVG();
         }
 
-        // Escape: exit path edit → exit group → deselect
+        // Escape: cancel in-flight drag → exit path edit → exit group → deselect
         if (e.key === 'Escape') {
+            if (this.isMouseDown && (this.moveSnapshot || this.resizeSnapshot || this.previewRect || this.marqueeRect)) {
+                this.cancelActiveDrag();
+                return;
+            }
             if (this.editingNodeId !== null) {
                 // Exit direct editing mode
                 this.editingNodeId = null;
@@ -388,11 +513,13 @@ export class InputManager {
         if ((e.metaKey || e.ctrlKey) && e.key === 'v' && !e.shiftKey) {
             if (this.clipboardIds.length > 0) {
                 e.preventDefault();
-                this.scene.engine!.clear_selection();
-                for (const id of this.clipboardIds) {
-                    const newId = this.scene.duplicateNode(id);
-                    this.scene.selectNode(newId, true);
-                }
+                this.scene.transaction(() => {
+                    this.scene.engine!.clear_selection();
+                    for (const id of this.clipboardIds) {
+                        const newId = this.scene.duplicateNode(id);
+                        this.scene.selectNode(newId, true);
+                    }
+                });
                 this.ui.updateLayerList();
                 this.ui.syncWithSelection();
             }
@@ -408,6 +535,100 @@ export class InputManager {
         if ((e.metaKey || e.ctrlKey) && e.key === 'g' && e.shiftKey) {
             e.preventDefault();
             this.ungroupSelection();
+        }
+    }
+
+    /** Open an inline editor over an existing text node (double-click). */
+    editTextNode(id: number) {
+        const geo = this.scene.getNodeGeometry(id);
+        if (!geo?.Text) return;
+        const container = document.getElementById('canvas-container');
+        if (!container) return;
+
+        const t = this.scene.getTransform(id); // row-major: t[2]/t[5] = translation
+        const fontSize = geo.Text.font_size;
+        const originalContent = geo.Text.content;
+        const screenX = t[2] * this.renderer.zoom + this.renderer.pan.x;
+        const screenY = (t[5] - fontSize) * this.renderer.zoom + this.renderer.pan.y;
+
+        const input = document.createElement('input');
+        input.className = 'text-input-overlay';
+        input.type = 'text';
+        input.value = originalContent;
+        input.style.left = `${screenX}px`;
+        input.style.top = `${screenY}px`;
+        input.style.fontSize = `${fontSize * this.renderer.zoom}px`;
+
+        let done = false;
+        const commit = () => {
+            if (done) return;
+            done = true;
+            const content = input.value.trim();
+            input.remove();
+            if (content && content !== originalContent) {
+                this.scene.setTextContent(id, content, fontSize);
+                this.ui.syncWithSelection();
+            }
+        };
+        const cancel = () => {
+            if (done) return;
+            done = true;
+            input.remove();
+        };
+
+        input.addEventListener('keydown', (ev: KeyboardEvent) => {
+            if (ev.key === 'Enter') {
+                ev.preventDefault();
+                commit();
+            } else if (ev.key === 'Escape') {
+                ev.preventDefault();
+                cancel();
+            }
+            ev.stopPropagation();
+        });
+        input.addEventListener('blur', commit);
+
+        container.appendChild(input);
+        input.focus();
+        input.select();
+    }
+
+    /** Abort the current drag (Esc): restore the pre-drag scene state and
+     *  drop all previews. The subsequent mouseup is a no-op because
+     *  isMouseDown is already cleared. */
+    cancelActiveDrag() {
+        if (this.moveSnapshot) {
+            this.scene.engine!.deserialize_scene(this.moveSnapshot);
+            this.moveSnapshot = null;
+            this.moveOriginalIds = [];
+            this.moveStartBounds = null;
+        }
+        if (this.resizeSnapshot) {
+            this.scene.engine!.deserialize_scene(this.resizeSnapshot);
+        }
+        this.resizeHandleType = null;
+        this.resizeStartBounds = null;
+        this.resizeTargetIds = [];
+        this.resizeSnapshot = null;
+        this.liveResizeBounds = null;
+        this.previewRect = null;
+        this.marqueeRect = null;
+        this.dragMode = 'none';
+        this.isMouseDown = false;
+        this.didMove = false;
+        this.snap.end();
+        this.activeSnapGuides = [];
+        this.canvas.style.cursor = 'default';
+        this.scene.invalidateCache();
+        this.ui.syncWithSelection();
+    }
+
+    onKeyUp(e: KeyboardEvent) {
+        if (e.key === ' ') {
+            this.isSpacePan = false;
+            if (!this.panDrag) {
+                this.canvas.style.cursor = 'default';
+            }
         }
     }
 
@@ -456,17 +677,29 @@ export class InputManager {
         this.didMove = false;
         this.startPos = this.getPos(e);
         this.currentPos = { ...this.startPos };
+        this.hoverNodeId = null;
+
+        // Space held (or middle mouse): pan the viewport instead of using the tool
+        if (this.isSpacePan || e.button === 1) {
+            e.preventDefault();
+            this.panDrag = {
+                screenX: e.clientX, screenY: e.clientY,
+                panX: this.renderer.pan.x, panY: this.renderer.pan.y,
+            };
+            this.canvas.style.cursor = 'grabbing';
+            return;
+        }
 
         if (this.ui.activeTool === 'selection') {
             // Check resize handles first
             const handle = this.checkResizeHandle(this.startPos);
             if (handle) {
                 this.resizeHandleType = handle.type;
-                this.resizeNodeId = handle.nodeId;
-                const bounds = this.scene.getNodeBounds(handle.nodeId);
-                this.resizeStartBounds = { x: bounds[0], y: bounds[1], w: bounds[2] - bounds[0], h: bounds[3] - bounds[1] };
+                this.resizeStartBounds = this.getSelectionBounds();
+                this.resizeTargetIds = Array.from(this.scene.dedupSelection(this.scene.engine!.get_selection()));
                 // Snapshot scene state so we can restore-then-resize each frame
                 this.resizeSnapshot = this.scene.engine!.serialize_scene();
+                this.snap.begin(this.scene, this.resizeTargetIds);
                 this.scene.saveMoveHistory();
                 return;
             }
@@ -498,6 +731,13 @@ export class InputManager {
         } else if (this.ui.activeTool === 'direct') {
             this.handleDirectDown(this.startPos, e.shiftKey);
         } else if (this.ui.activeTool === 'pen') {
+            // Snap new anchors to geometry unless Cmd/Ctrl bypasses snapping
+            if (!e.metaKey && !e.ctrlKey) {
+                this.snap.begin(this.scene, []);
+                const s = this.snap.snapPoint(this.startPos.x, this.startPos.y, 8 / this.renderer.zoom);
+                this.startPos = { x: s.x, y: s.y };
+                this.snap.end();
+            }
             this.handlePenDown(this.startPos);
         } else if (this.ui.activeTool === 'text') {
             // Create inline text input at click position
@@ -515,11 +755,22 @@ export class InputManager {
             input.style.top = `${screenY}px`;
             input.style.fontSize = `${32 * this.renderer.zoom}px`;
 
+            // `done` guards against the double-commit that happens when
+            // Enter removes the input, which fires blur → commit again.
+            let done = false;
             const commit = () => {
+                if (done) return;
+                done = true;
                 const content = input.value.trim() || 'Text';
                 input.remove();
                 this.scene.saveMoveHistory();
                 const id = this.scene.addText(this.startPos.x, this.startPos.y, content, 32);
+                // Text uses the active fill and no stroke — the engine default
+                // (white fill) is invisible against the white artboard.
+                const style = JSON.parse(this.ui.getCurrentStyle());
+                style.stroke = null;
+                style.stroke_width = 0;
+                this.scene.setNodeStyleNoHistory(id, JSON.stringify(style));
                 this.scene.engine!.clear_selection();
                 this.scene.selectNode(id, false);
                 this.ui.updateLayerList();
@@ -527,6 +778,8 @@ export class InputManager {
             };
 
             const cancel = () => {
+                if (done) return;
+                done = true;
                 input.remove();
             };
 
@@ -548,6 +801,12 @@ export class InputManager {
             input.select();
         } else if (this.ui.activeTool === 'rect' || this.ui.activeTool === 'ellipse'
                    || this.ui.activeTool === 'polygon' || this.ui.activeTool === 'star') {
+            // Snap the anchor corner unless Cmd/Ctrl bypasses snapping
+            this.snap.begin(this.scene, []);
+            if (!e.metaKey && !e.ctrlKey) {
+                const s = this.snap.snapPoint(this.startPos.x, this.startPos.y, 8 / this.renderer.zoom);
+                this.startPos = { x: s.x, y: s.y };
+            }
             this.previewRect = { x: this.startPos.x, y: this.startPos.y, w: 0, h: 0, tool: this.ui.activeTool };
         } else if (this.ui.activeTool === 'paint-bucket') {
             this.handlePaintBucketClick(this.startPos);
@@ -560,8 +819,7 @@ export class InputManager {
         if (faceId >= 0) {
             // Get the active fill color from UI
             const color = this.ui.getActiveFillColor();
-            this.scene.engine.set_face_fill(faceId, color.r, color.g, color.b, color.a);
-            this.scene.invalidateCache();
+            this.scene.setFaceFill(faceId, color.r, color.g, color.b, color.a);
         }
     }
 
@@ -658,11 +916,13 @@ export class InputManager {
     duplicateSelection() {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
-        this.scene.engine!.clear_selection();
-        for (const id of selection) {
-            const newId = this.scene.duplicateNode(id);
-            this.scene.selectNode(newId, true);
-        }
+        this.scene.transaction(() => {
+            this.scene.engine!.clear_selection();
+            for (const id of selection) {
+                const newId = this.scene.duplicateNode(id);
+                this.scene.selectNode(newId, true);
+            }
+        });
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
     }
@@ -689,9 +949,11 @@ export class InputManager {
     ungroupSelection() {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
-        for (const id of selection) {
-            this.scene.ungroupNode(id);
-        }
+        this.scene.transaction(() => {
+            for (const id of selection) {
+                this.scene.ungroupNode(id);
+            }
+        });
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
     }
@@ -766,10 +1028,19 @@ export class InputManager {
         this.shiftKey = e.shiftKey;
         this.altKey = e.altKey;
 
+        // Viewport pan drag (space or middle mouse held)
+        if (this.panDrag && this.isMouseDown) {
+            this.renderer.pan.x = this.panDrag.panX + (e.clientX - this.panDrag.screenX);
+            this.renderer.pan.y = this.panDrag.panY + (e.clientY - this.panDrag.screenY);
+            return;
+        }
+        if (this.isSpacePan) return; // hand tool active — no hover/tool behavior
+
         // Hover cursor for resize handles (when not dragging)
         if (!this.isMouseDown && this.ui.activeTool === 'selection') {
             const handle = this.checkResizeHandle(this.currentPos);
             if (handle) {
+                this.hoverNodeId = null;
                 const cursorMap: Record<string, string> = {
                     'nw': 'nwse-resize', 'se': 'nwse-resize',
                     'ne': 'nesw-resize', 'sw': 'nesw-resize',
@@ -779,6 +1050,7 @@ export class InputManager {
                 this.canvas.style.cursor = cursorMap[handle.type] || 'default';
             } else {
                 const hitId = this.getTargetIdForHit(this.currentPos);
+                this.hoverNodeId = hitId ?? null;
                 if (hitId !== undefined) {
                     this.canvas.style.cursor = e.altKey ? 'copy' : 'move';
                 } else {
@@ -800,7 +1072,7 @@ export class InputManager {
 
         if (this.ui.activeTool === 'selection') {
             // Resize handle drag (checked before dragMode since resize returns early from mouseDown)
-            if (this.resizeHandleType && this.resizeStartBounds && this.resizeNodeId !== null && this.resizeSnapshot) {
+            if (this.resizeHandleType && this.resizeStartBounds && this.resizeTargetIds.length > 0 && this.resizeSnapshot) {
                 const bounds = this.resizeStartBounds;
                 let rdx = this.currentPos.x - this.startPos.x;
                 let rdy = this.currentPos.y - this.startPos.y;
@@ -839,20 +1111,71 @@ export class InputManager {
                     moveY = -deltaH;
                 }
 
-                newW = Math.max(newW, 5);
-                newH = Math.max(newH, 5);
+                // Snap the dragged edge(s) to nearby geometry. Skipped with
+                // Shift/Alt (aspect and center-resize win) and bypassed with
+                // Cmd/Ctrl (Figma/Illustrator-style temporary disable).
+                this.activeSnapGuides = [];
+                if (!e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+                    const threshold = 8 / this.renderer.zoom;
+                    if (this.resizeHandleType.includes('e')) {
+                        const s = this.snap.snapAxis('x', bounds.x + newW, threshold);
+                        if (s) { newW = s.value - bounds.x; this.activeSnapGuides.push(s.guide); }
+                    }
+                    if (this.resizeHandleType.includes('w')) {
+                        const s = this.snap.snapAxis('x', bounds.x + moveX, threshold);
+                        if (s) {
+                            const d = s.value - (bounds.x + moveX);
+                            moveX += d; newW -= d;
+                            this.activeSnapGuides.push(s.guide);
+                        }
+                    }
+                    if (this.resizeHandleType.includes('s')) {
+                        const s = this.snap.snapAxis('y', bounds.y + newH, threshold);
+                        if (s) { newH = s.value - bounds.y; this.activeSnapGuides.push(s.guide); }
+                    }
+                    if (this.resizeHandleType.includes('n')) {
+                        const s = this.snap.snapAxis('y', bounds.y + moveY, threshold);
+                        if (s) {
+                            const d = s.value - (bounds.y + moveY);
+                            moveY += d; newH -= d;
+                            this.activeSnapGuides.push(s.guide);
+                        }
+                    }
+                }
 
-                // Restore original state, then apply resize cleanly
+                newW = Math.max(newW, 1);
+                newH = Math.max(newH, 1);
+
+                // Update live bounds for the renderer to show smooth handles
+                this.liveResizeBounds = { x: bounds.x + moveX, y: bounds.y + moveY, w: newW, h: newH };
+
+                // Restore original state, then apply the resize cleanly.
+                // Each target node is mapped from the start bounds into the live
+                // bounds: resize to its scaled size, then move so its bounds land
+                // at the scaled position. The post-resize move corrects for
+                // geometry that resizes about a point other than its top-left
+                // corner (e.g. ellipses resize about their center).
                 this.scene.engine!.deserialize_scene(this.resizeSnapshot);
-                this.scene.engine!.resize_node(this.resizeNodeId, newW, newH);
+                const scaleX = newW / Math.max(bounds.w, 1e-6);
+                const scaleY = newH / Math.max(bounds.h, 1e-6);
+                const live = this.liveResizeBounds;
 
-                // Handle origin shift (for w/n handles or Alt center-resize)
-                if (Math.abs(moveX) > 0.01 || Math.abs(moveY) > 0.01) {
-                    this.scene.engine!.move_node(this.resizeNodeId, moveX, moveY);
+                for (const id of this.resizeTargetIds) {
+                    const b = this.scene.getNodeBounds(id);
+                    const targetX = live.x + (b[0] - bounds.x) * scaleX;
+                    const targetY = live.y + (b[1] - bounds.y) * scaleY;
+                    this.scene.engine!.resize_node(id, (b[2] - b[0]) * scaleX, (b[3] - b[1]) * scaleY);
+                    const nb = this.scene.getNodeBounds(id);
+                    const dx = targetX - nb[0];
+                    const dy = targetY - nb[1];
+                    if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
+                        this.scene.engine!.move_node(id, dx, dy);
+                    }
                 }
 
                 this.scene.invalidateCache();
-                this.ui.syncWithSelection();
+                // Pass interactive to skip expensive context bar / breadcrumb / layer list rebuilds during drag
+                this.ui.syncWithSelection({ interactive: true });
                 return;
             }
         }
@@ -866,6 +1189,8 @@ export class InputManager {
                 // We restore this every frame so modifier changes (Alt, Shift) apply cleanly.
                 this.moveSnapshot = this.scene.engine!.serialize_scene();
                 this.moveOriginalIds = [...this.scene.engine!.get_selection()];
+                this.moveStartBounds = this.getSelectionBounds();
+                this.snap.begin(this.scene, this.moveOriginalIds);
             }
 
             if (this.didMove && this.moveSnapshot) {
@@ -881,6 +1206,24 @@ export class InputManager {
                     const constrained = this.constrainToAxis(this.startPos, this.currentPos);
                     totalDx = constrained.x - this.startPos.x;
                     totalDy = constrained.y - this.startPos.y;
+                }
+
+                // Snap the moving selection box (edges + centers) to nearby
+                // geometry. Cmd/Ctrl bypasses snapping; with Shift only the
+                // free axis snaps so the constraint is never broken.
+                this.activeSnapGuides = [];
+                if (!e.metaKey && !e.ctrlKey && this.moveStartBounds) {
+                    const sb = this.moveStartBounds;
+                    const snapped = this.snap.snapBounds(
+                        { x: sb.x + totalDx, y: sb.y + totalDy, w: sb.w, h: sb.h },
+                        8 / this.renderer.zoom,
+                    );
+                    const xLocked = e.shiftKey && totalDx === 0;
+                    const yLocked = e.shiftKey && totalDy === 0;
+                    if (!xLocked) totalDx += snapped.dx;
+                    if (!yLocked) totalDy += snapped.dy;
+                    this.activeSnapGuides = snapped.guides.filter(g =>
+                        (g.axis === 'x' && !xLocked) || (g.axis === 'y' && !yLocked));
                 }
 
                 let moveTargets: number[];
@@ -908,6 +1251,8 @@ export class InputManager {
                     this.scene.engine!.move_node(id, totalDx, totalDy);
                 }
                 this.scene.invalidateCache();
+                // Update property panel position values without rebuilding chrome DOM
+                this.ui.syncWithSelection({ interactive: true });
             }
         }
 
@@ -925,8 +1270,18 @@ export class InputManager {
 
         // Update live preview for shape creation
         if (this.previewRect) {
-            let w = Math.abs(this.currentPos.x - this.startPos.x);
-            let h = Math.abs(this.currentPos.y - this.startPos.y);
+            // Snap the moving corner (skipped with Shift/Alt so the square /
+            // from-center constraints stay exact; Cmd/Ctrl bypasses).
+            let cur = this.currentPos;
+            this.activeSnapGuides = [];
+            if (!e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+                const s = this.snap.snapPoint(cur.x, cur.y, 8 / this.renderer.zoom);
+                cur = { x: s.x, y: s.y };
+                this.activeSnapGuides = s.guides;
+            }
+
+            let w = Math.abs(cur.x - this.startPos.x);
+            let h = Math.abs(cur.y - this.startPos.y);
 
             // Shift: constrain to square/circle
             if (e.shiftKey) {
@@ -943,8 +1298,13 @@ export class InputManager {
                 w *= 2;
                 h *= 2;
             } else {
-                x = Math.min(this.startPos.x, this.currentPos.x);
-                y = Math.min(this.startPos.y, this.currentPos.y);
+                // Anchor at startPos, extend toward the drag direction.
+                // When Shift is held the constrained size may exceed the
+                // cursor offset on one axis, so we can't use Math.min with
+                // currentPos — that would place the origin at the cursor
+                // instead of at startPos on the shorter axis.
+                x = cur.x >= this.startPos.x ? this.startPos.x : this.startPos.x - w;
+                y = cur.y >= this.startPos.y ? this.startPos.y : this.startPos.y - h;
             }
 
             this.previewRect.x = x;
@@ -1030,11 +1390,21 @@ export class InputManager {
         this.isMouseDown = false;
         this.dragMode = 'none';
         this.isDraggingHandle = false;
+        this.snap.end();
+        this.activeSnapGuides = [];
+
+        // End viewport pan drag
+        if (this.panDrag) {
+            this.panDrag = null;
+            this.canvas.style.cursor = this.isSpacePan ? 'grab' : 'default';
+            return;
+        }
 
         // Clean up move-drag snapshot
         if (this.moveSnapshot) {
             this.moveSnapshot = null;
             this.moveOriginalIds = [];
+            this.moveStartBounds = null;
             this.scene.invalidateCache();
             this.scene.autosave?.trigger();
             this.ui.updateLayerList();
@@ -1045,10 +1415,13 @@ export class InputManager {
         if (this.resizeHandleType) {
             this.resizeHandleType = null;
             this.resizeStartBounds = null;
-            this.resizeNodeId = null;
+            this.resizeTargetIds = [];
             this.resizeSnapshot = null;
+            this.liveResizeBounds = null;
             this.scene.invalidateCache();
             this.scene.autosave?.trigger();
+            // Final sync to update layer list
+            this.ui.syncWithSelection();
             return;
         }
         
@@ -1127,12 +1500,29 @@ export class InputManager {
         this.marqueeRect = null;
     }
 
-    checkResizeHandle(pos: { x: number; y: number }): { type: string; nodeId: number } | null {
+    /** Union of the selected nodes' world bounds, or null if nothing is selected. */
+    getSelectionBounds(): { x: number; y: number; w: number; h: number } | null {
         const selection = this.scene.engine!.get_selection();
-        if (selection.length !== 1) return null;
-        const id = selection[0];
-        const bounds = this.scene.getNodeBounds(id);
-        const [minX, minY, maxX, maxY] = bounds;
+        if (selection.length === 0) return null;
+
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const id of selection) {
+            const b = this.scene.getNodeBounds(id);
+            minX = Math.min(minX, b[0]);
+            minY = Math.min(minY, b[1]);
+            maxX = Math.max(maxX, b[2]);
+            maxY = Math.max(maxY, b[3]);
+        }
+        if (minX === Infinity) return null;
+        return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+    }
+
+    checkResizeHandle(pos: { x: number; y: number }): { type: string } | null {
+        const bounds = this.getSelectionBounds();
+        if (!bounds) return null;
+
+        const minX = bounds.x, minY = bounds.y;
+        const maxX = bounds.x + bounds.w, maxY = bounds.y + bounds.h;
         const threshold = 6 / this.renderer.zoom;
 
         const handles: Array<{ type: string; x: number; y: number }> = [
@@ -1148,7 +1538,7 @@ export class InputManager {
 
         for (const h of handles) {
             if (Math.abs(pos.x - h.x) < threshold && Math.abs(pos.y - h.y) < threshold) {
-                return { type: h.type, nodeId: id };
+                return { type: h.type };
             }
         }
         return null;

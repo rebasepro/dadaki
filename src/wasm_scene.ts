@@ -194,7 +194,29 @@ export class WasmScene {
         }
     }
 
+    /** True while inside a transaction() — intermediate history pushes are suppressed. */
+    private _inTransaction = false;
+
+    /**
+     * Group several mutations into ONE undo step. A single history snapshot
+     * is taken up front; saveHistory calls made by wrapper methods inside
+     * `fn` become no-ops. Nested transactions join the outermost one.
+     */
+    transaction<T>(fn: () => T): T {
+        if (this._inTransaction) return fn();
+        this.saveHistory();
+        this._inTransaction = true;
+        try {
+            return fn();
+        } finally {
+            this._inTransaction = false;
+            this.invalidateCache();
+            this.autosave?.trigger();
+        }
+    }
+
     private saveHistory() {
+        if (this._inTransaction) return;
         const state = this.engine!.serialize_scene();
         this.history!.push_state(state);
     }
@@ -385,8 +407,24 @@ export class WasmScene {
         return id;
     }
 
+    /** Update a text node's content and font size. */
+    setTextContent(id: number, content: string, fontSize: number) {
+        this.saveHistory();
+        this.engine!.set_text_content(id, content, fontSize);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
     getNodeBounds(id: number): Float32Array {
         return this.engine!.get_node_bounds(id);
+    }
+
+    /** Fill a vector-network face (paint bucket). Undoable like any other mutation. */
+    setFaceFill(faceId: number, r: number, g: number, b: number, a: number) {
+        this.saveHistory();
+        this.engine!.set_face_fill(faceId, r, g, b, a);
+        this.invalidateCache();
+        this.autosave?.trigger();
     }
 
     convertToPath(id: number): boolean {

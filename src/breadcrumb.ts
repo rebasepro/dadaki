@@ -29,6 +29,9 @@ export class BreadcrumbBar {
     private input: InputManager;
     private scene: WasmScene;
 
+    /** Cache key for the last render — avoids redundant DOM rebuilds. */
+    private _lastSignature: string = '';
+
     constructor(
         headerEl: HTMLElement,
         ui: UIEngine,
@@ -57,7 +60,20 @@ export class BreadcrumbBar {
     /** Recompute context and update the breadcrumb. */
     refresh() {
         const info = getEditorContext(this.ui, this.input, this.scene);
+
+        // Build a signature from the state that drives the breadcrumb's DOM.
+        // If nothing relevant changed, skip the expensive innerHTML rebuild.
+        const sig = this.buildSignature(info);
+        if (sig === this._lastSignature) return;
+        this._lastSignature = sig;
+
         this.render(info);
+    }
+
+    /** Build a cache key that captures everything affecting the breadcrumb's rendered output. */
+    private buildSignature(info: ContextInfo): string {
+        const crumbSig = info.breadcrumb.map(c => `${c.id}:${c.name}:${c.nodeType}`).join('/');
+        return `${info.context}|${crumbSig}|${info.selectedIds.length}|${info.pointCount}|${info.editingNodeId}`;
     }
 
     /** Rebuild the breadcrumb DOM based on context info. */
