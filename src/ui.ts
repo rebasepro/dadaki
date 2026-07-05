@@ -5,6 +5,7 @@ import type { Color } from './types';
 import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, matrixToSVGTransform, escapeXml, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor } from './svg_utils';
 import type { SVGSubpath } from './svg_utils';
 import type { ContextBar } from './context_bar';
+import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock } from './icons';
 
 export class UIEngine {
     ck: CanvasKit;
@@ -19,12 +20,12 @@ export class UIEngine {
     private _currentStyleJson: string | null = null;
 
     // Static lookup tables (avoid re-creation each call)
-    private static readonly ICON_MAP: Record<string, string> = {
-        'Group': '📁',
-        'Rect': '⬜',
-        'Ellipse': '⭕',
-        'Path': '✏️',
-        'Text': '🔤',
+    private static readonly ICON_MAP: Record<string, () => string> = {
+        'Group': () => iconFolder(14),
+        'Rect': () => iconSquare(14),
+        'Ellipse': () => iconCircle(14),
+        'Path': () => iconPenTool(14),
+        'Text': () => iconType(14),
     };
     private static readonly CAP_MAP = ['butt', 'round', 'square'] as const;
     private static readonly JOIN_MAP = ['miter', 'round', 'bevel'] as const;
@@ -580,21 +581,21 @@ export class UIEngine {
                 chevronHtml = `<span class="layer-chevron-spacer"></span>`;
             }
 
-            let icon = '⬡';
+            let icon = iconHexagon(14);
             if (isGroup) {
-                icon = UIEngine.ICON_MAP['Group'];
+                icon = UIEngine.ICON_MAP['Group']();
             } else if (node.geometry?.Rect) {
-                icon = UIEngine.ICON_MAP['Rect'];
+                icon = UIEngine.ICON_MAP['Rect']();
             } else if (node.geometry?.Ellipse) {
-                icon = UIEngine.ICON_MAP['Ellipse'];
+                icon = UIEngine.ICON_MAP['Ellipse']();
             } else if (node.geometry?.Path) {
-                icon = UIEngine.ICON_MAP['Path'];
+                icon = UIEngine.ICON_MAP['Path']();
             } else if (node.geometry?.Text) {
-                icon = UIEngine.ICON_MAP['Text'];
+                icon = UIEngine.ICON_MAP['Text']();
             }
 
-            const visIcon = node.visible !== false ? '👁' : '👁‍🗨';
-            const lockIcon = node.locked === true ? '🔒' : '';
+            const visIcon = node.visible !== false ? iconEye(12) : iconEyeOff(12);
+            const lockIcon = node.locked === true ? iconLock(12) : '';
 
             item.innerHTML = `
                 <div class="layer-item-row" style="padding-left: ${indent + 4}px">

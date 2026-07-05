@@ -267,6 +267,29 @@ export class WasmScene {
         this.autosave?.trigger();
     }
 
+    /** Replace a set of nodes with a single path node (used by boolean ops).
+     *  All mutations land in ONE history snapshot so a single undo restores
+     *  the originals. Returns the new node's id. */
+    replaceNodesWithPath(
+        ids: number[] | Uint32Array,
+        subpathsJson: string,
+        styleJson: string | null,
+    ): number {
+        this.saveHistory();
+        this.engine!.clear_selection();
+        for (const id of ids) {
+            this.engine!.remove_node(id);
+        }
+        const newId = this.engine!.add_path(subpathsJson);
+        if (styleJson) {
+            this.engine!.set_node_style(newId, styleJson);
+        }
+        this.engine!.select_node(newId, false);
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return newId;
+    }
+
     /** Group the given node ids. Accepts any array-like (including the
      *  Uint32Array that get_selection() returns — JSON.stringify on a typed
      *  array would produce an object, not an array, so normalize here). */

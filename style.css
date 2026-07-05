@@ -637,9 +637,12 @@ body, html {
 /* Layer icon */
 .layer-icon {
     width: 14px;
-    text-align: center;
-    font-size: 11px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
+    color: var(--text-dim);
 }
 
 /* Layer name */
@@ -674,6 +677,9 @@ body, html {
     padding: 1px 2px;
     border-radius: 2px;
     transition: background 0.1s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .layer-vis-btn:hover,
@@ -828,6 +834,18 @@ body, html {
 .cb-btn-icon {
     font-size: 13px;
     line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Compact icon-only buttons (align / boolean rows) */
+.cb-btn-icon-only {
+    padding: 3px 5px;
+    font-size: 14px;
+    line-height: 1;
+    min-width: 24px;
+    justify-content: center;
 }
 
 .cb-btn-text {

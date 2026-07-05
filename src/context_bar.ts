@@ -9,6 +9,11 @@ import type { WasmScene } from './wasm_scene';
 import type { Renderer } from './renderer';
 import { getEditorContext } from './context';
 import type { ContextInfo } from './context';
+import { alignSelection, distributeSelection } from './align';
+import type { AlignMode } from './align';
+import { applyBooleanOp } from './boolean_ops';
+import type { BoolOp } from './boolean_ops';
+import { iconUndo, iconRedo, iconPencil, iconTrash } from './icons';
 
 /** Tool-specific hint text for shape-tool and text-tool contexts. */
 const TOOL_HINTS: Record<string, string> = {
@@ -119,12 +124,12 @@ export class ContextBar {
         this.el.appendChild(this.createSeparator());
 
         // Undo / Redo
-        this.el.appendChild(this.createButton('Undo', '↩', () => {
+        this.el.appendChild(this.createButton('Undo', iconUndo(14), () => {
             this.scene.undo();
             this.ui.syncWithSelection();
             this.ui.updateLayerList();
         }));
-        this.el.appendChild(this.createButton('Redo', '↪', () => {
+        this.el.appendChild(this.createButton('Redo', iconRedo(14), () => {
             this.scene.redo();
             this.ui.syncWithSelection();
             this.ui.updateLayerList();
@@ -173,7 +178,7 @@ export class ContextBar {
         this.el.appendChild(this.createSeparator());
 
         // Edit Path
-        this.el.appendChild(this.createButton('Edit Path', '✏️', () => {
+        this.el.appendChild(this.createButton('Edit Path', iconPencil(14), () => {
             if (info.selectedIds.length === 1) {
                 this.ui.setActiveTool('direct');
                 this.input.enterPathEditMode(info.selectedIds[0]);
@@ -186,7 +191,7 @@ export class ContextBar {
         }));
 
         // Delete
-        this.el.appendChild(this.createButton('Delete', '🗑', () => {
+        this.el.appendChild(this.createButton('Delete', iconTrash(14), () => {
             this.input.deleteSelection();
         }, true));
     }
@@ -206,13 +211,60 @@ export class ContextBar {
 
         this.el.appendChild(this.createSeparator());
 
+        // Align / distribute
+        const alignActions: Array<[string, string, AlignMode]> = [
+            ['Align left', '⇤', 'left'],
+            ['Align center', '⇹', 'hcenter'],
+            ['Align right', '⇥', 'right'],
+            ['Align top', '⤒', 'top'],
+            ['Align middle', '⇳', 'vcenter'],
+            ['Align bottom', '⤓', 'bottom'],
+        ];
+        for (const [title, icon, mode] of alignActions) {
+            this.el.appendChild(this.createIconButton(title, icon, () => {
+                alignSelection(this.scene, [...info.selectedIds], mode);
+                this.ui.syncWithSelection();
+            }));
+        }
+        if (info.selectedIds.length >= 3) {
+            this.el.appendChild(this.createIconButton('Distribute horizontally', '⫴', () => {
+                distributeSelection(this.scene, [...info.selectedIds], 'h');
+                this.ui.syncWithSelection();
+            }));
+            this.el.appendChild(this.createIconButton('Distribute vertically', '⫶', () => {
+                distributeSelection(this.scene, [...info.selectedIds], 'v');
+                this.ui.syncWithSelection();
+            }));
+        }
+
+        this.el.appendChild(this.createSeparator());
+
+        // Boolean operations
+        const boolActions: Array<[string, string, BoolOp]> = [
+            ['Union', '⊕', 'union'],
+            ['Subtract', '⊖', 'subtract'],
+            ['Intersect', '⊗', 'intersect'],
+            ['Exclude', '⊘', 'exclude'],
+        ];
+        for (const [title, icon, op] of boolActions) {
+            this.el.appendChild(this.createIconButton(title, icon, () => {
+                const newId = applyBooleanOp(this.ui.ck, this.scene, [...info.selectedIds], op);
+                if (newId !== null) {
+                    this.ui.syncWithSelection();
+                    this.ui.updateLayerList();
+                }
+            }));
+        }
+
+        this.el.appendChild(this.createSeparator());
+
         // Group
         this.el.appendChild(this.createButton('Group ⌘G', '⊞', () => {
             this.input.groupSelection();
         }));
 
         // Delete
-        this.el.appendChild(this.createButton('Delete', '🗑', () => {
+        this.el.appendChild(this.createButton('Delete', iconTrash(14), () => {
             this.input.deleteSelection();
         }, true));
     }
@@ -357,6 +409,19 @@ export class ContextBar {
         bc.className = 'cb-breadcrumb';
         bc.textContent = crumbs.join(' › ');
         return bc;
+    }
+
+    /** Compact icon-only button (align/boolean rows). */
+    private createIconButton(title: string, icon: string, onClick: () => void): HTMLElement {
+        const btn = document.createElement('button');
+        btn.className = 'cb-btn cb-btn-icon-only';
+        btn.title = title;
+        btn.textContent = icon;
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            onClick();
+        });
+        return btn;
     }
 
     private createButton(
