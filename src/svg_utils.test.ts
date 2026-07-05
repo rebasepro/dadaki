@@ -1,0 +1,389 @@
+import { describe, it, expect } from 'vitest';
+import {
+    hexToRgb,
+    rgbToHex,
+    tokenizeSVGNumbers,
+    parseSVGPathD,
+    arcToCubicBeziers,
+    identityMatrix,
+    composeMatrices,
+    transformPoint,
+    parseSVGTransform,
+    matrixToSVGTransform,
+    escapeXml,
+    resolveGradientColor,
+} from './svg_utils';
+
+// ─── Color Conversion ───────────────────────────────────────────────────────
+
+describe('hexToRgb', () => {
+    it('converts black', () => {
+        expect(hexToRgb('#000000')).toEqual({ r: 0, g: 0, b: 0, a: 1.0 });
+    });
+
+    it('converts white', () => {
+        expect(hexToRgb('#ffffff')).toEqual({ r: 1, g: 1, b: 1, a: 1.0 });
+    });
+
+    it('converts Figma blue', () => {
+        const c = hexToRgb('#0099ff');
+        expect(c.r).toBeCloseTo(0, 1);
+        expect(c.g).toBeCloseTo(0.6, 1);
+        expect(c.b).toBeCloseTo(1.0, 1);
+        expect(c.a).toBe(1.0);
+    });
+});
+
+describe('rgbToHex', () => {
+    it('converts black', () => {
+        expect(rgbToHex({ r: 0, g: 0, b: 0 })).toBe('#000000');
+    });
+
+    it('converts white', () => {
+        expect(rgbToHex({ r: 1, g: 1, b: 1 })).toBe('#ffffff');
+    });
+
+    it('round-trips correctly', () => {
+        const hex = '#4285f4';
+        const rgb = hexToRgb(hex);
+        const result = rgbToHex(rgb);
+        expect(result).toBe(hex);
+    });
+});
+
+// ─── SVG Number Tokenizer ───────────────────────────────────────────────────
+
+describe('tokenizeSVGNumbers', () => {
+    it('parses simple positive numbers', () => {
+        expect(tokenizeSVGNumbers('10 20 30')).toEqual([10, 20, 30]);
+    });
+
+    it('parses negative numbers', () => {
+        expect(tokenizeSVGNumbers('-10-20-30')).toEqual([-10, -20, -30]);
+    });
+
+    it('parses decimals without leading digit', () => {
+        expect(tokenizeSVGNumbers('.5.6.7')).toEqual([0.5, 0.6, 0.7]);
+    });
+
+    it('parses mixed positive, negative, decimal', () => {
+        expect(tokenizeSVGNumbers('10.5-3.2 0.1')).toEqual([10.5, -3.2, 0.1]);
+    });
+
+    it('parses scientific notation', () => {
+        expect(tokenizeSVGNumbers('1e2 -3.5e-1')).toEqual([100, -0.35]);
+    });
+
+    it('returns empty array for empty string', () => {
+        expect(tokenizeSVGNumbers('')).toEqual([]);
+    });
+});
+
+// ─── SVG Path Parsing ───────────────────────────────────────────────────────
+
+describe('parseSVGPathD', () => {
+    it('parses a simple triangle (M L L Z)', () => {
+        const result = parseSVGPathD('M 0 0 L 100 0 L 50 100 Z', 0, 0);
+        expect(result).toHaveLength(1);
+        expect(result[0].closed).toBe(true);
+        const pts = result[0].points;
+        // 3 points: M(0,0) + L(100,0) + L(50,100). Z closes, no duplicate point.
+        expect(pts).toHaveLength(3);
+        expect(pts[0]).toEqual({ x: 0, y: 0, cp1: [0, 0], cp2: [0, 0] });
+        expect(pts[1]).toEqual({ x: 100, y: 0, cp1: [100, 0], cp2: [100, 0] });
+        expect(pts[2]).toEqual({ x: 50, y: 100, cp1: [50, 100], cp2: [50, 100] });
+    });
+
+    it('applies translation offset', () => {
+        const result = parseSVGPathD('M 10 20', 5, 10);
+        const pts = result[0].points;
+        expect(pts[0].x).toBe(15);
+        expect(pts[0].y).toBe(30);
+    });
+
+    it('handles relative moveto (m) and lineto (l)', () => {
+        const result = parseSVGPathD('m 10 10 l 20 0 l 0 20', 0, 0);
+        expect(result).toHaveLength(1);
+        expect(result[0].closed).toBe(false);
+        const pts = result[0].points;
+        expect(pts).toHaveLength(3);
+        expect(pts[0]).toEqual({ x: 10, y: 10, cp1: [10, 10], cp2: [10, 10] });
+        expect(pts[1]).toEqual({ x: 30, y: 10, cp1: [30, 10], cp2: [30, 10] });
+        expect(pts[2]).toEqual({ x: 30, y: 30, cp1: [30, 30], cp2: [30, 30] });
+    });
+
+    it('handles horizontal (H/h) and vertical (V/v) lines', () => {
+        const result = parseSVGPathD('M 0 0 H 50 V 30', 0, 0);
+        expect(result).toHaveLength(1);
+        const pts = result[0].points;
+        expect(pts).toHaveLength(3);
+        expect(pts[1].x).toBe(50);
+        expect(pts[1].y).toBe(0);
+        expect(pts[2].x).toBe(50);
+        expect(pts[2].y).toBe(30);
+    });
+
+    it('parses cubic bezier (C)', () => {
+        const result = parseSVGPathD('M 0 0 C 10 20 30 40 50 60', 0, 0);
+        expect(result).toHaveLength(1);
+        const pts = result[0].points;
+        expect(pts).toHaveLength(2);
+        // First point's outgoing cp2 is set to C's first control point
+        expect(pts[0].cp2).toEqual([10, 20]);
+        // Second point
+        expect(pts[1].x).toBe(50);
+        expect(pts[1].y).toBe(60);
+        // Second point's incoming cp1 is C's second control point
+        expect(pts[1].cp1).toEqual([30, 40]);
+    });
+
+    it('parses quadratic bezier (Q) as cubic', () => {
+        const result = parseSVGPathD('M 0 0 Q 50 50 100 0', 0, 0);
+        expect(result).toHaveLength(1);
+        const pts = result[0].points;
+        expect(pts).toHaveLength(2);
+        // Q(50,50) → cubic control points via 2/3 rule
+        // CP1 = start + 2/3*(Q-start) = 0 + 2/3*50 = 33.33
+        expect(pts[0].cp2[0]).toBeCloseTo(33.33, 1);
+        expect(pts[0].cp2[1]).toBeCloseTo(33.33, 1);
+    });
+
+    it('does not add duplicate closing point for Z when already at start', () => {
+        // A shape where the path returns to origin before Z
+        const result = parseSVGPathD('M 0 0 L 10 0 L 10 10 L 0 0 Z', 0, 0);
+        expect(result).toHaveLength(1);
+        expect(result[0].closed).toBe(true);
+        // M + L + L + L = 4 points, Z does not add any
+        expect(result[0].points).toHaveLength(4);
+    });
+
+    it('handles empty path', () => {
+        expect(parseSVGPathD('', 0, 0)).toEqual([]);
+    });
+
+    it('handles implicit lineTo after M', () => {
+        // After M, subsequent coordinate pairs are implicit L
+        const result = parseSVGPathD('M 0 0 10 10 20 20', 0, 0);
+        expect(result).toHaveLength(1);
+        const pts = result[0].points;
+        expect(pts).toHaveLength(3);
+        expect(pts[2].x).toBe(20);
+        expect(pts[2].y).toBe(20);
+    });
+
+    // ─── New subpath tests ──────────────────────────────────────────────────
+
+    it('two-subpath Z-closed paths', () => {
+        const result = parseSVGPathD('M0 0 L10 0 L10 10 Z M20 20 L30 20 L30 30 Z', 0, 0);
+        expect(result).toHaveLength(2);
+
+        // First subpath
+        expect(result[0].closed).toBe(true);
+        expect(result[0].points).toHaveLength(3);
+        expect(result[0].points[0]).toEqual({ x: 0, y: 0, cp1: [0, 0], cp2: [0, 0] });
+        expect(result[0].points[1]).toEqual({ x: 10, y: 0, cp1: [10, 0], cp2: [10, 0] });
+        expect(result[0].points[2]).toEqual({ x: 10, y: 10, cp1: [10, 10], cp2: [10, 10] });
+
+        // Second subpath
+        expect(result[1].closed).toBe(true);
+        expect(result[1].points).toHaveLength(3);
+        expect(result[1].points[0]).toEqual({ x: 20, y: 20, cp1: [20, 20], cp2: [20, 20] });
+        expect(result[1].points[1]).toEqual({ x: 30, y: 20, cp1: [30, 20], cp2: [30, 20] });
+        expect(result[1].points[2]).toEqual({ x: 30, y: 30, cp1: [30, 30], cp2: [30, 30] });
+    });
+
+    it('open path (no Z) has closed: false', () => {
+        const result = parseSVGPathD('M 0 0 L 100 0 L 50 100', 0, 0);
+        expect(result).toHaveLength(1);
+        expect(result[0].closed).toBe(false);
+        expect(result[0].points).toHaveLength(3);
+    });
+
+    it('multi-M without Z produces separate open subpaths', () => {
+        const result = parseSVGPathD('M0 0 L10 10 M20 20 L30 30', 0, 0);
+        expect(result).toHaveLength(2);
+        expect(result[0].closed).toBe(false);
+        expect(result[0].points).toHaveLength(2);
+        expect(result[1].closed).toBe(false);
+        expect(result[1].points).toHaveLength(2);
+    });
+});
+
+// ─── Arc to Cubic Bezier ────────────────────────────────────────────────────
+
+describe('arcToCubicBeziers', () => {
+    it('returns line segment for degenerate arc (rx=0)', () => {
+        const segs = arcToCubicBeziers(0, 0, 0, 50, 0, false, true, 100, 0);
+        expect(segs).toHaveLength(1);
+        expect(segs[0].ex).toBe(100);
+        expect(segs[0].ey).toBe(0);
+    });
+
+    it('returns line segment for degenerate arc (ry=0)', () => {
+        const segs = arcToCubicBeziers(0, 0, 50, 0, 0, false, true, 100, 0);
+        expect(segs).toHaveLength(1);
+    });
+
+    it('creates semicircle segments for 180° arc', () => {
+        // Semicircle from (0,0) to (100,0) with radius 50
+        const segs = arcToCubicBeziers(0, 0, 50, 50, 0, false, true, 100, 0);
+        // Should produce 2 segments (180° / 90° max per segment)
+        expect(segs.length).toBeGreaterThanOrEqual(2);
+        // Last segment should end at target point
+        const last = segs[segs.length - 1];
+        expect(last.ex).toBeCloseTo(100, 1);
+        expect(last.ey).toBeCloseTo(0, 1);
+    });
+
+    it('creates correct number of segments for full circle', () => {
+        // Full circle: large arc flag = true, sweep = true
+        const segs = arcToCubicBeziers(50, 0, 50, 50, 0, true, true, 50, 0.001);
+        // Full circle ≈ 360° → 4 segments
+        expect(segs.length).toBe(4);
+    });
+});
+
+// ─── Matrix & Transform Utilities ────────────────────────────────────────────
+
+describe('composeMatrices / transformPoint', () => {
+    it('identity composed with identity is identity', () => {
+        expect(composeMatrices(identityMatrix(), identityMatrix())).toEqual(identityMatrix());
+    });
+
+    it('translation then scale applies in correct order', () => {
+        // M = translate(10, 20) * scale(2) — scale applied first, then translate
+        const t = parseSVGTransform('translate(10, 20)');
+        const s = parseSVGTransform('scale(2)');
+        const m = composeMatrices(t, s);
+        expect(transformPoint(m, 5, 5)).toEqual([20, 30]); // (5*2)+10, (5*2)+20
+    });
+});
+
+describe('parseSVGTransform', () => {
+    it('parses translate', () => {
+        const m = parseSVGTransform('translate(15, 25)');
+        expect(transformPoint(m, 0, 0)).toEqual([15, 25]);
+    });
+
+    it('translate with single argument means ty = 0', () => {
+        const m = parseSVGTransform('translate(15)');
+        expect(transformPoint(m, 0, 0)).toEqual([15, 0]);
+    });
+
+    it('parses scale (uniform and non-uniform)', () => {
+        expect(transformPoint(parseSVGTransform('scale(2)'), 3, 4)).toEqual([6, 8]);
+        expect(transformPoint(parseSVGTransform('scale(2, 3)'), 3, 4)).toEqual([6, 12]);
+    });
+
+    it('parses rotate about origin', () => {
+        const m = parseSVGTransform('rotate(90)');
+        const [x, y] = transformPoint(m, 10, 0);
+        expect(x).toBeCloseTo(0, 5);
+        expect(y).toBeCloseTo(10, 5);
+    });
+
+    it('parses rotate about a point', () => {
+        // rotate(45 50 50): the pivot itself must not move
+        const m = parseSVGTransform('rotate(45 50 50)');
+        const [px, py] = transformPoint(m, 50, 50);
+        expect(px).toBeCloseTo(50, 4);
+        expect(py).toBeCloseTo(50, 4);
+        // A point directly right of the pivot rotates 45° down-right (SVG y-down)
+        const [qx, qy] = transformPoint(m, 60, 50);
+        expect(qx).toBeCloseTo(50 + 10 * Math.SQRT1_2, 4);
+        expect(qy).toBeCloseTo(50 + 10 * Math.SQRT1_2, 4);
+    });
+
+    it('parses matrix()', () => {
+        const m = parseSVGTransform('matrix(1, 0, 0, 1, 30, 40)');
+        expect(transformPoint(m, 1, 2)).toEqual([31, 42]);
+    });
+
+    it('composes multiple transforms left-to-right', () => {
+        // translate then rotate: rotate applies first to the point
+        const m = parseSVGTransform('translate(100, 0) rotate(90)');
+        const [x, y] = transformPoint(m, 10, 0);
+        expect(x).toBeCloseTo(100, 4);
+        expect(y).toBeCloseTo(10, 4);
+    });
+
+    it('returns identity for empty/garbage input', () => {
+        expect(parseSVGTransform('')).toEqual(identityMatrix());
+        expect(parseSVGTransform('nonsense')).toEqual(identityMatrix());
+    });
+});
+
+describe('matrixToSVGTransform', () => {
+    it('maps column-major to SVG matrix(a,b,c,d,e,f)', () => {
+        // column-major: [a, b, 0, c, d, 0, tx, ty, 1]
+        const m = [1, 2, 0, 3, 4, 0, 5, 6, 1];
+        expect(matrixToSVGTransform(m)).toBe('matrix(1,2,3,4,5,6)');
+    });
+
+    it('round-trips through parseSVGTransform', () => {
+        const original = parseSVGTransform('translate(12, 34) rotate(30) scale(1.5)');
+        const reparsed = parseSVGTransform(matrixToSVGTransform(original));
+        for (const [x, y] of [[0, 0], [10, 0], [0, 10], [7, -3]] as const) {
+            const a = transformPoint(original, x, y);
+            const b = transformPoint(reparsed, x, y);
+            expect(b[0]).toBeCloseTo(a[0], 4);
+            expect(b[1]).toBeCloseTo(a[1], 4);
+        }
+    });
+});
+
+// ─── XML Escaping ────────────────────────────────────────────────────────────
+
+describe('escapeXml', () => {
+    it('escapes all five special characters', () => {
+        expect(escapeXml(`<a href="x">&'y'</a>`))
+            .toBe('&lt;a href=&quot;x&quot;&gt;&amp;&apos;y&apos;&lt;/a&gt;');
+    });
+
+    it('leaves plain text unchanged', () => {
+        expect(escapeXml('Hello World 123')).toBe('Hello World 123');
+    });
+});
+
+// ─── Gradient Resolution ─────────────────────────────────────────────────────
+
+/** Minimal stub implementing the Document surface resolveGradientColor uses. */
+function stubGradientDoc(tagName: string, stopColor: string | null, stopStyle?: string): Document {
+    const stop = stopColor !== null || stopStyle ? {
+        getAttribute: (name: string) => {
+            if (name === 'stop-color') return stopColor;
+            if (name === 'style') return stopStyle ?? null;
+            return null;
+        },
+    } : null;
+    const gradientEl = {
+        tagName,
+        querySelector: (sel: string) => (sel === 'stop' ? stop : null),
+    };
+    return {
+        getElementById: (id: string) => (id === 'grad1' ? gradientEl : null),
+    } as unknown as Document;
+}
+
+describe('resolveGradientColor', () => {
+    it('resolves first stop-color of a linear gradient', () => {
+        const doc = stubGradientDoc('linearGradient', '#ff8800');
+        expect(resolveGradientColor(doc, 'url(#grad1)')).toBe('#ff8800');
+    });
+
+    it('reads stop-color from inline style', () => {
+        const doc = stubGradientDoc('radialGradient', null, 'stop-color: #00ff00; stop-opacity: 1');
+        expect(resolveGradientColor(doc, 'url(#grad1)')).toBe('#00ff00');
+    });
+
+    it('converts rgb() stop colors to hex', () => {
+        const doc = stubGradientDoc('linearGradient', 'rgb(255, 0, 128)');
+        expect(resolveGradientColor(doc, 'url(#grad1)')).toBe('#ff0080');
+    });
+
+    it('returns null for unknown ids and non-gradient refs', () => {
+        const doc = stubGradientDoc('linearGradient', '#ffffff');
+        expect(resolveGradientColor(doc, 'url(#missing)')).toBeNull();
+        expect(resolveGradientColor(doc, 'not-a-url')).toBeNull();
+    });
+});

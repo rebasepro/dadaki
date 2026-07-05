@@ -57,7 +57,7 @@ export class FileIO {
      * Open a .vec or .svg file.
      * Returns true if a file was loaded.
      */
-    static async openFile(engine: Engine): Promise<boolean> {
+    static async openFile(engine: Engine, fallbackParser?: (svgText: string) => void): Promise<boolean> {
         if ('showOpenFilePicker' in window) {
             try {
                 const [handle] = await (window as any).showOpenFilePicker({
@@ -72,7 +72,7 @@ export class FileIO {
                 });
 
                 const file = await handle.getFile();
-                const loaded = await this.loadFile(engine, file);
+                const loaded = await this.loadFile(engine, file, fallbackParser);
                 if (loaded && file.name.endsWith('.vec')) {
                     this.fileHandle = handle;
                     document.title = file.name + ' — Vector Editor';
@@ -84,13 +84,13 @@ export class FileIO {
         }
 
         // Fallback: file input
-        return this.openViaInput(engine);
+        return this.openViaInput(engine, fallbackParser);
     }
 
     /**
      * Load a file (auto-detect .vec vs .svg).
      */
-    static async loadFile(engine: Engine, file: File): Promise<boolean> {
+    static async loadFile(engine: Engine, file: File, fallbackParser?: (svgText: string) => void): Promise<boolean> {
         if (file.name.endsWith('.vec')) {
             const bytes = new Uint8Array(await file.arrayBuffer());
             return engine.deserialize_proto(bytes);
@@ -98,13 +98,14 @@ export class FileIO {
 
         // SVG: check for embedded protobuf payload
         const text = await file.text();
-        return this.loadSVGText(engine, text);
+        return this.loadSVGText(engine, text, fallbackParser);
     }
 
     /**
      * Parse SVG text and load it. Checks for embedded vec:data payload first.
+     * If no payload is found and a fallback parser callback is provided, it is called with the raw SVG text.
      */
-    static loadSVGText(engine: Engine, text: string): boolean {
+    static loadSVGText(engine: Engine, text: string, fallbackParser?: (svgText: string) => void): boolean {
         // Check for embedded protobuf payload
         const match = text.match(/<vec:data[^>]*>([\s\S]*?)<\/vec:data>/);
         if (match) {
@@ -114,7 +115,12 @@ export class FileIO {
             }
         }
 
-        // TODO: Fallback to standard SVG parsing
+        // Fallback to standard SVG parsing via UI parser
+        if (fallbackParser) {
+            fallbackParser(text);
+            return true;
+        }
+
         console.warn('No vec:data payload found in SVG. Standard SVG import not yet implemented.');
         return false;
     }
@@ -162,7 +168,7 @@ export class FileIO {
         URL.revokeObjectURL(url);
     }
 
-    private static openViaInput(engine: Engine): Promise<boolean> {
+    private static openViaInput(engine: Engine, fallbackParser?: (svgText: string) => void): Promise<boolean> {
         return new Promise((resolve) => {
             const input = document.createElement('input');
             input.type = 'file';
@@ -173,7 +179,7 @@ export class FileIO {
                     resolve(false);
                     return;
                 }
-                const loaded = await this.loadFile(engine, file);
+                const loaded = await this.loadFile(engine, file, fallbackParser);
                 resolve(loaded);
             };
             input.click();

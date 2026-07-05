@@ -661,23 +661,32 @@ impl Engine {
                 .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
 
             match &node.geometry {
-                Geometry::Path { points } => {
-                    // Transform path points to world space, then extract segments
-                    let world_points: Vec<PathPoint> = points.iter().map(|p| {
-                        PathPoint {
-                            x: transform[0] * p.x + transform[3] * p.y + transform[6],
-                            y: transform[1] * p.x + transform[4] * p.y + transform[7],
-                            cp1: Vec2::new(
-                                transform[0] * p.cp1.x + transform[3] * p.cp1.y + transform[6],
-                                transform[1] * p.cp1.x + transform[4] * p.cp1.y + transform[7],
-                            ),
-                            cp2: Vec2::new(
-                                transform[0] * p.cp2.x + transform[3] * p.cp2.y + transform[6],
-                                transform[1] * p.cp2.x + transform[4] * p.cp2.y + transform[7],
-                            ),
+                Geometry::Path { subpaths } => {
+                    // Transform subpath points to world space, then extract segments
+                    for sp in subpaths {
+                        let world_points: Vec<PathPoint> = sp.points.iter().map(|p| {
+                            PathPoint {
+                                x: transform[0] * p.x + transform[3] * p.y + transform[6],
+                                y: transform[1] * p.x + transform[4] * p.y + transform[7],
+                                cp1: Vec2::new(
+                                    transform[0] * p.cp1.x + transform[3] * p.cp1.y + transform[6],
+                                    transform[1] * p.cp1.x + transform[4] * p.cp1.y + transform[7],
+                                ),
+                                cp2: Vec2::new(
+                                    transform[0] * p.cp2.x + transform[3] * p.cp2.y + transform[6],
+                                    transform[1] * p.cp2.x + transform[4] * p.cp2.y + transform[7],
+                                ),
+                            }
+                        }).collect();
+                        segments.extend(path_to_segments(&world_points, id));
+                        // If closed, add closing segment from last to first
+                        if sp.closed && world_points.len() >= 2 {
+                            let last = &world_points[world_points.len() - 1];
+                            let first = &world_points[0];
+                            let closing = vec![last.clone(), first.clone()];
+                            segments.extend(path_to_segments(&closing, id));
                         }
-                    }).collect();
-                    segments.extend(path_to_segments(&world_points, id));
+                    }
                 }
                 Geometry::Rect { width, height } => {
                     segments.extend(rect_to_segments(*width, *height, &transform, id));

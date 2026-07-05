@@ -1,18 +1,21 @@
 import init, { Engine, History } from '../engine/pkg/engine';
 import { PersistenceManager, AutosaveManager } from './persistence';
+import type { SceneData } from './types';
+import type { CanvasKit } from 'canvaskit-wasm';
 
 export class WasmScene {
     engine: Engine | null = null;
     history: History | null = null;
-    wasm: any = null;
+    /** WASM module instance — needed for `memory.buffer` access. */
+    wasm: { memory: WebAssembly.Memory } | null = null;
     autosave: AutosaveManager | null = null;
-    ck: any = null;
+    ck: CanvasKit;
 
     /** Cached scene data, invalidated on mutation. */
-    private _cachedSceneData: any = null;
+    private _cachedSceneData: SceneData | null = null;
     private _sceneDataDirty: boolean = true;
 
-    constructor(ck: any) {
+    constructor(ck: CanvasKit) {
         this.ck = ck;
     }
 
@@ -86,6 +89,14 @@ export class WasmScene {
         this.autosave?.trigger();
     }
 
+    /** Apply a style change without pushing history. Used for live preview during
+     *  drag-editing (e.g. color picker) and for applying the current style to
+     *  newly created shapes (where the creation already pushed history). */
+    setNodeStyleNoHistory(id: number, styleJson: string) {
+        this.engine!.set_node_style(id, styleJson);
+        this.invalidateCache();
+    }
+
     setNodeVisible(id: number, visible: boolean) {
         this.saveHistory();
         this.engine!.set_node_visible(id, visible);
@@ -122,6 +133,25 @@ export class WasmScene {
         return result;
     }
 
+    hitTestGrouped(x: number, y: number): number | undefined {
+        const result = this.engine!.hit_test_grouped(x, y);
+        return result;
+    }
+
+    getNodeType(id: number): number | undefined {
+        return this.engine!.get_node_type(id);
+    }
+
+    getNodeParent(id: number): number {
+        return this.engine!.get_node_parent(id);
+    }
+
+    /** Drop ids whose ancestor is also in the list (prevents double-moves
+     *  when a group and its children are both selected). */
+    dedupSelection(ids: number[] | Uint32Array): Uint32Array {
+        return this.engine!.dedup_selection(JSON.stringify(Array.from(ids)));
+    }
+
     undo() {
         const currentState = this.engine!.serialize_scene();
         const prevState = this.history!.undo(currentState);
@@ -155,7 +185,7 @@ export class WasmScene {
         const ptr = this.engine!.get_node_transform_ptr(id);
         // IMPORTANT: Copy the data. The WASM pointer points to a single reused buffer
         // that gets overwritten on the next get_node_transform_ptr call.
-        const view = new Float32Array(this.wasm.memory.buffer, ptr, 9);
+        const view = new Float32Array(this.wasm!.memory.buffer, ptr, 9);
         return new Float32Array(view);
     }
 
@@ -175,9 +205,9 @@ export class WasmScene {
      * Returns parsed scene data. Cached per frame — only re-parsed if the scene
      * was mutated since the last call.
      */
-    getSceneData(): any {
+    getSceneData(): SceneData {
         if (this._sceneDataDirty || !this._cachedSceneData) {
-            this._cachedSceneData = JSON.parse(this.engine!.get_scene_json());
+            this._cachedSceneData = JSON.parse(this.engine!.get_scene_json()) as SceneData;
             this._sceneDataDirty = false;
         }
         return this._cachedSceneData;
@@ -197,6 +227,14 @@ export class WasmScene {
         this.autosave?.trigger();
     }
 
+    /** Set the full local transform of a node (column-major [f32; 9]). */
+    setNodeTransform(id: number, transform: number[]) {
+        this.saveHistory();
+        this.engine!.set_node_transform(id, JSON.stringify(transform));
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
     rotateNode(id: number, angleRad: number) {
         this.saveHistory();
         this.engine!.rotate_node(id, angleRad);
@@ -212,7 +250,28 @@ export class WasmScene {
         return newId;
     }
 
-    groupNodes(idsJson: string): number {
+    removeNode(id: number) {
+        this.saveHistory();
+        this.engine!.remove_node(id);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** Remove multiple nodes in a single history snapshot. */
+    removeNodes(ids: number[] | Uint32Array) {
+        this.saveHistory();
+        for (const id of ids) {
+            this.engine!.remove_node(id);
+        }
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** Group the given node ids. Accepts any array-like (including the
+     *  Uint32Array that get_selection() returns — JSON.stringify on a typed
+     *  array would produce an object, not an array, so normalize here). */
+    groupNodes(ids: number[] | Uint32Array): number {
+        const idsJson = JSON.stringify(Array.from(ids));
         this.saveHistory();
         const groupId = this.engine!.group_nodes(idsJson);
         this.invalidateCache();

@@ -3,3 +3,4 @@ node_modules
 dist
 .idea
 engine/target/
+engine/wasm-pack-v0.12.1-x86_64-apple-darwin/

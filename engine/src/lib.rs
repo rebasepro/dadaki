@@ -65,7 +65,7 @@ fn default_opacity() -> f32 { 1.0 }
 pub enum Geometry {
     Rect { width: f32, height: f32 },
     Ellipse { radius_x: f32, radius_y: f32 },
-    Path { points: Vec<PathPoint> },
+    Path { subpaths: Vec<Subpath> },
     Text { content: String, font_size: f32 },
 }
 
@@ -75,6 +75,12 @@ pub struct PathPoint {
     pub y: f32,
     pub cp1: Vec2,
     pub cp2: Vec2,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Subpath {
+    pub points: Vec<PathPoint>,
+    pub closed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -133,7 +139,13 @@ pub struct Scene {
     pub selection: Vec<u32>,
     #[serde(default)]
     pub vector_network: VectorNetwork,
+    #[serde(default = "default_document_size")]
+    pub document_width: f32,
+    #[serde(default = "default_document_size")]
+    pub document_height: f32,
 }
+
+fn default_document_size() -> f32 { 1000.0 }
 
 #[wasm_bindgen]
 impl Engine {
@@ -146,6 +158,8 @@ impl Engine {
                 root_nodes: Vec::new(),
                 selection: Vec::new(),
                 vector_network: VectorNetwork::default(),
+                document_width: 1000.0,
+                document_height: 1000.0,
             },
             next_id: 1,
             global_transforms: HashMap::new(),
@@ -249,15 +263,46 @@ impl Engine {
     }
 
     pub fn add_path(&mut self, points_json: &str) -> u32 {
-        let points: Vec<PathPoint> = serde_json::from_str(points_json).unwrap_or_default();
+        let subpaths: Vec<Subpath> = serde_json::from_str(points_json).unwrap_or_default();
         let id = self.next_id;
         self.next_id += 1;
+
+        // Compute bbox center of all points for local-space normalization
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for sp in &subpaths {
+            for pt in &sp.points {
+                min_x = min_x.min(pt.x);
+                min_y = min_y.min(pt.y);
+                max_x = max_x.max(pt.x);
+                max_y = max_y.max(pt.y);
+            }
+        }
+        let (center_x, center_y) = if min_x <= max_x && min_y <= max_y {
+            ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+        } else {
+            (0.0, 0.0)
+        };
+
+        // Subtract center from all points to make geometry local-space
+        let subpaths: Vec<Subpath> = subpaths.into_iter().map(|sp| Subpath {
+            points: sp.points.into_iter().map(|mut pt| {
+                pt.x -= center_x;
+                pt.y -= center_y;
+                pt.cp1 -= Vec2::new(center_x, center_y);
+                pt.cp2 -= Vec2::new(center_x, center_y);
+                pt
+            }).collect(),
+            closed: sp.closed,
+        }).collect();
 
         let node = Node {
             id,
             name: format!("Path {}", id),
             node_type: NodeType::Path,
-            transform: Mat3::IDENTITY.to_cols_array(),
+            transform: Mat3::from_translation(Vec2::new(center_x, center_y)).to_cols_array(),
             style: Style {
                 fill: Some(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 }),
                 stroke: Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
@@ -273,7 +318,7 @@ impl Engine {
                 miter_limit: 4.0,
                 fill_opacity: 1.0,
             },
-            geometry: Geometry::Path { points },
+            geometry: Geometry::Path { subpaths },
             children: Vec::new(),
             parent: None,
             visible: true,
@@ -292,10 +337,10 @@ impl Engine {
         let sides = sides.max(3);
         let step = std::f32::consts::TAU / sides as f32;
         let mut points = Vec::new();
-        for i in 0..=sides {
+        for i in 0..sides {
             let angle = i as f32 * step - std::f32::consts::FRAC_PI_2;
-            let px = cx + radius * angle.cos();
-            let py = cy + radius * angle.sin();
+            let px = radius * angle.cos();
+            let py = radius * angle.sin();
             points.push(PathPoint {
                 x: px,
                 y: py,
@@ -303,15 +348,8 @@ impl Engine {
                 cp2: Vec2::new(px, py),
             });
         }
-        // Close: last point equals first
-        if let Some(first) = points.first().cloned() {
-            if let Some(last) = points.last_mut() {
-                last.x = first.x;
-                last.y = first.y;
-                last.cp1 = first.cp1;
-                last.cp2 = first.cp2;
-            }
-        }
+
+        let subpaths = vec![Subpath { points, closed: true }];
 
         let id = self.next_id;
         self.next_id += 1;
@@ -320,7 +358,7 @@ impl Engine {
             id,
             name: format!("Polygon {}", id),
             node_type: NodeType::Path,
-            transform: Mat3::IDENTITY.to_cols_array(),
+            transform: Mat3::from_translation(Vec2::new(cx, cy)).to_cols_array(),
             style: Style {
                 fill: Some(Color { r: 0.5, g: 0.8, b: 0.5, a: 1.0 }),
                 stroke: Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
@@ -336,7 +374,7 @@ impl Engine {
                 miter_limit: 4.0,
                 fill_opacity: 1.0,
             },
-            geometry: Geometry::Path { points },
+            geometry: Geometry::Path { subpaths },
             children: Vec::new(),
             parent: None,
             visible: true,
@@ -356,11 +394,11 @@ impl Engine {
         let step = std::f32::consts::PI / num_points as f32;
         let mut points = Vec::new();
         let total_verts = num_points * 2;
-        for i in 0..=total_verts {
-            let r = if (i % total_verts) % 2 == 0 { outer_r } else { inner_r };
+        for i in 0..total_verts {
+            let r = if i % 2 == 0 { outer_r } else { inner_r };
             let angle = i as f32 * step - std::f32::consts::FRAC_PI_2;
-            let px = cx + r * angle.cos();
-            let py = cy + r * angle.sin();
+            let px = r * angle.cos();
+            let py = r * angle.sin();
             points.push(PathPoint {
                 x: px,
                 y: py,
@@ -368,15 +406,8 @@ impl Engine {
                 cp2: Vec2::new(px, py),
             });
         }
-        // Close: last point equals first
-        if let Some(first) = points.first().cloned() {
-            if let Some(last) = points.last_mut() {
-                last.x = first.x;
-                last.y = first.y;
-                last.cp1 = first.cp1;
-                last.cp2 = first.cp2;
-            }
-        }
+
+        let subpaths = vec![Subpath { points, closed: true }];
 
         let id = self.next_id;
         self.next_id += 1;
@@ -385,7 +416,7 @@ impl Engine {
             id,
             name: format!("Star {}", id),
             node_type: NodeType::Path,
-            transform: Mat3::IDENTITY.to_cols_array(),
+            transform: Mat3::from_translation(Vec2::new(cx, cy)).to_cols_array(),
             style: Style {
                 fill: Some(Color { r: 1.0, g: 0.8, b: 0.2, a: 1.0 }),
                 stroke: Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
@@ -401,7 +432,7 @@ impl Engine {
                 miter_limit: 4.0,
                 fill_opacity: 1.0,
             },
-            geometry: Geometry::Path { points },
+            geometry: Geometry::Path { subpaths },
             children: Vec::new(),
             parent: None,
             visible: true,
@@ -416,10 +447,10 @@ impl Engine {
         id
     }
 
-    pub fn update_path_points(&mut self, id: u32, points_json: &str) {
-        let points: Vec<PathPoint> = serde_json::from_str(points_json).unwrap_or_default();
+    pub fn update_path_points(&mut self, id: u32, subpaths_json: &str) {
+        let subpaths: Vec<Subpath> = serde_json::from_str(subpaths_json).unwrap_or_default();
         if let Some(node) = self.scene.nodes.get_mut(&id) {
-            node.geometry = Geometry::Path { points };
+            node.geometry = Geometry::Path { subpaths };
             self.update_spatial_index(id);
             self.mark_dirty(id);
         }
@@ -452,6 +483,41 @@ impl Engine {
             self.spatial_index.remove(&old_node);
         }
 
+        let is_group = self.scene.nodes.get(&id)
+            .map(|n| matches!(n.node_type, NodeType::Group))
+            .unwrap_or(false);
+
+        if is_group {
+            // Group AABB = union of all descendant AABBs
+            let children = self.scene.nodes.get(&id)
+                .map(|n| n.children.clone())
+                .unwrap_or_default();
+            if children.is_empty() {
+                // Empty group — use a point AABB at the group's position
+                if let Some(transform_bytes) = self.global_transforms.get(&id) {
+                    let transform = Mat3::from_cols_array(transform_bytes);
+                    let p = transform.transform_point2(Vec2::ZERO);
+                    let aabb = AABB::from_corners([p.x, p.y], [p.x, p.y]);
+                    let spatial_node = SpatialNode { id, aabb };
+                    self.spatial_index.insert(spatial_node);
+                    self.node_to_spatial.insert(id, spatial_node);
+                }
+                return;
+            }
+            let mut min_x = f32::MAX;
+            let mut min_y = f32::MAX;
+            let mut max_x = f32::MIN;
+            let mut max_y = f32::MIN;
+            self.collect_descendant_bounds(id, &mut min_x, &mut min_y, &mut max_x, &mut max_y);
+            if min_x <= max_x && min_y <= max_y {
+                let aabb = AABB::from_corners([min_x, min_y], [max_x, max_y]);
+                let spatial_node = SpatialNode { id, aabb };
+                self.spatial_index.insert(spatial_node);
+                self.node_to_spatial.insert(id, spatial_node);
+            }
+            return;
+        }
+
         if let (Some(node), Some(transform_bytes)) = (self.scene.nodes.get(&id), self.global_transforms.get(&id)) {
             let transform = Mat3::from_cols_array(transform_bytes);
             let aabb = match node.geometry {
@@ -472,22 +538,20 @@ impl Engine {
                     let p = transform.transform_point2(Vec2::ZERO);
                     AABB::from_corners([p.x - radius_x, p.y - radius_y], [p.x + radius_x, p.y + radius_y])
                 }
-                Geometry::Path { ref points } => {
-                    if points.is_empty() {
-                        AABB::from_corners([0.0, 0.0], [0.0, 0.0])
-                    } else {
-                        let mut min_x = f32::MAX;
-                        let mut min_y = f32::MAX;
-                        let mut max_x = f32::MIN;
-                        let mut max_y = f32::MIN;
-                        for pt in points {
-                            // Include anchor point
+                Geometry::Path { ref subpaths } => {
+                    let mut min_x = f32::MAX;
+                    let mut min_y = f32::MAX;
+                    let mut max_x = f32::MIN;
+                    let mut max_y = f32::MIN;
+                    let mut has_points = false;
+                    for sp in subpaths {
+                        for pt in &sp.points {
+                            has_points = true;
                             let p = transform.transform_point2(Vec2::new(pt.x, pt.y));
                             min_x = min_x.min(p.x);
                             min_y = min_y.min(p.y);
                             max_x = max_x.max(p.x);
                             max_y = max_y.max(p.y);
-                            // Include control points (curve is within convex hull of control polygon)
                             let c1 = transform.transform_point2(pt.cp1);
                             min_x = min_x.min(c1.x);
                             min_y = min_y.min(c1.y);
@@ -499,6 +563,10 @@ impl Engine {
                             max_x = max_x.max(c2.x);
                             max_y = max_y.max(c2.y);
                         }
+                    }
+                    if !has_points {
+                        AABB::from_corners([0.0, 0.0], [0.0, 0.0])
+                    } else {
                         AABB::from_corners([min_x, min_y], [max_x, max_y])
                     }
                 }
@@ -515,12 +583,40 @@ impl Engine {
         }
     }
 
+    /// Recursively collect AABB bounds of all descendants of a node.
+    fn collect_descendant_bounds(&self, id: u32, min_x: &mut f32, min_y: &mut f32, max_x: &mut f32, max_y: &mut f32) {
+        if let Some(node) = self.scene.nodes.get(&id) {
+            for &child_id in &node.children {
+                let is_child_group = self.scene.nodes.get(&child_id)
+                    .map(|n| matches!(n.node_type, NodeType::Group))
+                    .unwrap_or(false);
+                if is_child_group {
+                    // Recurse into child groups
+                    self.collect_descendant_bounds(child_id, min_x, min_y, max_x, max_y);
+                } else if let Some(spatial) = self.node_to_spatial.get(&child_id) {
+                    let lower = spatial.aabb.lower();
+                    let upper = spatial.aabb.upper();
+                    *min_x = min_x.min(lower[0]);
+                    *min_y = min_y.min(lower[1]);
+                    *max_x = max_x.max(upper[0]);
+                    *max_y = max_y.max(upper[1]);
+                }
+            }
+        }
+    }
+
     pub fn update_all_spatial_indices(&mut self) {
         self.spatial_index = RTree::new();
         self.node_to_spatial.clear();
         let ids: Vec<u32> = self.scene.nodes.keys().cloned().collect();
         for id in ids {
             self.update_spatial_index(id);
+        }
+    }
+
+    pub fn set_node_name(&mut self, id: u32, name: &str) {
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            node.name = name.to_string();
         }
     }
 
@@ -652,7 +748,7 @@ impl Engine {
     }
 
     fn update_spatial_index_recursive(&mut self, id: u32) {
-        self.update_spatial_index(id);
+        // First, recurse into children (bottom-up: children before parent)
         let children = if let Some(node) = self.scene.nodes.get(&id) {
             node.children.clone()
         } else {
@@ -660,6 +756,22 @@ impl Engine {
         };
         for child_id in children {
             self.update_spatial_index_recursive(child_id);
+        }
+        // Then update this node (for groups, this unions the now-updated child AABBs)
+        self.update_spatial_index(id);
+    }
+
+    /// Walk up the parent chain and re-update spatial index for each Group ancestor.
+    fn update_ancestor_group_bounds(&mut self, id: u32) {
+        let mut current = id;
+        while let Some(parent_id) = self.scene.nodes.get(&current).and_then(|n| n.parent) {
+            let is_group = self.scene.nodes.get(&parent_id)
+                .map(|n| matches!(n.node_type, NodeType::Group))
+                .unwrap_or(false);
+            if is_group {
+                self.update_spatial_index(parent_id);
+            }
+            current = parent_id;
         }
     }
 
@@ -671,6 +783,7 @@ impl Engine {
             node.transform = transform.to_cols_array();
             self.update_node_global_transform(id);
             self.update_spatial_index_recursive(id);
+            self.update_ancestor_group_bounds(id);
             self.mark_dirty(id);
         }
     }
@@ -799,6 +912,7 @@ impl Engine {
             
             if let (Some(node), Some(transform_bytes)) = (self.scene.nodes.get(&id), self.global_transforms.get(&id)) {
                 if !node.visible { continue; }
+                if node.locked { continue; }
                 
                 let global_transform = Mat3::from_cols_array(transform_bytes);
                 let inv_transform = global_transform.inverse();
@@ -814,23 +928,24 @@ impl Engine {
                         let dy = local_point.y;
                         (dx * dx) / (radius_x * radius_x) + (dy * dy) / (radius_y * radius_y) <= 1.0
                     },
-                    Geometry::Path { ref points } => {
-                        if points.is_empty() {
-                            false
-                        } else {
-                            let mut min_x = f32::MAX;
-                            let mut min_y = f32::MAX;
-                            let mut max_x = f32::MIN;
-                            let mut max_y = f32::MIN;
-                            for pt in points {
+                    Geometry::Path { ref subpaths } => {
+                        let mut min_x = f32::MAX;
+                        let mut min_y = f32::MAX;
+                        let mut max_x = f32::MIN;
+                        let mut max_y = f32::MIN;
+                        let mut has_points = false;
+                        for sp in subpaths {
+                            for pt in &sp.points {
+                                has_points = true;
                                 min_x = min_x.min(pt.x);
                                 min_y = min_y.min(pt.y);
                                 max_x = max_x.max(pt.x);
                                 max_y = max_y.max(pt.y);
                             }
-                            local_point.x >= min_x && local_point.x <= max_x &&
-                            local_point.y >= min_y && local_point.y <= max_y
                         }
+                        has_points &&
+                        local_point.x >= min_x && local_point.x <= max_x &&
+                        local_point.y >= min_y && local_point.y <= max_y
                     },
                     Geometry::Text { ref content, font_size } => {
                         let approx_w = content.len() as f32 * font_size * 0.6;
@@ -845,6 +960,83 @@ impl Engine {
             }
         }
         None
+    }
+
+    /// Group-aware hit test: finds the deepest leaf hit, then walks up the parent
+    /// chain to find the topmost Group ancestor that is a direct child of root
+    /// (or of a non-Group parent). Returns that group's ID, or the leaf ID if
+    /// no Group ancestor exists.
+    pub fn hit_test_grouped(&self, x: f32, y: f32) -> Option<u32> {
+        let leaf_id = self.hit_test(x, y)?;
+        Some(self.find_topmost_group_ancestor(leaf_id))
+    }
+
+    /// Walk the parent chain from `id` upward, returning the topmost Group ancestor
+    /// whose parent is either None or a non-Group node. If `id` itself has no
+    /// Group ancestor, returns `id`.
+    fn find_topmost_group_ancestor(&self, id: u32) -> u32 {
+        let mut topmost_group = id;
+        let mut current = id;
+        while let Some(node) = self.scene.nodes.get(&current) {
+            if let Some(pid) = node.parent {
+                if let Some(parent_node) = self.scene.nodes.get(&pid) {
+                    if matches!(parent_node.node_type, NodeType::Group) {
+                        topmost_group = pid;
+                    }
+                }
+                current = pid;
+            } else {
+                break;
+            }
+        }
+        topmost_group
+    }
+
+    /// Get the node type as u32: 0=Path, 1=Rect, 2=Ellipse, 3=Group, 4=Text
+    pub fn get_node_type(&self, id: u32) -> Option<u32> {
+        self.scene.nodes.get(&id).map(|n| match n.node_type {
+            NodeType::Path => 0,
+            NodeType::Rect => 1,
+            NodeType::Ellipse => 2,
+            NodeType::Group => 3,
+            NodeType::Text => 4,
+        })
+    }
+
+    /// Get the parent node ID, or -1 if root.
+    pub fn get_node_parent(&self, id: u32) -> i32 {
+        self.scene.nodes.get(&id)
+            .and_then(|n| n.parent)
+            .map(|p| p as i32)
+            .unwrap_or(-1)
+    }
+
+    /// Filter a list of IDs to only include ancestors — drop any node whose
+    /// ancestor is also in the set. Useful for preventing overlapping selections
+    /// (e.g., selecting both a group and its child).
+    fn filter_ancestors_only(&self, ids: &[u32]) -> Vec<u32> {
+        let id_set: std::collections::HashSet<u32> = ids.iter().cloned().collect();
+        ids.iter()
+            .filter(|&&id| {
+                let mut current = id;
+                while let Some(node) = self.scene.nodes.get(&current) {
+                    if let Some(pid) = node.parent {
+                        if id_set.contains(&pid) { return false; }
+                        current = pid;
+                    } else {
+                        break;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Dedup a selection: remove any node whose ancestor is also selected.
+    pub fn dedup_selection(&self, ids_json: &str) -> Vec<u32> {
+        let ids: Vec<u32> = serde_json::from_str(ids_json).unwrap_or_default();
+        self.filter_ancestors_only(&ids)
     }
 
     /// Returns visible node IDs in document draw order (back to front).
@@ -881,7 +1073,12 @@ impl Engine {
     /// Depth-first traversal collecting only IDs present in the visible set.
     fn collect_visible_in_order(&self, id: u32, visible_set: &std::collections::HashSet<u32>, out: &mut Vec<u32>) {
         if visible_set.contains(&id) {
-            out.push(id);
+            // Only include nodes that are actually visible (not hidden by user)
+            if let Some(node) = self.scene.nodes.get(&id) {
+                if node.visible {
+                    out.push(id);
+                }
+            }
         }
         if let Some(node) = self.scene.nodes.get(&id) {
             for &child_id in &node.children {
@@ -916,37 +1113,29 @@ impl Engine {
                 Geometry::Rect { width, height } => {
                     let w = *width;
                     let h = *height;
-                    // 4 corners + closing point
+                    // 4 corners, closed subpath (no duplicate closing point)
                     let points = vec![
                         PathPoint { x: 0.0, y: 0.0, cp1: Vec2::new(0.0, 0.0), cp2: Vec2::new(0.0, 0.0) },
                         PathPoint { x: w,   y: 0.0, cp1: Vec2::new(w, 0.0),   cp2: Vec2::new(w, 0.0) },
                         PathPoint { x: w,   y: h,   cp1: Vec2::new(w, h),     cp2: Vec2::new(w, h) },
                         PathPoint { x: 0.0, y: h,   cp1: Vec2::new(0.0, h),   cp2: Vec2::new(0.0, h) },
-                        PathPoint { x: 0.0, y: 0.0, cp1: Vec2::new(0.0, 0.0), cp2: Vec2::new(0.0, 0.0) },
                     ];
-                    Some(Geometry::Path { points })
+                    Some(Geometry::Path { subpaths: vec![Subpath { points, closed: true }] })
                 }
                 Geometry::Ellipse { radius_x, radius_y } => {
                     let rx = *radius_x;
                     let ry = *radius_y;
-                    // Standard bezier circle approximation: kappa = 4 * (sqrt(2) - 1) / 3
                     let k: f32 = 0.5522847498;
                     let kx = rx * k;
                     let ky = ry * k;
-                    // 4 cardinal points + closing, with cubic bezier control points
+                    // 4 cardinal points, closed subpath (no duplicate)
                     let points = vec![
-                        // Top (0, -ry)
                         PathPoint { x: 0.0, y: -ry, cp1: Vec2::new(-kx, -ry), cp2: Vec2::new(kx, -ry) },
-                        // Right (rx, 0)
                         PathPoint { x: rx,  y: 0.0, cp1: Vec2::new(rx, -ky),  cp2: Vec2::new(rx, ky) },
-                        // Bottom (0, ry)
                         PathPoint { x: 0.0, y: ry,  cp1: Vec2::new(kx, ry),   cp2: Vec2::new(-kx, ry) },
-                        // Left (-rx, 0)
                         PathPoint { x: -rx, y: 0.0, cp1: Vec2::new(-rx, ky),  cp2: Vec2::new(-rx, -ky) },
-                        // Close back to top
-                        PathPoint { x: 0.0, y: -ry, cp1: Vec2::new(-kx, -ry), cp2: Vec2::new(kx, -ry) },
                     ];
-                    Some(Geometry::Path { points })
+                    Some(Geometry::Path { subpaths: vec![Subpath { points, closed: true }] })
                 }
                 Geometry::Path { .. } => None, // Already a path
                 Geometry::Text { .. } => None, // Can't convert text
@@ -980,37 +1169,44 @@ impl Engine {
                     *radius_x = (new_w / 2.0).max(0.5);
                     *radius_y = (new_h / 2.0).max(0.5);
                 }
-                Geometry::Path { points } => {
-                    // Scale path points proportionally using full bounds (including control points)
-                    if points.is_empty() { return; }
+                Geometry::Path { subpaths } => {
+                    // Scale all subpath points proportionally using full bounds
                     let mut min_x = f32::MAX; let mut min_y = f32::MAX;
                     let mut max_x = f32::MIN; let mut max_y = f32::MIN;
-                    for pt in points.iter() {
-                        min_x = min_x.min(pt.x).min(pt.cp1.x).min(pt.cp2.x);
-                        min_y = min_y.min(pt.y).min(pt.cp1.y).min(pt.cp2.y);
-                        max_x = max_x.max(pt.x).max(pt.cp1.x).max(pt.cp2.x);
-                        max_y = max_y.max(pt.y).max(pt.cp1.y).max(pt.cp2.y);
+                    let mut has_points = false;
+                    for sp in subpaths.iter() {
+                        for pt in &sp.points {
+                            has_points = true;
+                            min_x = min_x.min(pt.x).min(pt.cp1.x).min(pt.cp2.x);
+                            min_y = min_y.min(pt.y).min(pt.cp1.y).min(pt.cp2.y);
+                            max_x = max_x.max(pt.x).max(pt.cp1.x).max(pt.cp2.x);
+                            max_y = max_y.max(pt.y).max(pt.cp1.y).max(pt.cp2.y);
+                        }
                     }
+                    if !has_points { return; }
                     let old_w = (max_x - min_x).max(1.0);
                     let old_h = (max_y - min_y).max(1.0);
                     let sx = new_w / old_w;
                     let sy = new_h / old_h;
-                    for pt in points.iter_mut() {
-                        pt.x = min_x + (pt.x - min_x) * sx;
-                        pt.y = min_y + (pt.y - min_y) * sy;
-                        pt.cp1 = Vec2::new(
-                            min_x + (pt.cp1.x - min_x) * sx,
-                            min_y + (pt.cp1.y - min_y) * sy,
-                        );
-                        pt.cp2 = Vec2::new(
-                            min_x + (pt.cp2.x - min_x) * sx,
-                            min_y + (pt.cp2.y - min_y) * sy,
-                        );
+                    for sp in subpaths.iter_mut() {
+                        for pt in sp.points.iter_mut() {
+                            pt.x = min_x + (pt.x - min_x) * sx;
+                            pt.y = min_y + (pt.y - min_y) * sy;
+                            pt.cp1 = Vec2::new(
+                                min_x + (pt.cp1.x - min_x) * sx,
+                                min_y + (pt.cp1.y - min_y) * sy,
+                            );
+                            pt.cp2 = Vec2::new(
+                                min_x + (pt.cp2.x - min_x) * sx,
+                                min_y + (pt.cp2.y - min_y) * sy,
+                            );
+                        }
                     }
                 }
                 Geometry::Text { .. } => {}
             }
             self.update_spatial_index(id);
+            self.update_ancestor_group_bounds(id);
             self.mark_dirty(id);
         }
     }
@@ -1024,6 +1220,22 @@ impl Engine {
             node.transform = transform.to_cols_array();
             self.update_node_global_transform(id);
             self.update_spatial_index_recursive(id);
+            self.update_ancestor_group_bounds(id);
+            self.mark_dirty(id);
+        }
+    }
+
+    /// Set a node's full local transform from a JSON array of 9 f32 values (column-major, matching `Mat3::from_cols_array`).
+    pub fn set_node_transform(&mut self, id: u32, transform_json: &str) {
+        let parsed: [f32; 9] = match serde_json::from_str(transform_json) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            node.transform = parsed;
+            self.update_node_global_transform(id);
+            self.update_spatial_index_recursive(id);
+            self.update_ancestor_group_bounds(id);
             self.mark_dirty(id);
         }
     }
@@ -1039,64 +1251,132 @@ impl Engine {
             node.transform = new_transform.to_cols_array();
             self.update_node_global_transform(id);
             self.update_spatial_index_recursive(id);
+            self.update_ancestor_group_bounds(id);
             self.mark_dirty(id);
         }
     }
 
-    /// Duplicate a node and return the new id.
+    /// Duplicate a node (and its entire subtree if a group) and return the new id.
     pub fn duplicate_node(&mut self, id: u32) -> u32 {
+        let new_id = self.deep_clone_subtree(id);
+        // Offset the top-level clone by 20px
+        if let Some(node) = self.scene.nodes.get_mut(&new_id) {
+            let mut t = Mat3::from_cols_array(&node.transform);
+            t.z_axis.x += 20.0;
+            t.z_axis.y += 20.0;
+            node.transform = t.to_cols_array();
+            node.parent = None;
+        }
+        // Remove from any parent it was temporarily added to and add to root
+        self.scene.root_nodes.retain(|&r| r != new_id);
+        self.scene.root_nodes.push(new_id);
+        self.update_node_global_transform(new_id);
+        self.update_spatial_index_recursive(new_id);
+        self.mark_dirty(new_id);
+        new_id
+    }
+
+    /// Recursively clone a node and all its descendants, returning the new root ID.
+    /// The cloned nodes have fresh IDs and correct parent/children pointers.
+    /// The cloned root's parent is set to None (caller is responsible for reparenting).
+    fn deep_clone_subtree(&mut self, id: u32) -> u32 {
         let new_id = self.next_id;
         self.next_id += 1;
 
         if let Some(node) = self.scene.nodes.get(&id).cloned() {
+            let old_children = node.children.clone();
             let mut new_node = node;
             new_node.id = new_id;
             new_node.name = format!("{} copy", new_node.name);
-            // Offset position by 20px
-            let mut t = Mat3::from_cols_array(&new_node.transform);
-            t.z_axis.x += 20.0;
-            t.z_axis.y += 20.0;
-            new_node.transform = t.to_cols_array();
-            new_node.parent = None;
             new_node.children = Vec::new();
+            new_node.parent = None;
 
             self.scene.nodes.insert(new_id, new_node);
-            self.scene.root_nodes.push(new_id);
-            self.update_node_global_transform(new_id);
-            self.update_spatial_index(new_id);
-            self.mark_dirty(new_id);
+
+            // Recursively clone children and reparent them
+            for child_id in old_children {
+                let new_child_id = self.deep_clone_subtree(child_id);
+                // set_parent handles adding to children vec and updating parent pointer
+                if let Some(child_node) = self.scene.nodes.get_mut(&new_child_id) {
+                    child_node.parent = Some(new_id);
+                }
+                if let Some(parent_node) = self.scene.nodes.get_mut(&new_id) {
+                    parent_node.children.push(new_child_id);
+                }
+            }
         }
         new_id
     }
 
     /// Group selected nodes into a new Group node. Returns the group's id.
+    /// Deduplicates the selection (drops descendants of selected ancestors).
+    /// Places the group at the z-position of the topmost member in the common parent.
     pub fn group_nodes(&mut self, ids_json: &str) -> u32 {
-        let ids: Vec<u32> = serde_json::from_str(ids_json).unwrap_or_default();
+        let raw_ids: Vec<u32> = serde_json::from_str(ids_json).unwrap_or_default();
+        if raw_ids.is_empty() { return 0; }
+
+        // Dedup: remove any node whose ancestor is also selected
+        let ids = self.filter_ancestors_only(&raw_ids);
         if ids.is_empty() { return 0; }
 
         let group_id = self.next_id;
         self.next_id += 1;
 
-        // Compute the group center (average of node positions)
-        let mut sum_x = 0.0f32;
-        let mut sum_y = 0.0f32;
-        let mut count = 0;
+        // Determine the common parent of all selected nodes
+        let first_parent = self.scene.nodes.get(&ids[0]).and_then(|n| n.parent);
+        let all_same_parent = ids.iter().all(|&id| {
+            self.scene.nodes.get(&id).and_then(|n| n.parent) == first_parent
+        });
+        let group_parent = if all_same_parent { first_parent } else { None };
+
+        // Find the z-position: insert group at the position of the topmost (last) member
+        // in the parent's children list (or root_nodes)
+        let insert_index = {
+            let sibling_list = if let Some(pid) = group_parent {
+                self.scene.nodes.get(&pid).map(|n| n.children.clone()).unwrap_or_default()
+            } else {
+                self.scene.root_nodes.clone()
+            };
+            let id_set: std::collections::HashSet<u32> = ids.iter().cloned().collect();
+            let mut max_idx = 0usize;
+            for (i, &sib_id) in sibling_list.iter().enumerate() {
+                if id_set.contains(&sib_id) {
+                    max_idx = i;
+                }
+            }
+            max_idx
+        };
+
+        // Compute group global transform: use the AABB min corner of selected members
+        // so the group origin is at the top-left of the bounding box
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
         for &id in &ids {
-            if let Some(transform) = self.global_transforms.get(&id) {
-                let m = Mat3::from_cols_array(transform);
-                sum_x += m.z_axis.x;
-                sum_y += m.z_axis.y;
-                count += 1;
+            if let Some(spatial) = self.node_to_spatial.get(&id) {
+                let lower = spatial.aabb.lower();
+                min_x = min_x.min(lower[0]);
+                min_y = min_y.min(lower[1]);
             }
         }
-        let cx = if count > 0 { sum_x / count as f32 } else { 0.0 };
-        let cy = if count > 0 { sum_y / count as f32 } else { 0.0 };
+        if min_x == f32::MAX { min_x = 0.0; }
+        if min_y == f32::MAX { min_y = 0.0; }
+
+        // Group local transform: if the group has a parent, compute local from global
+        let group_global = Mat3::from_translation(Vec2::new(min_x, min_y));
+        let group_local = if let Some(pid) = group_parent {
+            let parent_global = self.global_transforms.get(&pid)
+                .map(|&m| Mat3::from_cols_array(&m))
+                .unwrap_or(Mat3::IDENTITY);
+            parent_global.inverse() * group_global
+        } else {
+            group_global
+        };
 
         let group_node = Node {
             id: group_id,
             name: format!("Group {}", group_id),
             node_type: NodeType::Group,
-            transform: Mat3::from_translation(Vec2::new(cx, cy)).to_cols_array(),
+            transform: group_local.to_cols_array(),
             style: Style {
                 fill: None,
                 stroke: None,
@@ -1114,48 +1394,119 @@ impl Engine {
             },
             geometry: Geometry::Rect { width: 0.0, height: 0.0 },
             children: Vec::new(),
-            parent: None,
+            parent: group_parent,
             visible: true,
             locked: false,
         };
         self.scene.nodes.insert(group_id, group_node);
-        self.scene.root_nodes.push(group_id);
 
-        // Reparent nodes — adjust their local transforms to be relative to group
-        for &id in &ids {
-            if let Some(node) = self.scene.nodes.get_mut(&id) {
-                let mut t = Mat3::from_cols_array(&node.transform);
-                t.z_axis.x -= cx;
-                t.z_axis.y -= cy;
-                node.transform = t.to_cols_array();
+        // Insert group at the correct z-position in its parent
+        if let Some(pid) = group_parent {
+            if let Some(parent) = self.scene.nodes.get_mut(&pid) {
+                let pos = (insert_index + 1).min(parent.children.len());
+                parent.children.insert(pos, group_id);
             }
-            self.set_parent(id, Some(group_id));
+        } else {
+            let pos = (insert_index + 1).min(self.scene.root_nodes.len());
+            self.scene.root_nodes.insert(pos, group_id);
         }
 
+        // Compute the group's global transform so we can use it for child reparenting
         self.update_node_global_transform(group_id);
-        self.update_spatial_index(group_id);
+        let group_global_inv = group_global.inverse();
+
+        // Reparent nodes: adjust their local transforms using proper matrix math
+        // child_new_local = group_global_inv * child_global
+        for &id in &ids {
+            let child_global = self.global_transforms.get(&id)
+                .map(|&m| Mat3::from_cols_array(&m))
+                .unwrap_or(Mat3::IDENTITY);
+            let child_new_local = group_global_inv * child_global;
+
+            // Remove from old parent
+            let old_parent = self.scene.nodes.get(&id).and_then(|n| n.parent);
+            if let Some(old_pid) = old_parent {
+                if let Some(old_p) = self.scene.nodes.get_mut(&old_pid) {
+                    old_p.children.retain(|&c| c != id);
+                }
+            } else {
+                self.scene.root_nodes.retain(|&r| r != id);
+            }
+
+            // Update transform and parent
+            if let Some(node) = self.scene.nodes.get_mut(&id) {
+                node.transform = child_new_local.to_cols_array();
+                node.parent = Some(group_id);
+            }
+            if let Some(g) = self.scene.nodes.get_mut(&group_id) {
+                g.children.push(id);
+            }
+        }
+
+        // Recompute transforms and spatial index for the entire group subtree
+        self.update_node_global_transform(group_id);
+        self.update_spatial_index_recursive(group_id);
         self.mark_dirty(group_id);
         group_id
     }
 
-    /// Ungroup a group node, promoting its children to the parent level.
+    /// Ungroup a group node, promoting its children to the group's parent level.
+    /// Children are inserted at the group's z-position, preserving their global positions.
     pub fn ungroup_node(&mut self, id: u32) {
-        let (children, group_transform) = if let Some(node) = self.scene.nodes.get(&id) {
+        let (children, group_parent, group_global) = if let Some(node) = self.scene.nodes.get(&id) {
             if !matches!(node.node_type, NodeType::Group) { return; }
-            (node.children.clone(), Mat3::from_cols_array(&node.transform))
+            let global = self.global_transforms.get(&id)
+                .map(|&m| Mat3::from_cols_array(&m))
+                .unwrap_or(Mat3::IDENTITY);
+            (node.children.clone(), node.parent, global)
         } else {
             return;
         };
 
-        // Move children to root, adjusting their transforms
-        for child_id in &children {
-            if let Some(child) = self.scene.nodes.get_mut(child_id) {
-                let child_t = Mat3::from_cols_array(&child.transform);
-                let new_t = group_transform * child_t;
-                child.transform = new_t.to_cols_array();
-                child.parent = None;
+        // Find the group's index in its parent's children list (or root_nodes)
+        let group_index = if let Some(pid) = group_parent {
+            self.scene.nodes.get(&pid)
+                .and_then(|p| p.children.iter().position(|&c| c == id))
+                .unwrap_or(0)
+        } else {
+            self.scene.root_nodes.iter().position(|&r| r == id).unwrap_or(0)
+        };
+
+        // Compute parent's global transform for local transform computation
+        let parent_global = if let Some(pid) = group_parent {
+            self.global_transforms.get(&pid)
+                .map(|&m| Mat3::from_cols_array(&m))
+                .unwrap_or(Mat3::IDENTITY)
+        } else {
+            Mat3::IDENTITY
+        };
+        let parent_global_inv = parent_global.inverse();
+
+        // Promote children to the group's parent, preserving global positions
+        for (offset, &child_id) in children.iter().enumerate() {
+            // child_new_local = parent_global_inv * child_global
+            // where child_global = group_global * child_old_local
+            let child_old_local = self.scene.nodes.get(&child_id)
+                .map(|n| Mat3::from_cols_array(&n.transform))
+                .unwrap_or(Mat3::IDENTITY);
+            let child_global = group_global * child_old_local;
+            let child_new_local = parent_global_inv * child_global;
+
+            if let Some(child) = self.scene.nodes.get_mut(&child_id) {
+                child.transform = child_new_local.to_cols_array();
+                child.parent = group_parent;
             }
-            self.scene.root_nodes.push(*child_id);
+
+            // Insert at the group's former position
+            if let Some(pid) = group_parent {
+                if let Some(parent) = self.scene.nodes.get_mut(&pid) {
+                    let pos = (group_index + offset).min(parent.children.len());
+                    parent.children.insert(pos, child_id);
+                }
+            } else {
+                let pos = (group_index + offset).min(self.scene.root_nodes.len());
+                self.scene.root_nodes.insert(pos, child_id);
+            }
         }
 
         // Remove the group node itself
@@ -1163,17 +1514,30 @@ impl Engine {
             group.children.clear();
         }
         self.scene.nodes.remove(&id);
-        self.scene.root_nodes.retain(|&r| r != id);
+        // Remove group from its parent's children list (or root_nodes)
+        if let Some(pid) = group_parent {
+            if let Some(parent) = self.scene.nodes.get_mut(&pid) {
+                parent.children.retain(|&c| c != id);
+            }
+        } else {
+            self.scene.root_nodes.retain(|&r| r != id);
+        }
         self.global_transforms.remove(&id);
         if let Some(old) = self.node_to_spatial.remove(&id) {
             self.spatial_index.remove(&old);
         }
+        self.scene.selection.retain(|&s| s != id);
 
         // Update children transforms and spatial indices
-        for child_id in &children {
-            self.update_node_global_transform(*child_id);
-            self.update_spatial_index_recursive(*child_id);
-            self.mark_dirty(*child_id);
+        for &child_id in &children {
+            self.update_node_global_transform(child_id);
+            self.update_spatial_index_recursive(child_id);
+            self.mark_dirty(child_id);
+        }
+
+        // Update ancestor group bounds if we ungrouped inside another group
+        if let Some(pid) = group_parent {
+            self.update_ancestor_group_bounds(pid);
         }
     }
 
@@ -1405,6 +1769,19 @@ impl Engine {
     /// Get the current format version.
     pub fn get_format_version(&self) -> u32 {
         FORMAT_VERSION
+    }
+
+    pub fn get_document_width(&self) -> f32 {
+        self.scene.document_width
+    }
+
+    pub fn get_document_height(&self) -> f32 {
+        self.scene.document_height
+    }
+
+    pub fn set_document_size(&mut self, w: f32, h: f32) {
+        self.scene.document_width = w;
+        self.scene.document_height = h;
     }
 }
 
@@ -1639,5 +2016,167 @@ mod tests {
         engine.set_parent(child, Some(parent));
         assert_eq!(engine.hit_test(15.0, 15.0), None, "Should not hit at old position");
         assert_eq!(engine.hit_test(115.0, 115.0), Some(child), "Should hit at new global position");
+    }
+
+    #[test]
+    fn test_group_bounds_union() {
+        let mut engine = Engine::new();
+        // Rect A at (0,0) size 100x50 → covers (0,0)-(100,50)
+        let a = engine.add_rect(0.0, 0.0, 100.0, 50.0);
+        // Rect B at (200,100) size 60x80 → covers (200,100)-(260,180)
+        let b = engine.add_rect(200.0, 100.0, 60.0, 80.0);
+
+        let group_id = engine.group_nodes(&format!("[{},{}]", a, b));
+        assert!(group_id > 0);
+
+        // Group AABB should be the union: (0,0)-(260,180)
+        let bounds = engine.get_node_bounds(group_id);
+        assert!(bounds[0] <= 0.1, "minX should be ~0, got {}", bounds[0]);
+        assert!(bounds[1] <= 0.1, "minY should be ~0, got {}", bounds[1]);
+        assert!((bounds[2] - 260.0).abs() < 1.0, "maxX should be ~260, got {}", bounds[2]);
+        assert!((bounds[3] - 180.0).abs() < 1.0, "maxY should be ~180, got {}", bounds[3]);
+    }
+
+    #[test]
+    fn test_duplicate_group_deep_copies() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 50.0, 50.0);
+        let b = engine.add_rect(100.0, 0.0, 50.0, 50.0);
+
+        let group_id = engine.group_nodes(&format!("[{},{}]", a, b));
+        let clone_id = engine.duplicate_node(group_id);
+
+        // Clone should exist and be a Group
+        let clone_node = engine.scene.nodes.get(&clone_id).unwrap();
+        assert!(matches!(clone_node.node_type, NodeType::Group));
+
+        // Clone should have 2 children, all with fresh IDs
+        assert_eq!(clone_node.children.len(), 2, "Cloned group should have 2 children");
+        for &child_id in &clone_node.children {
+            assert_ne!(child_id, a, "Cloned child should have fresh ID");
+            assert_ne!(child_id, b, "Cloned child should have fresh ID");
+            assert!(engine.scene.nodes.contains_key(&child_id), "Cloned child must exist in nodes");
+            let child = engine.scene.nodes.get(&child_id).unwrap();
+            assert_eq!(child.parent, Some(clone_id), "Cloned child's parent should be clone");
+        }
+
+        // Original children should be unaffected
+        assert_eq!(engine.scene.nodes.get(&a).unwrap().parent, Some(group_id));
+        assert_eq!(engine.scene.nodes.get(&b).unwrap().parent, Some(group_id));
+    }
+
+    #[test]
+    fn test_ungroup_nested_preserves_positions() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(50.0, 50.0, 30.0, 30.0);
+        let b = engine.add_rect(150.0, 150.0, 30.0, 30.0);
+
+        // Record global positions before grouping
+        let a_global_before = engine.global_transforms.get(&a).cloned().unwrap();
+        let b_global_before = engine.global_transforms.get(&b).cloned().unwrap();
+
+        // Group them
+        let inner = engine.group_nodes(&format!("[{},{}]", a, b));
+        // Create an outer group containing the inner group
+        let c = engine.add_rect(300.0, 300.0, 20.0, 20.0);
+        let outer = engine.group_nodes(&format!("[{},{}]", inner, c));
+
+        // Now ungroup the inner group (which is nested inside outer)
+        engine.ungroup_node(inner);
+
+        // a and b should have the same global positions as before
+        let a_global_after = engine.global_transforms.get(&a).cloned().unwrap();
+        let b_global_after = engine.global_transforms.get(&b).cloned().unwrap();
+
+        let a_before = Mat3::from_cols_array(&a_global_before);
+        let a_after = Mat3::from_cols_array(&a_global_after);
+        assert!((a_before.z_axis.x - a_after.z_axis.x).abs() < 1.0,
+            "a global X should be preserved: before={}, after={}", a_before.z_axis.x, a_after.z_axis.x);
+        assert!((a_before.z_axis.y - a_after.z_axis.y).abs() < 1.0,
+            "a global Y should be preserved: before={}, after={}", a_before.z_axis.y, a_after.z_axis.y);
+
+        let b_before = Mat3::from_cols_array(&b_global_before);
+        let b_after = Mat3::from_cols_array(&b_global_after);
+        assert!((b_before.z_axis.x - b_after.z_axis.x).abs() < 1.0,
+            "b global X should be preserved");
+        assert!((b_before.z_axis.y - b_after.z_axis.y).abs() < 1.0,
+            "b global Y should be preserved");
+
+        // a and b should now be children of outer (not root)
+        assert_eq!(engine.scene.nodes.get(&a).unwrap().parent, Some(outer));
+        assert_eq!(engine.scene.nodes.get(&b).unwrap().parent, Some(outer));
+    }
+
+    #[test]
+    fn test_group_children_of_group_preserves_positions() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(10.0, 10.0, 40.0, 40.0);
+        let b = engine.add_rect(100.0, 100.0, 40.0, 40.0);
+        let c = engine.add_rect(200.0, 200.0, 40.0, 40.0);
+
+        // Group all three
+        let outer = engine.group_nodes(&format!("[{},{},{}]", a, b, c));
+
+        // Record global positions
+        let a_global = Mat3::from_cols_array(&engine.global_transforms[&a]);
+        let b_global = Mat3::from_cols_array(&engine.global_transforms[&b]);
+
+        // Now group a and b (children of outer) into a sub-group
+        let sub_group = engine.group_nodes(&format!("[{},{}]", a, b));
+
+        // a and b should still be at the same global positions
+        let a_after = Mat3::from_cols_array(&engine.global_transforms[&a]);
+        let b_after = Mat3::from_cols_array(&engine.global_transforms[&b]);
+
+        assert!((a_global.z_axis.x - a_after.z_axis.x).abs() < 1.0,
+            "a global X should be preserved after sub-grouping");
+        assert!((a_global.z_axis.y - a_after.z_axis.y).abs() < 1.0,
+            "a global Y should be preserved after sub-grouping");
+        assert!((b_global.z_axis.x - b_after.z_axis.x).abs() < 1.0,
+            "b global X should be preserved after sub-grouping");
+
+        // sub_group should be a child of outer
+        assert_eq!(engine.scene.nodes.get(&sub_group).unwrap().parent, Some(outer));
+    }
+
+    #[test]
+    fn test_hit_test_grouped() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(200.0, 0.0, 100.0, 100.0);
+
+        let group_id = engine.group_nodes(&format!("[{},{}]", a, b));
+
+        // Raw hit_test should return the leaf (rect a)
+        let raw_hit = engine.hit_test(50.0, 50.0);
+        assert_eq!(raw_hit, Some(a), "Raw hit test should return leaf node");
+
+        // hit_test_grouped should return the group
+        let grouped_hit = engine.hit_test_grouped(50.0, 50.0);
+        assert_eq!(grouped_hit, Some(group_id), "Grouped hit test should return group");
+
+        // Hit on rect b should also return the group
+        let grouped_hit_b = engine.hit_test_grouped(250.0, 50.0);
+        assert_eq!(grouped_hit_b, Some(group_id), "Grouped hit on b should return group");
+
+        // Miss should return None
+        assert_eq!(engine.hit_test_grouped(500.0, 500.0), None);
+    }
+
+    #[test]
+    fn test_dedup_selection() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 50.0, 50.0);
+        let b = engine.add_rect(100.0, 0.0, 50.0, 50.0);
+
+        let group_id = engine.group_nodes(&format!("[{},{}]", a, b));
+
+        // Selecting group and its child 'a': dedup should drop 'a'
+        let deduped = engine.dedup_selection(&format!("[{},{}]", group_id, a));
+        assert_eq!(deduped, vec![group_id], "Dedup should drop child when parent is selected");
+
+        // Selecting only leaves: both should remain
+        let deduped2 = engine.dedup_selection(&format!("[{},{}]", a, b));
+        assert_eq!(deduped2.len(), 2, "Dedup should keep both when neither is ancestor");
     }
 }

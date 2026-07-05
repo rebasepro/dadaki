@@ -6,7 +6,7 @@ export class PersistenceManager {
     private static KEY = 'current_scene';
 
     static async saveScene(engine: Engine) {
-        const data = engine.serialize_scene();
+        const data = engine.serialize_proto();
         const db = await this.openDB();
         return new Promise<void>((resolve, reject) => {
             const tx = db.transaction(this.STORE_NAME, 'readwrite');
@@ -26,7 +26,10 @@ export class PersistenceManager {
             request.onsuccess = () => {
                 const data = request.result;
                 if (data) {
-                    engine.deserialize_scene(data);
+                    const ok = engine.deserialize_proto(data);
+                    if (!ok) {
+                        console.warn('[Persistence] Failed to deserialize saved scene – starting clean.');
+                    }
                 }
                 resolve();
             };
@@ -47,7 +50,7 @@ export class PersistenceManager {
 }
 
 export class AutosaveManager {
-    private timeout: any = null;
+    private timeout: ReturnType<typeof setTimeout> | null = null;
     private interval = 2000; // 2 seconds
 
     constructor(private engine: Engine) {}

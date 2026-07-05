@@ -1,14 +1,16 @@
-import type { CanvasKit, Surface, Canvas } from 'canvaskit-wasm';
+import type { CanvasKit, Surface, Canvas, Paint, BlendMode, StrokeCap, StrokeJoin } from 'canvaskit-wasm';
 import type { WasmScene } from './wasm_scene';
 import type { InputManager } from './input';
+import type { SceneData, NodeGeometry } from './types';
 
 export class Renderer {
     ck: CanvasKit;
     canvas: HTMLCanvasElement;
     scene: WasmScene;
     surface: Surface | null;
-    context: any;
-    grContext: any;
+    // CanvasKit WebGL context handles — typed as `number` (opaque GL context IDs)
+    private glContext: number = 0;
+    private grContext: unknown = null;
     isRunning: boolean;
     zoom: number;
     pan: { x: number; y: number };
@@ -16,23 +18,55 @@ export class Renderer {
     /** Face ID currently being hovered by the paint bucket tool (or -1). */
     hoverFaceId: number = -1;
 
+    // ─── Cached Resources (avoid per-frame allocation) ───
+    private blendModes: BlendMode[] = [];
+    private caps: StrokeCap[] = [];
+    private joins: StrokeJoin[] = [];
+
     constructor(ck: CanvasKit, canvas: HTMLCanvasElement, scene: WasmScene) {
         this.ck = ck;
         this.canvas = canvas;
         this.scene = scene;
         this.surface = null;
-        this.context = null;
         this.isRunning = false;
 
         this.zoom = 1.0;
         this.pan = { x: 0, y: 0 };
 
-        this.init();
+        this.initCachedResources();
+        this.initGL();
     }
 
-    init() {
-        this.context = (this.ck as any).GetWebGLContext(this.canvas);
-        this.grContext = (this.ck as any).MakeGrContext(this.context);
+    /** Pre-cache CanvasKit enum arrays so they aren't recreated per-frame. */
+    private initCachedResources() {
+        const ck = this.ck;
+        this.blendModes = [
+            ck.BlendMode.SrcOver,    // 0: normal
+            ck.BlendMode.Multiply,   // 1
+            ck.BlendMode.Screen,     // 2
+            ck.BlendMode.Overlay,    // 3
+            ck.BlendMode.Darken,     // 4
+            ck.BlendMode.Lighten,    // 5
+            ck.BlendMode.ColorDodge, // 6
+            ck.BlendMode.ColorBurn,  // 7
+            ck.BlendMode.HardLight,  // 8
+            ck.BlendMode.SoftLight,  // 9
+            ck.BlendMode.Difference, // 10
+            ck.BlendMode.Exclusion,  // 11
+            ck.BlendMode.Hue,        // 12
+            ck.BlendMode.Saturation, // 13
+            ck.BlendMode.Color,      // 14
+            ck.BlendMode.Luminosity, // 15
+        ];
+        this.caps = [ck.StrokeCap.Butt, ck.StrokeCap.Round, ck.StrokeCap.Square];
+        this.joins = [ck.StrokeJoin.Miter, ck.StrokeJoin.Round, ck.StrokeJoin.Bevel];
+    }
+
+    private initGL() {
+        // CanvasKit's GetWebGLContext/MakeGrContext aren't in public typings
+        const ckAny = this.ck as unknown as Record<string, CallableFunction>;
+        this.glContext = ckAny.GetWebGLContext(this.canvas) as number;
+        this.grContext = ckAny.MakeGrContext(this.glContext);
         this.onResize();
         window.addEventListener('resize', () => this.onResize());
     }
@@ -47,19 +81,21 @@ export class Renderer {
                 this.surface.delete();
             }
             
-            this.surface = (this.ck as any).MakeOnScreenGLSurface(
+            const ckExt = this.ck as unknown as Record<string, CallableFunction>;
+            const ckRaw = this.ck as unknown as Record<string, Record<string, unknown>>;
+            this.surface = ckExt.MakeOnScreenGLSurface(
                 this.grContext,
                 this.canvas.width,
                 this.canvas.height,
-                (this.ck as any).ColorSpace.SRGB
-            );
+                ckRaw.ColorSpace ? ckRaw.ColorSpace.SRGB : null
+            ) as Surface | null;
             
             // Fallback for different CanvasKit versions
-            if (!this.surface && (this.ck as any).MakeRenderTarget) {
-                this.surface = (this.ck as any).MakeRenderTarget(this.context, this.canvas.width, this.canvas.height);
+            if (!this.surface && ckExt.MakeRenderTarget) {
+                this.surface = ckExt.MakeRenderTarget(this.glContext, this.canvas.width, this.canvas.height) as Surface | null;
             }
             if (!this.surface) {
-                 this.surface = this.ck.MakeWebGLCanvasSurface(this.canvas, null as any, null as any);
+                this.surface = this.ck.MakeWebGLCanvasSurface(this.canvas);
             }
             
             this.render();
@@ -105,13 +141,19 @@ export class Renderer {
         const viewportMaxX = (this.canvas.width / dpr - this.pan.x) / this.zoom;
         const viewportMaxY = (this.canvas.height / dpr - this.pan.y) / this.zoom;
 
-        // Draw Scene Objects from WASM using Spatial Index
+        // Draw Scene Objects: recursive tree walk instead of flat iteration
+        // Build a set of visible leaf IDs from R-tree for culling
         const visibleIds = this.scene.getVisibleNodes(viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
+        const visibleSet = new Set<number>();
+        for (const id of visibleIds) {
+            visibleSet.add(id);
+        }
         const sceneData = this.scene.getSceneData();
         const nodes = sceneData.nodes;
 
-        for (const id of visibleIds) {
-            this.renderNode(canvas, id, nodes);
+        // Walk root_nodes recursively
+        for (const rootId of sceneData.root_nodes) {
+            this.renderSubtree(canvas, rootId, nodes, visibleSet);
         }
 
         // Draw filled faces (Live Paint)
@@ -177,33 +219,33 @@ export class Renderer {
         handleFill.setColor(this.ck.Color(0, 162, 255, 1.0));
         handleFill.setStyle(this.ck.PaintStyle.Fill);
 
-        for (const p of points) {
-            // Transform to world
-            const ax = t[0] * p.x + t[1] * p.y + t[2];
-            const ay = t[3] * p.x + t[4] * p.y + t[5];
-            const c1x = t[0] * p.cp1[0] + t[1] * p.cp1[1] + t[2];
-            const c1y = t[3] * p.cp1[0] + t[4] * p.cp1[1] + t[5];
-            const c2x = t[0] * p.cp2[0] + t[1] * p.cp2[1] + t[2];
-            const c2y = t[3] * p.cp2[0] + t[4] * p.cp2[1] + t[5];
+        for (const sp of points) {
+            for (const p of sp.points) {
+                // Transform to world
+                const ax = t[0] * p.x + t[1] * p.y + t[2];
+                const ay = t[3] * p.x + t[4] * p.y + t[5];
+                const c1x = t[0] * p.cp1[0] + t[1] * p.cp1[1] + t[2];
+                const c1y = t[3] * p.cp1[0] + t[4] * p.cp1[1] + t[5];
+                const c2x = t[0] * p.cp2[0] + t[1] * p.cp2[1] + t[2];
+                const c2y = t[3] * p.cp2[0] + t[4] * p.cp2[1] + t[5];
 
-            // Draw handle lines (anchor → cp1, anchor → cp2)
-            const isSmooth = Math.abs(c1x - ax) > 0.5 || Math.abs(c1y - ay) > 0.5;
-            if (isSmooth) {
-                canvas.drawLine(ax, ay, c1x, c1y, linePaint);
-                canvas.drawLine(ax, ay, c2x, c2y, linePaint);
-                // Draw cp1 handle circle
-                canvas.drawCircle(c1x, c1y, handleSize, handleFill);
-                // Draw cp2 handle circle
-                canvas.drawCircle(c2x, c2y, handleSize, handleFill);
+                // Draw handle lines (anchor → cp1, anchor → cp2)
+                const isSmooth = Math.abs(c1x - ax) > 0.5 || Math.abs(c1y - ay) > 0.5;
+                if (isSmooth) {
+                    canvas.drawLine(ax, ay, c1x, c1y, linePaint);
+                    canvas.drawLine(ax, ay, c2x, c2y, linePaint);
+                    canvas.drawCircle(c1x, c1y, handleSize, handleFill);
+                    canvas.drawCircle(c2x, c2y, handleSize, handleFill);
+                }
+
+                // Draw anchor point (white square with blue border)
+                canvas.drawRect(this.ck.LTRBRect(
+                    ax - dotSize, ay - dotSize, ax + dotSize, ay + dotSize
+                ), anchorFill);
+                canvas.drawRect(this.ck.LTRBRect(
+                    ax - dotSize, ay - dotSize, ax + dotSize, ay + dotSize
+                ), anchorStroke);
             }
-
-            // Draw anchor point (white square with blue border)
-            canvas.drawRect(this.ck.LTRBRect(
-                ax - dotSize, ay - dotSize, ax + dotSize, ay + dotSize
-            ), anchorFill);
-            canvas.drawRect(this.ck.LTRBRect(
-                ax - dotSize, ay - dotSize, ax + dotSize, ay + dotSize
-            ), anchorStroke);
         }
 
         linePaint.delete();
@@ -213,7 +255,51 @@ export class Renderer {
         canvas.restore();
     }
 
-    private renderNode(canvas: Canvas, id: number, nodes: any) {
+    private hasVisibleDescendant(id: number, nodes: SceneData['nodes'], visibleSet: Set<number>): boolean {
+        const node = nodes[id];
+        if (!node) return false;
+        if (node.children && node.children.length > 0) {
+            for (const childId of node.children) {
+                if (this.hasVisibleDescendant(childId, nodes, visibleSet)) return true;
+            }
+            return false;
+        }
+        return visibleSet.has(id);
+    }
+
+    private renderSubtree(canvas: Canvas, id: number, nodes: SceneData['nodes'], visibleSet: Set<number>) {
+        const node = nodes[id];
+        if (!node || !node.visible) return;
+
+        if (node.node_type === 'Group') {
+            // Check if any descendant is visible (skip entire group if not)
+            if (!this.hasVisibleDescendant(id, nodes, visibleSet)) return;
+
+            // Apply group opacity via saveLayer for correct compositing
+            const opacity = node.style.opacity ?? 1.0;
+            if (opacity < 1.0) {
+                const layerPaint = new this.ck.Paint();
+                layerPaint.setAlphaf(opacity);
+                canvas.saveLayer(layerPaint);
+                layerPaint.delete();
+            } else {
+                canvas.save();
+            }
+
+            // Recurse into children in order
+            for (const childId of (node.children || [])) {
+                this.renderSubtree(canvas, childId, nodes, visibleSet);
+            }
+
+            canvas.restore();
+        } else {
+            // Leaf node: only render if in visibleSet (R-tree culling)
+            if (!visibleSet.has(id)) return;
+            this.renderNode(canvas, id, nodes);
+        }
+    }
+
+    private renderNode(canvas: Canvas, id: number, nodes: SceneData['nodes']) {
         const node = nodes[id];
         if (!node || !node.visible) return;
 
@@ -223,39 +309,17 @@ export class Renderer {
         canvas.save();
         canvas.concat(transform);
 
-        // Extended blend mode map (16 modes)
-        const blendModes = [
-            this.ck.BlendMode.SrcOver,    // 0: normal
-            this.ck.BlendMode.Multiply,   // 1
-            this.ck.BlendMode.Screen,     // 2
-            this.ck.BlendMode.Overlay,    // 3
-            this.ck.BlendMode.Darken,     // 4
-            this.ck.BlendMode.Lighten,    // 5
-            this.ck.BlendMode.ColorDodge, // 6
-            this.ck.BlendMode.ColorBurn,  // 7
-            this.ck.BlendMode.HardLight,  // 8
-            this.ck.BlendMode.SoftLight,  // 9
-            this.ck.BlendMode.Difference, // 10
-            this.ck.BlendMode.Exclusion,  // 11
-            this.ck.BlendMode.Hue,        // 12
-            this.ck.BlendMode.Saturation, // 13
-            this.ck.BlendMode.Color,      // 14
-            this.ck.BlendMode.Luminosity,  // 15
-        ];
-
         const paint = new this.ck.Paint();
         paint.setAntiAlias(true);
 
-        const blendMode = blendModes[style.blend_mode || 0] || blendModes[0];
+        const blendMode = this.blendModes[style.blend_mode || 0] || this.blendModes[0];
         paint.setBlendMode(blendMode);
 
         // Fill pass
         if (style.fill) {
             const f = style.fill;
-            // Apply both global opacity and fill_opacity
-            const fillAlpha = (style.opacity ?? 1.0) * (style.fill_opacity ?? 1.0);
-            paint.setAlphaf(fillAlpha);
-            paint.setColor(this.ck.Color(f.r * 255, f.g * 255, f.b * 255, f.a));
+            const fillAlpha = f.a * (style.opacity ?? 1.0) * (style.fill_opacity ?? 1.0);
+            paint.setColor(this.ck.Color(f.r * 255, f.g * 255, f.b * 255, fillAlpha));
             paint.setStyle(this.ck.PaintStyle.Fill);
             this.drawGeometry(canvas, node.geometry, paint, style.corner_radius || 0, style.fill_rule || 0);
         }
@@ -263,27 +327,18 @@ export class Renderer {
         // Stroke pass
         if (style.stroke) {
             const s = style.stroke;
-            // Stroke uses only global opacity
-            paint.setAlphaf(style.opacity ?? 1.0);
-            paint.setColor(this.ck.Color(s.r * 255, s.g * 255, s.b * 255, s.a));
+            const strokeAlpha = s.a * (style.opacity ?? 1.0);
+            paint.setColor(this.ck.Color(s.r * 255, s.g * 255, s.b * 255, strokeAlpha));
             paint.setStyle(this.ck.PaintStyle.Stroke);
             paint.setStrokeWidth(style.stroke_width);
-
-            // Stroke cap
-            const caps = [this.ck.StrokeCap.Butt, this.ck.StrokeCap.Round, this.ck.StrokeCap.Square];
-            paint.setStrokeCap(caps[style.stroke_cap || 0] || caps[0]);
-
-            // Stroke join
-            const joins = [this.ck.StrokeJoin.Miter, this.ck.StrokeJoin.Round, this.ck.StrokeJoin.Bevel];
-            paint.setStrokeJoin(joins[style.stroke_join || 0] || joins[0]);
-
-            // Miter limit
-            const miterLimit = style.miter_limit ?? 4;
-            paint.setStrokeMiter(miterLimit);
+            paint.setStrokeCap(this.caps[style.stroke_cap || 0] || this.caps[0]);
+            paint.setStrokeJoin(this.joins[style.stroke_join || 0] || this.joins[0]);
+            paint.setStrokeMiter(style.miter_limit ?? 4);
 
             // Dash pattern
+            let dashEffect: ReturnType<typeof this.ck.PathEffect.MakeDash> | null = null;
             if (style.dash_array && style.dash_array.length >= 2) {
-                const dashEffect = this.ck.PathEffect.MakeDash(style.dash_array, style.dash_offset || 0);
+                dashEffect = this.ck.PathEffect.MakeDash(style.dash_array, style.dash_offset || 0);
                 if (dashEffect) {
                     paint.setPathEffect(dashEffect);
                 }
@@ -291,15 +346,16 @@ export class Renderer {
 
             this.drawGeometry(canvas, node.geometry, paint, style.corner_radius || 0, 0);
 
-            // Clear dash effect
+            // Clean up dash effect to prevent leak
             paint.setPathEffect(null);
+            dashEffect?.delete();
         }
         paint.delete();
 
         canvas.restore();
     }
 
-    private drawGeometry(canvas: Canvas, geometry: any, paint: any, cornerRadius: number = 0, fillRule: number = 0) {
+    private drawGeometry(canvas: Canvas, geometry: NodeGeometry, paint: Paint, cornerRadius: number = 0, fillRule: number = 0) {
         if (geometry.Rect) {
             const { width, height } = geometry.Rect;
             if (cornerRadius > 0) {
@@ -311,28 +367,26 @@ export class Renderer {
             const { radius_x, radius_y } = geometry.Ellipse;
             canvas.drawOval(this.ck.LTRBRect(-radius_x, -radius_y, radius_x, radius_y), paint);
         } else if (geometry.Path) {
-            const points = geometry.Path.points;
-            if (points && points.length >= 2) {
-                const path = new this.ck.Path();
-                // Apply fill rule
-                if (fillRule === 1) {
-                    path.setFillType(this.ck.FillType.EvenOdd);
-                }
-                path.moveTo(points[0].x, points[0].y);
-                for (let i = 1; i < points.length; i++) {
-                    const prev = points[i - 1];
-                    const p = points[i];
+            const subpaths = geometry.Path.subpaths;
+            const path = new this.ck.Path();
+            if (fillRule === 1) path.setFillType(this.ck.FillType.EvenOdd);
+            for (const sp of subpaths) {
+                if (sp.points.length < 2) continue;
+                path.moveTo(sp.points[0].x, sp.points[0].y);
+                for (let i = 1; i < sp.points.length; i++) {
+                    const prev = sp.points[i - 1];
+                    const p = sp.points[i];
                     path.cubicTo(prev.cp2[0], prev.cp2[1], p.cp1[0], p.cp1[1], p.x, p.y);
                 }
-                // Detect closed path (last point == first point) and close properly
-                const last = points[points.length - 1];
-                const first = points[0];
-                if (Math.abs(last.x - first.x) < 0.01 && Math.abs(last.y - first.y) < 0.01) {
+                if (sp.closed && sp.points.length >= 2) {
+                    const last = sp.points[sp.points.length - 1];
+                    const first = sp.points[0];
+                    path.cubicTo(last.cp2[0], last.cp2[1], first.cp1[0], first.cp1[1], first.x, first.y);
                     path.close();
                 }
-                canvas.drawPath(path, paint);
-                path.delete();
             }
+            canvas.drawPath(path, paint);
+            path.delete();
         } else if (geometry.Text) {
             const { content, font_size } = geometry.Text;
             const font = new this.ck.Font(null, font_size);
@@ -385,21 +439,18 @@ export class Renderer {
 
         const { x, y, w, h, tool } = preview;
         const rect = this.ck.LTRBRect(x, y, x + w, y + h);
+        const isCustomShape = tool !== 'rect' && tool !== 'ellipse';
+        // Build custom shape path once (if needed) and reuse for fill+stroke
+        const shapePath = isCustomShape ? this.makePreviewPath(tool, x, y, w, h) : null;
 
         // Semi-transparent fill
         const fillPaint = new this.ck.Paint();
         fillPaint.setColor(this.ck.Color(100, 149, 237, 0.3));
         fillPaint.setStyle(this.ck.PaintStyle.Fill);
 
-        if (tool === 'rect') {
-            canvas.drawRect(rect, fillPaint);
-        } else if (tool === 'ellipse') {
-            canvas.drawOval(rect, fillPaint);
-        } else {
-            const path = this.makePreviewPath(tool, x, y, w, h);
-            canvas.drawPath(path, fillPaint);
-            path.delete();
-        }
+        if (tool === 'rect') canvas.drawRect(rect, fillPaint);
+        else if (tool === 'ellipse') canvas.drawOval(rect, fillPaint);
+        else canvas.drawPath(shapePath!, fillPaint);
 
         // Blue outline
         const strokePaint = new this.ck.Paint();
@@ -407,16 +458,11 @@ export class Renderer {
         strokePaint.setStyle(this.ck.PaintStyle.Stroke);
         strokePaint.setStrokeWidth(1.5 / this.zoom);
 
-        if (tool === 'rect') {
-            canvas.drawRect(rect, strokePaint);
-        } else if (tool === 'ellipse') {
-            canvas.drawOval(rect, strokePaint);
-        } else {
-            const path = this.makePreviewPath(tool, x, y, w, h);
-            canvas.drawPath(path, strokePaint);
-            path.delete();
-        }
+        if (tool === 'rect') canvas.drawRect(rect, strokePaint);
+        else if (tool === 'ellipse') canvas.drawOval(rect, strokePaint);
+        else canvas.drawPath(shapePath!, strokePaint);
 
+        shapePath?.delete();
         fillPaint.delete();
         strokePaint.delete();
     }
@@ -527,7 +573,7 @@ export class Renderer {
         strokePaint.delete();
         dotPaint.delete();
     }
-    private renderSelectionOverlay(canvas: Canvas, dpr: number, nodes: any) {
+    private renderSelectionOverlay(canvas: Canvas, dpr: number, nodes: SceneData['nodes']) {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
 
@@ -550,27 +596,40 @@ export class Renderer {
             canvas.concat(transform);
 
             if (node.geometry.Rect) {
-                const { width, height } = node.geometry.Rect;
-                canvas.drawRect(this.ck.LTRBRect(0, 0, width, height), paint);
+                if (node.node_type === 'Group') {
+                    // Group node: draw selection outline using AABB bounds
+                    canvas.restore(); // undo the per-node transform
+                    const bounds = this.scene.getNodeBounds(id);
+                    const [gMinX, gMinY, gMaxX, gMaxY] = bounds;
+                    if (gMaxX > gMinX && gMaxY > gMinY) {
+                        canvas.drawRect(this.ck.LTRBRect(gMinX, gMinY, gMaxX, gMaxY), paint);
+                    }
+                    canvas.save(); // re-save so the outer restore is balanced
+                } else {
+                    const { width, height } = node.geometry.Rect;
+                    canvas.drawRect(this.ck.LTRBRect(0, 0, width, height), paint);
+                }
             } else if (node.geometry.Ellipse) {
                 const { radius_x, radius_y } = node.geometry.Ellipse;
                 canvas.drawOval(this.ck.LTRBRect(-radius_x, -radius_y, radius_x, radius_y), paint);
             } else if (node.geometry.Path) {
-                const points = node.geometry.Path.points;
-                if (points && points.length >= 2) {
-                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-                    for (const p of points) {
-                        // Include anchor
+                const subpaths = node.geometry.Path.subpaths;
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                let hasPoints = false;
+                for (const sp of subpaths) {
+                    for (const p of sp.points) {
+                        hasPoints = true;
                         minX = Math.min(minX, p.x);
                         minY = Math.min(minY, p.y);
                         maxX = Math.max(maxX, p.x);
                         maxY = Math.max(maxY, p.y);
-                        // Include control points
                         minX = Math.min(minX, p.cp1[0], p.cp2[0]);
                         minY = Math.min(minY, p.cp1[1], p.cp2[1]);
                         maxX = Math.max(maxX, p.cp1[0], p.cp2[0]);
                         maxY = Math.max(maxY, p.cp1[1], p.cp2[1]);
                     }
+                }
+                if (hasPoints) {
                     canvas.drawRect(this.ck.LTRBRect(minX, minY, maxX, maxY), paint);
                 }
             } else if (node.geometry.Text) {
@@ -660,18 +719,18 @@ export class Renderer {
         paint.setColor(this.ck.Color(255, 255, 255, 1.0));
         paint.setStyle(this.ck.PaintStyle.Fill);
 
-        // Center artboard (1000x1000 default)
-        const size = 1000;
-        const x = (this.canvas.clientWidth - size) / 2;
-        const y = (this.canvas.clientHeight - size) / 2;
+        // Use dynamic document size from engine
+        const w = this.scene.engine?.get_document_width() ?? 1000;
+        const h = this.scene.engine?.get_document_height() ?? 1000;
 
-        canvas.drawRect(this.ck.LTRBRect(x, y, x + size, y + size), paint);
+        // Artboard is at world origin (0,0)
+        canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), paint);
         
         // Artboard border
         paint.setColor(this.ck.Color(80, 80, 80, 1.0));
         paint.setStyle(this.ck.PaintStyle.Stroke);
-        paint.setStrokeWidth(1);
-        canvas.drawRect(this.ck.LTRBRect(x, y, x + size, y + size), paint);
+        paint.setStrokeWidth(1 / this.zoom);
+        canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), paint);
 
         paint.delete();
     }

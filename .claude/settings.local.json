@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm check *)",
+      "Bash(pnpm test *)",
+      "Bash(cargo test *)",
+      "Bash(wasm-pack build *)",
+      "Read(//Users/francesco/.cargo/**)",
+      "Read(//Users/francesco/.rustup/toolchains/**)",
+      "Read(//opt/homebrew/opt/**)"
+    ]
+  }
+}

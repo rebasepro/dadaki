@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="description" content="Antigravity Vector — a professional in-browser SVG vector graphics editor with Rust/WASM rendering engine">
     <title>Antigravity Vector — Pro SVG Editor</title>
     <link rel="stylesheet" href="style.css">
     <script>
@@ -11,18 +12,18 @@
             if (e.ctrlKey || e.metaKey) e.preventDefault();
         }, { passive: false, capture: true });
     </script>
-    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/lucide@0.460.0"></script>
     <script src="/canvaskit.js"></script>
     <script type="module" src="/src/main.ts"></script>
 </head>
 <body>
     <div id="app-container">
         <header id="header">
-            <div style="font-weight: 700; font-size: 14px; letter-spacing: -0.02em;">ANTIGRAVITY VECTOR</div>
-            <div style="flex: 1;"></div>
-            <button id="import-svg" style="background: var(--bg-hover); color: var(--text-main); border: 1px solid var(--border); padding: 4px 12px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-right: 8px;">Import SVG</button>
-            <button id="export-svg" style="background: var(--accent); color: white; border: none; padding: 4px 12px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-right: 16px;">Export SVG</button>
-            <div id="zoom-level" style="font-size: 11px; color: #909090;">100%</div>
+            <div class="header-title">ANTIGRAVITY VECTOR</div>
+            <div class="header-spacer"></div>
+            <button id="import-svg" class="header-btn header-btn-secondary">Import SVG</button>
+            <button id="export-svg" class="header-btn header-btn-primary">Export SVG</button>
+            <div id="zoom-level" class="zoom-display">100%</div>
         </header>
 
         <main id="main-layout">
@@ -35,7 +36,7 @@
                 <div class="tool-btn" id="tool-polygon" data-tooltip="Polygon"><i data-lucide="hexagon"></i></div>
                 <div class="tool-btn" id="tool-star" data-tooltip="Star"><i data-lucide="star"></i></div>
                 <div class="tool-btn" id="tool-text" data-tooltip="Text" data-shortcut="T"><i data-lucide="type"></i></div>
-                <div style="flex: 1;"></div>
+                <div class="toolbar-spacer"></div>
                 <div class="tool-btn" id="tool-paint-bucket" data-tooltip="Live Paint" data-shortcut="B"><i data-lucide="paintbrush"></i></div>
                 <div class="tool-btn" id="tool-stroke" data-tooltip="Stroke Color"><i data-lucide="pen-line"></i></div>
             </nav>
@@ -164,7 +165,7 @@
                             <span class="label">Opacity</span>
                             <input type="number" id="opacity" class="prop-input" value="100" min="0" max="100" style="width: 44px; flex: 0 0 44px;">
                             <span class="unit">%</span>
-                            <span style="flex: 1;"></span>
+                            <span class="header-spacer"></span>
                             <button class="icon-toggle active" id="toggle-visible" title="Visibility">👁</button>
                             <button class="icon-toggle" id="toggle-locked" title="Lock">🔒</button>
                         </div>
@@ -192,22 +193,6 @@
                     </div>
                 </div>
 
-                <!-- PATHFINDER -->
-                <div class="panel-section">
-                    <div class="panel-section-header" data-section="pathfinder">
-                        <span class="chevron">▾</span>
-                        <span class="section-title">Pathfinder</span>
-                    </div>
-                    <div class="panel-section-body" data-section-body="pathfinder">
-                        <div class="pathfinder-grid">
-                            <button class="op-btn" id="op-union" title="Union"><i data-lucide="squares-unite"></i></button>
-                            <button class="op-btn" id="op-subtract" title="Subtract"><i data-lucide="squares-subtract"></i></button>
-                            <button class="op-btn" id="op-intersect" title="Intersect"><i data-lucide="squares-intersect"></i></button>
-                            <button class="op-btn" id="op-xor" title="Exclude"><i data-lucide="squares-exclude"></i></button>
-                        </div>
-                    </div>
-                </div>
-
                 <!-- LAYERS -->
                 <div class="panel-section layers-section">
                     <div class="panel-section-header" data-section="layers">
@@ -220,12 +205,12 @@
                 </div>
             </aside>
         </main>
+        <!-- Context Menu -->
+        <div id="context-menu" class="context-menu"></div>
     </div>
     <script>
         // Initialize Lucide icons
         lucide.createIcons();
     </script>
-    <!-- Context Menu -->
-    <div id="context-menu" class="context-menu"></div>
 </body>
 </html>

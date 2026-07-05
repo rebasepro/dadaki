@@ -13,7 +13,9 @@ use crate::{
 };
 
 /// Current file format version. Bump when schema changes.
-pub const FORMAT_VERSION: u32 = 1;
+/// v1: flat point list per path (closed-ness implied by duplicated end point).
+/// v2: explicit subpaths with closed flag; document dimensions.
+pub const FORMAT_VERSION: u32 = 2;
 
 // ─── Proto Message Types ────────────────────────────────────────────────────────
 
@@ -37,8 +39,8 @@ pub struct ProtoStyle {
     pub stroke: Option<ProtoColor>,
     #[prost(float, tag = "3")]
     pub stroke_width: f32,
-    #[prost(float, tag = "4")]
-    pub opacity: f32,
+    #[prost(float, optional, tag = "4")]
+    pub opacity: Option<f32>,
     #[prost(uint32, tag = "5")]
     pub stroke_cap: u32,
     #[prost(uint32, tag = "6")]
@@ -53,10 +55,10 @@ pub struct ProtoStyle {
     pub blend_mode: u32,
     #[prost(uint32, tag = "11")]
     pub fill_rule: u32,
-    #[prost(float, tag = "12")]
-    pub miter_limit: f32,
-    #[prost(float, tag = "13")]
-    pub fill_opacity: f32,
+    #[prost(float, optional, tag = "12")]
+    pub miter_limit: Option<f32>,
+    #[prost(float, optional, tag = "13")]
+    pub fill_opacity: Option<f32>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -73,6 +75,14 @@ pub struct ProtoPathPoint {
     pub cp2_x: f32,
     #[prost(float, tag = "6")]
     pub cp2_y: f32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoSubpath {
+    #[prost(message, repeated, tag = "1")]
+    pub points: Vec<ProtoPathPoint>,
+    #[prost(bool, tag = "2")]
+    pub closed: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -93,8 +103,13 @@ pub struct ProtoEllipse {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct ProtoPath {
+    /// v1 flat point list (single implicit subpath). Only read during
+    /// migration of old files; v2+ writers leave this empty.
     #[prost(message, repeated, tag = "1")]
-    pub points: Vec<ProtoPathPoint>,
+    pub legacy_points: Vec<ProtoPathPoint>,
+    /// v2+ explicit subpaths.
+    #[prost(message, repeated, tag = "2")]
+    pub subpaths: Vec<ProtoSubpath>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -173,6 +188,11 @@ pub struct ProtoDocument {
     /// Gap tolerance for vector network.
     #[prost(float, tag = "6")]
     pub gap_tolerance: f32,
+    /// Document dimensions (default 1000x1000).
+    #[prost(float, optional, tag = "7")]
+    pub document_width: Option<f32>,
+    #[prost(float, optional, tag = "8")]
+    pub document_height: Option<f32>,
 }
 
 // ─── Conversion: Internal → Proto ───────────────────────────────────────────────
@@ -195,7 +215,7 @@ impl From<&Style> for ProtoStyle {
             fill: s.fill.as_ref().map(|c| c.into()),
             stroke: s.stroke.as_ref().map(|c| c.into()),
             stroke_width: s.stroke_width,
-            opacity: s.opacity,
+            opacity: Some(s.opacity),
             stroke_cap: s.stroke_cap as u32,
             stroke_join: s.stroke_join as u32,
             dash_array: s.dash_array.clone(),
@@ -203,8 +223,8 @@ impl From<&Style> for ProtoStyle {
             corner_radius: s.corner_radius,
             blend_mode: s.blend_mode as u32,
             fill_rule: s.fill_rule as u32,
-            miter_limit: s.miter_limit,
-            fill_opacity: s.fill_opacity,
+            miter_limit: Some(s.miter_limit),
+            fill_opacity: Some(s.fill_opacity),
         }
     }
 }
@@ -215,11 +235,7 @@ impl From<&ProtoStyle> for Style {
             fill: s.fill.as_ref().map(|c| c.into()),
             stroke: s.stroke.as_ref().map(|c| c.into()),
             stroke_width: s.stroke_width,
-            opacity: if s.opacity == 0.0 && s.fill.is_none() && s.stroke.is_none() {
-                1.0 // default
-            } else {
-                s.opacity
-            },
+            opacity: s.opacity.unwrap_or(1.0),
             stroke_cap: s.stroke_cap as u8,
             stroke_join: s.stroke_join as u8,
             dash_array: s.dash_array.clone(),
@@ -227,8 +243,8 @@ impl From<&ProtoStyle> for Style {
             corner_radius: s.corner_radius,
             blend_mode: s.blend_mode as u8,
             fill_rule: s.fill_rule as u8,
-            miter_limit: if s.miter_limit == 0.0 { 4.0 } else { s.miter_limit },
-            fill_opacity: if s.fill_opacity == 0.0 { 1.0 } else { s.fill_opacity },
+            miter_limit: s.miter_limit.unwrap_or(4.0),
+            fill_opacity: s.fill_opacity.unwrap_or(1.0),
         }
     }
 }
@@ -285,10 +301,14 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
             ellipse: Some(ProtoEllipse { radius_x: *radius_x, radius_y: *radius_y }),
             path: None, text: None,
         },
-        Geometry::Path { points } => ProtoGeometry {
+        Geometry::Path { subpaths } => ProtoGeometry {
             rect: None, ellipse: None,
             path: Some(ProtoPath {
-                points: points.iter().map(|p| p.into()).collect(),
+                legacy_points: Vec::new(),
+                subpaths: subpaths.iter().map(|sp| ProtoSubpath {
+                    points: sp.points.iter().map(|p| p.into()).collect(),
+                    closed: sp.closed,
+                }).collect(),
             }),
             text: None,
         },
@@ -308,8 +328,23 @@ fn proto_to_geometry(g: &ProtoGeometry) -> Geometry {
     } else if let Some(e) = &g.ellipse {
         Geometry::Ellipse { radius_x: e.radius_x, radius_y: e.radius_y }
     } else if let Some(p) = &g.path {
-        Geometry::Path {
-            points: p.points.iter().map(|pp| pp.into()).collect(),
+        // Defensive: if migrate() didn't run (direct to_scene call on a v1
+        // doc), still honor the legacy flat point list.
+        if p.subpaths.is_empty() && !p.legacy_points.is_empty() {
+            let sp = legacy_points_to_subpath(p.legacy_points.clone());
+            Geometry::Path {
+                subpaths: vec![crate::Subpath {
+                    points: sp.points.iter().map(|pp| pp.into()).collect(),
+                    closed: sp.closed,
+                }],
+            }
+        } else {
+            Geometry::Path {
+                subpaths: p.subpaths.iter().map(|sp| crate::Subpath {
+                    points: sp.points.iter().map(|pp| pp.into()).collect(),
+                    closed: sp.closed,
+                }).collect(),
+            }
         }
     } else if let Some(t) = &g.text {
         Geometry::Text {
@@ -404,6 +439,8 @@ impl ProtoDocument {
             next_id,
             face_fills,
             gap_tolerance: scene.vector_network.gap_tolerance,
+            document_width: Some(scene.document_width),
+            document_height: Some(scene.document_height),
         }
     }
 
@@ -434,6 +471,8 @@ impl ProtoDocument {
             root_nodes: self.root_ids.clone(),
             selection: Vec::new(),
             vector_network: vn,
+            document_width: self.document_width.unwrap_or(1000.0),
+            document_height: self.document_height.unwrap_or(1000.0),
         };
 
         let next_id = if self.next_id > 0 {
@@ -476,12 +515,251 @@ pub fn deserialize_from_base64(b64: &str) -> Option<(Scene, u32)> {
 
 /// Run schema migrations on older format versions.
 fn migrate(doc: &mut ProtoDocument) {
-    match doc.format_version {
-        0 | 1 => { /* v1 is current, no migration needed */ }
-        _ => {
-            // Future: add migrations here as schema evolves
-            // e.g., if v2 renames a field, transform it here
-        }
+    if doc.format_version <= 1 {
+        migrate_v1_to_v2(doc);
     }
     doc.format_version = FORMAT_VERSION;
+}
+
+/// v1 → v2: wrap each path's flat point list into a single subpath.
+/// Closed-ness in v1 was implied by a duplicated end point (≈ first point);
+/// we detect it, drop the duplicate, and preserve its incoming control handle.
+fn migrate_v1_to_v2(doc: &mut ProtoDocument) {
+    for node in &mut doc.nodes {
+        let Some(geo) = node.geometry.as_mut() else { continue };
+        let Some(path) = geo.path.as_mut() else { continue };
+        if !path.legacy_points.is_empty() && path.subpaths.is_empty() {
+            let points = std::mem::take(&mut path.legacy_points);
+            path.subpaths.push(legacy_points_to_subpath(points));
+        }
+    }
+}
+
+fn legacy_points_to_subpath(mut points: Vec<ProtoPathPoint>) -> ProtoSubpath {
+    let mut closed = false;
+    if points.len() >= 3 {
+        let first = &points[0];
+        let last = &points[points.len() - 1];
+        if (first.x - last.x).abs() < 0.01 && (first.y - last.y).abs() < 0.01 {
+            closed = true;
+            // The duplicated closing point carried the incoming handle of the
+            // closing segment; move it onto the first point before dropping.
+            let dup = points.pop().unwrap();
+            points[0].cp1_x = dup.cp1_x;
+            points[0].cp1_y = dup.cp1_y;
+        }
+    }
+    ProtoSubpath { points, closed }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_style() -> ProtoStyle {
+        ProtoStyle {
+            fill: Some(ProtoColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+            stroke: None,
+            stroke_width: 2.0,
+            opacity: Some(1.0),
+            stroke_cap: 0,
+            stroke_join: 0,
+            dash_array: Vec::new(),
+            dash_offset: 0.0,
+            corner_radius: 0.0,
+            blend_mode: 0,
+            fill_rule: 0,
+            miter_limit: Some(4.0),
+            fill_opacity: Some(1.0),
+        }
+    }
+
+    fn pp(x: f32, y: f32) -> ProtoPathPoint {
+        ProtoPathPoint { x, y, cp1_x: x, cp1_y: y, cp2_x: x, cp2_y: y }
+    }
+
+    /// A v1 file (legacy flat point list, duplicated closing point) must decode
+    /// into a single closed subpath without the duplicate.
+    #[test]
+    fn test_v1_file_migrates_to_subpaths() {
+        // v1 writers encoded `points` at tag 1 of ProtoPath — identical wire
+        // bytes to encoding `legacy_points` today, so this fixture is
+        // wire-exact with a real v1 file.
+        let v1_doc = ProtoDocument {
+            format_version: 1,
+            nodes: vec![ProtoNode {
+                id: 1,
+                name: "Triangle".into(),
+                node_type: 0, // Path
+                transform: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                style: Some(make_style()),
+                geometry: Some(ProtoGeometry {
+                    rect: None,
+                    ellipse: None,
+                    path: Some(ProtoPath {
+                        legacy_points: vec![
+                            pp(0.0, 0.0), pp(100.0, 0.0), pp(50.0, 80.0),
+                            pp(0.0, 0.0), // v1 closing duplicate
+                        ],
+                        subpaths: Vec::new(),
+                    }),
+                    text: None,
+                }),
+                children: Vec::new(),
+                parent: None,
+                visible: true,
+                locked: false,
+            }],
+            root_ids: vec![1],
+            next_id: 2,
+            face_fills: Vec::new(),
+            gap_tolerance: 2.0,
+            document_width: None,
+            document_height: None,
+        };
+
+        let bytes = v1_doc.encode_to_vec();
+        let (scene, next_id) = deserialize_from_proto(&bytes).expect("v1 file must decode");
+        assert_eq!(next_id, 2);
+
+        let node = scene.nodes.get(&1).expect("node present");
+        match &node.geometry {
+            Geometry::Path { subpaths } => {
+                assert_eq!(subpaths.len(), 1);
+                assert!(subpaths[0].closed, "duplicated end point implies closed");
+                assert_eq!(subpaths[0].points.len(), 3, "closing duplicate dropped");
+            }
+            other => panic!("expected Path geometry, got {:?}", other),
+        }
+        // v1 files without document dimensions get defaults
+        assert_eq!(scene.document_width, 1000.0);
+        assert_eq!(scene.document_height, 1000.0);
+    }
+
+    /// An open v1 path (no duplicated end point) stays open.
+    #[test]
+    fn test_v1_open_path_stays_open() {
+        let mut doc = ProtoDocument {
+            format_version: 1,
+            nodes: vec![],
+            root_ids: vec![],
+            next_id: 1,
+            face_fills: Vec::new(),
+            gap_tolerance: 2.0,
+            document_width: None,
+            document_height: None,
+        };
+        doc.nodes.push(ProtoNode {
+            id: 1,
+            name: "Line".into(),
+            node_type: 0,
+            transform: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            style: Some(make_style()),
+            geometry: Some(ProtoGeometry {
+                rect: None,
+                ellipse: None,
+                path: Some(ProtoPath {
+                    legacy_points: vec![pp(0.0, 0.0), pp(50.0, 50.0)],
+                    subpaths: Vec::new(),
+                }),
+                text: None,
+            }),
+            children: Vec::new(),
+            parent: None,
+            visible: true,
+            locked: false,
+        });
+
+        let bytes = doc.encode_to_vec();
+        let (scene, _) = deserialize_from_proto(&bytes).unwrap();
+        match &scene.nodes.get(&1).unwrap().geometry {
+            Geometry::Path { subpaths } => {
+                assert_eq!(subpaths.len(), 1);
+                assert!(!subpaths[0].closed);
+                assert_eq!(subpaths[0].points.len(), 2);
+            }
+            other => panic!("expected Path geometry, got {:?}", other),
+        }
+    }
+
+    /// v2 round trip: subpaths, closed flags, and document size survive.
+    #[test]
+    fn test_v2_round_trip() {
+        let mut nodes = HashMap::new();
+        nodes.insert(7, Node {
+            id: 7,
+            name: "Shape".into(),
+            node_type: NodeType::Path,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 25.0, 30.0, 1.0],
+            style: Style {
+                fill: Some(Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 }),
+                stroke: Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                stroke_width: 3.0,
+                opacity: 0.5,
+                stroke_cap: 1,
+                stroke_join: 2,
+                dash_array: vec![4.0, 2.0],
+                dash_offset: 1.0,
+                corner_radius: 0.0,
+                blend_mode: 0,
+                fill_rule: 1,
+                miter_limit: 4.0,
+                fill_opacity: 0.75,
+            },
+            geometry: Geometry::Path {
+                subpaths: vec![
+                    crate::Subpath {
+                        points: vec![
+                            PathPoint { x: 0.0, y: 0.0, cp1: Vec2::new(0.0, 0.0), cp2: Vec2::new(10.0, 0.0) },
+                            PathPoint { x: 50.0, y: 0.0, cp1: Vec2::new(40.0, 0.0), cp2: Vec2::new(50.0, 0.0) },
+                            PathPoint { x: 25.0, y: 40.0, cp1: Vec2::new(25.0, 40.0), cp2: Vec2::new(25.0, 40.0) },
+                        ],
+                        closed: true,
+                    },
+                    crate::Subpath {
+                        points: vec![
+                            PathPoint { x: 10.0, y: 10.0, cp1: Vec2::new(10.0, 10.0), cp2: Vec2::new(10.0, 10.0) },
+                            PathPoint { x: 20.0, y: 20.0, cp1: Vec2::new(20.0, 20.0), cp2: Vec2::new(20.0, 20.0) },
+                        ],
+                        closed: false,
+                    },
+                ],
+            },
+            children: Vec::new(),
+            parent: None,
+            visible: true,
+            locked: false,
+        });
+
+        let scene = Scene {
+            nodes,
+            root_nodes: vec![7],
+            selection: Vec::new(),
+            vector_network: VectorNetwork::default(),
+            document_width: 800.0,
+            document_height: 600.0,
+        };
+
+        let bytes = serialize_to_proto(&scene, 8);
+        let (scene2, next_id) = deserialize_from_proto(&bytes).unwrap();
+        assert_eq!(next_id, 8);
+        assert_eq!(scene2.document_width, 800.0);
+        assert_eq!(scene2.document_height, 600.0);
+
+        let node = scene2.nodes.get(&7).unwrap();
+        assert_eq!(node.style.opacity, 0.5);
+        assert_eq!(node.style.fill_opacity, 0.75);
+        match &node.geometry {
+            Geometry::Path { subpaths } => {
+                assert_eq!(subpaths.len(), 2);
+                assert!(subpaths[0].closed);
+                assert!(!subpaths[1].closed);
+                assert_eq!(subpaths[0].points.len(), 3);
+                assert_eq!(subpaths[0].points[0].cp2, Vec2::new(10.0, 0.0));
+                assert_eq!(subpaths[1].points.len(), 2);
+            }
+            other => panic!("expected Path geometry, got {:?}", other),
+        }
+    }
 }

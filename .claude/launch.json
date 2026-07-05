@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "vector-editor",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev", "--port", "5199", "--strictPort"],
+      "port": 5199,
+      "autoPort": false
+    }
+  ]
+}
