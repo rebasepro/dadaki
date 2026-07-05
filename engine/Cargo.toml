@@ -18,6 +18,10 @@ bincode = "1.3"
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
 getrandom = { version = "0.2", features = ["js"] }
+geo = "0.28"
+ordered-float = "4"
+prost = "0.13"
+base64 = "0.22"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

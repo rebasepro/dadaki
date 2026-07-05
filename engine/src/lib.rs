@@ -3,6 +3,11 @@ use glam::{Mat3, Vec2};
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 
+mod vector_network;
+pub use vector_network::VectorNetwork;
+
+mod proto;
+pub use proto::FORMAT_VERSION;
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
@@ -126,6 +131,8 @@ pub struct Scene {
     pub nodes: HashMap<u32, Node>,
     pub root_nodes: Vec<u32>,
     pub selection: Vec<u32>,
+    #[serde(default)]
+    pub vector_network: VectorNetwork,
 }
 
 #[wasm_bindgen]
@@ -138,6 +145,7 @@ impl Engine {
                 nodes: HashMap::new(),
                 root_nodes: Vec::new(),
                 selection: Vec::new(),
+                vector_network: VectorNetwork::default(),
             },
             next_id: 1,
             global_transforms: HashMap::new(),
@@ -158,6 +166,8 @@ impl Engine {
 
     fn mark_dirty(&mut self, id: u32) {
         self.dirty_flags.insert(id, true);
+        // Invalidate vector network so faces recompute on next query
+        self.scene.vector_network.dirty = true;
     }
 
     pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32) -> u32 {
@@ -699,6 +709,44 @@ impl Engine {
         }
     }
 
+    pub fn bring_forward(&mut self, id: u32) {
+        let parent_id = self.scene.nodes.get(&id).and_then(|n| n.parent);
+        if let Some(pid) = parent_id {
+            if let Some(parent) = self.scene.nodes.get_mut(&pid) {
+                if let Some(pos) = parent.children.iter().position(|&x| x == id) {
+                    if pos + 1 < parent.children.len() {
+                        parent.children.swap(pos, pos + 1);
+                    }
+                }
+            }
+        } else {
+            if let Some(pos) = self.scene.root_nodes.iter().position(|&x| x == id) {
+                if pos + 1 < self.scene.root_nodes.len() {
+                    self.scene.root_nodes.swap(pos, pos + 1);
+                }
+            }
+        }
+    }
+
+    pub fn send_backward(&mut self, id: u32) {
+        let parent_id = self.scene.nodes.get(&id).and_then(|n| n.parent);
+        if let Some(pid) = parent_id {
+            if let Some(parent) = self.scene.nodes.get_mut(&pid) {
+                if let Some(pos) = parent.children.iter().position(|&x| x == id) {
+                    if pos > 0 {
+                        parent.children.swap(pos, pos - 1);
+                    }
+                }
+            }
+        } else {
+            if let Some(pos) = self.scene.root_nodes.iter().position(|&x| x == id) {
+                if pos > 0 {
+                    self.scene.root_nodes.swap(pos, pos - 1);
+                }
+            }
+        }
+    }
+
     pub fn get_scene_json(&self) -> String {
         serde_json::to_string(&self.scene).unwrap_or_default()
     }
@@ -1231,6 +1279,132 @@ impl History {
         } else {
             None
         }
+    }
+}
+
+// ─── Live Paint / Vector Network API ────────────────────────────────────────────
+
+#[wasm_bindgen]
+impl Engine {
+    /// Rebuild the planar graph from all visible paths.
+    pub fn rebuild_vector_network(&mut self) {
+        let segments = self.collect_segments();
+        self.scene.vector_network.rebuild(segments);
+    }
+
+    /// Mark the vector network as needing recomputation.
+    pub fn invalidate_vector_network(&mut self) {
+        self.scene.vector_network.dirty = true;
+    }
+
+    /// Query which face contains the given point. Returns face ID or -1.
+    pub fn query_face_at(&mut self, x: f32, y: f32) -> i32 {
+        self.ensure_network_clean();
+        match self.scene.vector_network.query_face_at(x, y) {
+            Some(id) => id as i32,
+            None => -1,
+        }
+    }
+
+    /// Get the boundary polygon of a face as JSON.
+    pub fn get_face_boundary(&mut self, face_id: u32) -> String {
+        self.ensure_network_clean();
+        match self.scene.vector_network.faces.get(&face_id) {
+            Some(face) => serde_json::to_string(&face.boundary_polygon).unwrap_or_default(),
+            None => "[]".to_string(),
+        }
+    }
+
+    /// Assign a fill color to a face.
+    pub fn set_face_fill(&mut self, face_id: u32, r: f32, g: f32, b: f32, a: f32) {
+        if let Some(face) = self.scene.vector_network.faces.get_mut(&face_id) {
+            face.fill = Some(Color { r, g, b, a });
+        }
+    }
+
+    /// Clear a face's fill.
+    pub fn clear_face_fill(&mut self, face_id: u32) {
+        if let Some(face) = self.scene.vector_network.faces.get_mut(&face_id) {
+            face.fill = None;
+        }
+    }
+
+    /// Get all filled faces as JSON for rendering.
+    pub fn get_filled_faces(&mut self) -> String {
+        self.ensure_network_clean();
+        let filled: Vec<serde_json::Value> = self.scene.vector_network.faces.values()
+            .filter(|f| f.fill.is_some() && !f.is_outer)
+            .map(|f| {
+                let fill = f.fill.as_ref().unwrap();
+                serde_json::json!({
+                    "id": f.id,
+                    "boundary": f.boundary_polygon,
+                    "fill": { "r": fill.r, "g": fill.g, "b": fill.b, "a": fill.a }
+                })
+            })
+            .collect();
+        serde_json::to_string(&filled).unwrap_or_default()
+    }
+
+    /// Set gap tolerance for the vector network.
+    pub fn set_gap_tolerance(&mut self, tolerance: f32) {
+        self.scene.vector_network.gap_tolerance = tolerance;
+        self.scene.vector_network.dirty = true;
+    }
+
+    /// Check if the vector network is dirty.
+    pub fn is_vector_network_dirty(&self) -> bool {
+        self.scene.vector_network.dirty
+    }
+}
+
+// ─── Protobuf File Format API ───────────────────────────────────────────────────
+
+#[wasm_bindgen]
+impl Engine {
+    /// Serialize scene to protobuf bytes (.vec file format).
+    pub fn serialize_proto(&self) -> Vec<u8> {
+        proto::serialize_to_proto(&self.scene, self.next_id)
+    }
+
+    /// Deserialize scene from protobuf bytes (.vec file format).
+    /// Returns true on success.
+    pub fn deserialize_proto(&mut self, data: &[u8]) -> bool {
+        match proto::deserialize_from_proto(data) {
+            Some((scene, next_id)) => {
+                self.scene = scene;
+                self.next_id = next_id;
+                self.update_all_global_transforms();
+                self.update_all_spatial_indices();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Serialize scene to base64-encoded protobuf (for SVG embedding).
+    pub fn serialize_proto_base64(&self) -> String {
+        proto::serialize_to_base64(&self.scene, self.next_id)
+    }
+
+    /// Deserialize scene from base64-encoded protobuf (from SVG metadata).
+    /// Returns true on success.
+    pub fn deserialize_proto_base64(&mut self, b64: &str) -> bool {
+        match proto::deserialize_from_base64(b64) {
+            Some((scene, next_id)) => {
+                self.scene = scene;
+                self.next_id = next_id;
+                self.update_all_global_transforms();
+                self.update_all_spatial_indices();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Get the current format version.
+    pub fn get_format_version(&self) -> u32 {
+        FORMAT_VERSION
     }
 }
 

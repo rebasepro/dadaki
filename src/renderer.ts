@@ -13,6 +13,8 @@ export class Renderer {
     zoom: number;
     pan: { x: number; y: number };
     inputManager: InputManager | null = null;
+    /** Face ID currently being hovered by the paint bucket tool (or -1). */
+    hoverFaceId: number = -1;
 
     constructor(ck: CanvasKit, canvas: HTMLCanvasElement, scene: WasmScene) {
         this.ck = ck;
@@ -112,11 +114,17 @@ export class Renderer {
             this.renderNode(canvas, id, nodes);
         }
 
+        // Draw filled faces (Live Paint)
+        this.drawFilledFaces(canvas);
+
         // Draw live preview shape (while user is dragging to create)
         this.drawPreview(canvas);
 
         // Draw pen tool in-progress path
         this.drawPenPreview(canvas);
+
+        // Draw paint bucket hover preview
+        this.drawPaintBucketHover(canvas);
 
         // Draw marquee selection rectangle
         this.drawMarquee(canvas);
@@ -666,5 +674,74 @@ export class Renderer {
         canvas.drawRect(this.ck.LTRBRect(x, y, x + size, y + size), paint);
 
         paint.delete();
+    }
+
+    // ─── Live Paint Rendering ───────────────────────────────────────────────
+
+    private drawFilledFaces(canvas: Canvas) {
+        if (!this.scene.engine) return;
+        try {
+            const json = this.scene.engine.get_filled_faces();
+            const faces = JSON.parse(json);
+            if (!faces || faces.length === 0) return;
+
+            const paint = new this.ck.Paint();
+            paint.setStyle(this.ck.PaintStyle.Fill);
+            paint.setAntiAlias(true);
+
+            for (const face of faces) {
+                const boundary = face.boundary;
+                if (!boundary || boundary.length < 3) continue;
+
+                const path = new this.ck.Path();
+                path.moveTo(boundary[0][0], boundary[0][1]);
+                for (let i = 1; i < boundary.length; i++) {
+                    path.lineTo(boundary[i][0], boundary[i][1]);
+                }
+                path.close();
+
+                const f = face.fill;
+                paint.setColor(this.ck.Color(f.r * 255, f.g * 255, f.b * 255, f.a));
+                canvas.drawPath(path, paint);
+                path.delete();
+            }
+            paint.delete();
+        } catch {
+            // Silently ignore parse errors
+        }
+    }
+
+    private drawPaintBucketHover(canvas: Canvas) {
+        if (this.hoverFaceId < 0 || !this.scene.engine) return;
+        try {
+            const json = this.scene.engine.get_face_boundary(this.hoverFaceId);
+            const boundary = JSON.parse(json);
+            if (!boundary || boundary.length < 3) return;
+
+            const path = new this.ck.Path();
+            path.moveTo(boundary[0][0], boundary[0][1]);
+            for (let i = 1; i < boundary.length; i++) {
+                path.lineTo(boundary[i][0], boundary[i][1]);
+            }
+            path.close();
+
+            // Semi-transparent blue preview
+            const paint = new this.ck.Paint();
+            paint.setColor(this.ck.Color(66, 133, 244, 0.3));
+            paint.setStyle(this.ck.PaintStyle.Fill);
+            paint.setAntiAlias(true);
+            canvas.drawPath(path, paint);
+
+            // Thin blue outline
+            paint.setColor(this.ck.Color(66, 133, 244, 0.8));
+            paint.setStyle(this.ck.PaintStyle.Stroke);
+            paint.setStrokeWidth(1.5 / this.zoom);
+            canvas.drawPath(path, paint);
+
+            path.delete();
+            paint.delete();
+        } catch {
+            // Silently ignore
+        }
     }
 }

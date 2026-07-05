@@ -1,6 +1,7 @@
-import { SmartPaint } from './smart_paint';
+
 import { UIEngine } from './ui';
 import { Renderer } from './renderer';
+import { FileIO } from './file_io';
 import type { WasmScene } from './wasm_scene';
 
 export class InputManager {
@@ -11,7 +12,7 @@ export class InputManager {
     isMouseDown: boolean;
     startPos: { x: number; y: number };
     currentPos: { x: number; y: number };
-    smartPaint: SmartPaint;
+
     dragMode: 'move' | 'marquee' | 'none' = 'none';
     /** Whether any actual movement happened during a drag. */
     didMove: boolean = false;
@@ -27,8 +28,12 @@ export class InputManager {
     // --- Modifier key state (updated every mousemove) ---
     shiftKey: boolean = false;
     altKey: boolean = false;
-    /** Whether Alt-clone has already duplicated during this drag. */
-    cloneDragStarted: boolean = false;
+
+    // --- Move drag state (snapshot-restore, like resize) ---
+    /** Snapshot of scene state taken at drag start so we can restore & reapply each frame. */
+    moveSnapshot: Uint8Array | null = null;
+    /** Original selection IDs captured at drag start. */
+    moveOriginalIds: number[] = [];
 
     // --- Direct selection state ---
     /** Node being edited in direct selection mode. */
@@ -58,7 +63,7 @@ export class InputManager {
         this.isMouseDown = false;
         this.startPos = { x: 0, y: 0 };
         this.currentPos = { x: 0, y: 0 };
-        this.smartPaint = new SmartPaint(scene.ck, scene);
+
 
         this.init();
     }
@@ -66,10 +71,61 @@ export class InputManager {
     init() {
         this.canvas.addEventListener('mousedown', (e) => this.onMouseDown(e));
         this.canvas.addEventListener('dblclick', (e) => this.onDoubleClick(e));
+        this.canvas.addEventListener('contextmenu', (e) => this.onContextMenu(e));
         window.addEventListener('mousemove', (e) => this.onMouseMove(e));
         window.addEventListener('mouseup', (e) => this.onMouseUp(e));
         window.addEventListener('keydown', (e) => this.onKeyDown(e));
         window.addEventListener('wheel', (e) => this.onWheel(e), { passive: false, capture: true });
+    }
+
+    onContextMenu(e: MouseEvent) {
+        e.preventDefault();
+        const pos = this.getPos(e);
+        const hitId = this.scene.hitTest(pos.x, pos.y);
+        if (hitId !== undefined) {
+            // Select the element if not already selected
+            const currentSel = this.scene.engine!.get_selection();
+            if (!currentSel.includes(hitId)) {
+                this.scene.selectNode(hitId, false);
+                this.ui.syncWithSelection();
+                this.ui.updateLayerList();
+            }
+            this.ui.showContextMenu(e.clientX, e.clientY, (action: string) => {
+                this.handleContextMenuAction(action);
+            });
+        } else {
+            this.ui.hideContextMenu();
+        }
+    }
+
+    handleContextMenuAction(action: string) {
+        const selection = this.scene.engine!.get_selection();
+        if (selection.length === 0) return;
+
+        switch (action) {
+            case 'bring-to-front':
+                for (const id of selection) this.scene.bringToFront(id);
+                break;
+            case 'bring-forward':
+                for (const id of selection) this.scene.bringForward(id);
+                break;
+            case 'send-backward':
+                for (const id of selection) this.scene.sendBackward(id);
+                break;
+            case 'send-to-back':
+                for (const id of selection) this.scene.sendToBack(id);
+                break;
+            case 'duplicate':
+                this.duplicateSelection();
+                break;
+            case 'delete':
+                this.scene.engine!.clear_selection();
+                for (const id of selection) this.scene.engine!.remove_node(id);
+                break;
+        }
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.ui.hideContextMenu();
     }
 
     onDoubleClick(e: MouseEvent) {
@@ -119,7 +175,8 @@ export class InputManager {
             if (e.key === 'p' || e.key === 'P') this.ui.setActiveTool('pen');
             if (e.key === 'm' || e.key === 'M') this.ui.setActiveTool('rect');
             if (e.key === 'l' || e.key === 'L') this.ui.setActiveTool('ellipse');
-            if (e.key === 'k' || e.key === 'K') this.ui.setActiveTool('smart-paint');
+
+            if (e.key === 'b' || e.key === 'B') this.ui.setActiveTool('paint-bucket');
             if (e.key === 't' || e.key === 'T') this.ui.setActiveTool('text');
         }
 
@@ -152,6 +209,42 @@ export class InputManager {
             this.ui.syncWithSelection();
         }
 
+        // Save: Cmd+S / Ctrl+S
+        if ((e.metaKey || e.ctrlKey) && e.key === 's' && !e.shiftKey) {
+            e.preventDefault();
+            if (this.scene.engine) {
+                FileIO.saveVec(this.scene.engine).catch(console.error);
+            }
+        }
+
+        // Save As: Cmd+Shift+S / Ctrl+Shift+S
+        if ((e.metaKey || e.ctrlKey) && e.key === 's' && e.shiftKey) {
+            e.preventDefault();
+            if (this.scene.engine) {
+                FileIO.saveVecAs(this.scene.engine).catch(console.error);
+            }
+        }
+
+        // Open: Cmd+O / Ctrl+O
+        if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
+            e.preventDefault();
+            if (this.scene.engine) {
+                FileIO.openFile(this.scene.engine).then((loaded) => {
+                    if (loaded) {
+                        this.scene.invalidateCache();
+                        this.ui.updateLayerList();
+                        this.ui.syncWithSelection();
+                    }
+                }).catch(console.error);
+            }
+        }
+
+        // Export SVG: Cmd+Shift+E / Ctrl+Shift+E
+        if ((e.metaKey || e.ctrlKey) && e.key === 'e' && e.shiftKey) {
+            e.preventDefault();
+            this.ui.exportSVG();
+        }
+
         // Escape: exit direct edit → finalize pen → deselect
         if (e.key === 'Escape') {
             if (this.editingNodeId !== null) {
@@ -174,21 +267,23 @@ export class InputManager {
             this.finalizePenPath();
         }
 
-        // Z-ordering: ] = bring to front, [ = send to back
-        if (e.key === ']' && !e.metaKey && !e.ctrlKey) {
+        // Z-ordering: ]/[ = step forward/backward, Cmd+]/Cmd+[ = front/back
+        if (e.key === ']') {
             const selection = this.scene.engine!.get_selection();
-            for (const id of selection) {
-                this.scene.engine!.bring_to_front(id);
+            if (e.metaKey || e.ctrlKey) {
+                for (const id of selection) this.scene.bringToFront(id);
+            } else {
+                for (const id of selection) this.scene.bringForward(id);
             }
-            this.scene.invalidateCache();
             this.ui.updateLayerList();
         }
-        if (e.key === '[' && !e.metaKey && !e.ctrlKey) {
+        if (e.key === '[') {
             const selection = this.scene.engine!.get_selection();
-            for (const id of selection) {
-                this.scene.engine!.send_to_back(id);
+            if (e.metaKey || e.ctrlKey) {
+                for (const id of selection) this.scene.sendToBack(id);
+            } else {
+                for (const id of selection) this.scene.sendBackward(id);
             }
-            this.scene.invalidateCache();
             this.ui.updateLayerList();
         }
 
@@ -296,6 +391,9 @@ export class InputManager {
     }
 
     onMouseDown(e: MouseEvent) {
+        // Ignore right-click — handled by onContextMenu
+        if (e.button === 2) return;
+        this.ui.hideContextMenu();
         this.isMouseDown = true;
         this.didMove = false;
         this.startPos = this.getPos(e);
@@ -330,7 +428,6 @@ export class InputManager {
                     this.scene.selectNode(hitId, true);
                 }
                 this.dragMode = 'move';
-                this.cloneDragStarted = false;
             } else {
                 // Clicked on empty space — start marquee selection
                 if (!e.shiftKey) {
@@ -341,8 +438,7 @@ export class InputManager {
             }
             this.ui.syncWithSelection();
             this.ui.updateLayerList();
-         } else if (this.ui.activeTool === 'smart-paint') {
-            this.handleSmartPaint(e);
+
         } else if (this.ui.activeTool === 'direct') {
             this.handleDirectDown(this.startPos, e.shiftKey);
         } else if (this.ui.activeTool === 'pen') {
@@ -361,6 +457,19 @@ export class InputManager {
         } else if (this.ui.activeTool === 'rect' || this.ui.activeTool === 'ellipse'
                    || this.ui.activeTool === 'polygon' || this.ui.activeTool === 'star') {
             this.previewRect = { x: this.startPos.x, y: this.startPos.y, w: 0, h: 0, tool: this.ui.activeTool };
+        } else if (this.ui.activeTool === 'paint-bucket') {
+            this.handlePaintBucketClick(this.startPos);
+        }
+    }
+
+    handlePaintBucketClick(pos: { x: number; y: number }) {
+        if (!this.scene.engine) return;
+        const faceId = this.scene.engine.query_face_at(pos.x, pos.y);
+        if (faceId >= 0) {
+            // Get the active fill color from UI
+            const color = this.ui.getActiveFillColor();
+            this.scene.engine.set_face_fill(faceId, color.r, color.g, color.b, color.a);
+            this.scene.invalidateCache();
         }
     }
 
@@ -503,27 +612,7 @@ export class InputManager {
         this.currentPathPoints = [];
     }
 
-    handleSmartPaint(e: MouseEvent) {
-        const rect = this.canvas.getBoundingClientRect();
-        const screenX = e.clientX - rect.left;
-        const screenY = e.clientY - rect.top;
-        const dpr = window.devicePixelRatio;
 
-        const path = this.smartPaint.findRegion(
-            screenX, screenY, 
-            this.canvas.width, this.canvas.height,
-            dpr, this.renderer.pan, this.renderer.zoom
-        );
-        
-        if (path) {
-            const bounds = path.getBounds();
-            if (bounds) {
-                this.scene.addRect(bounds[0], bounds[1], bounds[2] - bounds[0], bounds[3] - bounds[1]);
-                this.ui.updateLayerList();
-            }
-            path.delete();
-        }
-    }
 
     // --- Modifier helpers ---
     private constrainToAxis(start: {x: number; y: number}, current: {x: number; y: number}): {x: number; y: number} {
@@ -559,8 +648,19 @@ export class InputManager {
                 this.canvas.style.cursor = cursorMap[handle.type] || 'default';
             } else {
                 const hitId = this.scene.hitTest(this.currentPos.x, this.currentPos.y);
-                this.canvas.style.cursor = hitId !== undefined ? 'move' : 'default';
+                if (hitId !== undefined) {
+                    this.canvas.style.cursor = e.altKey ? 'copy' : 'move';
+                } else {
+                    this.canvas.style.cursor = 'default';
+                }
             }
+        }
+
+        // Paint bucket hover preview
+        if (!this.isMouseDown && this.ui.activeTool === 'paint-bucket') {
+            const faceId = this.scene.engine!.query_face_at(this.currentPos.x, this.currentPos.y);
+            this.renderer.hoverFaceId = faceId;
+            this.canvas.style.cursor = faceId >= 0 ? 'crosshair' : 'default';
         }
 
         if (!this.isMouseDown) return;
@@ -631,27 +731,52 @@ export class InputManager {
             if (!this.didMove && (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5)) {
                 this.scene.saveMoveHistory();
                 this.didMove = true;
-
-                // Alt: clone drag — duplicate selection once at start of move
-                if (e.altKey && !this.cloneDragStarted) {
-                    this.cloneDragStarted = true;
-                    this.duplicateSelection();
-                }
+                // Snapshot the pre-drag scene (same approach as resize).
+                // We restore this every frame so modifier changes (Alt, Shift) apply cleanly.
+                this.moveSnapshot = this.scene.engine!.serialize_scene();
+                this.moveOriginalIds = [...this.scene.engine!.get_selection()];
             }
-            if (this.didMove) {
-                let mdx = dx, mdy = dy;
+
+            if (this.didMove && this.moveSnapshot) {
+                // Restore pristine pre-drag state
+                this.scene.engine!.deserialize_scene(this.moveSnapshot);
+
+                // Compute total displacement from drag start
+                let totalDx = this.currentPos.x - this.startPos.x;
+                let totalDy = this.currentPos.y - this.startPos.y;
+
                 // Shift: constrain to axis
                 if (e.shiftKey) {
                     const constrained = this.constrainToAxis(this.startPos, this.currentPos);
-                    // Compute delta from last constrained position
-                    const lastConstrained = this.constrainToAxis(this.startPos, lastPos);
-                    mdx = constrained.x - lastConstrained.x;
-                    mdy = constrained.y - lastConstrained.y;
+                    totalDx = constrained.x - this.startPos.x;
+                    totalDy = constrained.y - this.startPos.y;
                 }
-                const selection = this.scene.engine!.get_selection();
-                for (const id of selection) {
-                    this.scene.moveNode(id, mdx, mdy);
+
+                let moveTargets: number[];
+                if (e.altKey) {
+                    // Alt: clone-drag — duplicate originals, move the clones
+                    this.scene.engine!.clear_selection();
+                    moveTargets = [];
+                    for (const id of this.moveOriginalIds) {
+                        const newId = this.scene.engine!.duplicate_node(id);
+                        this.scene.engine!.select_node(newId, true);
+                        moveTargets.push(newId);
+                    }
+                    this.canvas.style.cursor = 'copy';
+                } else {
+                    // Normal move — shift the originals
+                    this.scene.engine!.clear_selection();
+                    for (const id of this.moveOriginalIds) {
+                        this.scene.engine!.select_node(id, true);
+                    }
+                    moveTargets = this.moveOriginalIds;
+                    this.canvas.style.cursor = 'move';
                 }
+
+                for (const id of moveTargets) {
+                    this.scene.engine!.move_node(id, totalDx, totalDy);
+                }
+                this.scene.invalidateCache();
             }
         }
 
@@ -772,6 +897,17 @@ export class InputManager {
         this.isMouseDown = false;
         this.dragMode = 'none';
         this.isDraggingHandle = false;
+
+        // Clean up move-drag snapshot
+        if (this.moveSnapshot) {
+            this.moveSnapshot = null;
+            this.moveOriginalIds = [];
+            this.scene.invalidateCache();
+            this.scene.autosave?.trigger();
+            this.ui.updateLayerList();
+            this.ui.syncWithSelection();
+        }
+        this.canvas.style.cursor = 'default';
 
         if (this.resizeHandleType) {
             this.resizeHandleType = null;

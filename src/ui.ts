@@ -1,5 +1,6 @@
 import type { CanvasKit, Canvas } from 'canvaskit-wasm';
 import type { WasmScene } from './wasm_scene';
+import { FileIO } from './file_io';
 
 export class UIEngine {
     ck: CanvasKit;
@@ -36,6 +37,12 @@ export class UIEngine {
     toggleVisible: HTMLButtonElement;
     toggleLocked: HTMLButtonElement;
 
+    // Context menu
+    contextMenuEl: HTMLElement;
+    private _contextMenuCallback: ((action: string) => void) | null = null;
+    private _dismissContextMenu: ((e: MouseEvent) => void) | null = null;
+    private _dismissContextMenuKey: ((e: KeyboardEvent) => void) | null = null;
+
     constructor(ck: CanvasKit, scene: WasmScene) {
         this.ck = ck;
         this.scene = scene;
@@ -69,6 +76,9 @@ export class UIEngine {
         this.miterLimit = document.getElementById('stroke-miter-limit') as HTMLInputElement;
         this.toggleVisible = document.getElementById('toggle-visible') as HTMLButtonElement;
         this.toggleLocked = document.getElementById('toggle-locked') as HTMLButtonElement;
+
+        // Context menu
+        this.contextMenuEl = document.getElementById('context-menu') as HTMLElement;
 
         this.initEvents();
         this.initCollapsibleSections();
@@ -165,10 +175,20 @@ export class UIEngine {
                 'polygon': 'crosshair',
                 'star': 'crosshair',
                 'text': 'text',
-                'smart-paint': 'crosshair',
+                
+                'paint-bucket': 'crosshair',
             };
             canvas.style.cursor = cursorMap[toolId] || 'default';
         }
+    }
+
+    /** Get the current fill color from the UI as {r, g, b, a} in 0-1 range. */
+    getActiveFillColor(): { r: number; g: number; b: number; a: number } {
+        const hex = this.fillInput?.value || '#4285F4';
+        const r = parseInt(hex.slice(1, 3), 16) / 255;
+        const g = parseInt(hex.slice(3, 5), 16) / 255;
+        const b = parseInt(hex.slice(5, 7), 16) / 255;
+        return { r, g, b, a: 1.0 };
     }
 
     private toggleNodeVisibility() {
@@ -507,6 +527,11 @@ export class UIEngine {
         }
 
         svg += `\n</svg>`;
+
+        // Embed protobuf payload for lossless re-importing
+        if (this.scene.engine) {
+            svg = FileIO.embedPayloadInSVG(this.scene.engine, svg);
+        }
         
         const blob = new Blob([svg], { type: 'image/svg+xml' });
         const url = URL.createObjectURL(blob);
@@ -783,5 +808,79 @@ export class UIEngine {
             }
         }
         return pts;
+    }
+
+    showContextMenu(x: number, y: number, callback: (action: string) => void) {
+        this._contextMenuCallback = callback;
+        const items: Array<{ label: string; action: string; shortcut: string } | 'separator'> = [
+            { label: 'Bring to Front', action: 'bring-to-front', shortcut: '⌘]' },
+            { label: 'Bring Forward', action: 'bring-forward', shortcut: ']' },
+            { label: 'Send Backward', action: 'send-backward', shortcut: '[' },
+            { label: 'Send to Back', action: 'send-to-back', shortcut: '⌘[' },
+            'separator',
+            { label: 'Duplicate', action: 'duplicate', shortcut: '⌘D' },
+            { label: 'Delete', action: 'delete', shortcut: '⌫' },
+        ];
+
+        this.contextMenuEl.innerHTML = '';
+        for (const item of items) {
+            if (item === 'separator') {
+                const sep = document.createElement('div');
+                sep.className = 'context-menu-separator';
+                this.contextMenuEl.appendChild(sep);
+            } else {
+                const row = document.createElement('div');
+                row.className = 'context-menu-item';
+                row.innerHTML = `<span>${item.label}</span><span class="context-menu-shortcut">${item.shortcut}</span>`;
+                row.addEventListener('click', () => {
+                    this._contextMenuCallback?.(item.action);
+                });
+                this.contextMenuEl.appendChild(row);
+            }
+        }
+
+        // Position: keep within viewport
+        this.contextMenuEl.style.display = 'block';
+        this.contextMenuEl.style.left = `${x}px`;
+        this.contextMenuEl.style.top = `${y}px`;
+
+        // Adjust if overflowing viewport
+        requestAnimationFrame(() => {
+            const rect = this.contextMenuEl.getBoundingClientRect();
+            if (rect.right > window.innerWidth) {
+                this.contextMenuEl.style.left = `${x - rect.width}px`;
+            }
+            if (rect.bottom > window.innerHeight) {
+                this.contextMenuEl.style.top = `${y - rect.height}px`;
+            }
+        });
+
+        // Dismiss on click-outside
+        this._dismissContextMenu = (e: MouseEvent) => {
+            if (!this.contextMenuEl.contains(e.target as Node)) {
+                this.hideContextMenu();
+            }
+        };
+        this._dismissContextMenuKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') this.hideContextMenu();
+        };
+        setTimeout(() => {
+            window.addEventListener('mousedown', this._dismissContextMenu!);
+            window.addEventListener('keydown', this._dismissContextMenuKey!);
+        }, 0);
+    }
+
+    hideContextMenu() {
+        this.contextMenuEl.style.display = 'none';
+        this.contextMenuEl.innerHTML = '';
+        this._contextMenuCallback = null;
+        if (this._dismissContextMenu) {
+            window.removeEventListener('mousedown', this._dismissContextMenu);
+            this._dismissContextMenu = null;
+        }
+        if (this._dismissContextMenuKey) {
+            window.removeEventListener('keydown', this._dismissContextMenuKey);
+            this._dismissContextMenuKey = null;
+        }
     }
 }

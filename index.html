@@ -27,17 +27,17 @@
 
         <main id="main-layout">
             <nav id="toolbar">
-                <div class="tool-btn active" id="tool-selection" title="Selection (V)"><i data-lucide="mouse-pointer-2"></i></div>
-                <div class="tool-btn" id="tool-direct" title="Direct Selection (A)"><i data-lucide="mouse-pointer-click"></i></div>
-                <div class="tool-btn" id="tool-pen" title="Pen Tool (P)"><i data-lucide="pen-tool"></i></div>
-                <div class="tool-btn" id="tool-rect" title="Rectangle (M)"><i data-lucide="square"></i></div>
-                <div class="tool-btn" id="tool-ellipse" title="Ellipse (L)"><i data-lucide="circle"></i></div>
-                <div class="tool-btn" id="tool-polygon" title="Polygon"><i data-lucide="hexagon"></i></div>
-                <div class="tool-btn" id="tool-star" title="Star"><i data-lucide="star"></i></div>
-                <div class="tool-btn" id="tool-text" title="Text (T)"><i data-lucide="type"></i></div>
+                <div class="tool-btn active" id="tool-selection" data-tooltip="Selection" data-shortcut="V"><i data-lucide="mouse-pointer-2"></i></div>
+                <div class="tool-btn" id="tool-direct" data-tooltip="Direct Selection" data-shortcut="A"><i data-lucide="mouse-pointer-click"></i></div>
+                <div class="tool-btn" id="tool-pen" data-tooltip="Pen" data-shortcut="P"><i data-lucide="pen-tool"></i></div>
+                <div class="tool-btn" id="tool-rect" data-tooltip="Rectangle" data-shortcut="R"><i data-lucide="square"></i></div>
+                <div class="tool-btn" id="tool-ellipse" data-tooltip="Ellipse" data-shortcut="O"><i data-lucide="circle"></i></div>
+                <div class="tool-btn" id="tool-polygon" data-tooltip="Polygon"><i data-lucide="hexagon"></i></div>
+                <div class="tool-btn" id="tool-star" data-tooltip="Star"><i data-lucide="star"></i></div>
+                <div class="tool-btn" id="tool-text" data-tooltip="Text" data-shortcut="T"><i data-lucide="type"></i></div>
                 <div style="flex: 1;"></div>
-                <div class="tool-btn" id="tool-smart-paint" title="Smart Paint (K)"><i data-lucide="paint-bucket"></i></div>
-                <div class="tool-btn" id="tool-stroke" title="Stroke Color"><i data-lucide="pen-line"></i></div>
+                <div class="tool-btn" id="tool-paint-bucket" data-tooltip="Live Paint" data-shortcut="B"><i data-lucide="paintbrush"></i></div>
+                <div class="tool-btn" id="tool-stroke" data-tooltip="Stroke Color"><i data-lucide="pen-line"></i></div>
             </nav>
 
             <section id="canvas-container">
@@ -200,10 +200,10 @@
                     </div>
                     <div class="panel-section-body" data-section-body="pathfinder">
                         <div class="pathfinder-grid">
-                            <button class="op-btn" id="op-union" title="Union">∪</button>
-                            <button class="op-btn" id="op-subtract" title="Subtract">∖</button>
-                            <button class="op-btn" id="op-intersect" title="Intersect">∩</button>
-                            <button class="op-btn" id="op-xor" title="Exclude">⊕</button>
+                            <button class="op-btn" id="op-union" title="Union"><i data-lucide="squares-unite"></i></button>
+                            <button class="op-btn" id="op-subtract" title="Subtract"><i data-lucide="squares-subtract"></i></button>
+                            <button class="op-btn" id="op-intersect" title="Intersect"><i data-lucide="squares-intersect"></i></button>
+                            <button class="op-btn" id="op-xor" title="Exclude"><i data-lucide="squares-exclude"></i></button>
                         </div>
                     </div>
                 </div>
@@ -225,5 +225,7 @@
         // Initialize Lucide icons
         lucide.createIcons();
     </script>
+    <!-- Context Menu -->
+    <div id="context-menu" class="context-menu"></div>
 </body>
 </html>

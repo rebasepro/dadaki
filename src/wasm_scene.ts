@@ -248,4 +248,32 @@ export class WasmScene {
         }
         return converted;
     }
+
+    bringToFront(id: number) {
+        this.saveHistory();
+        this.engine!.bring_to_front(id);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    sendToBack(id: number) {
+        this.saveHistory();
+        this.engine!.send_to_back(id);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    bringForward(id: number) {
+        this.saveHistory();
+        this.engine!.bring_forward(id);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    sendBackward(id: number) {
+        this.saveHistory();
+        this.engine!.send_backward(id);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
 }

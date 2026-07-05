@@ -96,6 +96,57 @@ body, html {
     height: 16px;
 }
 
+/* ─── Toolbar Tooltips (Figma-style) ─── */
+
+.tool-btn[data-tooltip] {
+    position: relative;
+}
+
+.tool-btn[data-tooltip]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    left: calc(100% + 10px);
+    top: 50%;
+    transform: translateY(-50%);
+    background: #1a1a1a;
+    color: #e8e8e8;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 4px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    z-index: 1000;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    letter-spacing: 0.01em;
+}
+
+/* Shortcut badge inside tooltip */
+.tool-btn[data-shortcut]::after {
+    content: attr(data-tooltip) "  " attr(data-shortcut);
+}
+
+.tool-btn[data-tooltip]::before {
+    content: '';
+    position: absolute;
+    left: calc(100% + 5px);
+    top: 50%;
+    transform: translateY(-50%);
+    border: 5px solid transparent;
+    border-right-color: #1a1a1a;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    z-index: 1000;
+}
+
+.tool-btn[data-tooltip]:hover::after,
+.tool-btn[data-tooltip]:hover::before {
+    opacity: 1;
+}
+
 /* ─── Canvas ─── */
 
 #canvas-container {
@@ -448,6 +499,11 @@ body, html {
     padding: 0;
 }
 
+.op-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
 .op-btn:hover {
     background: var(--bg-hover);
     border-color: var(--border-light);
@@ -508,4 +564,54 @@ body, html {
     text-align: center;
     font-size: 11px;
     flex-shrink: 0;
+}
+
+/* ─── Context Menu ─── */
+
+.context-menu {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    min-width: 200px;
+    background: rgba(43, 43, 43, 0.95);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+    padding: 4px 0;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.25);
+    font-size: 12px;
+    color: var(--text-main);
+    user-select: none;
+}
+
+.context-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+
+.context-menu-item:hover {
+    background: var(--accent);
+    color: #fff;
+}
+
+.context-menu-item:hover .context-menu-shortcut {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.context-menu-shortcut {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-left: 24px;
+    flex-shrink: 0;
+}
+
+.context-menu-separator {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 8px;
 }
