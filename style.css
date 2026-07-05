@@ -47,10 +47,92 @@ body, html {
     z-index: 10;
 }
 
-.header-title {
-    font-weight: 700;
-    font-size: 14px;
-    letter-spacing: -0.02em;
+/* ─── Breadcrumb Navigation ─── */
+
+.breadcrumb-bar {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    height: 100%;
+}
+
+.breadcrumb-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: color 0.15s, background 0.15s;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.breadcrumb-item:hover:not(.current) {
+    color: var(--text-main);
+    background: var(--bg-hover);
+}
+
+.breadcrumb-item:active:not(.current) {
+    background: var(--accent-dim);
+    color: var(--accent);
+}
+
+.breadcrumb-item.active {
+    color: var(--text-main);
+    font-weight: 600;
+}
+
+.breadcrumb-item.current {
+    cursor: default;
+}
+
+.breadcrumb-item.badge {
+    background: var(--accent-dim);
+    color: var(--accent);
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-weight: 600;
+    font-size: 10px;
+}
+
+.breadcrumb-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.7;
+}
+
+.breadcrumb-item.active .breadcrumb-icon,
+.breadcrumb-item:hover .breadcrumb-icon {
+    opacity: 1;
+}
+
+.breadcrumb-label {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.breadcrumb-sep {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    opacity: 0.4;
+    flex-shrink: 0;
+    margin: 0 1px;
 }
 
 .header-spacer {
@@ -909,12 +991,6 @@ body, html {
     user-select: none;
 }
 
-/* Breadcrumb */
-.cb-breadcrumb {
-    color: var(--text-label);
-    font-size: 11px;
-    user-select: none;
-}
 
 /* Number input */
 .cb-number-wrapper {

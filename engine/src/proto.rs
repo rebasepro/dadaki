@@ -9,13 +9,12 @@ use glam::Vec2;
 
 use crate::{
     Color, Geometry, Node, NodeType, PathPoint, Scene, Style,
-    vector_network::VectorNetwork,
+    vector_network::{VectorNetwork, NodeVectorNetwork, NetworkVertex, NetworkEdge, NetworkRegion},
 };
 
 /// Current file format version. Bump when schema changes.
-/// v1: flat point list per path (closed-ness implied by duplicated end point).
-/// v2: explicit subpaths with closed flag; document dimensions.
-pub const FORMAT_VERSION: u32 = 2;
+/// v3: per-node vector network.
+pub const FORMAT_VERSION: u32 = 3;
 
 // ─── Proto Message Types ────────────────────────────────────────────────────────
 
@@ -110,6 +109,51 @@ pub struct ProtoPath {
     /// v2+ explicit subpaths.
     #[prost(message, repeated, tag = "2")]
     pub subpaths: Vec<ProtoSubpath>,
+    /// Per-node vector network (v3+).
+    #[prost(message, optional, tag = "3")]
+    pub network: Option<ProtoNodeNetwork>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoNetworkVertex {
+    #[prost(float, tag = "1")]
+    pub x: f32,
+    #[prost(float, tag = "2")]
+    pub y: f32,
+    #[prost(float, optional, tag = "3")]
+    pub handle_in_x: Option<f32>,
+    #[prost(float, optional, tag = "4")]
+    pub handle_in_y: Option<f32>,
+    #[prost(float, optional, tag = "5")]
+    pub handle_out_x: Option<f32>,
+    #[prost(float, optional, tag = "6")]
+    pub handle_out_y: Option<f32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoNetworkEdge {
+    #[prost(uint32, tag = "1")]
+    pub start_vertex: u32,
+    #[prost(uint32, tag = "2")]
+    pub end_vertex: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoNetworkRegion {
+    #[prost(uint32, repeated, tag = "1")]
+    pub edge_loop: Vec<u32>,
+    #[prost(message, optional, tag = "2")]
+    pub fill: Option<ProtoColor>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoNodeNetwork {
+    #[prost(message, repeated, tag = "1")]
+    pub vertices: Vec<ProtoNetworkVertex>,
+    #[prost(message, repeated, tag = "2")]
+    pub edges: Vec<ProtoNetworkEdge>,
+    #[prost(message, repeated, tag = "3")]
+    pub regions: Vec<ProtoNetworkRegion>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -301,7 +345,7 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
             ellipse: Some(ProtoEllipse { radius_x: *radius_x, radius_y: *radius_y }),
             path: None, text: None,
         },
-        Geometry::Path { subpaths } => ProtoGeometry {
+        Geometry::Path { ref subpaths, ref network } => ProtoGeometry {
             rect: None, ellipse: None,
             path: Some(ProtoPath {
                 legacy_points: Vec::new(),
@@ -309,6 +353,7 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
                     points: sp.points.iter().map(|p| p.into()).collect(),
                     closed: sp.closed,
                 }).collect(),
+                network: network.as_ref().map(|n| network_to_proto(n)),
             }),
             text: None,
         },
@@ -337,6 +382,7 @@ fn proto_to_geometry(g: &ProtoGeometry) -> Geometry {
                     points: sp.points.iter().map(|pp| pp.into()).collect(),
                     closed: sp.closed,
                 }],
+                network: p.network.as_ref().map(|n| proto_to_network(n)),
             }
         } else {
             Geometry::Path {
@@ -344,6 +390,7 @@ fn proto_to_geometry(g: &ProtoGeometry) -> Geometry {
                     points: sp.points.iter().map(|pp| pp.into()).collect(),
                     closed: sp.closed,
                 }).collect(),
+                network: p.network.as_ref().map(|n| proto_to_network(n)),
             }
         }
     } else if let Some(t) = &g.text {
@@ -353,6 +400,51 @@ fn proto_to_geometry(g: &ProtoGeometry) -> Geometry {
         }
     } else {
         Geometry::Rect { width: 100.0, height: 100.0 }
+    }
+}
+
+fn network_to_proto(n: &NodeVectorNetwork) -> ProtoNodeNetwork {
+    ProtoNodeNetwork {
+        vertices: n.vertices.iter().map(|v| ProtoNetworkVertex {
+            x: v.position.x,
+            y: v.position.y,
+            handle_in_x: v.handle_in.map(|h| h.x),
+            handle_in_y: v.handle_in.map(|h| h.y),
+            handle_out_x: v.handle_out.map(|h| h.x),
+            handle_out_y: v.handle_out.map(|h| h.y),
+        }).collect(),
+        edges: n.edges.iter().map(|e| ProtoNetworkEdge {
+            start_vertex: e.start_vertex,
+            end_vertex: e.end_vertex,
+        }).collect(),
+        regions: n.regions.iter().map(|r| ProtoNetworkRegion {
+            edge_loop: r.edge_loop.clone(),
+            fill: r.fill.as_ref().map(|c| c.into()),
+        }).collect(),
+    }
+}
+
+fn proto_to_network(n: &ProtoNodeNetwork) -> NodeVectorNetwork {
+    NodeVectorNetwork {
+        vertices: n.vertices.iter().map(|v| NetworkVertex {
+            position: Vec2::new(v.x, v.y),
+            handle_in: match (v.handle_in_x, v.handle_in_y) {
+                (Some(x), Some(y)) => Some(Vec2::new(x, y)),
+                _ => None,
+            },
+            handle_out: match (v.handle_out_x, v.handle_out_y) {
+                (Some(x), Some(y)) => Some(Vec2::new(x, y)),
+                _ => None,
+            },
+        }).collect(),
+        edges: n.edges.iter().map(|e| NetworkEdge {
+            start_vertex: e.start_vertex,
+            end_vertex: e.end_vertex,
+        }).collect(),
+        regions: n.regions.iter().map(|r| NetworkRegion {
+            edge_loop: r.edge_loop.clone(),
+            fill: r.fill.as_ref().map(|c| c.into()),
+        }).collect(),
     }
 }
 
@@ -603,6 +695,7 @@ mod tests {
                             pp(0.0, 0.0), // v1 closing duplicate
                         ],
                         subpaths: Vec::new(),
+                        network: None,
                     }),
                     text: None,
                 }),
@@ -625,7 +718,7 @@ mod tests {
 
         let node = scene.nodes.get(&1).expect("node present");
         match &node.geometry {
-            Geometry::Path { subpaths } => {
+            Geometry::Path { subpaths, .. } => {
                 assert_eq!(subpaths.len(), 1);
                 assert!(subpaths[0].closed, "duplicated end point implies closed");
                 assert_eq!(subpaths[0].points.len(), 3, "closing duplicate dropped");
@@ -662,6 +755,7 @@ mod tests {
                 path: Some(ProtoPath {
                     legacy_points: vec![pp(0.0, 0.0), pp(50.0, 50.0)],
                     subpaths: Vec::new(),
+                    network: None,
                 }),
                 text: None,
             }),
@@ -674,7 +768,7 @@ mod tests {
         let bytes = doc.encode_to_vec();
         let (scene, _) = deserialize_from_proto(&bytes).unwrap();
         match &scene.nodes.get(&1).unwrap().geometry {
-            Geometry::Path { subpaths } => {
+            Geometry::Path { subpaths, .. } => {
                 assert_eq!(subpaths.len(), 1);
                 assert!(!subpaths[0].closed);
                 assert_eq!(subpaths[0].points.len(), 2);
@@ -725,6 +819,7 @@ mod tests {
                         closed: false,
                     },
                 ],
+                network: None,
             },
             children: Vec::new(),
             parent: None,
@@ -751,7 +846,7 @@ mod tests {
         assert_eq!(node.style.opacity, 0.5);
         assert_eq!(node.style.fill_opacity, 0.75);
         match &node.geometry {
-            Geometry::Path { subpaths } => {
+            Geometry::Path { subpaths, .. } => {
                 assert_eq!(subpaths.len(), 2);
                 assert!(subpaths[0].closed);
                 assert!(!subpaths[1].closed);

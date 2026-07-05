@@ -6,7 +6,6 @@
 import type { UIEngine } from './ui';
 import type { InputManager } from './input';
 import type { WasmScene } from './wasm_scene';
-import type { SceneData } from './types';
 
 /** Possible editor contexts that drive the action bar content. */
 export type EditorContext =
@@ -26,13 +25,20 @@ export interface SelectedNodeInfo {
     node_type: string;
 }
 
+/** A single breadcrumb segment with metadata for clickable navigation. */
+export interface BreadcrumbItem {
+    id: number;
+    name: string;
+    nodeType: string;
+}
+
 /** Full context info passed to the bar for rendering. */
 export interface ContextInfo {
     context: EditorContext;
     selectedIds: number[];
     selectedNodes: SelectedNodeInfo[];
-    /** Breadcrumb trail for nested selection, e.g. ["Group 2", "Rect 5"] */
-    breadcrumb: string[];
+    /** Breadcrumb trail for nested selection — each item has an id for navigation. */
+    breadcrumb: BreadcrumbItem[];
     editingNodeId: number | null;
     /** Path point count — for editing (editingPoints) or pen-drawing (currentPathPoints) */
     pointCount: number;
@@ -48,13 +54,12 @@ const SHAPE_TOOLS = new Set(['rect', 'ellipse', 'polygon', 'star', 'pen']);
  */
 export function getEditorContext(ui: UIEngine, input: InputManager, scene: WasmScene): ContextInfo {
     const selection = scene.engine!.get_selection();
-    const sceneData = scene.getSceneData();
     const selectedIds = Array.from(selection);
 
     // Build selected node info
     const selectedNodes: SelectedNodeInfo[] = selectedIds
         .map(id => {
-            const node = sceneData.nodes[id];
+            const node = scene.getNode(id);
             if (!node) return null;
             return { id, name: node.name, node_type: node.node_type };
         })
@@ -62,7 +67,7 @@ export function getEditorContext(ui: UIEngine, input: InputManager, scene: WasmS
 
     // Compute breadcrumb for primary selection
     const breadcrumb = selectedIds.length > 0
-        ? buildBreadcrumb(selectedIds[0], sceneData, scene)
+        ? buildBreadcrumb(selectedIds[0], scene)
         : [];
 
     const editingNodeId = input.editingNodeId;
@@ -112,18 +117,23 @@ export function getEditorContext(ui: UIEngine, input: InputManager, scene: WasmS
 
 /**
  * Build a breadcrumb trail from a node up to the root.
- * Returns e.g. ["Group 2", "Rect 5"] — ancestors first, leaf last.
+ * Returns e.g. [{id: 2, name: "Group 2", nodeType: "Group"}, {id: 5, name: "Rect 5", nodeType: "Rect"}]
+ * — ancestors first, leaf last.
  */
-function buildBreadcrumb(nodeId: number, sceneData: SceneData, scene: WasmScene): string[] {
-    const crumbs: string[] = [];
+function buildBreadcrumb(nodeId: number, scene: WasmScene): BreadcrumbItem[] {
+    const crumbs: BreadcrumbItem[] = [];
     let currentId = nodeId;
     const visited = new Set<number>(); // safety guard against cycles
 
     while (!visited.has(currentId)) {
         visited.add(currentId);
-        const node = sceneData.nodes[currentId];
+        const node = scene.getNode(currentId);
         if (!node) break;
-        crumbs.unshift(node.name || `${node.node_type} ${currentId}`);
+        crumbs.unshift({
+            id: currentId,
+            name: node.name || `${node.node_type} ${currentId}`,
+            nodeType: node.node_type,
+        });
 
         const parentId = scene.getNodeParent(currentId);
         if (parentId < 0) break; // root reached

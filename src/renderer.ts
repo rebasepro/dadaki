@@ -1,7 +1,39 @@
-import type { CanvasKit, Surface, Canvas, Paint, BlendMode, StrokeCap, StrokeJoin } from 'canvaskit-wasm';
+import type { Canvas, CanvasKit, Paint, Surface } from 'canvaskit-wasm';
+
+/** Helper for efficient zero-copy parsing of the WASM binary render buffer. */
+class BinaryReader {
+    view: DataView;
+    offset: number = 0;
+    private decoder = new TextDecoder();
+
+    constructor(view: DataView) {
+        this.view = view;
+    }
+
+    u8() { const v = this.view.getUint8(this.offset); this.offset += 1; return v; }
+    u16() { const v = this.view.getUint16(this.offset, true); this.offset += 2; return v; }
+    u32() { const v = this.view.getUint32(this.offset, true); this.offset += 4; return v; }
+    f32() { const v = this.view.getFloat32(this.offset, true); this.offset += 4; return v; }
+    
+    f32Array(n: number): Float32Array {
+        const arr = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            arr[i] = this.f32();
+        }
+        return arr;
+    }
+
+    string(): string {
+        const len = this.u32();
+        const bytes = new Uint8Array(this.view.buffer, this.view.byteOffset + this.offset, len);
+        this.offset += len;
+        return this.decoder.decode(bytes);
+    }
+}
+
 import type { WasmScene } from './wasm_scene';
 import type { InputManager } from './input';
-import type { SceneData, NodeGeometry } from './types';
+    /** Get a single node's full data as a SceneNode. */
 
 export class Renderer {
     ck: CanvasKit;
@@ -19,9 +51,7 @@ export class Renderer {
     hoverFaceId: number = -1;
 
     // ─── Cached Resources (avoid per-frame allocation) ───
-    private blendModes: BlendMode[] = [];
-    private caps: StrokeCap[] = [];
-    private joins: StrokeJoin[] = [];
+    private paint: Paint | null = null;
 
     constructor(ck: CanvasKit, canvas: HTMLCanvasElement, scene: WasmScene) {
         this.ck = ck;
@@ -33,34 +63,9 @@ export class Renderer {
         this.zoom = 1.0;
         this.pan = { x: 0, y: 0 };
 
-        this.initCachedResources();
         this.initGL();
     }
 
-    /** Pre-cache CanvasKit enum arrays so they aren't recreated per-frame. */
-    private initCachedResources() {
-        const ck = this.ck;
-        this.blendModes = [
-            ck.BlendMode.SrcOver,    // 0: normal
-            ck.BlendMode.Multiply,   // 1
-            ck.BlendMode.Screen,     // 2
-            ck.BlendMode.Overlay,    // 3
-            ck.BlendMode.Darken,     // 4
-            ck.BlendMode.Lighten,    // 5
-            ck.BlendMode.ColorDodge, // 6
-            ck.BlendMode.ColorBurn,  // 7
-            ck.BlendMode.HardLight,  // 8
-            ck.BlendMode.SoftLight,  // 9
-            ck.BlendMode.Difference, // 10
-            ck.BlendMode.Exclusion,  // 11
-            ck.BlendMode.Hue,        // 12
-            ck.BlendMode.Saturation, // 13
-            ck.BlendMode.Color,      // 14
-            ck.BlendMode.Luminosity, // 15
-        ];
-        this.caps = [ck.StrokeCap.Butt, ck.StrokeCap.Round, ck.StrokeCap.Square];
-        this.joins = [ck.StrokeJoin.Miter, ck.StrokeJoin.Round, ck.StrokeJoin.Bevel];
-    }
 
     private initGL() {
         // CanvasKit's GetWebGLContext/MakeGrContext aren't in public typings
@@ -100,23 +105,11 @@ export class Renderer {
             
             this.render();
         } catch (e) {
-            console.error("Resize Error:", e);
+            console.error("Failed to resize surface:", e);
         }
     }
 
-    start() {
-        this.isRunning = true;
-        this.loop();
-    }
-
-    stop() {
-        this.isRunning = false;
-    }
-
-    /** Fit the artboard (document rect at world 0,0) in the viewport with a margin. */
-    fitToArtboard() {
-        const docW = this.scene.engine?.get_document_width() ?? 1000;
-        const docH = this.scene.engine?.get_document_height() ?? 1000;
+    zoomToFit(docW: number, docH: number) {
         const viewW = this.canvas.clientWidth;
         const viewH = this.canvas.clientHeight;
         if (viewW <= 0 || viewH <= 0) return;
@@ -149,10 +142,23 @@ export class Renderer {
         requestAnimationFrame(() => this.loop());
     }
 
+    start() {
+        if (this.isRunning) return;
+        this.isRunning = true;
+        this.loop();
+    }
+
+    fitToArtboard(docW?: number, docH?: number) {
+        const w = docW ?? this.scene.engine?.get_document_width() ?? 1000;
+        const h = docH ?? this.scene.engine?.get_document_height() ?? 1000;
+        this.zoomToFit(w, h);
+        this.render();
+    }
+
     render() {
         if (!this.surface || !this.scene.engine) return;
         const canvas = this.surface.getCanvas();
-        const dpr = window.devicePixelRatio;
+        const dpr = window.devicePixelRatio || 1;
 
         canvas.clear(this.ck.Color(43, 43, 43, 1.0));
 
@@ -171,19 +177,70 @@ export class Renderer {
         const viewportMaxX = (this.canvas.width / dpr - this.pan.x) / this.zoom;
         const viewportMaxY = (this.canvas.height / dpr - this.pan.y) / this.zoom;
 
-        // Draw Scene Objects: recursive tree walk instead of flat iteration
-        // Build a set of visible leaf IDs from R-tree for culling
+        // Draw Scene Objects via binary command stream (Phase 3: No JSON Tax)
         const visibleIds = this.scene.getVisibleNodes(viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
-        const visibleSet = new Set<number>();
-        for (const id of visibleIds) {
-            visibleSet.add(id);
-        }
-        const sceneData = this.scene.getSceneData();
-        const nodes = sceneData.nodes;
+        const view = this.scene.getRenderData(visibleIds);
+        const reader = new BinaryReader(view);
+        
+        const commandCount = reader.u32();
+        if (!this.paint) this.paint = new this.ck.Paint();
+        const p = this.paint;
+        p.setAntiAlias(true);
 
-        // Walk root_nodes recursively
-        for (const rootId of sceneData.root_nodes) {
-            this.renderSubtree(canvas, rootId, nodes, visibleSet);
+        for (let i = 0; i < commandCount; i++) {
+            const cmdType = reader.u8();
+            reader.u32(); // skip id
+
+            if (cmdType === 1) { // CMD_START_GROUP
+                const opacity = reader.f32();
+                if (opacity < 1.0) {
+                    p.setAlphaf(opacity);
+                    canvas.saveLayer(p);
+                    p.setAlphaf(1.0);
+                } else {
+                    canvas.save();
+                }
+            } else if (cmdType === 3) { // CMD_END_GROUP
+                canvas.restore();
+            } else if (cmdType === 2) { // CMD_DRAW_NODE
+                const nodeType = reader.u8();
+                const matrix = reader.f32Array(9);
+                
+                // Style
+                const fr = reader.f32(); const fg = reader.f32(); const fb = reader.f32(); const fa = reader.f32();
+                const sr = reader.f32(); const sg = reader.f32(); const sb = reader.f32(); const sa = reader.f32();
+                const strokeWidth = reader.f32();
+
+                canvas.save();
+                canvas.concat(matrix);
+
+                const startGeoOffset = reader.offset;
+                const geoSize = reader.view.getUint32(startGeoOffset, true);
+
+                // Fill Pass
+                if (fa > 0) {
+                    p.setColor(this.ck.Color4f(fr, fg, fb, fa));
+                    p.setStyle(this.ck.PaintStyle.Fill);
+                    this.drawBinaryGeometry(canvas, nodeType, reader, p);
+                } else {
+                    reader.offset += 4 + geoSize;
+                }
+
+                // Stroke Pass
+                if (sa > 0 && strokeWidth > 0) {
+                    reader.offset = startGeoOffset; // Rewind
+                    p.setColor(this.ck.Color4f(sr, sg, sb, sa));
+                    p.setStyle(this.ck.PaintStyle.Stroke);
+                    p.setStrokeWidth(strokeWidth);
+                    this.drawBinaryGeometry(canvas, nodeType, reader, p);
+                } else {
+                    if (reader.offset === startGeoOffset) {
+                        reader.offset += 4 + geoSize;
+                    }
+                }
+
+                canvas.restore();
+            }
         }
 
         // Draw filled faces (Live Paint)
@@ -204,7 +261,7 @@ export class Renderer {
         canvas.restore();
 
         // Draw selection overlay
-        this.renderSelectionOverlay(canvas, dpr, nodes);
+        this.renderSelectionOverlay(canvas, dpr);
 
         // Draw direct selection edit handles
         this.drawDirectEditHandles(canvas, dpr);
@@ -212,214 +269,53 @@ export class Renderer {
         this.surface.flush();
     }
 
-    private drawDirectEditHandles(canvas: Canvas, dpr: number) {
-        const im = this.inputManager;
-        if (!im || !im.editingPoints || im.editingNodeId === null || !im.editingTransform) return;
-
-        const points = im.editingPoints;
-        const t = im.editingTransform;
-
-        canvas.save();
-        canvas.scale(dpr, dpr);
-        canvas.translate(this.pan.x, this.pan.y);
-        canvas.scale(this.zoom, this.zoom);
-
-        const dotSize = 4 / this.zoom;
-        const handleSize = 3.5 / this.zoom;
-        const lineWidth = 1 / this.zoom;
-
-        // Handle line paint (thin gray lines from anchor to control points)
-        const linePaint = new this.ck.Paint();
-        linePaint.setColor(this.ck.Color(150, 150, 150, 0.8));
-        linePaint.setStyle(this.ck.PaintStyle.Stroke);
-        linePaint.setStrokeWidth(lineWidth);
-
-        // Anchor fill (white) and stroke (blue)
-        const anchorFill = new this.ck.Paint();
-        anchorFill.setColor(this.ck.Color(255, 255, 255, 1.0));
-        anchorFill.setStyle(this.ck.PaintStyle.Fill);
-
-        const anchorStroke = new this.ck.Paint();
-        anchorStroke.setColor(this.ck.Color(0, 162, 255, 1.0));
-        anchorStroke.setStyle(this.ck.PaintStyle.Stroke);
-        anchorStroke.setStrokeWidth(lineWidth * 1.5);
-
-        // Control handle fill (blue circle)
-        const handleFill = new this.ck.Paint();
-        handleFill.setColor(this.ck.Color(0, 162, 255, 1.0));
-        handleFill.setStyle(this.ck.PaintStyle.Fill);
-
-        for (const sp of points) {
-            for (const p of sp.points) {
-                // Transform to world
-                const ax = t[0] * p.x + t[1] * p.y + t[2];
-                const ay = t[3] * p.x + t[4] * p.y + t[5];
-                const c1x = t[0] * p.cp1[0] + t[1] * p.cp1[1] + t[2];
-                const c1y = t[3] * p.cp1[0] + t[4] * p.cp1[1] + t[5];
-                const c2x = t[0] * p.cp2[0] + t[1] * p.cp2[1] + t[2];
-                const c2y = t[3] * p.cp2[0] + t[4] * p.cp2[1] + t[5];
-
-                // Draw handle lines (anchor → cp1, anchor → cp2)
-                const isSmooth = Math.abs(c1x - ax) > 0.5 || Math.abs(c1y - ay) > 0.5;
-                if (isSmooth) {
-                    canvas.drawLine(ax, ay, c1x, c1y, linePaint);
-                    canvas.drawLine(ax, ay, c2x, c2y, linePaint);
-                    canvas.drawCircle(c1x, c1y, handleSize, handleFill);
-                    canvas.drawCircle(c2x, c2y, handleSize, handleFill);
-                }
-
-                // Draw anchor point (white square with blue border)
-                canvas.drawRect(this.ck.LTRBRect(
-                    ax - dotSize, ay - dotSize, ax + dotSize, ay + dotSize
-                ), anchorFill);
-                canvas.drawRect(this.ck.LTRBRect(
-                    ax - dotSize, ay - dotSize, ax + dotSize, ay + dotSize
-                ), anchorStroke);
-            }
-        }
-
-        linePaint.delete();
-        anchorFill.delete();
-        anchorStroke.delete();
-        handleFill.delete();
-        canvas.restore();
-    }
-
-    private hasVisibleDescendant(id: number, nodes: SceneData['nodes'], visibleSet: Set<number>): boolean {
-        const node = nodes[id];
-        if (!node) return false;
-        if (node.children && node.children.length > 0) {
-            for (const childId of node.children) {
-                if (this.hasVisibleDescendant(childId, nodes, visibleSet)) return true;
-            }
-            return false;
-        }
-        return visibleSet.has(id);
-    }
-
-    private renderSubtree(canvas: Canvas, id: number, nodes: SceneData['nodes'], visibleSet: Set<number>) {
-        const node = nodes[id];
-        if (!node || !node.visible) return;
-
-        if (node.node_type === 'Group') {
-            // Check if any descendant is visible (skip entire group if not)
-            if (!this.hasVisibleDescendant(id, nodes, visibleSet)) return;
-
-            // Apply group opacity via saveLayer for correct compositing
-            const opacity = node.style.opacity ?? 1.0;
-            if (opacity < 1.0) {
-                const layerPaint = new this.ck.Paint();
-                layerPaint.setAlphaf(opacity);
-                canvas.saveLayer(layerPaint);
-                layerPaint.delete();
-            } else {
-                canvas.save();
-            }
-
-            // Recurse into children in order
-            for (const childId of (node.children || [])) {
-                this.renderSubtree(canvas, childId, nodes, visibleSet);
-            }
-
-            canvas.restore();
-        } else {
-            // Leaf node: only render if in visibleSet (R-tree culling)
-            if (!visibleSet.has(id)) return;
-            this.renderNode(canvas, id, nodes);
-        }
-    }
-
-    private renderNode(canvas: Canvas, id: number, nodes: SceneData['nodes']) {
-        const node = nodes[id];
-        if (!node || !node.visible) return;
-
-        const transform = this.scene.getTransform(id);
-        const style = node.style;
+    private drawBinaryGeometry(canvas: Canvas, type: number, reader: BinaryReader, paint: Paint) {
+        reader.u32(); // skip size
         
-        canvas.save();
-        canvas.concat(transform);
-
-        const paint = new this.ck.Paint();
-        paint.setAntiAlias(true);
-
-        const blendMode = this.blendModes[style.blend_mode || 0] || this.blendModes[0];
-        paint.setBlendMode(blendMode);
-
-        // Fill pass
-        if (style.fill) {
-            const f = style.fill;
-            const fillAlpha = f.a * (style.opacity ?? 1.0) * (style.fill_opacity ?? 1.0);
-            paint.setColor(this.ck.Color(f.r * 255, f.g * 255, f.b * 255, fillAlpha));
-            paint.setStyle(this.ck.PaintStyle.Fill);
-            this.drawGeometry(canvas, node.geometry, paint, style.corner_radius || 0, style.fill_rule || 0);
-        }
-
-        // Stroke pass
-        if (style.stroke) {
-            const s = style.stroke;
-            const strokeAlpha = s.a * (style.opacity ?? 1.0);
-            paint.setColor(this.ck.Color(s.r * 255, s.g * 255, s.b * 255, strokeAlpha));
-            paint.setStyle(this.ck.PaintStyle.Stroke);
-            paint.setStrokeWidth(style.stroke_width);
-            paint.setStrokeCap(this.caps[style.stroke_cap || 0] || this.caps[0]);
-            paint.setStrokeJoin(this.joins[style.stroke_join || 0] || this.joins[0]);
-            paint.setStrokeMiter(style.miter_limit ?? 4);
-
-            // Dash pattern
-            let dashEffect: ReturnType<typeof this.ck.PathEffect.MakeDash> | null = null;
-            if (style.dash_array && style.dash_array.length >= 2) {
-                dashEffect = this.ck.PathEffect.MakeDash(style.dash_array, style.dash_offset || 0);
-                if (dashEffect) {
-                    paint.setPathEffect(dashEffect);
-                }
-            }
-
-            this.drawGeometry(canvas, node.geometry, paint, style.corner_radius || 0, 0);
-
-            // Clean up dash effect to prevent leak
-            paint.setPathEffect(null);
-            dashEffect?.delete();
-        }
-        paint.delete();
-
-        canvas.restore();
-    }
-
-    private drawGeometry(canvas: Canvas, geometry: NodeGeometry, paint: Paint, cornerRadius: number = 0, fillRule: number = 0) {
-        if (geometry.Rect) {
-            const { width, height } = geometry.Rect;
-            if (cornerRadius > 0) {
-                canvas.drawRRect(this.ck.RRectXY(this.ck.LTRBRect(0, 0, width, height), cornerRadius, cornerRadius), paint);
-            } else {
-                canvas.drawRect(this.ck.LTRBRect(0, 0, width, height), paint);
-            }
-        } else if (geometry.Ellipse) {
-            const { radius_x, radius_y } = geometry.Ellipse;
-            canvas.drawOval(this.ck.LTRBRect(-radius_x, -radius_y, radius_x, radius_y), paint);
-        } else if (geometry.Path) {
-            const subpaths = geometry.Path.subpaths;
+        if (type === 1) { // Rect
+            const w = reader.f32();
+            const h = reader.f32();
+            canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), paint);
+        } else if (type === 2) { // Ellipse
+            const rx = reader.f32();
+            const ry = reader.f32();
+            canvas.drawOval(this.ck.LTRBRect(-rx, -ry, rx, ry), paint);
+        } else if (type === 0) { // Path
+            const numSubpaths = reader.u16();
             const path = new this.ck.Path();
-            if (fillRule === 1) path.setFillType(this.ck.FillType.EvenOdd);
-            for (const sp of subpaths) {
-                if (sp.points.length < 2) continue;
-                path.moveTo(sp.points[0].x, sp.points[0].y);
-                for (let i = 1; i < sp.points.length; i++) {
-                    const prev = sp.points[i - 1];
-                    const p = sp.points[i];
-                    path.cubicTo(prev.cp2[0], prev.cp2[1], p.cp1[0], p.cp1[1], p.x, p.y);
+            for (let s = 0; s < numSubpaths; s++) {
+                const closed = reader.u8() === 1;
+                const numPoints = reader.u16();
+                let prevCP2: [number, number] | null = null;
+                let firstX = 0, firstY = 0, firstCP1: [number, number] = [0, 0];
+
+                for (let p = 0; p < numPoints; p++) {
+                    const x = reader.f32(); const y = reader.f32();
+                    const cp1x = reader.f32(); const cp1y = reader.f32();
+                    const cp2x = reader.f32(); const cp2y = reader.f32();
+                    
+                    if (p === 0) {
+                        path.moveTo(x, y);
+                        firstX = x; firstY = y;
+                        firstCP1 = [cp1x, cp1y];
+                    } else if (prevCP2) {
+                        path.cubicTo(prevCP2[0], prevCP2[1], cp1x, cp1y, x, y);
+                    }
+                    prevCP2 = [cp2x, cp2y];
                 }
-                if (sp.closed && sp.points.length >= 2) {
-                    const last = sp.points[sp.points.length - 1];
-                    const first = sp.points[0];
-                    path.cubicTo(last.cp2[0], last.cp2[1], first.cp1[0], first.cp1[1], first.x, first.y);
+                if (closed && numPoints >= 2 && prevCP2) {
+                    path.cubicTo(prevCP2[0], prevCP2[1], firstCP1[0], firstCP1[1], firstX, firstY);
+                    path.close();
+                } else if (closed) {
                     path.close();
                 }
             }
             canvas.drawPath(path, paint);
             path.delete();
-        } else if (geometry.Text) {
-            const { content, font_size } = geometry.Text;
-            const font = new this.ck.Font(null, font_size);
+        } else if (type === 4) { // Text
+            const fontSize = reader.f32();
+            const content = reader.string();
+            const font = new this.ck.Font(null, fontSize);
             const blob = this.ck.TextBlob.MakeFromText(content, font);
             if (blob) {
                 canvas.drawTextBlob(blob, 0, 0, paint);
@@ -429,182 +325,8 @@ export class Renderer {
         }
     }
 
-    private makePreviewPath(tool: string, x: number, y: number, w: number, h: number) {
-        const cx = x + w / 2;
-        const cy = y + h / 2;
-        const r = Math.min(w, h) / 2;
-        const path = new this.ck.Path();
-
-        if (tool === 'polygon') {
-            const sides = 6;
-            for (let i = 0; i < sides; i++) {
-                const angle = (i * 2 * Math.PI / sides) - Math.PI / 2;
-                const px = cx + r * Math.cos(angle);
-                const py = cy + r * Math.sin(angle);
-                if (i === 0) path.moveTo(px, py);
-                else path.lineTo(px, py);
-            }
-            path.close();
-        } else {
-            // star – 5 points, inner radius 40%
-            const points = 5;
-            const outerR = r;
-            const innerR = r * 0.4;
-            for (let i = 0; i < points * 2; i++) {
-                const angle = (i * Math.PI / points) - Math.PI / 2;
-                const cr = i % 2 === 0 ? outerR : innerR;
-                const px = cx + cr * Math.cos(angle);
-                const py = cy + cr * Math.sin(angle);
-                if (i === 0) path.moveTo(px, py);
-                else path.lineTo(px, py);
-            }
-            path.close();
-        }
-        return path;
-    }
-
-    private drawPreview(canvas: Canvas) {
-        const preview = this.inputManager?.previewRect;
-        if (!preview || preview.w < 1 || preview.h < 1) return;
-
-        const { x, y, w, h, tool } = preview;
-        const rect = this.ck.LTRBRect(x, y, x + w, y + h);
-        const isCustomShape = tool !== 'rect' && tool !== 'ellipse';
-        // Build custom shape path once (if needed) and reuse for fill+stroke
-        const shapePath = isCustomShape ? this.makePreviewPath(tool, x, y, w, h) : null;
-
-        // Semi-transparent fill
-        const fillPaint = new this.ck.Paint();
-        fillPaint.setColor(this.ck.Color(100, 149, 237, 0.3));
-        fillPaint.setStyle(this.ck.PaintStyle.Fill);
-
-        if (tool === 'rect') canvas.drawRect(rect, fillPaint);
-        else if (tool === 'ellipse') canvas.drawOval(rect, fillPaint);
-        else canvas.drawPath(shapePath!, fillPaint);
-
-        // Blue outline
-        const strokePaint = new this.ck.Paint();
-        strokePaint.setColor(this.ck.Color(0, 162, 255, 1.0));
-        strokePaint.setStyle(this.ck.PaintStyle.Stroke);
-        strokePaint.setStrokeWidth(1.5 / this.zoom);
-
-        if (tool === 'rect') canvas.drawRect(rect, strokePaint);
-        else if (tool === 'ellipse') canvas.drawOval(rect, strokePaint);
-        else canvas.drawPath(shapePath!, strokePaint);
-
-        shapePath?.delete();
-        fillPaint.delete();
-        strokePaint.delete();
-    }
-
-    private drawMarquee(canvas: Canvas) {
-        const marquee = this.inputManager?.marqueeRect;
-        if (!marquee || marquee.w < 1 || marquee.h < 1) return;
-
-        const { x, y, w, h } = marquee;
-        const rect = this.ck.LTRBRect(x, y, x + w, y + h);
-
-        // Semi-transparent blue fill
-        const fillPaint = new this.ck.Paint();
-        fillPaint.setColor(this.ck.Color(0, 120, 255, 0.08));
-        fillPaint.setStyle(this.ck.PaintStyle.Fill);
-        canvas.drawRect(rect, fillPaint);
-
-        // Blue dashed outline
-        const strokePaint = new this.ck.Paint();
-        strokePaint.setColor(this.ck.Color(0, 120, 255, 0.7));
-        strokePaint.setStyle(this.ck.PaintStyle.Stroke);
-        strokePaint.setStrokeWidth(1 / this.zoom);
-        canvas.drawRect(rect, strokePaint);
-
-        fillPaint.delete();
-        strokePaint.delete();
-    }
-
-    private drawPenPreview(canvas: Canvas) {
-        const points = this.inputManager?.currentPathPoints;
-        if (!points || points.length === 0) return;
-
-        // Draw the path so far
-        const strokePaint = new this.ck.Paint();
-        strokePaint.setColor(this.ck.Color(0, 162, 255, 1.0));
-        strokePaint.setStyle(this.ck.PaintStyle.Stroke);
-        strokePaint.setStrokeWidth(2 / this.zoom);
-
-        if (points.length >= 2) {
-            const path = new this.ck.Path();
-            path.moveTo(points[0].x, points[0].y);
-            for (let i = 1; i < points.length; i++) {
-                const prev = points[i - 1];
-                const p = points[i];
-                path.cubicTo(prev.cp2x, prev.cp2y, p.cp1x, p.cp1y, p.x, p.y);
-            }
-            canvas.drawPath(path, strokePaint);
-            path.delete();
-        }
-
-        // Draw anchor points and handle lines
-        const dotPaint = new this.ck.Paint();
-        const handleLinePaint = new this.ck.Paint();
-        handleLinePaint.setColor(this.ck.Color(150, 150, 150, 0.8));
-        handleLinePaint.setStyle(this.ck.PaintStyle.Stroke);
-        handleLinePaint.setStrokeWidth(1 / this.zoom);
-
-        const handleDotPaint = new this.ck.Paint();
-        handleDotPaint.setColor(this.ck.Color(0, 162, 255, 1.0));
-        handleDotPaint.setStyle(this.ck.PaintStyle.Fill);
-
-        dotPaint.setStyle(this.ck.PaintStyle.Fill);
-        const dotSize = 4 / this.zoom;
-        const handleSize = 3 / this.zoom;
-
-        for (const p of points) {
-            const hasCurve = Math.abs(p.cp1x - p.x) > 0.5 || Math.abs(p.cp1y - p.y) > 0.5;
-
-            // Draw handle lines and dots for curved points
-            if (hasCurve) {
-                canvas.drawLine(p.x, p.y, p.cp1x, p.cp1y, handleLinePaint);
-                canvas.drawLine(p.x, p.y, p.cp2x, p.cp2y, handleLinePaint);
-                canvas.drawCircle(p.cp1x, p.cp1y, handleSize, handleDotPaint);
-                canvas.drawCircle(p.cp2x, p.cp2y, handleSize, handleDotPaint);
-            }
-
-            // White fill with blue border for anchor
-            dotPaint.setColor(this.ck.Color(255, 255, 255, 1.0));
-            dotPaint.setStyle(this.ck.PaintStyle.Fill);
-            canvas.drawRect(this.ck.LTRBRect(
-                p.x - dotSize, p.y - dotSize, p.x + dotSize, p.y + dotSize
-            ), dotPaint);
-            dotPaint.setColor(this.ck.Color(0, 162, 255, 1.0));
-            dotPaint.setStyle(this.ck.PaintStyle.Stroke);
-            dotPaint.setStrokeWidth(1 / this.zoom);
-            canvas.drawRect(this.ck.LTRBRect(
-                p.x - dotSize, p.y - dotSize, p.x + dotSize, p.y + dotSize
-            ), dotPaint);
-        }
-
-        handleLinePaint.delete();
-        handleDotPaint.delete();
-
-        // Draw preview line from last point to current mouse position
-        if (points.length > 0 && this.inputManager) {
-            const last = points[points.length - 1];
-            const mousePos = this.inputManager.currentPos;
-            if (mousePos) {
-                const dashPaint = new this.ck.Paint();
-                dashPaint.setColor(this.ck.Color(0, 162, 255, 0.5));
-                dashPaint.setStyle(this.ck.PaintStyle.Stroke);
-                dashPaint.setStrokeWidth(1 / this.zoom);
-                canvas.drawLine(last.x, last.y, mousePos.x, mousePos.y, dashPaint);
-                dashPaint.delete();
-            }
-        }
-
-        strokePaint.delete();
-        dotPaint.delete();
-    }
-    private renderSelectionOverlay(canvas: Canvas, dpr: number, nodes: SceneData['nodes']) {
-        const selection = this.scene.engine!.get_selection();
+    private renderSelectionOverlay(canvas: Canvas, dpr: number) {
+        const selection = this.scene.getSelection();
         if (selection.length === 0) return;
 
         canvas.save();
@@ -612,79 +334,73 @@ export class Renderer {
         canvas.translate(this.pan.x, this.pan.y);
         canvas.scale(this.zoom, this.zoom);
 
-        const paint = new this.ck.Paint();
-        paint.setColor(this.ck.Color(0, 162, 255, 1.0));
-        paint.setStyle(this.ck.PaintStyle.Stroke);
-        paint.setStrokeWidth(1.5 / this.zoom);
+        const outlinePaint = new this.ck.Paint();
+        outlinePaint.setColor(this.ck.Color(0, 162, 255, 1.0));
+        outlinePaint.setStyle(this.ck.PaintStyle.Stroke);
+        outlinePaint.setStrokeWidth(1.0 / this.zoom);
+
+        let totalMinX = Infinity, totalMinY = Infinity, totalMaxX = -Infinity, totalMaxY = -Infinity;
 
         for (const id of selection) {
-            const node = nodes[id];
-            if (!node) continue;
+            const node = this.scene.getNode(id);
+            const nodeTypeNum = this.scene.getNodeType(id);
+            if (nodeTypeNum === undefined) continue;
+
+            const bounds = this.scene.getNodeBounds(id);
+            totalMinX = Math.min(totalMinX, bounds[0]);
+            totalMinY = Math.min(totalMinY, bounds[1]);
+            totalMaxX = Math.max(totalMaxX, bounds[2]);
+            totalMaxY = Math.max(totalMaxY, bounds[3]);
 
             const transform = this.scene.getTransform(id);
-            canvas.save();
-            canvas.concat(transform);
 
-            if (node.geometry.Rect) {
-                if (node.node_type === 'Group') {
-                    // Group node: draw selection outline using AABB bounds
-                    canvas.restore(); // undo the per-node transform
-                    const bounds = this.scene.getNodeBounds(id);
-                    const [gMinX, gMinY, gMaxX, gMaxY] = bounds;
-                    if (gMaxX > gMinX && gMaxY > gMinY) {
-                        canvas.drawRect(this.ck.LTRBRect(gMinX, gMinY, gMaxX, gMaxY), paint);
-                    }
-                    canvas.save(); // re-save so the outer restore is balanced
-                } else {
-                    const { width, height } = node.geometry.Rect;
-                    canvas.drawRect(this.ck.LTRBRect(0, 0, width, height), paint);
+            // 0=Path, 1=Rect, 2=Ellipse, 3=Group, 4=Text
+            if (nodeTypeNum === 3) { // Group
+                // Groups draw their world-space AABB
+                const [gMinX, gMinY, gMaxX, gMaxY] = bounds;
+                if (gMaxX > gMinX && gMaxY > gMinY) {
+                    canvas.drawRect(this.ck.LTRBRect(gMinX, gMinY, gMaxX, gMaxY), outlinePaint);
                 }
-            } else if (node.geometry.Ellipse) {
-                const { radius_x, radius_y } = node.geometry.Ellipse;
-                canvas.drawOval(this.ck.LTRBRect(-radius_x, -radius_y, radius_x, radius_y), paint);
-            } else if (node.geometry.Path) {
-                const subpaths = node.geometry.Path.subpaths;
-                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-                let hasPoints = false;
-                for (const sp of subpaths) {
-                    for (const p of sp.points) {
-                        hasPoints = true;
-                        minX = Math.min(minX, p.x);
-                        minY = Math.min(minY, p.y);
-                        maxX = Math.max(maxX, p.x);
-                        maxY = Math.max(maxY, p.y);
-                        minX = Math.min(minX, p.cp1[0], p.cp2[0]);
-                        minY = Math.min(minY, p.cp1[1], p.cp2[1]);
-                        maxX = Math.max(maxX, p.cp1[0], p.cp2[0]);
-                        maxY = Math.max(maxY, p.cp1[1], p.cp2[1]);
-                    }
+            } else if (node) {
+                // Leaf nodes draw in local space
+                canvas.save();
+                canvas.concat(transform);
+                
+                const geo = node.geometry;
+                if (geo.Rect) {
+                    const { width, height } = geo.Rect;
+                    canvas.drawRect(this.ck.LTRBRect(0, 0, width, height), outlinePaint);
+                } else if (geo.Ellipse) {
+                    const { radius_x, radius_y } = geo.Ellipse;
+                    canvas.drawOval(this.ck.LTRBRect(-radius_x, -radius_y, radius_x, radius_y), outlinePaint);
+                } else if (geo.Path) {
+                    const pathBounds = this.calculatePathBounds(geo.Path);
+                    canvas.drawRect(this.ck.LTRBRect(pathBounds.minX, pathBounds.minY, pathBounds.maxX, pathBounds.maxY), outlinePaint);
+                } else if (geo.Text) {
+                    const { content, font_size } = geo.Text;
+                    const approxW = content.length * font_size * 0.6;
+                    canvas.drawRect(this.ck.LTRBRect(0, -font_size, approxW, 0), outlinePaint);
                 }
-                if (hasPoints) {
-                    canvas.drawRect(this.ck.LTRBRect(minX, minY, maxX, maxY), paint);
-                }
-            } else if (node.geometry.Text) {
-                const { content, font_size } = node.geometry.Text;
-                const approxW = content.length * font_size * 0.6;
-                canvas.drawRect(this.ck.LTRBRect(0, -font_size, approxW, 0), paint);
+                canvas.restore();
             }
-
-            canvas.restore();
         }
 
-        paint.delete();
+        // Draw global bounding box and handles
+        if (totalMaxX > totalMinX && totalMaxY > totalMinY) {
+            // Draw global bounding box for multi-selection
+            if (selection.length > 1) {
+                canvas.drawRect(this.ck.LTRBRect(totalMinX, totalMinY, totalMaxX, totalMaxY), outlinePaint);
+            }
 
-        // Draw resize handles
-        if (selection.length === 1) {
-            const bounds = this.scene.getNodeBounds(selection[0]);
-            const [minX, minY, maxX, maxY] = bounds;
+            // Draw resize handles
             const hSize = 4 / this.zoom;
-            const midX = (minX + maxX) / 2;
-            const midY = (minY + maxY) / 2;
+            const midX = (totalMinX + totalMaxX) / 2;
+            const midY = (totalMinY + totalMaxY) / 2;
 
             const handlePositions = [
-                [minX, minY], [midX, minY], [maxX, minY],
-                [minX, midY],               [maxX, midY],
-                [minX, maxY], [midX, maxY], [maxX, maxY],
+                [totalMinX, totalMinY], [midX, totalMinY], [totalMaxX, totalMinY],
+                [totalMinX, midY],                         [totalMaxX, midY],
+                [totalMinX, totalMaxY], [midX, totalMaxY], [totalMaxX, totalMaxY],
             ];
 
             const handleFill = new this.ck.Paint();
@@ -694,24 +410,34 @@ export class Renderer {
             const handleStroke = new this.ck.Paint();
             handleStroke.setColor(this.ck.Color(0, 162, 255, 1.0));
             handleStroke.setStyle(this.ck.PaintStyle.Stroke);
-            handleStroke.setStrokeWidth(1 / this.zoom);
+            handleStroke.setStrokeWidth(1.0 / this.zoom);
 
             for (const [hx, hy] of handlePositions) {
-                canvas.drawRect(
-                    this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize),
-                    handleFill
-                );
-                canvas.drawRect(
-                    this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize),
-                    handleStroke
-                );
+                canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), handleFill);
+                canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), handleStroke);
             }
 
             handleFill.delete();
             handleStroke.delete();
         }
 
+        outlinePaint.delete();
         canvas.restore();
+    }
+
+    private calculatePathBounds(path: any) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        let hasPoints = false;
+        for (const sp of path.subpaths) {
+            for (const p of sp.points) {
+                hasPoints = true;
+                minX = Math.min(minX, p.x, p.cp1[0], p.cp2[0]);
+                minY = Math.min(minY, p.y, p.cp1[1], p.cp2[1]);
+                maxX = Math.max(maxX, p.x, p.cp1[0], p.cp2[0]);
+                maxY = Math.max(maxY, p.y, p.cp1[1], p.cp2[1]);
+            }
+        }
+        return hasPoints ? { minX, minY, maxX, maxY } : { minX: 0, minY: 0, maxX: 0, maxY: 0 };
     }
 
     private drawGrid(canvas: Canvas, dpr: number) {
@@ -765,7 +491,217 @@ export class Renderer {
         paint.delete();
     }
 
-    // ─── Live Paint Rendering ───────────────────────────────────────────────
+    private drawDirectEditHandles(canvas: Canvas, dpr: number) {
+        const im = this.inputManager;
+        if (!im || !im.editingPoints || im.editingNodeId === null || !im.editingTransform) return;
+
+        const points = im.editingPoints;
+        const t = im.editingTransform;
+
+        canvas.save();
+        canvas.scale(dpr, dpr);
+        canvas.translate(this.pan.x, this.pan.y);
+        canvas.scale(this.zoom, this.zoom);
+
+        const dotSize = 4 / this.zoom;
+        const handleSize = 3.5 / this.zoom;
+        const lineWidth = 1 / this.zoom;
+
+        const linePaint = new this.ck.Paint();
+        linePaint.setColor(this.ck.Color(150, 150, 150, 0.8));
+        linePaint.setStyle(this.ck.PaintStyle.Stroke);
+        linePaint.setStrokeWidth(lineWidth);
+
+        const anchorFill = new this.ck.Paint();
+        anchorFill.setColor(this.ck.Color(255, 255, 255, 1.0));
+        anchorFill.setStyle(this.ck.PaintStyle.Fill);
+
+        const anchorStroke = new this.ck.Paint();
+        anchorStroke.setColor(this.ck.Color(0, 162, 255, 1.0));
+        anchorStroke.setStyle(this.ck.PaintStyle.Stroke);
+        anchorStroke.setStrokeWidth(lineWidth * 1.5);
+
+        const handleFill = new this.ck.Paint();
+        handleFill.setColor(this.ck.Color(0, 162, 255, 1.0));
+        handleFill.setStyle(this.ck.PaintStyle.Fill);
+
+        for (const sp of points) {
+            for (const p of sp.points) {
+                const ax = t[0] * p.x + t[1] * p.y + t[2];
+                const ay = t[3] * p.x + t[4] * p.y + t[5];
+                const c1x = t[0] * p.cp1[0] + t[1] * p.cp1[1] + t[2];
+                const c1y = t[3] * p.cp1[0] + t[4] * p.cp1[1] + t[5];
+                const c2x = t[0] * p.cp2[0] + t[1] * p.cp2[1] + t[2];
+                const c2y = t[3] * p.cp2[0] + t[4] * p.cp2[1] + t[5];
+
+                const isSmooth = Math.abs(c1x - ax) > 0.5 || Math.abs(c1y - ay) > 0.5;
+                if (isSmooth) {
+                    canvas.drawLine(ax, ay, c1x, c1y, linePaint);
+                    canvas.drawLine(ax, ay, c2x, c2y, linePaint);
+                    canvas.drawCircle(c1x, c1y, handleSize, handleFill);
+                    canvas.drawCircle(c2x, c2y, handleSize, handleFill);
+                }
+
+                canvas.drawRect(this.ck.LTRBRect(
+                    ax - dotSize, ay - dotSize, ax + dotSize, ay + dotSize
+                ), anchorFill);
+                canvas.drawRect(this.ck.LTRBRect(
+                    ax - dotSize, ay - dotSize, ax + dotSize, ay + dotSize
+                ), anchorStroke);
+            }
+        }
+
+        linePaint.delete();
+        anchorFill.delete();
+        anchorStroke.delete();
+        handleFill.delete();
+        canvas.restore();
+    }
+
+    private drawPreview(canvas: Canvas) {
+        const preview = this.inputManager?.previewRect;
+        if (!preview || preview.w < 1 || preview.h < 1) return;
+
+        const { x, y, w, h, tool } = preview;
+        const rect = this.ck.LTRBRect(x, y, x + w, y + h);
+        const isCustomShape = tool !== 'rect' && tool !== 'ellipse';
+        const shapePath = isCustomShape ? this.makePreviewPath(tool, x, y, w, h) : null;
+
+        const fillPaint = new this.ck.Paint();
+        fillPaint.setColor(this.ck.Color(100, 149, 237, 0.3));
+        fillPaint.setStyle(this.ck.PaintStyle.Fill);
+
+        if (tool === 'rect') canvas.drawRect(rect, fillPaint);
+        else if (tool === 'ellipse') canvas.drawOval(rect, fillPaint);
+        else canvas.drawPath(shapePath!, fillPaint);
+
+        const strokePaint = new this.ck.Paint();
+        strokePaint.setColor(this.ck.Color(0, 162, 255, 1.0));
+        strokePaint.setStyle(this.ck.PaintStyle.Stroke);
+        strokePaint.setStrokeWidth(1.5 / this.zoom);
+
+        if (tool === 'rect') canvas.drawRect(rect, strokePaint);
+        else if (tool === 'ellipse') canvas.drawOval(rect, strokePaint);
+        else canvas.drawPath(shapePath!, strokePaint);
+
+        shapePath?.delete();
+        fillPaint.delete();
+        strokePaint.delete();
+    }
+
+    private makePreviewPath(tool: string, x: number, y: number, w: number, h: number) {
+        const cx = x + w / 2;
+        const cy = y + h / 2;
+        const r = Math.min(w, h) / 2;
+        const path = new this.ck.Path();
+
+        if (tool === 'polygon') {
+            const sides = 6;
+            for (let i = 0; i < sides; i++) {
+                const angle = (i * 2 * Math.PI / sides) - Math.PI / 2;
+                const px = cx + r * Math.cos(angle);
+                const py = cy + r * Math.sin(angle);
+                if (i === 0) path.moveTo(px, py);
+                else path.lineTo(px, py);
+            }
+            path.close();
+        } else {
+            const points = 5;
+            const outerR = r;
+            const innerR = r * 0.4;
+            for (let i = 0; i < points * 2; i++) {
+                const angle = (i * Math.PI / points) - Math.PI / 2;
+                const cr = i % 2 === 0 ? outerR : innerR;
+                const px = cx + cr * Math.cos(angle);
+                const py = cy + cr * Math.sin(angle);
+                if (i === 0) path.moveTo(px, py);
+                else path.lineTo(px, py);
+            }
+            path.close();
+        }
+        return path;
+    }
+
+    private drawMarquee(canvas: Canvas) {
+        const marquee = this.inputManager?.marqueeRect;
+        if (!marquee || marquee.w < 1 || marquee.h < 1) return;
+
+        const { x, y, w, h } = marquee;
+        const rect = this.ck.LTRBRect(x, y, x + w, y + h);
+
+        const fillPaint = new this.ck.Paint();
+        fillPaint.setColor(this.ck.Color(0, 120, 255, 0.08));
+        fillPaint.setStyle(this.ck.PaintStyle.Fill);
+        canvas.drawRect(rect, fillPaint);
+
+        const strokePaint = new this.ck.Paint();
+        strokePaint.setColor(this.ck.Color(0, 120, 255, 0.7));
+        strokePaint.setStyle(this.ck.PaintStyle.Stroke);
+        strokePaint.setStrokeWidth(1 / this.zoom);
+        canvas.drawRect(rect, strokePaint);
+
+        fillPaint.delete();
+        strokePaint.delete();
+    }
+
+    private drawPenPreview(canvas: Canvas) {
+        const points = this.inputManager?.currentPathPoints;
+        if (!points || points.length === 0) return;
+
+        const strokePaint = new this.ck.Paint();
+        strokePaint.setColor(this.ck.Color(0, 162, 255, 1.0));
+        strokePaint.setStyle(this.ck.PaintStyle.Stroke);
+        strokePaint.setStrokeWidth(2 / this.zoom);
+
+        if (points.length >= 2) {
+            const path = new this.ck.Path();
+            path.moveTo(points[0].x, points[0].y);
+            for (let i = 1; i < points.length; i++) {
+                const prev = points[i - 1];
+                const p = points[i];
+                path.cubicTo(prev.cp2x, prev.cp2y, p.cp1x, p.cp1y, p.x, p.y);
+            }
+            canvas.drawPath(path, strokePaint);
+            path.delete();
+        }
+
+        const dotPaint = new this.ck.Paint();
+        const handleLinePaint = new this.ck.Paint();
+        handleLinePaint.setColor(this.ck.Color(150, 150, 150, 0.8));
+        handleLinePaint.setStyle(this.ck.PaintStyle.Stroke);
+        handleLinePaint.setStrokeWidth(1 / this.zoom);
+
+        const handleDotPaint = new this.ck.Paint();
+        handleDotPaint.setColor(this.ck.Color(0, 162, 255, 1.0));
+        handleDotPaint.setStyle(this.ck.PaintStyle.Fill);
+
+        dotPaint.setStyle(this.ck.PaintStyle.Fill);
+        const dotSize = 4 / this.zoom;
+        const handleSize = 3 / this.zoom;
+
+        for (const p of points) {
+            const hasCurve = Math.abs(p.cp1x - p.x) > 0.5 || Math.abs(p.cp1y - p.y) > 0.5;
+            if (hasCurve) {
+                canvas.drawLine(p.x, p.y, p.cp1x, p.cp1y, handleLinePaint);
+                canvas.drawLine(p.x, p.y, p.cp2x, p.cp2y, handleLinePaint);
+                canvas.drawCircle(p.cp1x, p.cp1y, handleSize, handleDotPaint);
+                canvas.drawCircle(p.cp2x, p.cp2y, handleSize, handleDotPaint);
+            }
+
+            dotPaint.setColor(this.ck.Color(255, 255, 255, 1.0));
+            dotPaint.setStyle(this.ck.PaintStyle.Fill);
+            canvas.drawRect(this.ck.LTRBRect(p.x - dotSize, p.y - dotSize, p.x + dotSize, p.y + dotSize), dotPaint);
+            dotPaint.setColor(this.ck.Color(0, 162, 255, 1.0));
+            dotPaint.setStyle(this.ck.PaintStyle.Stroke);
+            dotPaint.setStrokeWidth(1 / this.zoom);
+            canvas.drawRect(this.ck.LTRBRect(p.x - dotSize, p.y - dotSize, p.x + dotSize, p.y + dotSize), dotPaint);
+        }
+
+        handleLinePaint.delete();
+        handleDotPaint.delete();
+        strokePaint.delete();
+        dotPaint.delete();
+    }
 
     private drawFilledFaces(canvas: Canvas) {
         if (!this.scene.engine) return;
@@ -795,9 +731,7 @@ export class Renderer {
                 path.delete();
             }
             paint.delete();
-        } catch {
-            // Silently ignore parse errors
-        }
+        } catch {}
     }
 
     private drawPaintBucketHover(canvas: Canvas) {
@@ -814,14 +748,12 @@ export class Renderer {
             }
             path.close();
 
-            // Semi-transparent blue preview
             const paint = new this.ck.Paint();
             paint.setColor(this.ck.Color(66, 133, 244, 0.3));
             paint.setStyle(this.ck.PaintStyle.Fill);
             paint.setAntiAlias(true);
             canvas.drawPath(path, paint);
 
-            // Thin blue outline
             paint.setColor(this.ck.Color(66, 133, 244, 0.8));
             paint.setStyle(this.ck.PaintStyle.Stroke);
             paint.setStrokeWidth(1.5 / this.zoom);
@@ -829,8 +761,6 @@ export class Renderer {
 
             path.delete();
             paint.delete();
-        } catch {
-            // Silently ignore
-        }
+        } catch {}
     }
 }

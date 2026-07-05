@@ -2,9 +2,10 @@ import type { CanvasKit } from 'canvaskit-wasm';
 import type { WasmScene } from './wasm_scene';
 import { FileIO } from './file_io';
 import type { Color } from './types';
-import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, matrixToSVGTransform, escapeXml, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor } from './svg_utils';
+import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, escapeXml, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor } from './svg_utils';
 import type { SVGSubpath } from './svg_utils';
 import type { ContextBar } from './context_bar';
+import type { BreadcrumbBar } from './breadcrumb';
 import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock } from './icons';
 
 export class UIEngine {
@@ -12,6 +13,7 @@ export class UIEngine {
     scene: WasmScene;
     activeTool: string = 'selection';
     contextBar: ContextBar | null = null;
+    breadcrumbBar: BreadcrumbBar | null = null;
 
     /** Tracks whether we've already taken a history snapshot for the current
      *  property-editing gesture (e.g. a color picker drag). */
@@ -233,6 +235,7 @@ export class UIEngine {
         }
 
         this.contextBar?.refresh();
+        this.breadcrumbBar?.refresh();
     }
 
     /** Get the current fill color from the UI as {r, g, b, a} in 0-1 range. */
@@ -245,11 +248,9 @@ export class UIEngine {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
 
-        const sceneData = this.scene.getSceneData();
-        const node = sceneData.nodes[selection[0]];
-        if (!node) return;
+        const currentVisible = this.scene.getNodeVisible(selection[0]);
 
-        const newVisible = !node.visible;
+        const newVisible = !currentVisible;
         for (const id of selection) {
             this.scene.setNodeVisible(id, newVisible);
         }
@@ -262,11 +263,9 @@ export class UIEngine {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
 
-        const sceneData = this.scene.getSceneData();
-        const node = sceneData.nodes[selection[0]];
-        if (!node) return;
+        const currentLocked = this.scene.getNodeLocked(selection[0]);
 
-        const newLocked = !node.locked;
+        const newLocked = !currentLocked;
         for (const id of selection) {
             this.scene.setNodeLocked(id, newLocked);
         }
@@ -350,8 +349,7 @@ export class UIEngine {
         if (selection.length === 0) return;
 
         const id = selection[0];
-        const sceneData = this.scene.getSceneData();
-        const node = sceneData.nodes[id];
+        const node = this.scene.getNode(id);
         if (!node) return;
 
         this.scene.saveMoveHistory();
@@ -387,9 +385,8 @@ export class UIEngine {
         // Lightweight sync that doesn't trigger updateTransform again
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
-        const sceneData = this.scene.getSceneData();
-        const node = sceneData.nodes[selection[0]];
-        if (!node) return;
+        const nodeType = this.scene.getNodeType(selection[0]);
+        if (nodeType === undefined) return;
         this.updateLayerList();
     }
 
@@ -399,15 +396,16 @@ export class UIEngine {
             this.clearPropertyPanel();
             this.updateLayerList();
             this.contextBar?.refresh();
+            this.breadcrumbBar?.refresh();
             return;
         }
         
-        const sceneData = this.scene.getSceneData();
-        const node = sceneData.nodes[selection[0]];
+        const node = this.scene.getNode(selection[0]);
         if (!node) {
             this.clearPropertyPanel();
             this.updateLayerList();
             this.contextBar?.refresh();
+            this.breadcrumbBar?.refresh();
             return;
         }
         const style = node.style;
@@ -498,6 +496,7 @@ export class UIEngine {
 
         this.updateLayerList();
         this.contextBar?.refresh();
+        this.breadcrumbBar?.refresh();
     }
 
     /** When nothing is selected, show the CURRENT style (what a newly drawn
@@ -532,21 +531,23 @@ export class UIEngine {
         if (this.toggleLocked) this.toggleLocked.classList.remove('active');
     }
 
+    /** Map from numeric node type (engine enum) to string key for icon lookup.
+     *  0=Path, 1=Rect, 2=Ellipse, 3=Group, 4=Text */
+    private static readonly NODE_TYPE_KEY: readonly string[] = ['Path', 'Rect', 'Ellipse', 'Group', 'Text'];
+
     updateLayerList() {
         if (!this.scene.engine) return;
 
-        let sceneData: ReturnType<typeof this.scene.getSceneData>;
+        let rootNodes: Uint32Array;
         let selection: number[];
         try {
-            sceneData = this.scene.getSceneData();
+            rootNodes = this.scene.getRootNodes();
             selection = Array.from(this.scene.engine.get_selection());
         } catch {
             return; // Don't clear the list if we can't get fresh data
         }
 
-        const nodes = sceneData?.nodes;
-        const rootNodes = sceneData?.root_nodes;
-        if (!nodes || !rootNodes || rootNodes.length === 0) {
+        if (rootNodes.length === 0) {
             this.layerList.innerHTML = '';
             return;
         }
@@ -556,19 +557,25 @@ export class UIEngine {
 
         // Recursive helper to render a node and its children
         const renderNode = (id: number, depth: number) => {
-            const node = nodes[id];
-            if (!node) return;
+            const nodeTypeNum = this.scene.getNodeType(id);
+            if (nodeTypeNum === undefined) return;
 
-            const isGroup = node.node_type === 'Group';
+            const nodeTypeKey = UIEngine.NODE_TYPE_KEY[nodeTypeNum] || 'Path';
+            const isGroup = nodeTypeKey === 'Group';
+            const children = isGroup ? this.scene.getNodeChildren(id) : null;
             const isCollapsed = this._collapsedGroups.has(id);
-            const hasChildren = isGroup && node.children && node.children.length > 0;
+            const hasChildren = isGroup && children !== null && children.length > 0;
+
+            const nodeVisible = this.scene.getNodeVisible(id);
+            const nodeLocked = this.scene.getNodeLocked(id);
+            const nodeName = this.scene.getNodeName(id);
 
             const item = document.createElement('div');
             item.className = 'layer-item';
             item.dataset.nodeId = id.toString();
             if (selection.includes(id)) item.classList.add('selected');
-            if (node.visible === false) item.classList.add('layer-hidden');
-            if (node.locked === true) item.classList.add('layer-locked');
+            if (nodeVisible === false) item.classList.add('layer-hidden');
+            if (nodeLocked === true) item.classList.add('layer-locked');
 
             // Indent based on depth
             const indent = depth * 16;
@@ -581,27 +588,17 @@ export class UIEngine {
                 chevronHtml = `<span class="layer-chevron-spacer"></span>`;
             }
 
-            let icon = iconHexagon(14);
-            if (isGroup) {
-                icon = UIEngine.ICON_MAP['Group']();
-            } else if (node.geometry?.Rect) {
-                icon = UIEngine.ICON_MAP['Rect']();
-            } else if (node.geometry?.Ellipse) {
-                icon = UIEngine.ICON_MAP['Ellipse']();
-            } else if (node.geometry?.Path) {
-                icon = UIEngine.ICON_MAP['Path']();
-            } else if (node.geometry?.Text) {
-                icon = UIEngine.ICON_MAP['Text']();
-            }
+            const iconFn = UIEngine.ICON_MAP[nodeTypeKey];
+            const icon = iconFn ? iconFn() : iconHexagon(14);
 
-            const visIcon = node.visible !== false ? iconEye(12) : iconEyeOff(12);
-            const lockIcon = node.locked === true ? iconLock(12) : '';
+            const visIcon = nodeVisible !== false ? iconEye(12) : iconEyeOff(12);
+            const lockIcon = nodeLocked === true ? iconLock(12) : '';
 
             item.innerHTML = `
                 <div class="layer-item-row" style="padding-left: ${indent + 4}px">
                     ${chevronHtml}
                     <span class="layer-icon">${icon}</span>
-                    <span class="layer-name" data-node-id="${id}">${node.name || `Node ${id}`}</span>
+                    <span class="layer-name" data-node-id="${id}">${nodeName || `Node ${id}`}</span>
                     <span class="layer-actions">
                         ${lockIcon ? `<span class="layer-lock-btn" data-lock-id="${id}" title="Locked">${lockIcon}</span>` : ''}
                         <span class="layer-vis-btn" data-vis-id="${id}" title="Toggle visibility">${visIcon}</span>
@@ -647,7 +644,7 @@ export class UIEngine {
             if (visBtn) {
                 visBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    this.scene.setNodeVisible(id, node.visible === false);
+                    this.scene.setNodeVisible(id, nodeVisible === false);
                     this.updateLayerList();
                 });
             }
@@ -657,7 +654,7 @@ export class UIEngine {
             if (lockBtn) {
                 lockBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    this.scene.setNodeLocked(id, !node.locked);
+                    this.scene.setNodeLocked(id, !nodeLocked);
                     this.updateLayerList();
                 });
             }
@@ -666,7 +663,6 @@ export class UIEngine {
 
             // Render children if group is expanded
             if (hasChildren && !isCollapsed) {
-                const children = node.children as number[];
                 // Render in reverse for top-to-bottom visual order
                 for (let i = children.length - 1; i >= 0; i--) {
                     renderNode(children[i], depth + 1);
@@ -695,11 +691,9 @@ export class UIEngine {
 
         const commit = () => {
             const newName = input.value.trim() || currentName;
-            // Set the name via engine (we need to update the node's name)
-            const sceneData = this.scene.getSceneData();
-            const node = sceneData.nodes[nodeId];
-            if (node) {
-                node.name = newName;
+            // Set the name via engine — verify node exists first
+            const existingName = this.scene.getNodeName(nodeId);
+            if (existingName !== undefined) {
                 // Update via style JSON which includes name — actually we need a different approach
                 // For now, directly set it in the engine and invalidate
                 try {
@@ -729,6 +723,7 @@ export class UIEngine {
         this.zoomText.innerText = `${Math.round(level * 100)}%`;
         // Keep the context bar's zoom label in sync
         this.contextBar?.refresh();
+        this.breadcrumbBar?.refresh();
     }
 
     exportSVG() {
@@ -744,131 +739,101 @@ export class UIEngine {
 
     /** Build the full SVG document string (with embedded .vec payload). */
     buildSVGString(): string {
-        const sceneData = this.scene.getSceneData();
-        const nodes = sceneData.nodes;
         const docW = this.scene.engine?.get_document_width() ?? 1000;
         const docH = this.scene.engine?.get_document_height() ?? 1000;
         let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${docW}" height="${docH}" viewBox="0 0 ${docW} ${docH}">`;
 
+        const rootNodes = this.scene.getRootNodes();
+
         /** Build SVG style attributes string for a node. */
-        const buildStyleAttrs = (node: typeof nodes[number]): string => {
-            const fill = node.style.fill ? escapeXml(this.rgbToHex(node.style.fill)) : 'none';
-            const stroke = node.style.stroke ? escapeXml(this.rgbToHex(node.style.stroke)) : 'none';
-            const sw = node.style.stroke_width;
-            const op = node.style.opacity;
+        const buildStyleAttrs = (node: any): string => {
+            const style = node.style;
+            const fill = style.fill ? escapeXml(this.rgbToHex(style.fill)) : 'none';
+            const stroke = style.stroke ? escapeXml(this.rgbToHex(style.stroke)) : 'none';
+            const sw = style.stroke_width;
+            const op = style.opacity ?? 1.0;
 
             let attrs = `fill="${fill}" stroke="${stroke}" stroke-width="${sw}" opacity="${op}"`;
-            attrs += ` stroke-linecap="${UIEngine.CAP_MAP[node.style.stroke_cap || 0]}"`;
-            attrs += ` stroke-linejoin="${UIEngine.JOIN_MAP[node.style.stroke_join || 0]}"`;
+            attrs += ` stroke-linecap="${UIEngine.CAP_MAP[style.stroke_cap || 0]}"`;
+            attrs += ` stroke-linejoin="${UIEngine.JOIN_MAP[style.stroke_join || 0]}"`;
 
             // Dash array and offset
-            if (node.style.dash_array && node.style.dash_array.length > 0) {
-                attrs += ` stroke-dasharray="${node.style.dash_array.join(',')}"`;
-                if (node.style.dash_offset) attrs += ` stroke-dashoffset="${node.style.dash_offset}"`;
+            if (style.dash_array && style.dash_array.length > 0) {
+                attrs += ` stroke-dasharray="${style.dash_array.join(',')}"`;
+                if (style.dash_offset) attrs += ` stroke-dashoffset="${style.dash_offset}"`;
             }
 
             // Miter limit
-            if (node.style.miter_limit !== undefined && node.style.miter_limit !== 4) {
-                attrs += ` stroke-miterlimit="${node.style.miter_limit}"`;
+            if (style.miter_limit !== undefined && style.miter_limit !== 4) {
+                attrs += ` stroke-miterlimit="${style.miter_limit}"`;
             }
 
             // Fill opacity
-            if (node.style.fill_opacity !== undefined && node.style.fill_opacity !== 1) {
-                attrs += ` fill-opacity="${node.style.fill_opacity}"`;
+            if (style.fill_opacity !== undefined && style.fill_opacity !== 1) {
+                attrs += ` fill-opacity="${style.fill_opacity}"`;
             }
 
-            const fillRuleIdx = node.style.fill_rule || 0;
+            const fillRuleIdx = style.fill_rule || 0;
             if (fillRuleIdx > 0) {
                 attrs += ` fill-rule="${UIEngine.FILL_RULE_MAP[fillRuleIdx]}"`;
-            }
-
-            // Visibility
-            if (node.visible === false) {
-                attrs += ` visibility="hidden"`;
             }
 
             return attrs;
         };
 
-        /**
-         * Recursively emit SVG for a node and its children in draw order.
-         * @param nodeId  The node to emit
-         * @param depth   Indentation depth for pretty-printing
-         */
-        const emitNode = (nodeId: number, depth: number) => {
-            const node = nodes[nodeId];
-            if (!node) return;
+        const renderNodeToSVG = (id: number): string => {
+            const node = this.scene.getNode(id);
+            if (!node || !node.visible) return '';
 
-            const indent = '\n' + '  '.repeat(depth + 1);
-            // Local transform from scene data (column-major [f32; 9])
-            const mat = matrixToSVGTransform(node.transform);
-
-            // Group node → emit <g> with local transform, recurse children.
-            // Childless groups are skipped entirely (their placeholder Rect{0,0}
-            // geometry must not leak into the output).
+            const transform = this.scene.getTransform(id);
+            const matrix = `matrix(${transform[0]} ${transform[3]} ${transform[1]} ${transform[4]} ${transform[2]} ${transform[5]})`;
+            
+            let nodeSvg = `<g transform="${matrix}">`;
+            
             if (node.node_type === 'Group') {
-                if (!node.children || node.children.length === 0) return;
-                let gAttrs = `transform="${mat}"`;
-                if (node.visible === false) gAttrs += ` visibility="hidden"`;
-                svg += `${indent}<g ${gAttrs}>`;
-                for (const childId of node.children) {
-                    emitNode(childId, depth + 1);
+                const children = this.scene.getNodeChildren(id);
+                for (const childId of Array.from(children)) {
+                    nodeSvg += renderNodeToSVG(childId);
                 }
-                svg += `${indent}</g>`;
-                return;
-            }
-
-            // Build style + transform attributes
-            let attrs = buildStyleAttrs(node);
-            attrs += ` transform="${mat}"`;
-
-            // Emit based on geometry type
-            if (node.geometry.Rect) {
-                const { width, height } = node.geometry.Rect;
-                const rx = node.style.corner_radius || 0;
-                svg += `${indent}<rect width="${width}" height="${height}" ${rx > 0 ? `rx="${rx}" ry="${rx}" ` : ''}${attrs} />`;
-            } else if (node.geometry.Ellipse) {
-                const { radius_x, radius_y } = node.geometry.Ellipse;
-                svg += `${indent}<ellipse rx="${radius_x}" ry="${radius_y}" ${attrs} />`;
-            } else if (node.geometry.Path) {
-                const subpaths = node.geometry.Path.subpaths;
-                let d = '';
-                for (const sp of subpaths) {
-                    if (sp.points.length < 2) continue;
-                    d += `M ${sp.points[0].x} ${sp.points[0].y} `;
-                    for (let i = 1; i < sp.points.length; i++) {
-                        const prev = sp.points[i - 1];
-                        const p = sp.points[i];
-                        d += `C ${prev.cp2[0]} ${prev.cp2[1]} ${p.cp1[0]} ${p.cp1[1]} ${p.x} ${p.y} `;
+            } else {
+                const attrs = buildStyleAttrs(node);
+                const geo = node.geometry;
+                if (geo.Rect) {
+                    nodeSvg += `<rect x="0" y="0" width="${geo.Rect.width}" height="${geo.Rect.height}" ${attrs} />`;
+                } else if (geo.Ellipse) {
+                    nodeSvg += `<ellipse cx="0" cy="0" rx="${geo.Ellipse.radius_x}" ry="${geo.Ellipse.radius_y}" ${attrs} />`;
+                } else if (geo.Path) {
+                    let d = '';
+                    for (const sp of geo.Path.subpaths) {
+                        if (sp.points.length < 2) continue;
+                        d += `M ${sp.points[0].x} ${sp.points[0].y} `;
+                        for (let i = 1; i < sp.points.length; i++) {
+                            const prev = sp.points[i-1];
+                            const p = sp.points[i];
+                            d += `C ${prev.cp2[0]} ${prev.cp2[1]} ${p.cp1[0]} ${p.cp1[1]} ${p.x} ${p.y} `;
+                        }
+                        if (sp.closed) d += 'Z ';
                     }
-                    if (sp.closed && sp.points.length >= 2) {
-                        const last = sp.points[sp.points.length - 1];
-                        const first = sp.points[0];
-                        d += `C ${last.cp2[0]} ${last.cp2[1]} ${first.cp1[0]} ${first.cp1[1]} ${first.x} ${first.y} Z `;
-                    }
+                    nodeSvg += `<path d="${d.trim()}" ${attrs} />`;
+                } else if (geo.Text) {
+                    nodeSvg += `<text x="0" y="0" font-size="${geo.Text.font_size}" ${attrs}>${escapeXml(geo.Text.content)}</text>`;
                 }
-                if (d.trim()) {
-                    svg += `${indent}<path d="${d.trim()}" ${attrs} />`;
-                }
-            } else if (node.geometry.Text) {
-                const { content, font_size } = node.geometry.Text;
-                const escapedContent = escapeXml(content);
-                svg += `${indent}<text x="0" y="0" font-size="${font_size}" ${attrs}>${escapedContent}</text>`;
             }
-            // Nodes with no geometry payload (e.g. empty groups) are silently skipped
+            nodeSvg += `</g>`;
+            return nodeSvg;
         };
 
-        // Walk root_nodes in scene order (index 0 = drawn first = bottom)
-        for (const rootId of sceneData.root_nodes) {
-            emitNode(rootId, 0);
+        for (const rootId of Array.from(rootNodes)) {
+            svg += renderNodeToSVG(rootId);
         }
 
-        svg += `\n</svg>`;
-
-        // Embed protobuf payload for lossless re-importing
+        svg += `</svg>`;
+        
+        // Embed the binary .vec payload for round-tripping
         if (this.scene.engine) {
             svg = FileIO.embedPayloadInSVG(this.scene.engine, svg);
         }
+
         return svg;
     }
 

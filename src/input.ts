@@ -146,12 +146,10 @@ export class InputManager {
         const hitId = this.scene.hitTest(pos.x, pos.y); // raw hit for drill-down
         if (hitId === undefined) return;
 
-        const sceneData = this.scene.getSceneData();
-
         // Check if the currently selected node is a group
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 1) {
-            const selectedNode = sceneData.nodes[selection[0]];
+            const selectedNode = this.scene.getNode(selection[0]);
             if (selectedNode && selectedNode.node_type === 'Group') {
                 // Double-click on a group → "enter" it: select the child under cursor
                 this.scene.selectNode(hitId, false);
@@ -163,7 +161,7 @@ export class InputManager {
 
         // Double-click on a leaf shape: enter path edit only if it's already a Path
         // or if the user is in the 'direct' tool. Don't destructively convert Rect/Ellipse.
-        const node = sceneData.nodes[hitId];
+        const node = this.scene.getNode(hitId);
         if (!node) return;
 
         if (node.geometry.Path || this.ui.activeTool === 'direct') {
@@ -183,21 +181,19 @@ export class InputManager {
     /** Enter path edit mode on a node. Converts Rect/Ellipse to Path first if needed. */
     enterPathEditMode(nodeId: number) {
         // Convert non-path geometry to path
-        const sceneData = this.scene.getSceneData();
-        const node = sceneData.nodes[nodeId];
-        if (!node) return;
+        const geometry = this.scene.getNodeGeometry(nodeId);
+        if (!geometry) return;
 
-        if (!node.geometry.Path) {
+        if (!geometry.Path) {
             // Convert rect/ellipse/etc. to editable path
             this.scene.convertToPath(nodeId);
         }
 
-        // Re-read scene data after potential conversion
-        const updatedData = this.scene.getSceneData();
-        const updatedNode = updatedData.nodes[nodeId];
-        if (updatedNode && updatedNode.geometry.Path) {
+        // Re-read geometry after potential conversion
+        const updatedGeometry = this.scene.getNodeGeometry(nodeId);
+        if (updatedGeometry && updatedGeometry.Path) {
             this.editingNodeId = nodeId;
-            this.editingPoints = JSON.parse(JSON.stringify(updatedNode.geometry.Path.subpaths));
+            this.editingPoints = JSON.parse(JSON.stringify(updatedGeometry.Path.subpaths));
             this.editingTransform = this.scene.getTransform(nodeId);
             this.ui.updateLayerList();
             this.ui.contextBar?.refresh();
@@ -299,7 +295,7 @@ export class InputManager {
             this.ui.exportSVG();
         }
 
-        // Escape: exit direct edit → finalize pen → deselect
+        // Escape: exit path edit → exit group → deselect
         if (e.key === 'Escape') {
             if (this.editingNodeId !== null) {
                 // Exit direct editing mode
@@ -310,7 +306,22 @@ export class InputManager {
             } else if (this.currentPathPoints.length > 0) {
                 this.finalizePenPath();
             } else {
-                this.scene.engine!.clear_selection();
+                // Check if we're inside a group — if so, select the parent group instead of clearing
+                const selection = this.scene.engine!.get_selection();
+                if (selection.length > 0) {
+                    const parentId = this.scene.getNodeParent(selection[0]);
+                    const parentNode = parentId >= 0 ? this.scene.getNode(parentId) : null;
+
+                    if (parentNode && parentNode.node_type === 'Group') {
+                        // Exit group context: select the parent group
+                        this.scene.selectNode(parentId, false);
+                    } else {
+                        // At root level: clear selection
+                        this.scene.engine!.clear_selection();
+                    }
+                } else {
+                    this.scene.engine!.clear_selection();
+                }
                 this.ui.updateLayerList();
                 this.ui.syncWithSelection();
                 this.ui.contextBar?.refresh();
@@ -460,7 +471,7 @@ export class InputManager {
                 return;
             }
 
-            const hitId = this.scene.hitTestGrouped(this.startPos.x, this.startPos.y);
+            const hitId = this.getTargetIdForHit(this.startPos);
             if (hitId !== undefined) {
                 // Clicked on an object — select it and prepare to drag-move
                 if (!e.shiftKey) {
@@ -767,7 +778,7 @@ export class InputManager {
                 };
                 this.canvas.style.cursor = cursorMap[handle.type] || 'default';
             } else {
-                const hitId = this.scene.hitTestGrouped(this.currentPos.x, this.currentPos.y);
+                const hitId = this.getTargetIdForHit(this.currentPos);
                 if (hitId !== undefined) {
                     this.canvas.style.cursor = e.altKey ? 'copy' : 'move';
                 } else {
@@ -1061,18 +1072,16 @@ export class InputManager {
             }
             // Filter out locked nodes — they shouldn't be selectable via marquee
             // Promote leaf nodes to their topmost group ancestor (Figma-style)
-            const sceneData = this.scene.getSceneData();
             const groupPromoted = new Set<number>();
             for (const id of nodesInRect) {
-                const node = sceneData.nodes[id];
-                if (node && (node.locked || node.visible === false)) continue;
+                if (this.scene.getNodeLocked(id) || !this.scene.getNodeVisible(id)) continue;
                 // Walk up to find topmost group ancestor
                 let promoted = id;
                 let current = id;
                 while (true) {
                     const parentId = this.scene.getNodeParent(current);
                     if (parentId < 0) break; // no parent (root)
-                    const parentNode = sceneData.nodes[parentId];
+                    const parentNode = this.scene.getNode(parentId);
                     if (parentNode && parentNode.node_type === 'Group') {
                         promoted = parentId;
                     }
@@ -1143,5 +1152,44 @@ export class InputManager {
             }
         }
         return null;
+    }
+
+    /** 
+     * Find the node that should be selected given a hit position and the current selection.
+     * This implements "context-aware" selection: if you are inside a group, you select 
+     * siblings/children of that group. If not, you select the topmost group.
+     */
+    private getTargetIdForHit(pos: { x: number; y: number }): number | undefined {
+        const rawHitId = this.scene.hitTest(pos.x, pos.y);
+        if (rawHitId === undefined) return undefined;
+
+        const selection = this.scene.engine!.get_selection();
+        if (selection.length === 0) {
+            // Nothing selected: return topmost group ancestor
+            return this.scene.hitTestGrouped(pos.x, pos.y);
+        }
+
+        // We have a selection. Let's see if the raw hit is "inside" the current context.
+        // A common context is the parent of the first selected item.
+        const contextParentId = this.scene.getNodeParent(selection[0]);
+        
+        if (contextParentId === -1) {
+            // Selected item is at root. Default to topmost group.
+            return this.scene.hitTestGrouped(pos.x, pos.y);
+        }
+
+        // Walk up from rawHitId to see if it's a descendant of contextParentId.
+        // We want to pick the child of contextParentId that contains the hit.
+        let current = rawHitId;
+        while (current !== -1) {
+            const p = this.scene.getNodeParent(current);
+            if (p === contextParentId) {
+                return current;
+            }
+            current = p;
+        }
+
+        // Hit is outside current context. Fall back to topmost group.
+        return this.scene.hitTestGrouped(pos.x, pos.y);
     }
 }

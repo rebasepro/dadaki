@@ -137,12 +137,6 @@ export class ContextBar {
     }
 
     private renderSingleShape(info: ContextInfo) {
-        // Breadcrumb
-        if (info.breadcrumb.length > 1) {
-            this.el.appendChild(this.createBreadcrumb(info.breadcrumb));
-            this.el.appendChild(this.createSeparator());
-        }
-
         // Fill swatch
         this.el.appendChild(this.createColorSwatch('fill', this.ui.fillInput.value, (color) => {
             this.ui.fillInput.value = color;
@@ -278,10 +272,9 @@ export class ContextBar {
         // Enter Group
         this.el.appendChild(this.createButton('Enter Group', '↳', () => {
             if (info.selectedIds.length === 1) {
-                const sceneData = this.scene.getSceneData();
-                const groupNode = sceneData.nodes[info.selectedIds[0]];
-                if (groupNode?.children && groupNode.children.length > 0) {
-                    this.scene.selectNode(groupNode.children[0], false);
+                const children = Array.from(this.scene.getNodeChildren(info.selectedIds[0]));
+                if (children.length > 0) {
+                    this.scene.selectNode(children[0], false);
                     this.ui.syncWithSelection();
                     this.ui.updateLayerList();
                 }
@@ -325,12 +318,6 @@ export class ContextBar {
     }
 
     private renderPathEditing(info: ContextInfo) {
-        // Breadcrumb
-        if (info.breadcrumb.length > 0) {
-            this.el.appendChild(this.createBreadcrumb(info.breadcrumb));
-            this.el.appendChild(this.createSeparator());
-        }
-
         // Point count
         this.el.appendChild(this.createLabel(`${info.pointCount} points`, 'cb-point-count'));
 
@@ -404,12 +391,7 @@ export class ContextBar {
         return hint;
     }
 
-    private createBreadcrumb(crumbs: string[]): HTMLElement {
-        const bc = document.createElement('span');
-        bc.className = 'cb-breadcrumb';
-        bc.textContent = crumbs.join(' › ');
-        return bc;
-    }
+
 
     /** Compact icon-only button (align/boolean rows). */
     private createIconButton(title: string, icon: string, onClick: () => void): HTMLElement {

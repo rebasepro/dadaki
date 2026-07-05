@@ -59,6 +59,40 @@ export interface EllipseGeometry {
 /** Path geometry. */
 export interface PathGeometry {
     subpaths: Subpath[];
+    /** Per-node vector network (graph-based editing source of truth). */
+    network?: NodeVectorNetwork;
+}
+
+// ─── Per-Node Vector Network Types ─────────────────────────────────────
+
+/** A vertex in the per-node vector network. */
+export interface NetworkVertex {
+    position: [number, number];
+    /** Incoming control handle (absolute position). */
+    handle_in?: [number, number];
+    /** Outgoing control handle (absolute position). */
+    handle_out?: [number, number];
+}
+
+/** An edge connecting two vertices. */
+export interface NetworkEdge {
+    start_vertex: number;
+    end_vertex: number;
+}
+
+/** An enclosed region with an independent fill style. */
+export interface NetworkRegion {
+    /** Ordered edge indices forming a closed loop. */
+    edge_loop: number[];
+    /** Fill color for this region. */
+    fill?: Color;
+}
+
+/** Per-node vector network — the graph-based path representation. */
+export interface NodeVectorNetwork {
+    vertices: NetworkVertex[];
+    edges: NetworkEdge[];
+    regions: NetworkRegion[];
 }
 
 /** Text geometry. */

@@ -3,7 +3,7 @@ use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-use crate::{Color, Engine, Geometry, PathPoint};
+use crate::{Color, Engine, Geometry, PathPoint, Subpath};
 
 /// Compute the centroid of a face's boundary polygon.
 pub fn face_centroid(face: &PlanarFace) -> Vec2 {
@@ -662,7 +662,7 @@ impl Engine {
                 .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
 
             match &node.geometry {
-                Geometry::Path { subpaths } => {
+                Geometry::Path { ref subpaths, .. } => {
                     // Transform subpath points to world space, then extract segments
                     for sp in subpaths {
                         let world_points: Vec<PathPoint> = sp.points.iter().map(|p| {
@@ -707,5 +707,186 @@ impl Engine {
             let segments = self.collect_segments();
             self.scene.vector_network.rebuild(segments);
         }
+    }
+}
+
+// ─── Per-Node Vector Network ───────────────────────────────────────────────────
+
+/// Per-node vector network — the graph-based path representation.
+/// This is the editing source of truth; subpaths are derived from it.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct NodeVectorNetwork {
+    pub vertices: Vec<NetworkVertex>,
+    pub edges: Vec<NetworkEdge>,
+    /// Enclosed regions with independent fill styles.
+    #[serde(default)]
+    pub regions: Vec<NetworkRegion>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct NetworkVertex {
+    pub position: Vec2,
+    /// Incoming control handle (absolute position). None = sharp corner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_in: Option<Vec2>,
+    /// Outgoing control handle (absolute position). None = sharp corner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_out: Option<Vec2>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct NetworkEdge {
+    pub start_vertex: u32,  // index into vertices
+    pub end_vertex: u32,    // index into vertices
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct NetworkRegion {
+    /// Ordered edge indices forming a closed loop.
+    pub edge_loop: Vec<u32>,
+    /// Fill style for this enclosed area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Color>,
+}
+
+impl Default for NodeVectorNetwork {
+    fn default() -> Self {
+        Self {
+            vertices: Vec::new(),
+            edges: Vec::new(),
+            regions: Vec::new(),
+        }
+    }
+}
+
+impl NodeVectorNetwork {
+    /// Convert traditional subpaths to a NodeVectorNetwork.
+    pub fn from_subpaths(subpaths: &[Subpath]) -> Self {
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+
+        for sp in subpaths {
+            let base = vertices.len() as u32;
+            for point in &sp.points {
+                let position = Vec2::new(point.x, point.y);
+                let handle_in = if (point.cp1 - position).length() > 0.001 {
+                    Some(point.cp1)
+                } else {
+                    None
+                };
+                let handle_out = if (point.cp2 - position).length() > 0.001 {
+                    Some(point.cp2)
+                } else {
+                    None
+                };
+                vertices.push(NetworkVertex {
+                    position,
+                    handle_in,
+                    handle_out,
+                });
+            }
+
+            let count = sp.points.len() as u32;
+            // Create edges between consecutive vertices
+            for i in 0..count.saturating_sub(1) {
+                edges.push(NetworkEdge {
+                    start_vertex: base + i,
+                    end_vertex: base + i + 1,
+                });
+            }
+            // If closed, add closing edge from last to first vertex of this subpath
+            if sp.closed && count >= 2 {
+                edges.push(NetworkEdge {
+                    start_vertex: base + count - 1,
+                    end_vertex: base,
+                });
+            }
+        }
+
+        NodeVectorNetwork {
+            vertices,
+            edges,
+            regions: Vec::new(),
+        }
+    }
+
+    /// Convert the network back to subpaths.
+    pub fn to_subpaths(&self) -> Vec<Subpath> {
+        if self.edges.is_empty() {
+            return Vec::new();
+        }
+
+        // Build adjacency map: start_vertex -> Vec<(end_vertex, edge_index)>
+        let mut adjacency: HashMap<u32, Vec<(u32, usize)>> = HashMap::new();
+        for (idx, edge) in self.edges.iter().enumerate() {
+            adjacency.entry(edge.start_vertex).or_default().push((edge.end_vertex, idx));
+        }
+
+        let mut visited_edges: HashSet<usize> = HashSet::new();
+        let mut subpaths = Vec::new();
+
+        for start_edge_idx in 0..self.edges.len() {
+            if visited_edges.contains(&start_edge_idx) {
+                continue;
+            }
+
+            let mut walk = Vec::new();
+            let start_vertex = self.edges[start_edge_idx].start_vertex;
+            let mut current_vertex = start_vertex;
+            let mut closed = false;
+
+            // Walk the chain
+            loop {
+                // Find an unvisited edge from current_vertex
+                let next = adjacency.get(&current_vertex).and_then(|neighbors| {
+                    neighbors.iter().find(|(_, eidx)| !visited_edges.contains(eidx)).copied()
+                });
+
+                match next {
+                    Some((end_vertex, edge_idx)) => {
+                        visited_edges.insert(edge_idx);
+                        if walk.is_empty() {
+                            walk.push(current_vertex);
+                        }
+                        if end_vertex == start_vertex {
+                            // Closed loop
+                            closed = true;
+                            break;
+                        }
+                        walk.push(end_vertex);
+                        current_vertex = end_vertex;
+                    }
+                    None => {
+                        // Dead end (open subpath)
+                        if walk.is_empty() {
+                            walk.push(current_vertex);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if walk.is_empty() {
+                continue;
+            }
+
+            // Convert vertex indices to PathPoints
+            let points: Vec<PathPoint> = walk.iter().filter_map(|&vi| {
+                self.vertices.get(vi as usize).map(|v| {
+                    PathPoint {
+                        x: v.position.x,
+                        y: v.position.y,
+                        cp1: v.handle_in.unwrap_or(v.position),
+                        cp2: v.handle_out.unwrap_or(v.position),
+                    }
+                })
+            }).collect();
+
+            if !points.is_empty() {
+                subpaths.push(Subpath { points, closed });
+            }
+        }
+
+        subpaths
     }
 }

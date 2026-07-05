@@ -3,6 +3,7 @@ import { UIEngine } from './ui';
 import { InputManager } from './input';
 import { WasmScene } from './wasm_scene';
 import { ContextBar } from './context_bar';
+import { BreadcrumbBar } from './breadcrumb';
 
 async function bootstrap() {
     // @ts-ignore - Loaded from script tag in index.html
@@ -23,6 +24,11 @@ async function bootstrap() {
     const canvasContainer = document.getElementById('canvas-container') as HTMLElement;
     const contextBar = new ContextBar(canvasContainer, ui, input, wasmScene, renderer);
     ui.contextBar = contextBar;
+
+    // Breadcrumb bar — replaces the static header title
+    const headerEl = document.getElementById('header') as HTMLElement;
+    const breadcrumbBar = new BreadcrumbBar(headerEl, ui, input, wasmScene, renderer);
+    ui.breadcrumbBar = breadcrumbBar;
 
     // Start with the artboard centered and fitted in the viewport
     renderer.fitToArtboard();

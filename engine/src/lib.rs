@@ -1,10 +1,10 @@
 use wasm_bindgen::prelude::*;
 use glam::{Mat3, Vec2};
 use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 mod vector_network;
-pub use vector_network::VectorNetwork;
+pub use vector_network::{VectorNetwork, NodeVectorNetwork, NetworkVertex, NetworkEdge, NetworkRegion};
 
 mod proto;
 pub use proto::FORMAT_VERSION;
@@ -15,7 +15,7 @@ extern "C" {
 }
 
 #[wasm_bindgen]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum NodeType {
     Path,
     Rect,
@@ -170,7 +170,13 @@ fn path_hit(subpaths: &[Subpath], style: &Style, p: Vec2, tol: f32) -> bool {
 pub enum Geometry {
     Rect { width: f32, height: f32 },
     Ellipse { radius_x: f32, radius_y: f32 },
-    Path { subpaths: Vec<Subpath> },
+    Path {
+        subpaths: Vec<Subpath>,
+        /// Per-node vector network (graph-based editing source of truth).
+        /// When present, editing goes through the network, which recomputes subpaths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        network: Option<NodeVectorNetwork>,
+    },
     Text { content: String, font_size: f32 },
 }
 
@@ -216,6 +222,7 @@ pub struct Engine {
     spatial_index: RTree<SpatialNode>,
     node_to_spatial: HashMap<u32, SpatialNode>,
     dirty_flags: HashMap<u32, bool>,
+    render_buffer: Vec<u8>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -268,10 +275,167 @@ impl Engine {
             },
             next_id: 1,
             global_transforms: HashMap::new(),
-            transform_out_buf: [0.0; 9],
+            transform_out_buf: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             spatial_index: RTree::new(),
             node_to_spatial: HashMap::new(),
             dirty_flags: HashMap::new(),
+            render_buffer: Vec::new(),
+        }
+    }
+
+    pub fn get_render_buffer(&self) -> *const u8 {
+        self.render_buffer.as_ptr()
+    }
+
+    pub fn get_render_buffer_size(&self) -> usize {
+        self.render_buffer.len()
+    }
+
+    pub fn update_render_buffer(&mut self, visible_ids: Vec<u32>) {
+        self.render_buffer.clear();
+        let visible_set: HashSet<u32> = visible_ids.into_iter().collect();
+        
+        let mut total_nodes = 0;
+        // Skip first 4 bytes, we'll write total_nodes there at the end
+        self.render_buffer.extend_from_slice(&[0u8; 4]);
+
+        let root_nodes = self.scene.root_nodes.clone();
+        for root_id in root_nodes {
+            self.write_node_recursive(root_id, &visible_set, &mut total_nodes);
+        }
+
+        // Fill in the total node count (number of "commands")
+        let count_bytes = (total_nodes as u32).to_le_bytes();
+        self.render_buffer[0..4].copy_from_slice(&count_bytes);
+    }
+
+    fn write_node_recursive(
+        &mut self, 
+        id: u32, 
+        visible_set: &HashSet<u32>, 
+        total_nodes: &mut u32
+    ) {
+        let node = match self.scene.nodes.get(&id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        if !node.visible { return; }
+
+        if node.node_type == NodeType::Group {
+            // Check if any descendant is visible (optimization: use R-tree indirectly via visible_set)
+            // Groups aren't in R-tree themselves, but their children are.
+            // If none of the descendants are in visible_set, we can skip.
+            // For now, let's be safe and always process groups if they are visible.
+            
+            // CMD_START_GROUP = 1
+            self.render_buffer.push(1);
+            self.render_buffer.extend_from_slice(&id.to_le_bytes());
+            self.render_buffer.extend_from_slice(&node.style.opacity.to_le_bytes());
+            *total_nodes += 1;
+
+            let children = node.children.clone();
+            for child_id in children {
+                self.write_node_recursive(child_id, visible_set, total_nodes);
+            }
+
+            // CMD_END_GROUP = 3
+            self.render_buffer.push(3);
+            self.render_buffer.extend_from_slice(&id.to_le_bytes());
+            *total_nodes += 1;
+        } else {
+            // Only draw leaf if it's in the visible set
+            if !visible_set.contains(&id) { return; }
+
+            // CMD_DRAW_NODE = 2
+            self.render_buffer.push(2);
+            self.render_buffer.extend_from_slice(&id.to_le_bytes());
+            
+            // NodeType: Path=0, Rect=1, Ellipse=2, Text=4
+            let type_u8 = match node.node_type {
+                NodeType::Path => 0u8,
+                NodeType::Rect => 1u8,
+                NodeType::Ellipse => 2u8,
+                NodeType::Group => 3u8, // should not happen here
+                NodeType::Text => 4u8,
+            };
+            self.render_buffer.push(type_u8);
+
+            // Global Transform (9 x f32) - Transpose to row-major for Skia
+            let m = self.global_transforms.get(&id).cloned().unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+            let row_major = [
+                m[0], m[3], m[6], // Row 0: scaleX, skewX, transX
+                m[1], m[4], m[7], // Row 1: skewY, scaleY, transY  
+                m[2], m[5], m[8], // Row 2: pers0, pers1, pers2
+            ];
+            for f in row_major {
+                self.render_buffer.extend_from_slice(&f.to_le_bytes());
+            }
+
+            // Style: Fill (4xf32), Stroke (4xf32), StrokeWidth (f32)
+            let s = &node.style;
+            let f = s.fill.clone().unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 });
+            self.render_buffer.extend_from_slice(&f.r.to_le_bytes());
+            self.render_buffer.extend_from_slice(&f.g.to_le_bytes());
+            self.render_buffer.extend_from_slice(&f.b.to_le_bytes());
+            self.render_buffer.extend_from_slice(&f.a.to_le_bytes());
+
+            let st = s.stroke.clone().unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 });
+            self.render_buffer.extend_from_slice(&st.r.to_le_bytes());
+            self.render_buffer.extend_from_slice(&st.g.to_le_bytes());
+            self.render_buffer.extend_from_slice(&st.b.to_le_bytes());
+            self.render_buffer.extend_from_slice(&st.a.to_le_bytes());
+
+            self.render_buffer.extend_from_slice(&s.stroke_width.to_le_bytes());
+
+            // Geometry
+            match &node.geometry {
+                Geometry::Rect { width, height } => {
+                    self.render_buffer.extend_from_slice(&8u32.to_le_bytes()); // Size: 2 * f32
+                    self.render_buffer.extend_from_slice(&width.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&height.to_le_bytes());
+                }
+                Geometry::Ellipse { radius_x, radius_y } => {
+                    self.render_buffer.extend_from_slice(&8u32.to_le_bytes()); // Size: 2 * f32
+                    self.render_buffer.extend_from_slice(&radius_x.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&radius_y.to_le_bytes());
+                }
+                Geometry::Path { subpaths, .. } => {
+                    // Pre-calculate size or write a placeholder. 
+                    // Let's use a placeholder for Path size.
+                    let size_offset = self.render_buffer.len();
+                    self.render_buffer.extend_from_slice(&[0u8; 4]);
+                    let start_len = self.render_buffer.len();
+
+                    self.render_buffer.extend_from_slice(&(subpaths.len() as u16).to_le_bytes());
+                    for sp in subpaths {
+                        self.render_buffer.push(if sp.closed { 1 } else { 0 });
+                        self.render_buffer.extend_from_slice(&(sp.points.len() as u16).to_le_bytes());
+                        for pt in &sp.points {
+                            self.render_buffer.extend_from_slice(&pt.x.to_le_bytes());
+                            self.render_buffer.extend_from_slice(&pt.y.to_le_bytes());
+                            self.render_buffer.extend_from_slice(&pt.cp1.x.to_le_bytes());
+                            self.render_buffer.extend_from_slice(&pt.cp1.y.to_le_bytes());
+                            self.render_buffer.extend_from_slice(&pt.cp2.x.to_le_bytes());
+                            self.render_buffer.extend_from_slice(&pt.cp2.y.to_le_bytes());
+                        }
+                    }
+
+                    let end_len = self.render_buffer.len();
+                    let total_size = (end_len - start_len) as u32;
+                    self.render_buffer[size_offset..size_offset+4].copy_from_slice(&total_size.to_le_bytes());
+                }
+                Geometry::Text { content, font_size } => {
+                    let bytes = content.as_bytes();
+                    let total_size = 4 + 4 + bytes.len() as u32; // font_size + len_prefix + bytes
+                    self.render_buffer.extend_from_slice(&total_size.to_le_bytes());
+                    
+                    self.render_buffer.extend_from_slice(&font_size.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    self.render_buffer.extend_from_slice(bytes);
+                }
+            }
+            *total_nodes += 1;
         }
     }
 
@@ -423,7 +587,10 @@ impl Engine {
                 miter_limit: 4.0,
                 fill_opacity: 1.0,
             },
-            geometry: Geometry::Path { subpaths },
+            geometry: Geometry::Path {
+                network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
+                subpaths,
+            },
             children: Vec::new(),
             parent: None,
             visible: true,
@@ -479,7 +646,10 @@ impl Engine {
                 miter_limit: 4.0,
                 fill_opacity: 1.0,
             },
-            geometry: Geometry::Path { subpaths },
+            geometry: Geometry::Path {
+                network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
+                subpaths,
+            },
             children: Vec::new(),
             parent: None,
             visible: true,
@@ -537,7 +707,10 @@ impl Engine {
                 miter_limit: 4.0,
                 fill_opacity: 1.0,
             },
-            geometry: Geometry::Path { subpaths },
+            geometry: Geometry::Path {
+                network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
+                subpaths,
+            },
             children: Vec::new(),
             parent: None,
             visible: true,
@@ -555,7 +728,10 @@ impl Engine {
     pub fn update_path_points(&mut self, id: u32, subpaths_json: &str) {
         let subpaths: Vec<Subpath> = serde_json::from_str(subpaths_json).unwrap_or_default();
         if let Some(node) = self.scene.nodes.get_mut(&id) {
-            node.geometry = Geometry::Path { subpaths };
+            node.geometry = Geometry::Path {
+                network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
+                subpaths,
+            };
             self.update_spatial_index(id);
             self.mark_dirty(id);
         }
@@ -643,7 +819,7 @@ impl Engine {
                     let p = transform.transform_point2(Vec2::ZERO);
                     AABB::from_corners([p.x - radius_x, p.y - radius_y], [p.x + radius_x, p.y + radius_y])
                 }
-                Geometry::Path { ref subpaths } => {
+                Geometry::Path { ref subpaths, .. } => {
                     let mut min_x = f32::MAX;
                     let mut min_y = f32::MAX;
                     let mut max_x = f32::MIN;
@@ -969,6 +1145,68 @@ impl Engine {
         serde_json::to_string(&self.scene).unwrap_or_default()
     }
 
+    // ─── Per-Node Getters (avoid full-scene JSON serialization) ─────────
+
+    /// Get a single node's full data as JSON. Used by UI panels.
+    pub fn get_node_json(&self, id: u32) -> String {
+        self.scene.nodes.get(&id)
+            .map(|n| serde_json::to_string(n).unwrap_or_default())
+            .unwrap_or_default()
+    }
+
+    /// Get a node's style as JSON.
+    pub fn get_node_style_json(&self, id: u32) -> String {
+        self.scene.nodes.get(&id)
+            .map(|n| serde_json::to_string(&n.style).unwrap_or_default())
+            .unwrap_or_default()
+    }
+
+    /// Get a node's geometry as JSON.
+    pub fn get_node_geometry_json(&self, id: u32) -> String {
+        self.scene.nodes.get(&id)
+            .map(|n| serde_json::to_string(&n.geometry).unwrap_or_default())
+            .unwrap_or_default()
+    }
+
+    /// Get a node's name.
+    pub fn get_node_name(&self, id: u32) -> String {
+        self.scene.nodes.get(&id)
+            .map(|n| n.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get a node's visible flag.
+    pub fn get_node_visible(&self, id: u32) -> bool {
+        self.scene.nodes.get(&id).map(|n| n.visible).unwrap_or(false)
+    }
+
+    /// Get a node's locked flag.
+    pub fn get_node_locked(&self, id: u32) -> bool {
+        self.scene.nodes.get(&id).map(|n| n.locked).unwrap_or(false)
+    }
+
+    /// Get a node's children IDs.
+    pub fn get_node_children(&self, id: u32) -> Vec<u32> {
+        self.scene.nodes.get(&id)
+            .map(|n| n.children.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get root node IDs.
+    pub fn get_root_nodes(&self) -> Vec<u32> {
+        self.scene.root_nodes.clone()
+    }
+
+    /// Get a node's transform as a Vec<f32> (column-major, 9 elements).
+    /// Used by SVG export which needs the local transform, not the global one.
+    pub fn get_node_local_transform(&self, id: u32) -> Vec<f32> {
+        self.scene.nodes.get(&id)
+            .map(|n| n.transform.to_vec())
+            .unwrap_or_default()
+    }
+
+    // ─── End Per-Node Getters ───────────────────────────────────────────
+
     pub fn serialize_scene(&self) -> Vec<u8> {
         bincode::serialize(&self.scene).unwrap_or_default()
     }
@@ -1033,7 +1271,7 @@ impl Engine {
                         let dy = local_point.y;
                         (dx * dx) / (radius_x * radius_x) + (dy * dy) / (radius_y * radius_y) <= 1.0
                     },
-                    Geometry::Path { ref subpaths } => {
+                    Geometry::Path { ref subpaths, .. } => {
                         // Precise geometric test against the actual outline.
                         // Tolerance is in world pixels; convert to local space
                         // by dividing by the transform's average scale factor.
@@ -1216,7 +1454,13 @@ impl Engine {
                         PathPoint { x: w,   y: h,   cp1: Vec2::new(w, h),     cp2: Vec2::new(w, h) },
                         PathPoint { x: 0.0, y: h,   cp1: Vec2::new(0.0, h),   cp2: Vec2::new(0.0, h) },
                     ];
-                    Some(Geometry::Path { subpaths: vec![Subpath { points, closed: true }] })
+                    {
+                        let subpaths = vec![Subpath { points, closed: true }];
+                        Some(Geometry::Path {
+                            network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
+                            subpaths,
+                        })
+                    }
                 }
                 Geometry::Ellipse { radius_x, radius_y } => {
                     let rx = *radius_x;
@@ -1231,7 +1475,13 @@ impl Engine {
                         PathPoint { x: 0.0, y: ry,  cp1: Vec2::new(kx, ry),   cp2: Vec2::new(-kx, ry) },
                         PathPoint { x: -rx, y: 0.0, cp1: Vec2::new(-rx, ky),  cp2: Vec2::new(-rx, -ky) },
                     ];
-                    Some(Geometry::Path { subpaths: vec![Subpath { points, closed: true }] })
+                    {
+                        let subpaths = vec![Subpath { points, closed: true }];
+                        Some(Geometry::Path {
+                            network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
+                            subpaths,
+                        })
+                    }
                 }
                 Geometry::Path { .. } => None, // Already a path
                 Geometry::Text { .. } => None, // Can't convert text
@@ -1276,7 +1526,7 @@ impl Engine {
                     *radius_x = (new_w / 2.0).max(0.5);
                     *radius_y = (new_h / 2.0).max(0.5);
                 }
-                Geometry::Path { subpaths } => {
+                Geometry::Path { subpaths, ref mut network, .. } => {
                     // Scale all subpath points proportionally using full bounds
                     let mut min_x = f32::MAX; let mut min_y = f32::MAX;
                     let mut max_x = f32::MIN; let mut max_y = f32::MIN;
@@ -1309,6 +1559,8 @@ impl Engine {
                             );
                         }
                     }
+                    // Rebuild network from scaled subpaths to keep in sync
+                    *network = Some(NodeVectorNetwork::from_subpaths(subpaths));
                 }
                 Geometry::Text { .. } => {}
             }
@@ -1749,6 +2001,145 @@ impl Engine {
             vec![0.0, 0.0, 0.0, 0.0]
         }
     }
+
+    // ─── Per-Node VectorNetwork Editing API ─────────────────────────────
+
+    /// Get the per-node vector network as JSON.
+    pub fn get_node_network_json(&self, id: u32) -> String {
+        self.scene.nodes.get(&id)
+            .and_then(|n| match &n.geometry {
+                Geometry::Path { network, .. } => network.as_ref(),
+                _ => None,
+            })
+            .map(|net| serde_json::to_string(net).unwrap_or_default())
+            .unwrap_or_default()
+    }
+
+    /// Update a vertex position and handles in a node's network.
+    pub fn set_network_vertex(
+        &mut self, node_id: u32, vertex_idx: u32,
+        x: f32, y: f32,
+        hin_x: f32, hin_y: f32, has_hin: bool,
+        hout_x: f32, hout_y: f32, has_hout: bool,
+    ) {
+        if let Some(node) = self.scene.nodes.get_mut(&node_id) {
+            if let Geometry::Path { ref mut network, ref mut subpaths, .. } = node.geometry {
+                if let Some(net) = network.as_mut() {
+                    if let Some(v) = net.vertices.get_mut(vertex_idx as usize) {
+                        v.position = Vec2::new(x, y);
+                        v.handle_in = if has_hin { Some(Vec2::new(hin_x, hin_y)) } else { None };
+                        v.handle_out = if has_hout { Some(Vec2::new(hout_x, hout_y)) } else { None };
+                    }
+                    *subpaths = net.to_subpaths();
+                }
+            }
+        }
+        self.update_spatial_index(node_id);
+        self.mark_dirty(node_id);
+    }
+
+    /// Add a vertex to a node's network. Returns the new vertex index.
+    pub fn add_network_vertex(&mut self, node_id: u32, x: f32, y: f32) -> i32 {
+        let result = if let Some(node) = self.scene.nodes.get_mut(&node_id) {
+            if let Geometry::Path { ref mut network, ref mut subpaths, .. } = node.geometry {
+                if let Some(net) = network.as_mut() {
+                    let idx = net.vertices.len() as u32;
+                    net.vertices.push(NetworkVertex {
+                        position: Vec2::new(x, y),
+                        handle_in: None,
+                        handle_out: None,
+                    });
+                    *subpaths = net.to_subpaths();
+                    idx as i32
+                } else { -1 }
+            } else { -1 }
+        } else { -1 };
+        if result >= 0 {
+            self.update_spatial_index(node_id);
+            self.mark_dirty(node_id);
+        }
+        result
+    }
+
+    /// Add an edge between two vertices in a node's network. Returns the edge index.
+    pub fn add_network_edge(&mut self, node_id: u32, start: u32, end: u32) -> i32 {
+        let result = if let Some(node) = self.scene.nodes.get_mut(&node_id) {
+            if let Geometry::Path { ref mut network, ref mut subpaths, .. } = node.geometry {
+                if let Some(net) = network.as_mut() {
+                    let idx = net.edges.len() as u32;
+                    net.edges.push(NetworkEdge {
+                        start_vertex: start,
+                        end_vertex: end,
+                    });
+                    *subpaths = net.to_subpaths();
+                    idx as i32
+                } else { -1 }
+            } else { -1 }
+        } else { -1 };
+        if result >= 0 {
+            self.update_spatial_index(node_id);
+            self.mark_dirty(node_id);
+        }
+        result
+    }
+
+    /// Remove a vertex (and its edges) from a node's network.
+    pub fn remove_network_vertex(&mut self, node_id: u32, vertex_idx: u32) {
+        if let Some(node) = self.scene.nodes.get_mut(&node_id) {
+            if let Geometry::Path { ref mut network, ref mut subpaths, .. } = node.geometry {
+                if let Some(net) = network.as_mut() {
+                    let vi = vertex_idx as usize;
+                    if vi < net.vertices.len() {
+                        net.vertices.remove(vi);
+                        // Remove edges referencing this vertex, and remap indices
+                        net.edges.retain(|e| {
+                            e.start_vertex != vertex_idx && e.end_vertex != vertex_idx
+                        });
+                        for e in &mut net.edges {
+                            if e.start_vertex > vertex_idx { e.start_vertex -= 1; }
+                            if e.end_vertex > vertex_idx { e.end_vertex -= 1; }
+                        }
+                        // Also remap region edge references
+                        net.regions.clear(); // Regions invalidated by topology change
+                        *subpaths = net.to_subpaths();
+                    }
+                }
+            }
+        }
+        self.update_spatial_index(node_id);
+        self.mark_dirty(node_id);
+    }
+
+    /// Detect enclosed regions in a node's network (placeholder — uses simple cycle detection).
+    pub fn detect_node_regions(&mut self, node_id: u32) {
+        if let Some(node) = self.scene.nodes.get_mut(&node_id) {
+            if let Geometry::Path { ref mut network, .. } = node.geometry {
+                if let Some(_net) = network.as_mut() {
+                    // TODO: Implement per-node planar face detection
+                    // For now, regions are managed manually via set_node_region_fill
+                }
+            }
+        }
+    }
+
+    /// Set fill color on a specific region of a node's network.
+    pub fn set_node_region_fill(
+        &mut self, node_id: u32, region_idx: u32,
+        r: f32, g: f32, b: f32, a: f32,
+    ) {
+        if let Some(node) = self.scene.nodes.get_mut(&node_id) {
+            if let Geometry::Path { ref mut network, .. } = node.geometry {
+                if let Some(net) = network.as_mut() {
+                    if let Some(region) = net.regions.get_mut(region_idx as usize) {
+                        region.fill = Some(Color { r, g, b, a });
+                    }
+                }
+            }
+        }
+        self.mark_dirty(node_id);
+    }
+
+    // ─── End Per-Node VectorNetwork API ─────────────────────────────────
 }
 
 #[wasm_bindgen]

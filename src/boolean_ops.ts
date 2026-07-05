@@ -6,7 +6,7 @@
  */
 import type { CanvasKit, Path } from 'canvaskit-wasm';
 import type { WasmScene } from './wasm_scene';
-import type { SceneData, Subpath, PathPoint } from './types';
+import type { Subpath, PathPoint } from './types';
 
 export type BoolOp = 'union' | 'subtract' | 'intersect' | 'exclude';
 
@@ -25,11 +25,10 @@ export function applyBooleanOp(
     op: BoolOp,
 ): number | null {
     if (ids.length < 2) return null;
-    const sceneData = scene.getSceneData();
 
     const paths: Path[] = [];
     for (const id of ids) {
-        const p = nodeToWorldPath(ck, scene, sceneData, id);
+        const p = nodeToWorldPath(ck, scene, id);
         if (p) paths.push(p);
         else {
             // Unsupported node in the selection (e.g. text) — abort cleanly
@@ -67,9 +66,9 @@ export function applyBooleanOp(
     }
 
     // Carry over the style of the first (bottom-most in selection order) node
-    const styleNode = sceneData.nodes[ids[0]];
-    const styleJson = styleNode
-        ? JSON.stringify({ ...styleNode.style, fill_rule: resultFillRule })
+    const styleData = scene.getNodeStyle(ids[0]);
+    const styleJson = styleData
+        ? JSON.stringify({ ...styleData, fill_rule: resultFillRule })
         : null;
 
     return scene.replaceNodesWithPath(ids, JSON.stringify(subpaths), styleJson);
@@ -79,16 +78,16 @@ export function applyBooleanOp(
 function nodeToWorldPath(
     ck: CanvasKit,
     scene: WasmScene,
-    sceneData: SceneData,
     id: number,
 ): Path | null {
-    const node = sceneData.nodes[id];
+    const node = scene.getNode(id);
     if (!node) return null;
 
     if (node.node_type === 'Group') {
         const acc = new ck.Path();
-        for (const childId of node.children ?? []) {
-            const childPath = nodeToWorldPath(ck, scene, sceneData, childId);
+        const children = Array.from(scene.getNodeChildren(id));
+        for (const childId of children) {
+            const childPath = nodeToWorldPath(ck, scene, childId);
             if (childPath) {
                 acc.addPath(childPath);
                 childPath.delete();
@@ -97,18 +96,20 @@ function nodeToWorldPath(
         return acc;
     }
 
+    const geometry = scene.getNodeGeometry(id);
+    const style = scene.getNodeStyle(id);
     const path = new ck.Path();
-    if (node.geometry.Rect) {
-        const { width, height } = node.geometry.Rect;
-        const r = node.style.corner_radius || 0;
+    if (geometry.Rect) {
+        const { width, height } = geometry.Rect;
+        const r = style.corner_radius || 0;
         if (r > 0) {
             path.addRRect(ck.RRectXY(ck.LTRBRect(0, 0, width, height), r, r));
         } else {
             path.addRect(ck.LTRBRect(0, 0, width, height));
         }
-    } else if (node.geometry.Ellipse) {
+    } else if (geometry.Ellipse) {
         // Build with cubics (not addOval) so boolean results contain no conics
-        const { radius_x: rx, radius_y: ry } = node.geometry.Ellipse;
+        const { radius_x: rx, radius_y: ry } = geometry.Ellipse;
         const kx = rx * KAPPA, ky = ry * KAPPA;
         path.moveTo(0, -ry);
         path.cubicTo(kx, -ry, rx, -ky, rx, 0);
@@ -116,8 +117,8 @@ function nodeToWorldPath(
         path.cubicTo(-kx, ry, -rx, ky, -rx, 0);
         path.cubicTo(-rx, -ky, -kx, -ry, 0, -ry);
         path.close();
-    } else if (node.geometry.Path) {
-        for (const sp of node.geometry.Path.subpaths) {
+    } else if (geometry.Path) {
+        for (const sp of geometry.Path.subpaths) {
             const pts = sp.points;
             if (pts.length < 2) continue;
             path.moveTo(pts[0].x, pts[0].y);

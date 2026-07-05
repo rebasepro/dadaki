@@ -30,6 +30,20 @@ export class WasmScene {
         this.invalidateCache();
     }
 
+    getRenderData(visibleIds: Uint32Array): DataView {
+        if (!this.engine || !this.wasm) throw new Error("WasmScene not initialized");
+        
+        // Tell engine to update the binary render buffer
+        this.engine.update_render_buffer(visibleIds);
+        
+        const ptr = this.engine.get_render_buffer();
+        const size = this.engine.get_render_buffer_size();
+        
+        // Note: the pointer can change if the vector reallocates, 
+        // so we must fetch it every frame.
+        return new DataView(this.wasm.memory.buffer, ptr, size);
+    }
+
     invalidateCache() {
         this._sceneDataDirty = true;
         this._cachedSceneData = null;
@@ -152,6 +166,14 @@ export class WasmScene {
         return this.engine!.dedup_selection(JSON.stringify(Array.from(ids)));
     }
 
+    getSelection(): Uint32Array {
+        return this.engine!.get_selection();
+    }
+
+    getRootNodes(): Uint32Array {
+        return this.engine!.get_root_nodes();
+    }
+
     undo() {
         const currentState = this.engine!.serialize_scene();
         const prevState = this.history!.undo(currentState);
@@ -212,6 +234,52 @@ export class WasmScene {
         }
         return this._cachedSceneData;
     }
+
+    // ─── Per-Node Getters (avoid full-scene JSON serialization) ─────────
+
+    /** Get a single node's style. Only serializes ~200 bytes instead of the whole scene. */
+    getNodeStyle(id: number): import('./types').NodeStyle {
+        return JSON.parse(this.engine!.get_node_style_json(id));
+    }
+
+    /** Get a single node's geometry. */
+    getNodeGeometry(id: number): import('./types').NodeGeometry {
+        return JSON.parse(this.engine!.get_node_geometry_json(id));
+    }
+
+    /** Get a single node's full data as a SceneNode. */
+    getNode(id: number): import('./types').SceneNode | null {
+        const json = this.engine!.get_node_json(id);
+        if (!json) return null;
+        return JSON.parse(json);
+    }
+
+    /** Get a node's display name. */
+    getNodeName(id: number): string {
+        return this.engine!.get_node_name(id);
+    }
+
+    /** Get a node's visible flag. */
+    getNodeVisible(id: number): boolean {
+        return this.engine!.get_node_visible(id);
+    }
+
+    /** Get a node's locked flag. */
+    getNodeLocked(id: number): boolean {
+        return this.engine!.get_node_locked(id);
+    }
+
+    /** Get a node's children IDs. */
+    getNodeChildren(id: number): Uint32Array {
+        return this.engine!.get_node_children(id);
+    }
+
+    /** Get a node's local transform as a column-major array. */
+    getNodeLocalTransform(id: number): Float32Array {
+        return this.engine!.get_node_local_transform(id);
+    }
+
+    // ─── End Per-Node Getters ───────────────────────────────────────────
 
     resizeNode(id: number, w: number, h: number) {
         this.saveHistory();
