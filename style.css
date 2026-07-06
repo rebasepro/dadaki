@@ -210,6 +210,19 @@ body, html {
     position: relative;
 }
 
+/* ─── Layers Panel (Left) ─── */
+
+#layers-panel {
+    width: 200px;
+    min-width: 200px;
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    z-index: 10;
+    overflow: hidden;
+}
+
 /* ─── Toolbar ─── */
 
 #toolbar {
@@ -701,8 +714,7 @@ body, html {
 /* ─── Layers ─── */
 
 .panel-section.layers-section {
-    flex: 1 0 120px;
-    min-height: 120px;
+    flex: 1;
     display: flex;
     flex-direction: column;
     overflow: hidden;

@@ -33,6 +33,18 @@
         </header>
 
         <main id="main-layout">
+            <aside id="layers-panel">
+                <div class="panel-section layers-section">
+                    <div class="panel-section-header" data-section="layers">
+                        <span class="chevron">▾</span>
+                        <span class="section-title">Layers</span>
+                    </div>
+                    <div id="layer-list" data-section-body="layers">
+                        <!-- Layers injected by JS -->
+                    </div>
+                </div>
+            </aside>
+
             <nav id="toolbar">
                 <div class="tool-btn active" id="tool-selection" data-tooltip="Selection" data-shortcut="V"><i data-lucide="mouse-pointer-2"></i></div>
                 <div class="tool-btn" id="tool-direct" data-tooltip="Direct Selection" data-shortcut="A"><i data-lucide="mouse-pointer-click"></i></div>
@@ -270,16 +282,6 @@
 
                 </div><!-- .properties-scroll -->
 
-                <!-- LAYERS -->
-                <div class="panel-section layers-section">
-                    <div class="panel-section-header" data-section="layers">
-                        <span class="chevron">▾</span>
-                        <span class="section-title">Layers</span>
-                    </div>
-                    <div id="layer-list" data-section-body="layers">
-                        <!-- Layers injected by JS -->
-                    </div>
-                </div>
             </aside>
         </main>
         <!-- Context Menu -->
