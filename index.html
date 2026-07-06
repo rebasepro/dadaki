@@ -24,7 +24,12 @@
             </div>
             <button id="import-svg" class="header-btn header-btn-secondary">Import SVG</button>
             <button id="export-svg" class="header-btn header-btn-primary">Export SVG</button>
-            <div id="zoom-level" class="zoom-display">100%</div>
+            <div class="zoom-controls">
+                <button id="zoom-out" class="zoom-btn" title="Zoom Out (−)">−</button>
+                <div id="zoom-level" class="zoom-display">100%</div>
+                <button id="zoom-in" class="zoom-btn" title="Zoom In (+)">+</button>
+                <button id="zoom-fit" class="zoom-btn" title="Fit to Artboard (Shift+1)">⊡</button>
+            </div>
         </header>
 
         <main id="main-layout">
@@ -39,8 +44,7 @@
                 <div class="tool-btn" id="tool-star" data-tooltip="Star"><i data-lucide="star"></i></div>
                 <div class="tool-btn" id="tool-text" data-tooltip="Text" data-shortcut="T"><i data-lucide="type"></i></div>
                 <div class="toolbar-spacer"></div>
-                <div class="tool-btn" id="tool-paint-bucket" data-tooltip="Live Paint" data-shortcut="B"><i data-lucide="paintbrush"></i></div>
-                <div class="tool-btn" id="tool-stroke" data-tooltip="Stroke Color"><i data-lucide="pen-line"></i></div>
+                <div class="tool-btn" id="tool-paint-bucket" data-tooltip="Live Paint" data-shortcut="B"><i data-lucide="paint-bucket"></i></div>
             </nav>
 
             <section id="canvas-container">
@@ -74,12 +78,29 @@
                                 <input type="number" id="prop-h" class="prop-input" value="0" step="1" min="0">
                             </div>
                             <div class="transform-cell">
-                                <label>R</label>
-                                <input type="number" id="prop-rotation" class="prop-input" value="0" step="1">
+                                <label>Rotation</label>
+                                <div class="input-with-unit">
+                                    <input type="number" id="prop-rotation" class="prop-input" value="0" step="1">
+                                    <span class="input-unit">°</span>
+                                </div>
+                            </div>
+                            <div class="transform-cell" id="corner-radius-cell">
+                                <label>Radius</label>
+                                <input type="number" id="prop-corner-radius" class="prop-input" value="0" step="1" min="0">
                             </div>
                             <div class="transform-cell">
-                                <label>⌒</label>
-                                <input type="number" id="prop-corner-radius" class="prop-input" value="0" step="1" min="0">
+                                <label>Skew X</label>
+                                <div class="input-with-unit">
+                                    <input type="number" id="prop-skew-x" class="prop-input" value="0" step="0.1">
+                                    <span class="input-unit">°</span>
+                                </div>
+                            </div>
+                            <div class="transform-cell">
+                                <label>Skew Y</label>
+                                <div class="input-with-unit">
+                                    <input type="number" id="prop-skew-y" class="prop-input" value="0" step="0.1">
+                                    <span class="input-unit">°</span>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -144,10 +165,10 @@
                     </div>
                     <div class="panel-section-body" data-section-body="fill">
                         <div class="fill-stroke-row">
-                            <label class="toggle-label"><input type="checkbox" id="fill-enabled" checked></label>
+                            <label class="toggle-label" title="Toggle fill on/off"><input type="checkbox" id="fill-enabled" checked></label>
                             <input type="color" id="fill-color" class="color-input" value="#cccccc">
-                            <span class="label-short" style="min-width: 8px;">α</span>
-                            <input type="number" id="fill-opacity" class="prop-input" value="100" min="0" max="100" step="1" style="width: 40px; flex: 0 0 40px;">
+                            <span class="label-short" style="min-width: 30px;">Alpha</span>
+                            <input type="number" id="fill-opacity" class="prop-input" value="100" min="0" max="100" step="1" style="width: 48px; flex: 0 0 48px;">
                             <span class="unit">%</span>
                         </div>
                         <div class="prop-row" style="margin-top: 4px;">
@@ -168,7 +189,7 @@
                     </div>
                     <div class="panel-section-body" data-section-body="stroke">
                         <div class="fill-stroke-row">
-                            <label class="toggle-label"><input type="checkbox" id="stroke-enabled" checked></label>
+                            <label class="toggle-label" title="Toggle stroke on/off"><input type="checkbox" id="stroke-enabled" checked></label>
                             <input type="color" id="stroke-color" class="color-input" value="#000000">
                             <span class="label-short">W</span>
                             <input type="number" id="stroke-weight" class="prop-input" value="2" min="0" step="0.5" style="width: 44px; flex: 0 0 44px;">
@@ -216,8 +237,8 @@
                     </div>
                     <div class="panel-section-body" data-section-body="appearance">
                         <div class="prop-row">
-                            <span class="label">Opacity</span>
-                            <input type="number" id="opacity" class="prop-input" value="100" min="0" max="100" style="width: 44px; flex: 0 0 44px;">
+                            <span class="label">Layer Opacity</span>
+                            <input type="number" id="opacity" class="prop-input" value="100" min="0" max="100" style="width: 48px; flex: 0 0 48px;">
                             <span class="unit">%</span>
                             <span class="header-spacer"></span>
                             <button class="icon-toggle active" id="toggle-visible" title="Visibility"><i data-lucide="eye" style="width:14px;height:14px;"></i></button>

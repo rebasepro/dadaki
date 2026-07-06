@@ -9,7 +9,7 @@ import type { SVGExportInput, FilledFace } from './svg_export';
 import type { SVGSubpath, SVGGradientData } from './svg_utils';
 import type { ContextBar } from './context_bar';
 import type { BreadcrumbBar } from './breadcrumb';
-import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock } from './icons';
+import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock, iconUnlock } from './icons';
 
 export class UIEngine {
     ck: CanvasKit;
@@ -54,6 +54,8 @@ export class UIEngine {
     propW: HTMLInputElement;
     propH: HTMLInputElement;
     propRotation: HTMLInputElement;
+    propSkewX: HTMLInputElement;
+    propSkewY: HTMLInputElement;
 
     // DOM Elements — new SVG properties
     fillOpacity: HTMLInputElement;
@@ -62,6 +64,13 @@ export class UIEngine {
     miterLimit: HTMLInputElement;
     toggleVisible: HTMLButtonElement;
     toggleLocked: HTMLButtonElement;
+
+    // Typography DOM elements
+    textFontFamily: HTMLSelectElement;
+    textFontSize: HTMLInputElement;
+    textLineHeight: HTMLInputElement;
+    textAlign: HTMLSelectElement;
+    typographySection: HTMLElement;
 
     // Context menu
     contextMenuEl: HTMLElement;
@@ -97,6 +106,8 @@ export class UIEngine {
         this.propW = document.getElementById('prop-w') as HTMLInputElement;
         this.propH = document.getElementById('prop-h') as HTMLInputElement;
         this.propRotation = document.getElementById('prop-rotation') as HTMLInputElement;
+        this.propSkewX = document.getElementById('prop-skew-x') as HTMLInputElement;
+        this.propSkewY = document.getElementById('prop-skew-y') as HTMLInputElement;
 
         // Initialize DOM refs — new SVG properties
         this.fillOpacity = document.getElementById('fill-opacity') as HTMLInputElement;
@@ -105,6 +116,13 @@ export class UIEngine {
         this.miterLimit = document.getElementById('stroke-miter-limit') as HTMLInputElement;
         this.toggleVisible = document.getElementById('toggle-visible') as HTMLButtonElement;
         this.toggleLocked = document.getElementById('toggle-locked') as HTMLButtonElement;
+
+        // Typography
+        this.textFontFamily = document.getElementById('text-font-family') as HTMLSelectElement;
+        this.textFontSize = document.getElementById('text-font-size') as HTMLInputElement;
+        this.textLineHeight = document.getElementById('text-line-height') as HTMLInputElement;
+        this.textAlign = document.getElementById('text-align') as HTMLSelectElement;
+        this.typographySection = document.getElementById('typography-section') as HTMLElement;
 
         // Context menu
         this.contextMenuEl = document.getElementById('context-menu') as HTMLElement;
@@ -146,7 +164,7 @@ export class UIEngine {
         const styleInputs = [
             this.fillInput, this.strokeInput, this.weightInput, this.opacityInput,
             this.fillEnabled, this.strokeEnabled, this.strokeCap, this.strokeJoin,
-            this.strokeDash, this.blendMode, this.cornerRadius,
+            this.strokeDash, this.blendMode,
             this.fillOpacity, this.fillRule, this.dashOffset, this.miterLimit,
         ];
         for (const el of styleInputs) {
@@ -175,8 +193,51 @@ export class UIEngine {
             }
         }
 
+        // Corner radius has its own handler: on a Rect it sets the parametric
+        // shape radius; on a Path it writes the radius onto the vertices
+        // (selected ones in node-edit mode, otherwise all corners).
+        if (this.cornerRadius) {
+            this.cornerRadius.addEventListener('input', () => {
+                if (!this._propertyEditSnapshotTaken) {
+                    this.scene.saveMoveHistory();
+                    this._propertyEditSnapshotTaken = true;
+                }
+                this.applyCornerRadiusToSelection();
+            });
+            this.cornerRadius.addEventListener('change', () => {
+                if (!this._propertyEditSnapshotTaken) {
+                    this.scene.saveMoveHistory();
+                }
+                this._propertyEditSnapshotTaken = false;
+                this.applyCornerRadiusToSelection();
+                this.scene.autosave?.trigger();
+            });
+        }
+
+        // Typography properties
+        const typographyInputs = [this.textFontFamily, this.textFontSize, this.textLineHeight, this.textAlign];
+        for (const el of typographyInputs) {
+            if (el) {
+                el.addEventListener('input', () => {
+                    if (!this._propertyEditSnapshotTaken) {
+                        this.scene.saveMoveHistory();
+                        this._propertyEditSnapshotTaken = true;
+                    }
+                    this.updateTextPropertiesNoHistory();
+                });
+                el.addEventListener('change', () => {
+                    if (!this._propertyEditSnapshotTaken) {
+                        this.scene.saveMoveHistory();
+                    }
+                    this._propertyEditSnapshotTaken = false;
+                    this.updateTextPropertiesNoHistory();
+                    this.scene.autosave?.trigger();
+                });
+            }
+        }
+
         // Transform properties
-        const transformInputs = [this.propX, this.propY, this.propW, this.propH, this.propRotation];
+        const transformInputs = [this.propX, this.propY, this.propW, this.propH, this.propRotation, this.propSkewX, this.propSkewY];
         for (const el of transformInputs) {
             if (el) el.addEventListener('change', () => this.updateTransform());
         }
@@ -296,6 +357,45 @@ export class UIEngine {
         }
     }
 
+    /** Apply the Radius field to the selection. Rect → shape corner_radius;
+     *  Path → per-vertex corner_radius (selected vertices in node-edit mode,
+     *  otherwise every corner). No-history: the calling gesture snapshots once. */
+    applyCornerRadiusToSelection() {
+        const selection = this.scene.engine!.get_selection();
+        if (selection.length === 0) return;
+        const radius = this.cornerRadius ? Math.max(0, parseFloat(this.cornerRadius.value) || 0) : 0;
+        const im = this.scene.renderer?.inputManager;
+
+        for (const id of selection) {
+            const node = this.scene.getNode(id);
+            if (!node) continue;
+
+            if (node.geometry.Rect) {
+                const style = { ...node.style, corner_radius: radius };
+                this.scene.setNodeStyleNoHistory(id, JSON.stringify(style));
+            } else if (node.geometry.Path) {
+                const subpaths = node.geometry.Path.subpaths;
+                // Target only the selected vertices when this node is being
+                // edited with a non-empty vertex selection; else all corners.
+                const editingThis = im?.editingNodeId === id && (im?.selectedPoints?.size ?? 0) > 0;
+                for (let si = 0; si < subpaths.length; si++) {
+                    for (let pi = 0; pi < subpaths[si].points.length; pi++) {
+                        if (!editingThis || im!.selectedPoints.has(`${si}:${pi}`)) {
+                            subpaths[si].points[pi].corner_radius = radius;
+                        }
+                    }
+                }
+                this.scene.engine!.update_path_points(id, JSON.stringify(subpaths));
+                // Keep the live node-edit buffer in sync so the overlay and
+                // subsequent drags see the updated radii.
+                if (im?.editingNodeId === id) {
+                    im.editingPoints = JSON.parse(JSON.stringify(subpaths));
+                }
+            }
+        }
+        this.scene.invalidateCache();
+    }
+
     /** Build a style JSON string from the current UI panel values. */
     private buildCurrentStyleJson(): string {
         const fillOn = this.fillEnabled ? this.fillEnabled.checked : true;
@@ -370,11 +470,45 @@ export class UIEngine {
             this.scene.resizeNode(id, newW, newH);
         }
 
-        // Rotation
-        if (this.propRotation) {
-            const newAngleDeg = parseFloat(this.propRotation.value) || 0;
-            const newAngleRad = newAngleDeg * (Math.PI / 180);
-            this.scene.rotateNode(id, newAngleRad);
+        // Rotation + Skew — recompose the full transform as T × R × Skew × S
+        // We read the current local transform to get the current scale,
+        // then apply the new rotation and skew from the UI fields.
+        {
+            const lt = this.scene.getNodeLocalTransform(id);
+            // lt is column-major [m00, m10, m20, m01, m11, m21, m02, m12, m22]
+            // Decompose current scale from the local transform
+            const sx = Math.sqrt(lt[0] * lt[0] + lt[1] * lt[1]) || 1;
+            const det = lt[0] * lt[4] - lt[3] * lt[1];
+            const sy = det < 0 ? -Math.sqrt(lt[3] * lt[3] + lt[4] * lt[4]) || -1 : Math.sqrt(lt[3] * lt[3] + lt[4] * lt[4]) || 1;
+
+            const tx = lt[6]; // translation X (column-major: m02)
+            const ty = lt[7]; // translation Y (column-major: m12)
+
+            const angleDeg = parseFloat(this.propRotation?.value) || 0;
+            const angleRad = angleDeg * (Math.PI / 180);
+            const skewXDeg = parseFloat(this.propSkewX?.value) || 0;
+            const skewYDeg = parseFloat(this.propSkewY?.value) || 0;
+            const skewXRad = skewXDeg * (Math.PI / 180);
+            const skewYRad = skewYDeg * (Math.PI / 180);
+
+            const cosR = Math.cos(angleRad);
+            const sinR = Math.sin(angleRad);
+            const tanSkX = Math.tan(skewXRad);
+            const tanSkY = Math.tan(skewYRad);
+
+            // Compose: T(tx,ty) × R(θ) × Skew(skewX, skewY) × S(sx, sy)
+            // Skew matrix:  [1, tan(skX), 0,  tan(skY), 1, 0,  0, 0, 1] (column-major)
+            // R × Skew × S (column-major):
+            //   col0 = R × [sx, sx*tan(skY), 0]
+            //   col1 = R × [sy*tan(skX), sy, 0]
+            const m00 = cosR * sx + (-sinR) * sx * tanSkY;
+            const m10 = sinR * sx + cosR * sx * tanSkY;
+            const m01 = cosR * sy * tanSkX + (-sinR) * sy;
+            const m11 = sinR * sy * tanSkX + cosR * sy;
+
+            // Column-major transform: [m00, m10, 0, m01, m11, 0, tx, ty, 1]
+            const newTransform = [m00, m10, 0, m01, m11, 0, tx, ty, 1];
+            this.scene.setNodeTransform(id, newTransform);
         }
 
         this.scene.invalidateCache();
@@ -393,6 +527,10 @@ export class UIEngine {
 
     syncWithSelection(opts: { interactive?: boolean } = {}) {
         const interactive = opts.interactive === true;
+        // Any selection change must repaint the overlay — otherwise stale
+        // selection/corner-radius handles linger after deselecting via paths
+        // that don't go through the canvas input handlers (e.g. layer panel).
+        this.scene.renderer?.requestRender();
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) {
             this.clearPropertyPanel();
@@ -467,8 +605,32 @@ export class UIEngine {
         // Blend mode
         if (this.blendMode) this.blendMode.value = (style.blend_mode || 0).toString();
 
-        // Corner radius
-        if (this.cornerRadius) this.cornerRadius.value = (style.corner_radius || 0).toString();
+        // Corner radius — Rect uses the parametric shape radius; Path shows the
+        // per-vertex radius (blank when corners differ), editable via the field.
+        const cornerRadiusCell = document.getElementById('corner-radius-cell');
+        const im = this.scene.renderer?.inputManager;
+        if (this.cornerRadius) {
+            if (node.geometry.Rect) {
+                this.cornerRadius.value = (style.corner_radius || 0).toString();
+            } else if (node.geometry.Path) {
+                const editingThis = im?.editingNodeId === selection[0] && (im?.selectedPoints?.size ?? 0) > 0;
+                const radii: number[] = [];
+                const subs = node.geometry.Path.subpaths;
+                for (let si = 0; si < subs.length; si++) {
+                    for (let pi = 0; pi < subs[si].points.length; pi++) {
+                        if (!editingThis || im!.selectedPoints.has(`${si}:${pi}`)) {
+                            radii.push(subs[si].points[pi].corner_radius || 0);
+                        }
+                    }
+                }
+                const uniform = radii.length > 0 && radii.every(r => Math.abs(r - radii[0]) < 1e-3);
+                this.cornerRadius.value = uniform ? String(radii[0]) : '';
+                if (!uniform) this.cornerRadius.placeholder = 'Mixed';
+            }
+        }
+        if (cornerRadiusCell) {
+            cornerRadiusCell.style.display = (node.geometry.Rect || node.geometry.Path) ? '' : 'none';
+        }
 
         // New SVG properties
         if (this.fillOpacity) this.fillOpacity.value = ((style.fill_opacity !== undefined ? style.fill_opacity : 1) * 100).toFixed(0);
@@ -509,10 +671,57 @@ export class UIEngine {
             }
         }
 
-        // Rotation from transform matrix
-        if (this.propRotation) {
-            const angle = Math.atan2(t[3], t[0]) * (180 / Math.PI);
-            this.propRotation.value = Math.round(angle).toString();
+        // Decompose rotation and skew from the local transform matrix
+        // The local transform is column-major: [m00, m10, m20, m01, m11, m21, m02, m12, m22]
+        // Row-major (t from getTransform): [scaleX, skewX, transX, skewY, scaleY, transY, p0, p1, p2]
+        {
+            const lt = this.scene.getNodeLocalTransform(selection[0]);
+            // Column-major: m00=lt[0], m10=lt[1], m01=lt[3], m11=lt[4]
+            // Decompose as R × Skew × S
+            const sx = Math.sqrt(lt[0] * lt[0] + lt[1] * lt[1]);
+            const rotation = Math.atan2(lt[1], lt[0]);
+
+            if (this.propRotation) {
+                this.propRotation.value = Math.round(rotation * (180 / Math.PI)).toString();
+            }
+
+            // Remove rotation to get Skew × S
+            if (sx > 1e-6) {
+                const cosR = Math.cos(rotation);
+                const sinR = Math.sin(rotation);
+                // R⁻¹ × M  (only need the 2×2 linear part)
+                // R⁻¹ = [cos, sin; -sin, cos]
+                const r10 = -sinR * lt[0] + cosR * lt[1]; // ≈ sx * tan(skewY)
+                const r01 = cosR * lt[3] + sinR * lt[4];  // = sx * tan(skewX)  ... actually sy*tan(skewX)
+                const r11 = -sinR * lt[3] + cosR * lt[4]; // = sy
+
+                // r00 = sx, r10 ≈ 0, r01 = sy * tan(skewX), r11 = sy
+                // skewX = atan2(r01, r11)  — or atan(r01/r11) when r11 ≈ sy
+                const skewXRad = Math.abs(r11) > 1e-6 ? Math.atan2(r01, r11) : 0;
+                // skewY is not directly extractable from a simple R×Skew×S decomposition
+                // because our compose order is R × SkewMatrix(skX, skY) × S
+                // SkewMatrix col0 = [1, tan(skY)] × sx → after R: [cos-sin*tan(skY), sin+cos*tan(skY)] × sx
+                // r10 = sx * tan(skY) when decomposed correctly, but r10 should be ≈ 0 in R×Skew×S
+                // Actually: r10 = -sinR*lt[0] + cosR*lt[1]
+                //   lt[0] = cosR*sx + (-sinR)*sx*tan(skY) = sx*(cosR - sinR*tan(skY))
+                //   lt[1] = sinR*sx + cosR*sx*tan(skY) = sx*(sinR + cosR*tan(skY))
+                //   r10 = -sinR*sx*(cosR-sinR*tanSkY) + cosR*sx*(sinR+cosR*tanSkY)
+                //       = sx*(-sinR*cosR + sin²R*tanSkY + cosR*sinR + cos²R*tanSkY)
+                //       = sx * tanSkY
+                const skewYRad = Math.abs(sx) > 1e-6 ? Math.atan(r10 / sx) : 0;
+
+                if (this.propSkewX) {
+                    const deg = skewXRad * (180 / Math.PI);
+                    this.propSkewX.value = Math.abs(deg) < 0.05 ? '0' : deg.toFixed(1);
+                }
+                if (this.propSkewY) {
+                    const deg = skewYRad * (180 / Math.PI);
+                    this.propSkewY.value = Math.abs(deg) < 0.05 ? '0' : deg.toFixed(1);
+                }
+            } else {
+                if (this.propSkewX) this.propSkewX.value = '0';
+                if (this.propSkewY) this.propSkewY.value = '0';
+            }
         }
 
         // During interactive drags, skip expensive DOM rebuilds — the mouseup
@@ -522,9 +731,19 @@ export class UIEngine {
             this.contextBar?.refresh();
             this.breadcrumbBar?.refresh();
         }
+        // Typography — show/hide section and populate values
+        if (node.geometry.Text) {
+            if (this.typographySection) this.typographySection.style.display = '';
+            if (this.textFontFamily) this.textFontFamily.value = node.geometry.Text.font_family || '';
+            if (this.textFontSize) this.textFontSize.value = String(node.geometry.Text.font_size || 32);
+            if (this.textLineHeight) this.textLineHeight.value = String(node.geometry.Text.line_height || 1.2);
+            if (this.textAlign) this.textAlign.value = String(node.geometry.Text.text_align || 0);
+        } else {
+            if (this.typographySection) this.typographySection.style.display = 'none';
+        }
     }
 
-    /** When nothing is selected, show the CURRENT style (what a newly drawn
+    /** Clear the property panel (when nothing is selected). Show the CURRENT style (what a newly drawn
      *  shape will get) in the style controls and blank the transform fields. */
     private clearPropertyPanel() {
         // Restore style widgets from the persistent current style
@@ -552,8 +771,39 @@ export class UIEngine {
         if (this.propW) this.propW.value = '';
         if (this.propH) this.propH.value = '';
         if (this.propRotation) this.propRotation.value = '';
+        if (this.propSkewX) this.propSkewX.value = '';
+        if (this.propSkewY) this.propSkewY.value = '';
         if (this.toggleVisible) this.toggleVisible.classList.remove('active');
         if (this.toggleLocked) this.toggleLocked.classList.remove('active');
+        if (this.typographySection) this.typographySection.style.display = 'none';
+        const cornerRadiusCell = document.getElementById('corner-radius-cell');
+        if (cornerRadiusCell) cornerRadiusCell.style.display = 'none';
+    }
+
+    /** Apply typography properties from the side panel to the selected text node. */
+    private updateTextPropertiesNoHistory() {
+        const selection = this.scene.engine!.get_selection();
+        if (selection.length !== 1) return;
+        const id = selection[0];
+        const node = this.scene.getNode(id);
+        if (!node?.geometry?.Text) return;
+
+        const fontFamily = this.textFontFamily?.value ?? '';
+        const textAlign = parseInt(this.textAlign?.value ?? '0', 10);
+        const lineHeight = parseFloat(this.textLineHeight?.value ?? '1.2');
+        const fontSize = parseFloat(this.textFontSize?.value ?? '32');
+
+        // Update font size via setTextContent
+        // NOTE: we need a way to set properties without history for live preview
+        // Let's add set_text_properties_no_history to engine if needed, 
+        // or just use the current one and assume history was already saved by the listener.
+        
+        const content = node.geometry.Text.content;
+        this.scene.engine!.set_text_content(id, content, fontSize);
+        this.scene.engine!.set_text_properties(id, fontFamily, textAlign, lineHeight);
+        
+        this.scene.invalidateCache();
+        this.syncWithSelection({ interactive: true }); // Don't re-focus inputs
     }
 
     /** Map from numeric node type (engine enum) to string key for icon lookup.
@@ -617,7 +867,7 @@ export class UIEngine {
             const icon = iconFn ? iconFn() : iconHexagon(14);
 
             const visIcon = nodeVisible !== false ? iconEye(12) : iconEyeOff(12);
-            const lockIcon = nodeLocked === true ? iconLock(12) : '';
+            const lockIcon = nodeLocked === true ? iconLock(12) : iconUnlock(12);
 
             item.innerHTML = `
                 <div class="layer-item-row" style="padding-left: ${indent + 4}px">
@@ -625,7 +875,7 @@ export class UIEngine {
                     <span class="layer-icon">${icon}</span>
                     <span class="layer-name" data-node-id="${id}">${nodeName || `Node ${id}`}</span>
                     <span class="layer-actions">
-                        ${lockIcon ? `<span class="layer-lock-btn" data-lock-id="${id}" title="Locked">${lockIcon}</span>` : ''}
+                        <span class="layer-lock-btn" data-lock-id="${id}" title="${nodeLocked ? 'Unlock' : 'Lock'}">${lockIcon}</span>
                         <span class="layer-vis-btn" data-vis-id="${id}" title="Toggle visibility">${visIcon}</span>
                     </span>
                 </div>
@@ -776,6 +1026,12 @@ export class UIEngine {
         const collectNodeData = (id: number) => {
             const node = this.scene.getNode(id);
             if (!node) return;
+            // Bake per-vertex corner radii into the exported path outline so the
+            // SVG matches the rendered (rounded) shape.
+            if (node.geometry?.Path && this.scene.engine) {
+                const resolved = this.scene.getResolvedSubpaths(id);
+                if (resolved.length) node.geometry.Path.subpaths = resolved;
+            }
             nodes[id] = node;
             localTransforms[id] = Array.from(this.scene.getNodeLocalTransform(id));
             if (node.node_type === 'Group') {
@@ -1473,7 +1729,7 @@ export class UIEngine {
             'separator',
             { label: 'Group', action: 'group', shortcut: '⌘G' },
             { label: 'Ungroup', action: 'ungroup', shortcut: '⌘⇧G' },
-            { label: 'Convert to Path', action: 'convert-to-path', shortcut: '' },
+            { label: 'Flatten', action: 'flatten', shortcut: '⌘E' },
             'separator',
             { label: 'Duplicate', action: 'duplicate', shortcut: '⌘D' },
             { label: 'Delete', action: 'delete', shortcut: '⌫' },

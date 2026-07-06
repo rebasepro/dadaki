@@ -118,7 +118,11 @@ function nodeToWorldPath(
         path.cubicTo(-rx, -ky, -kx, -ry, 0, -ry);
         path.close();
     } else if (geometry.Path) {
-        for (const sp of geometry.Path.subpaths) {
+        // Use the resolved outline so per-vertex corner radii are honoured in
+        // the boolean result (matches what is rendered).
+        const resolved = scene.getResolvedSubpaths(id);
+        const subpaths = resolved.length ? resolved : geometry.Path.subpaths;
+        for (const sp of subpaths) {
             const pts = sp.points;
             if (pts.length < 2) continue;
             path.moveTo(pts[0].x, pts[0].y);

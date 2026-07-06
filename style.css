@@ -166,9 +166,41 @@ body, html {
     margin-right: 16px;
 }
 
+.zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 4px;
+}
+
 .zoom-display {
     font-size: 11px;
     color: #909090;
+    min-width: 36px;
+    text-align: center;
+    user-select: none;
+}
+
+.zoom-btn {
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    padding: 0;
+    transition: background 0.15s, color 0.15s;
+}
+
+.zoom-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-main);
 }
 
 #main-layout {
@@ -519,7 +551,7 @@ body, html {
 
 .transform-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr;
     gap: 4px;
 }
 
@@ -539,6 +571,28 @@ body, html {
 .transform-cell .prop-input {
     width: 100%;
     box-sizing: border-box;
+}
+
+/* Input with unit suffix (e.g. ° for degrees) */
+.input-with-unit {
+    display: flex;
+    align-items: center;
+    position: relative;
+}
+
+.input-with-unit .prop-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding-right: 16px;
+}
+
+.input-with-unit .input-unit {
+    position: absolute;
+    right: 4px;
+    font-size: 9px;
+    color: var(--text-dim);
+    pointer-events: none;
+    line-height: 1;
 }
 
 /* ─── Fill / Stroke compact row ─── */
@@ -955,9 +1009,20 @@ body, html {
 /* Color Swatch */
 .cb-swatch-wrapper {
     position: relative;
-    width: 20px;
-    height: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     flex-shrink: 0;
+}
+
+.cb-swatch-label {
+    font-size: 9px;
+    color: var(--text-dim);
+    text-align: center;
+    display: block;
+    margin-top: 1px;
+    user-select: none;
+    line-height: 1;
 }
 
 .cb-swatch {

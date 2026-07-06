@@ -300,6 +300,113 @@ fn path_hit(subpaths: &[Subpath], style: &Style, p: Vec2, tol: f32) -> bool {
     false
 }
 
+// ─── Corner-radius resolution ───────────────────────────────────────────────
+//
+// Corner radius is stored non-destructively as a per-vertex property on the
+// *sharp* logical geometry (the editable source of truth). The rounded outline
+// is re-derived from (sharp vertices + radius) whenever it is needed for
+// rendering, hit-testing, boolean ops or export. Editing a vertex therefore
+// keeps its rounding: a rectangle whose corner is dragged becomes a trapezoid
+// that is still rounded, exactly like Figma.
+
+/// Expand every straight-line corner that carries a `corner_radius` into an
+/// explicit fillet (two anchors + an arc-as-cubic). Vertices that already have
+/// Bézier handles, or sit on an open subpath's endpoint, are left untouched.
+fn round_subpaths(subpaths: &[Subpath]) -> Vec<Subpath> {
+    subpaths.iter().map(round_subpath).collect()
+}
+
+fn round_subpath(sp: &Subpath) -> Subpath {
+    const EPS: f32 = 1e-3;
+    let n = sp.points.len();
+    // Need at least 3 points, and at least one requested radius, to do anything.
+    if n < 3 || !sp.points.iter().any(|p| p.corner_radius > EPS) {
+        // Still strip corner_radius from the resolved copy so downstream
+        // consumers never see a residual value.
+        let mut clone = sp.clone();
+        for p in &mut clone.points {
+            p.corner_radius = 0.0;
+        }
+        return clone;
+    }
+
+    let mut out: Vec<PathPoint> = Vec::with_capacity(n + 4);
+    for i in 0..n {
+        let cur = &sp.points[i];
+        let has_prev = sp.closed || i > 0;
+        let has_next = sp.closed || i + 1 < n;
+        let prev = &sp.points[(i + n - 1) % n];
+        let next = &sp.points[(i + 1) % n];
+
+        let p = Vec2::new(cur.x, cur.y);
+        let pv = Vec2::new(prev.x, prev.y);
+        let nx = Vec2::new(next.x, next.y);
+
+        // A corner is roundable only if both adjacent segments are straight
+        // lines (no Bézier handles at either end) and the vertex itself sharp.
+        let seg_in_straight = (prev.cp2 - pv).length() < EPS && (cur.cp1 - p).length() < EPS;
+        let seg_out_straight = (cur.cp2 - p).length() < EPS && (next.cp1 - nx).length() < EPS;
+
+        if cur.corner_radius > EPS && has_prev && has_next && seg_in_straight && seg_out_straight {
+            let u = (pv - p).normalize_or_zero(); // toward previous vertex
+            let w = (nx - p).normalize_or_zero(); // toward next vertex
+            let len_in = (pv - p).length();
+            let len_out = (nx - p).length();
+
+            let a = u.dot(w).clamp(-1.0, 1.0).acos(); // interior angle at corner
+            // Skip degenerate / collinear corners — nothing to round.
+            if u.length_squared() < 0.5
+                || w.length_squared() < 0.5
+                || a < 1e-3
+                || (std::f32::consts::PI - a) < 1e-3
+            {
+                let mut q = cur.clone();
+                q.corner_radius = 0.0;
+                out.push(q);
+                continue;
+            }
+
+            let half = a * 0.5;
+            let tan_half = half.tan();
+            // Trim distance from the corner along each edge for the requested
+            // radius, clamped so neighbouring corners never overlap (each may
+            // consume at most half of a shared edge).
+            let trim = (cur.corner_radius / tan_half)
+                .min(0.5 * len_in)
+                .min(0.5 * len_out);
+            let radius = trim * tan_half; // effective radius after clamping
+            let phi = std::f32::consts::PI - a; // arc sweep angle
+            let handle_len = (4.0 / 3.0) * (phi * 0.25).tan() * radius;
+
+            let t1 = p + u * trim; // tangent point on the incoming edge
+            let t2 = p + w * trim; // tangent point on the outgoing edge
+
+            // Anchor A: straight in from the previous point, arc out toward B.
+            out.push(PathPoint {
+                x: t1.x,
+                y: t1.y,
+                cp1: t1,
+                cp2: t1 - u * handle_len,
+                corner_radius: 0.0,
+            });
+            // Anchor B: arc in from A, straight out to the next point.
+            out.push(PathPoint {
+                x: t2.x,
+                y: t2.y,
+                cp1: t2 - w * handle_len,
+                cp2: t2,
+                corner_radius: 0.0,
+            });
+        } else {
+            let mut q = cur.clone();
+            q.corner_radius = 0.0;
+            out.push(q);
+        }
+    }
+
+    Subpath { points: out, closed: sp.closed }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Geometry {
     Rect { width: f32, height: f32 },
@@ -325,12 +432,17 @@ pub enum Geometry {
     },
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PathPoint {
     pub x: f32,
     pub y: f32,
     pub cp1: Vec2,
     pub cp2: Vec2,
+    /// Parametric corner radius at this vertex. Non-destructive: the sharp
+    /// vertex is the editable source of truth, and the rounded outline is
+    /// re-derived at resolve time. Only applied to straight-line corners.
+    #[serde(default)]
+    pub corner_radius: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -592,14 +704,18 @@ impl Engine {
                     self.render_buffer.extend_from_slice(&radius_y.to_le_bytes());
                 }
                 Geometry::Path { subpaths, .. } => {
-                    // Pre-calculate size or write a placeholder. 
+                    // Emit the *resolved* outline (per-vertex corner radii baked
+                    // into arcs) so rendering shows rounding while the stored
+                    // geometry stays sharp and editable.
+                    let resolved = round_subpaths(subpaths);
+                    // Pre-calculate size or write a placeholder.
                     // Let's use a placeholder for Path size.
                     let size_offset = self.render_buffer.len();
                     self.render_buffer.extend_from_slice(&[0u8; 4]);
                     let start_len = self.render_buffer.len();
 
-                    self.render_buffer.extend_from_slice(&(subpaths.len() as u32).to_le_bytes());
-                    for sp in subpaths {
+                    self.render_buffer.extend_from_slice(&(resolved.len() as u32).to_le_bytes());
+                    for sp in &resolved {
                         self.render_buffer.extend_from_slice(&(if sp.closed { 1u32 } else { 0u32 }).to_le_bytes());
                         self.render_buffer.extend_from_slice(&(sp.points.len() as u32).to_le_bytes());
                         for pt in &sp.points {
@@ -826,6 +942,7 @@ impl Engine {
                 y: py,
                 cp1: Vec2::new(px, py),
                 cp2: Vec2::new(px, py),
+                corner_radius: 0.0,
             });
         }
 
@@ -887,6 +1004,7 @@ impl Engine {
                 y: py,
                 cp1: Vec2::new(px, py),
                 cp2: Vec2::new(px, py),
+                corner_radius: 0.0,
             });
         }
 
@@ -1393,6 +1511,21 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    /// Resolve a Path node's per-vertex corner radii into an explicit rounded
+    /// outline and return it as JSON subpaths. Non-path geometry (or a path
+    /// with no rounding) yields the plain subpaths. Consumed by SVG export and
+    /// boolean ops so their output matches the rendered (rounded) shape.
+    pub fn resolve_subpaths_json(&self, id: u32) -> String {
+        let resolved = self.scene.nodes.get(&id).and_then(|n| match &n.geometry {
+            Geometry::Path { subpaths, .. } => Some(round_subpaths(subpaths)),
+            _ => None,
+        });
+        match resolved {
+            Some(s) => serde_json::to_string(&s).unwrap_or_else(|_| "[]".into()),
+            None => "[]".into(),
+        }
+    }
+
     /// Get a node's name.
     pub fn get_node_name(&self, id: u32) -> String {
         self.scene.nodes.get(&id)
@@ -1672,12 +1805,15 @@ impl Engine {
                 Geometry::Rect { width, height } => {
                     let w = *width;
                     let h = *height;
+                    // Transfer the parametric corner radius onto each vertex so
+                    // rounding is preserved non-destructively after conversion.
+                    let cr = node.style.corner_radius;
                     // 4 corners, closed subpath (no duplicate closing point)
                     let points = vec![
-                        PathPoint { x: 0.0, y: 0.0, cp1: Vec2::new(0.0, 0.0), cp2: Vec2::new(0.0, 0.0) },
-                        PathPoint { x: w,   y: 0.0, cp1: Vec2::new(w, 0.0),   cp2: Vec2::new(w, 0.0) },
-                        PathPoint { x: w,   y: h,   cp1: Vec2::new(w, h),     cp2: Vec2::new(w, h) },
-                        PathPoint { x: 0.0, y: h,   cp1: Vec2::new(0.0, h),   cp2: Vec2::new(0.0, h) },
+                        PathPoint { x: 0.0, y: 0.0, cp1: Vec2::new(0.0, 0.0), cp2: Vec2::new(0.0, 0.0), corner_radius: cr },
+                        PathPoint { x: w,   y: 0.0, cp1: Vec2::new(w, 0.0),   cp2: Vec2::new(w, 0.0),   corner_radius: cr },
+                        PathPoint { x: w,   y: h,   cp1: Vec2::new(w, h),     cp2: Vec2::new(w, h),     corner_radius: cr },
+                        PathPoint { x: 0.0, y: h,   cp1: Vec2::new(0.0, h),   cp2: Vec2::new(0.0, h),   corner_radius: cr },
                     ];
                     {
                         let subpaths = vec![Subpath { points, closed: true }];
@@ -1695,10 +1831,10 @@ impl Engine {
                     let ky = ry * k;
                     // 4 cardinal points, closed subpath (no duplicate)
                     let points = vec![
-                        PathPoint { x: 0.0, y: -ry, cp1: Vec2::new(-kx, -ry), cp2: Vec2::new(kx, -ry) },
-                        PathPoint { x: rx,  y: 0.0, cp1: Vec2::new(rx, -ky),  cp2: Vec2::new(rx, ky) },
-                        PathPoint { x: 0.0, y: ry,  cp1: Vec2::new(kx, ry),   cp2: Vec2::new(-kx, ry) },
-                        PathPoint { x: -rx, y: 0.0, cp1: Vec2::new(-rx, ky),  cp2: Vec2::new(-rx, -ky) },
+                        PathPoint { x: 0.0, y: -ry, cp1: Vec2::new(-kx, -ry), cp2: Vec2::new(kx, -ry), corner_radius: 0.0 },
+                        PathPoint { x: rx,  y: 0.0, cp1: Vec2::new(rx, -ky),  cp2: Vec2::new(rx, ky),  corner_radius: 0.0 },
+                        PathPoint { x: 0.0, y: ry,  cp1: Vec2::new(kx, ry),   cp2: Vec2::new(-kx, ry), corner_radius: 0.0 },
+                        PathPoint { x: -rx, y: 0.0, cp1: Vec2::new(-rx, ky),  cp2: Vec2::new(-rx, -ky), corner_radius: 0.0 },
                     ];
                     {
                         let subpaths = vec![Subpath { points, closed: true }];
@@ -1719,9 +1855,34 @@ impl Engine {
             if let Some(node) = self.scene.nodes.get_mut(&id) {
                 node.geometry = geo;
                 node.node_type = NodeType::Path;
+                // The radius now lives on the vertices; clear the shape-level
+                // field so it isn't double-applied.
+                node.style.corner_radius = 0.0;
                 self.update_spatial_index(id);
                 self.mark_dirty(id);
             }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Replace a node's geometry with a new path. Used for "Create Outlines".
+    pub fn replace_geometry_with_path(&mut self, id: u32, subpaths_json: &str) -> bool {
+        let subpaths: Vec<Subpath> = match serde_json::from_str(subpaths_json) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            node.geometry = Geometry::Path {
+                network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
+                subpaths,
+            };
+            node.node_type = NodeType::Path;
+            self.update_spatial_index(id);
+            self.update_ancestor_group_bounds(id);
+            self.mark_dirty(id);
             true
         } else {
             false
@@ -2537,6 +2698,7 @@ impl Engine {
                         position: Vec2::new(x, y),
                         handle_in: None,
                         handle_out: None,
+                        corner_radius: 0.0,
                     });
                     *subpaths = net.to_subpaths();
                     idx as i32

@@ -102,6 +102,8 @@ pub struct ProtoPathPoint {
     pub cp2_x: f32,
     #[prost(float, tag = "6")]
     pub cp2_y: f32,
+    #[prost(float, tag = "7")]
+    pub corner_radius: f32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -156,6 +158,8 @@ pub struct ProtoNetworkVertex {
     pub handle_out_x: Option<f32>,
     #[prost(float, optional, tag = "6")]
     pub handle_out_y: Option<f32>,
+    #[prost(float, tag = "7")]
+    pub corner_radius: f32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -391,6 +395,7 @@ impl From<&PathPoint> for ProtoPathPoint {
             x: p.x, y: p.y,
             cp1_x: p.cp1.x, cp1_y: p.cp1.y,
             cp2_x: p.cp2.x, cp2_y: p.cp2.y,
+            corner_radius: p.corner_radius,
         }
     }
 }
@@ -401,6 +406,7 @@ impl From<&ProtoPathPoint> for PathPoint {
             x: p.x, y: p.y,
             cp1: Vec2::new(p.cp1_x, p.cp1_y),
             cp2: Vec2::new(p.cp2_x, p.cp2_y),
+            corner_radius: p.corner_radius,
         }
     }
 }
@@ -510,6 +516,7 @@ fn network_to_proto(n: &NodeVectorNetwork) -> ProtoNodeNetwork {
             handle_in_y: v.handle_in.map(|h| h.y),
             handle_out_x: v.handle_out.map(|h| h.x),
             handle_out_y: v.handle_out.map(|h| h.y),
+            corner_radius: v.corner_radius,
         }).collect(),
         edges: n.edges.iter().map(|e| ProtoNetworkEdge {
             start_vertex: e.start_vertex,
@@ -534,6 +541,7 @@ fn proto_to_network(n: &ProtoNodeNetwork) -> NodeVectorNetwork {
                 (Some(x), Some(y)) => Some(Vec2::new(x, y)),
                 _ => None,
             },
+            corner_radius: v.corner_radius,
         }).collect(),
         edges: n.edges.iter().map(|e| NetworkEdge {
             start_vertex: e.start_vertex,
@@ -768,7 +776,7 @@ mod tests {
     }
 
     fn pp(x: f32, y: f32) -> ProtoPathPoint {
-        ProtoPathPoint { x, y, cp1_x: x, cp1_y: y, cp2_x: x, cp2_y: y }
+        ProtoPathPoint { x, y, cp1_x: x, cp1_y: y, cp2_x: x, cp2_y: y, corner_radius: 0.0 }
     }
 
     /// A v1 file (legacy flat point list, duplicated closing point) must decode
@@ -905,16 +913,16 @@ mod tests {
                 subpaths: vec![
                     crate::Subpath {
                         points: vec![
-                            PathPoint { x: 0.0, y: 0.0, cp1: Vec2::new(0.0, 0.0), cp2: Vec2::new(10.0, 0.0) },
-                            PathPoint { x: 50.0, y: 0.0, cp1: Vec2::new(40.0, 0.0), cp2: Vec2::new(50.0, 0.0) },
-                            PathPoint { x: 25.0, y: 40.0, cp1: Vec2::new(25.0, 40.0), cp2: Vec2::new(25.0, 40.0) },
+                            PathPoint { x: 0.0, y: 0.0, cp1: Vec2::new(0.0, 0.0), cp2: Vec2::new(10.0, 0.0), corner_radius: 0.0 },
+                            PathPoint { x: 50.0, y: 0.0, cp1: Vec2::new(40.0, 0.0), cp2: Vec2::new(50.0, 0.0), corner_radius: 0.0 },
+                            PathPoint { x: 25.0, y: 40.0, cp1: Vec2::new(25.0, 40.0), cp2: Vec2::new(25.0, 40.0), corner_radius: 0.0 },
                         ],
                         closed: true,
                     },
                     crate::Subpath {
                         points: vec![
-                            PathPoint { x: 10.0, y: 10.0, cp1: Vec2::new(10.0, 10.0), cp2: Vec2::new(10.0, 10.0) },
-                            PathPoint { x: 20.0, y: 20.0, cp1: Vec2::new(20.0, 20.0), cp2: Vec2::new(20.0, 20.0) },
+                            PathPoint { x: 10.0, y: 10.0, cp1: Vec2::new(10.0, 10.0), cp2: Vec2::new(10.0, 10.0), corner_radius: 0.0 },
+                            PathPoint { x: 20.0, y: 20.0, cp1: Vec2::new(20.0, 20.0), cp2: Vec2::new(20.0, 20.0), corner_radius: 0.0 },
                         ],
                         closed: false,
                     },

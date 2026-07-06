@@ -35,6 +35,23 @@ async function bootstrap() {
     renderer.fitToArtboard();
     ui.setZoom(renderer.zoom);
 
+    // Populate layers & property panel with any restored session data
+    ui.updateLayerList();
+
+    // Zoom controls
+    document.getElementById('zoom-in')?.addEventListener('click', () => {
+        renderer.setZoomCentered(renderer.zoom * 1.25);
+        ui.setZoom(renderer.zoom);
+    });
+    document.getElementById('zoom-out')?.addEventListener('click', () => {
+        renderer.setZoomCentered(renderer.zoom / 1.25);
+        ui.setZoom(renderer.zoom);
+    });
+    document.getElementById('zoom-fit')?.addEventListener('click', () => {
+        renderer.fitToArtboard();
+        ui.setZoom(renderer.zoom);
+    });
+
     renderer.start();
 
     // Dev-only handle for debugging and automated testing

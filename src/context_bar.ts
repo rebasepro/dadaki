@@ -14,7 +14,6 @@ import type { AlignMode } from './align';
 import { applyBooleanOp } from './boolean_ops';
 import type { BoolOp } from './boolean_ops';
 import { addAnchorPoint, deleteAnchorPoint, findNearestSegment, joinSubpaths, type SegmentHitResult } from './path_ops';
-import { outlineStroke } from './outline_stroke';
 import {
     iconUndo, iconRedo, iconPencil, iconTrash, iconCopy,
     iconAlignLeft, iconAlignCenterH, iconAlignRight,
@@ -96,7 +95,7 @@ export class ContextBar {
             const geo = this.scene.getNodeGeometry(info.selectedIds[0])?.Text;
             if (geo) textSig = `|ff:${geo.font_family}|ta:${geo.text_align}|lh:${geo.line_height}|fs:${geo.font_size}`;
         }
-        return `${info.context}|${info.selectedIds.join(',')}|${info.pointCount}|${info.primaryNodeType}|${this.ui.fillInput.value}|${this.ui.strokeInput.value}|${this.ui.opacityInput.value}|${this.ui.cornerRadius?.value ?? ''}|${Math.round(this.renderer.zoom * 100)}${textSig}`;
+        return `${info.context}|${info.selectedIds.join(',')}|${info.pointCount}|${info.primaryNodeType}|${this.ui.fillInput.value}|${this.ui.strokeInput.value}|${this.ui.opacityInput.value}|${this.ui.cornerRadius?.value ?? ''}${textSig}`;
     }
 
     /** Rebuild the bar DOM based on context info. */
@@ -150,12 +149,6 @@ export class ContextBar {
 
         this.el.appendChild(this.createSeparator());
 
-        // Zoom %
-        const zoomPct = Math.round(this.renderer.zoom * 100);
-        this.el.appendChild(this.createLabel(`${zoomPct}%`, 'cb-zoom'));
-
-        this.el.appendChild(this.createSeparator());
-
         // Undo / Redo
         this.el.appendChild(this.createButton('Undo', iconUndo(14), () => {
             this.scene.undo();
@@ -186,15 +179,15 @@ export class ContextBar {
 
         this.el.appendChild(this.createSeparator());
 
-        // Opacity input
-        this.el.appendChild(this.createNumberInput('Opacity', this.ui.opacityInput.value, '%', (val) => {
+        // Layer opacity input
+        this.el.appendChild(this.createNumberInput('Layer Opacity', this.ui.opacityInput.value, '%', (val) => {
             this.ui.opacityInput.value = val;
             this.ui.opacityInput.dispatchEvent(new Event('input', { bubbles: true }));
             this.ui.opacityInput.dispatchEvent(new Event('change', { bubbles: true }));
         }));
 
-        // Corner radius for Rect
-        if (info.primaryNodeType === 'Rect') {
+        // Corner radius for Rect (shape radius) and Path (per-vertex radius)
+        if (info.primaryNodeType === 'Rect' || info.primaryNodeType === 'Path') {
             this.el.appendChild(this.createNumberInput('Radius', this.ui.cornerRadius.value, 'px', (val) => {
                 this.ui.cornerRadius.value = val;
                 this.ui.cornerRadius.dispatchEvent(new Event('input', { bubbles: true }));
@@ -300,23 +293,9 @@ export class ContextBar {
             this.scene.invalidateCache();
             this.ui.syncWithSelection();
         }));
-        if (info.selectedIds.length === 1 && this.scene.engine!.has_non_identity_linear(info.selectedIds[0])) {
-            this.el.appendChild(this.createButton('Flatten', iconFlatten(), () => {
-                this.scene.flattenTransform(info.selectedIds[0]);
-                this.scene.invalidateCache();
-                this.ui.syncWithSelection();
-            }));
-        }
-
-        // Outline Stroke (only if node has a stroke)
-        const style = this.scene.getNodeStyle(info.selectedIds[0]);
-        if (style && style.stroke !== null && style.stroke_width > 0) {
-            this.el.appendChild(this.createButton('Outline Stroke', iconBoxSelect(14), () => {
-                outlineStroke(this.ui.ck, this.scene, info.selectedIds[0]);
-                this.ui.syncWithSelection();
-                this.ui.updateLayerList();
-            }));
-        }
+        this.el.appendChild(this.createButton('Flatten', iconFlatten(), () => {
+            this.input.flattenSelection();
+        }));
 
         // Duplicate
         this.el.appendChild(this.createButton('Duplicate', iconCopy(14), () => {
@@ -462,13 +441,9 @@ export class ContextBar {
             this.scene.invalidateCache();
             this.ui.syncWithSelection();
         }));
-        if (info.selectedIds.length === 1 && this.scene.engine!.has_non_identity_linear(info.selectedIds[0])) {
-            this.el.appendChild(this.createButton('Flatten', iconFlatten(), () => {
-                this.scene.flattenTransform(info.selectedIds[0]);
-                this.scene.invalidateCache();
-                this.ui.syncWithSelection();
-            }));
-        }
+        this.el.appendChild(this.createButton('Flatten', iconFlatten(), () => {
+            this.input.flattenSelection();
+        }));
 
         this.el.appendChild(this.createSeparator());
 
@@ -564,6 +539,12 @@ export class ContextBar {
         swatch.addEventListener('change', () => onChange(swatch.value));
 
         wrapper.appendChild(swatch);
+
+        const labelSpan = document.createElement('span');
+        labelSpan.className = 'cb-swatch-label';
+        labelSpan.textContent = label.charAt(0).toUpperCase() + label.slice(1);
+        wrapper.appendChild(labelSpan);
+
         return wrapper;
     }
 
@@ -671,7 +652,7 @@ export class ContextBar {
         input.className = 'cb-number-input';
         input.value = currentValue;
         input.min = '0';
-        input.max = label === 'Opacity' ? '100' : '999';
+        input.max = label.includes('Opacity') ? '100' : '999';
 
         const suffixEl = document.createElement('span');
         suffixEl.className = 'cb-number-suffix';

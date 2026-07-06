@@ -677,6 +677,7 @@ impl Engine {
                                     transform[0] * p.cp2.x + transform[3] * p.cp2.y + transform[6],
                                     transform[1] * p.cp2.x + transform[4] * p.cp2.y + transform[7],
                                 ),
+                                corner_radius: p.corner_radius,
                             }
                         }).collect();
                         segments.extend(path_to_segments(&world_points, id));
@@ -735,6 +736,9 @@ pub struct NetworkVertex {
     /// Outgoing control handle (absolute position). None = sharp corner.
     #[serde(default)]
     pub handle_out: Option<Vec2>,
+    /// Parametric corner radius at this vertex (non-destructive rounding).
+    #[serde(default)]
+    pub corner_radius: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -786,6 +790,7 @@ impl NodeVectorNetwork {
                     position,
                     handle_in,
                     handle_out,
+                    corner_radius: point.corner_radius,
                 });
             }
 
@@ -881,6 +886,7 @@ impl NodeVectorNetwork {
                         y: v.position.y,
                         cp1: v.handle_in.unwrap_or(v.position),
                         cp2: v.handle_out.unwrap_or(v.position),
+                        corner_radius: v.corner_radius,
                     }
                 })
             }).collect();

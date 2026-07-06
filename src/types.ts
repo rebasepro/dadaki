@@ -65,6 +65,8 @@ export interface PathPoint {
     cp1: [number, number];
     /** Outgoing control point [x, y]. */
     cp2: [number, number];
+    /** Non-destructive parametric corner radius at this vertex (default 0). */
+    corner_radius?: number;
 }
 
 /** A subpath — a sequence of connected path points with an explicit closed flag. */
@@ -101,6 +103,8 @@ export interface NetworkVertex {
     handle_in?: [number, number];
     /** Outgoing control handle (absolute position). */
     handle_out?: [number, number];
+    /** Non-destructive parametric corner radius at this vertex (default 0). */
+    corner_radius?: number;
 }
 
 /** An edge connecting two vertices. */

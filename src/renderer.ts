@@ -1,5 +1,6 @@
 import type { Canvas, CanvasKit, Paint, Surface } from 'canvaskit-wasm';
 import { buildFontProvider, isFontLoaded, loadGoogleFontData, onFontLoaded } from './fonts';
+import { parseSVGPathD } from './svg_utils';
 
 /** Helper for efficient zero-copy parsing of the WASM binary render buffer. */
 class BinaryReader {
@@ -46,6 +47,63 @@ import type { WasmScene } from './wasm_scene';
 import type { InputManager } from './input';
 
 export class Renderer {
+    /** Generate a path for a text node (for "Create Outlines"). */
+    getTextPath(id: number): any[] | null {
+        const node = this.scene.getNode(id);
+        if (!node || !node.geometry.Text) return null;
+        
+        const geo = node.geometry.Text;
+        const fontSize = geo.font_size;
+        const fontFamily = geo.font_family;
+        const textAlign = geo.text_align; // 0=Left, 1=Center, 2=Right
+        const lineHeight = geo.line_height || 1.2;
+        const content = geo.content;
+
+        // Use a generic font manager if possible, or null for default
+        const font = new this.ck.Font(null, fontSize);
+        const lines = content.split('\n');
+        const combinedPath = new this.ck.Path();
+
+        // Calculate line widths for alignment
+        const lineData: { text: string, width: number }[] = [];
+        for (const line of lines) {
+            const width = font.measureText(line);
+            lineData.push({ text: line, width });
+        }
+
+        for (let i = 0; i < lineData.length; i++) {
+            const { text, width } = lineData[i];
+            
+            // Offset for alignment
+            let offsetX = 0;
+            if (textAlign === 1) offsetX = -width / 2;
+            else if (textAlign === 2) offsetX = -width;
+
+            const offsetY = i * fontSize * lineHeight;
+
+            const glyphIDs = font.getGlyphIDs(text);
+            const glyphWidths = font.getGlyphWidths(glyphIDs);
+            const paths = font.getGlyphPaths(glyphIDs);
+            
+            let currentX = offsetX;
+            for (let j = 0; j < paths.length; j++) {
+                const p = paths[j];
+                if (p) {
+                    p.transform([1, 0, currentX, 0, 1, offsetY, 0, 0, 1]);
+                    combinedPath.addPath(p);
+                    p.delete();
+                }
+                currentX += glyphWidths[j];
+            }
+        }
+
+        const svgD = combinedPath.toSVGString();
+        combinedPath.delete();
+        font.delete();
+
+        return parseSVGPathD(svgD);
+    }
+
     ck: CanvasKit;
     canvas: HTMLCanvasElement;
     scene: WasmScene;
@@ -348,6 +406,12 @@ export class Renderer {
                 const nodeType = reader.u32();
                 const matrix = reader.f32Array(9);
                 
+                // Dim non-edited nodes in path edit mode
+                let nodeAlpha = 1.0;
+                if (this.inputManager?.editingNodeId !== null && this.inputManager?.editingNodeId !== undefined && nodeId !== this.inputManager!.editingNodeId) {
+                    nodeAlpha = 0.3;
+                }
+
                 // ─── Read Fill Paint (variable-length) ─────────────────
                 const fillType = reader.u32(); // 0=none, 1=solid, 2=linear, 3=radial
                 let fr = 0, fg = 0, fb = 0, fa = 0;
@@ -374,7 +438,7 @@ export class Renderer {
                 const strokeType = reader.u32();
                 let sr = 0, sg = 0, sb = 0, sa = 0;
                 let strokeGradientStops: typeof fillGradientStops = null;
-                let strokeGradStart: [number, number] = [0, 0];
+                let strokeGradStart: [number, number] = [0, 1];
                 let strokeGradEnd: [number, number] = [0, 0];
                 if (strokeType === 1) { // Solid
                     sr = reader.f32(); sg = reader.f32(); sb = reader.f32(); sa = reader.f32();
@@ -438,11 +502,11 @@ export class Renderer {
                 // Fill Pass
                 if (fa > 0) {
                     if (fillType === 1) {
-                        p.setColor(this.ck.Color4f(fr, fg, fb, fa));
+                        p.setColor(this.ck.Color4f(fr, fg, fb, fa * nodeAlpha));
                         p.setShader(null);
                     } else if (fillGradientStops) {
                         const fillShader = this.getOrCreateGradientShader(
-                            fillType, fillGradientStops, fillGradStart, fillGradEnd,
+                            fillType, fillGradientStops, fillGradStart, fillGradEnd, nodeAlpha
                         );
                         p.setShader(fillShader);
                     }
@@ -458,11 +522,11 @@ export class Renderer {
                 if (sa > 0 && strokeWidth > 0) {
                     reader.offset = startGeoOffset; // Rewind
                     if (strokeType === 1) {
-                        p.setColor(this.ck.Color4f(sr, sg, sb, sa));
+                        p.setColor(this.ck.Color4f(sr, sg, sb, sa * nodeAlpha));
                         p.setShader(null);
                     } else if (strokeGradientStops) {
                         const strokeShader = this.getOrCreateGradientShader(
-                            strokeType, strokeGradientStops, strokeGradStart, strokeGradEnd,
+                            strokeType, strokeGradientStops, strokeGradStart, strokeGradEnd, nodeAlpha
                         );
                         p.setShader(strokeShader);
                     }
@@ -545,16 +609,17 @@ export class Renderer {
         stops: { offset: number; r: number; g: number; b: number; a: number }[],
         start: [number, number],
         end: [number, number],
+        nodeAlpha: number = 1.0,
     ): ReturnType<CanvasKit['Shader']['MakeLinearGradient']> {
         // Build a compact cache key from gradient parameters
-        let key = `${gradType}|${start[0]},${start[1]}|${end[0]},${end[1]}`;
+        let key = `${gradType}|${start[0]},${start[1]}|${end[0]},${end[1]}|${nodeAlpha}`;
         for (const s of stops) {
             key += `|${s.offset},${s.r},${s.g},${s.b},${s.a}`;
         }
         const cached = this._gradientCache.get(key);
         if (cached) return cached;
 
-        const colors = stops.map(s => this.ck.Color4f(s.r, s.g, s.b, s.a));
+        const colors = stops.map(s => this.ck.Color4f(s.r, s.g, s.b, s.a * nodeAlpha));
         const offsets = stops.map(s => s.offset);
         let shader: ReturnType<CanvasKit['Shader']['MakeLinearGradient']>;
         if (gradType === 2) { // Linear
@@ -804,8 +869,9 @@ export class Renderer {
             hMaxY = live.y + live.h;
         }
 
-        // Draw global bounding box and handles
-        if (hMaxX > hMinX && hMaxY > hMinY) {
+        // Draw global bounding box and handles (skip in node-editing mode — anchors replace resize handles)
+        const isNodeEditing = this.inputManager?.editingNodeId != null;
+        if (hMaxX > hMinX && hMaxY > hMinY && !isNodeEditing) {
             if (selection.length > 1 || live) {
                 canvas.drawRect(this.ck.LTRBRect(hMinX, hMinY, hMaxX, hMaxY), op.selOutline);
             }
@@ -825,6 +891,41 @@ export class Renderer {
             for (const [hx, hy] of handlePositions) {
                 canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), op.selHandleFill);
                 canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), op.selHandleStroke);
+            }
+        }
+
+        // Draw corner radius handles for single selection (Rect only — skip in node-editing mode)
+        if (selection.length === 1 && !live && !isNodeEditing) {
+            const id = selection[0];
+            const node = this.scene.getNode(id);
+            if (node && node.geometry.Rect) {
+                const style = node.style;
+                const rect = node.geometry.Rect;
+                const radius = style.corner_radius || 0;
+                const transform = this.scene.getTransform(id);
+
+                canvas.save();
+                canvas.concat(transform);
+                
+                // Draw 4 handles inside the corners
+                // Use a minimum visual offset so they are always draggable
+                const visualMin = 14 / this.zoom;
+                const rx = Math.min(Math.max(radius, visualMin), rect.width / 2);
+                const ry = Math.min(Math.max(radius, visualMin), rect.height / 2);
+                
+                const handlePos = [
+                    [rx, ry],
+                    [rect.width - rx, ry],
+                    [rect.width - rx, rect.height - ry],
+                    [rx, rect.height - ry]
+                ];
+
+                const hSize = 3.5 / this.zoom;
+                for (const [hx, hy] of handlePos) {
+                    canvas.drawCircle(hx, hy, hSize, op.selHandleFill);
+                    canvas.drawCircle(hx, hy, hSize, op.selHandleStroke);
+                }
+                canvas.restore();
             }
         }
 
@@ -974,12 +1075,47 @@ export class Renderer {
         anchorStroke.setStyle(this.ck.PaintStyle.Stroke);
         anchorStroke.setStrokeWidth(lineWidth * 1.5);
 
+        const selectedFill = new this.ck.Paint();
+        selectedFill.setColor(this.ck.Color(0, 162, 255, 1.0));
+        selectedFill.setStyle(this.ck.PaintStyle.Fill);
+
         const handleFill = new this.ck.Paint();
         handleFill.setColor(this.ck.Color(0, 162, 255, 1.0));
         handleFill.setStyle(this.ck.PaintStyle.Fill);
 
-        for (const sp of points) {
-            for (const p of sp.points) {
+        // Draw hover segment highlight
+        if (im.hoverSegment) {
+            const h = im.hoverSegment;
+            const sp = points[h.subpathIndex];
+            const p1 = sp.points[h.segmentIndex];
+            const p2 = sp.points[(h.segmentIndex + 1) % sp.points.length];
+            
+            // Only draw if not closed or not at the end
+            if (sp.closed || h.segmentIndex < sp.points.length - 1) {
+                const highlightPaint = new this.ck.Paint();
+                highlightPaint.setColor(this.ck.Color(0, 162, 255, 0.4));
+                highlightPaint.setStyle(this.ck.PaintStyle.Stroke);
+                highlightPaint.setStrokeWidth(lineWidth * 3);
+
+                const path = new this.ck.Path();
+                const a1 = { x: t[0] * p1.x + t[1] * p1.y + t[2], y: t[3] * p1.x + t[4] * p1.y + t[5] };
+                const c1 = { x: t[0] * p1.cp2[0] + t[1] * p1.cp2[1] + t[2], y: t[3] * p1.cp2[0] + t[4] * p1.cp2[1] + t[5] };
+                const c2 = { x: t[0] * p2.cp1[0] + t[1] * p2.cp1[1] + t[2], y: t[3] * p2.cp1[0] + t[4] * p2.cp1[1] + t[5] };
+                const a2 = { x: t[0] * p2.x + t[1] * p2.y + t[2], y: t[3] * p2.x + t[4] * p2.y + t[5] };
+                
+                path.moveTo(a1.x, a1.y);
+                path.cubicTo(c1.x, c1.y, c2.x, c2.y, a2.x, a2.y);
+                canvas.drawPath(path, highlightPaint);
+                
+                path.delete();
+                highlightPaint.delete();
+            }
+        }
+
+        for (let si = 0; si < points.length; si++) {
+            const sp = points[si];
+            for (let i = 0; i < sp.points.length; i++) {
+                const p = sp.points[i];
                 const ax = t[0] * p.x + t[1] * p.y + t[2];
                 const ay = t[3] * p.x + t[4] * p.y + t[5];
                 const c1x = t[0] * p.cp1[0] + t[1] * p.cp1[1] + t[2];
@@ -995,12 +1131,9 @@ export class Renderer {
                     canvas.drawCircle(c2x, c2y, handleSize, handleFill);
                 }
 
-                canvas.drawRect(this.ck.LTRBRect(
-                    ax - dotSize, ay - dotSize, ax + dotSize, ay + dotSize
-                ), anchorFill);
-                canvas.drawRect(this.ck.LTRBRect(
-                    ax - dotSize, ay - dotSize, ax + dotSize, ay + dotSize
-                ), anchorStroke);
+                const isSelected = im.selectedPoints.has(`${si}:${i}`);
+                canvas.drawCircle(ax, ay, dotSize, isSelected ? selectedFill : anchorFill);
+                canvas.drawCircle(ax, ay, dotSize, anchorStroke);
             }
         }
 

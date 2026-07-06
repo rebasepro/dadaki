@@ -1,15 +1,16 @@
-
 import { UIEngine } from './ui';
 import { Renderer } from './renderer';
 import { FileIO } from './file_io';
 import { SnapEngine, type SnapGuide } from './snapping';
 import type { WasmScene } from './wasm_scene';
 import type { PenPathPoint, Subpath } from './types';
+import { outlineStroke } from './outline_stroke';
 import {
-    addAnchorPoint, deleteAnchorPoint,
-    splitPathAtSegment, splitPathAtPoint,
-    joinSubpaths, findNearestSegment,
-    type SegmentHitResult,
+    addAnchorPoint,
+    findNearestSegment,
+    joinSubpaths,
+    splitPathAtPoint,
+    splitPathAtSegment,
 } from './path_ops';
 
 export class InputManager {
@@ -72,15 +73,19 @@ export class InputManager {
     draggingHandleType: 'anchor' | 'cp1' | 'cp2' | null = null;
     /** Transform of the node being edited (for world<->local conversion). */
     editingTransform: Float32Array | null = null;
+    /** Set of selected points in the format "subpathIndex:pointIndex" */
+    selectedPoints: Set<string> = new Set();
+    /** The selected anchor index in path editing (for delete point). */
+    selectedAnchorSubpath: number = -1;
+    selectedAnchorIndex: number = -1;
+    /** The segment currently under the cursor in edit mode. */
+    hoverSegment: { subpathIndex: number; segmentIndex: number } | null = null;
 
     // --- Path operation state ---
     /** True when Add Point mode is active (next click on segment adds a point). */
     addPointMode: boolean = false;
     /** World-space point on nearest segment for scissors/add-point hover preview. */
     scissorsHoverPoint: { x: number; y: number } | null = null;
-    /** The selected anchor index in path editing (for delete point). */
-    selectedAnchorSubpath: number = -1;
-    selectedAnchorIndex: number = -1;
 
     // --- Resize handle state ---
     resizeHandleType: string | null = null; // 'nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w', or null
@@ -91,6 +96,15 @@ export class InputManager {
     resizeSnapshot: Uint8Array | null = null;
     /** Current calculated bounds during a resize drag, read by Renderer for smooth sticky handles. */
     liveResizeBounds: { x: number; y: number; w: number; h: number } | null = null;
+
+    // --- Corner radius handle state ---
+    cornerRadiusDragging: { nodeId: number; startRadius: number; startPos: { x: number; y: number } } | null = null;
+
+    // --- Arrow key nudge grouping state ---
+    /** Timer that fires after 500ms of no nudging, to finalise the grouped nudge undo step. */
+    private nudgeTimer: ReturnType<typeof setTimeout> | null = null;
+    /** True while a nudge sequence is in progress (history was already saved at the start). */
+    private nudgeInProgress: boolean = false;
 
     constructor(canvas: HTMLCanvasElement, scene: WasmScene, ui: UIEngine, renderer: Renderer) {
         this.canvas = canvas;
@@ -233,10 +247,8 @@ export class InputManager {
             case 'ungroup':
                 this.ungroupSelection();
                 break;
-            case 'convert-to-path':
-                for (const id of selection) {
-                    this.scene.convertToPath(id);
-                }
+            case 'flatten':
+                this.flattenSelection();
                 break;
         }
         this.ui.updateLayerList();
@@ -403,11 +415,10 @@ export class InputManager {
             }
         }
 
-        // Delete — in path editing mode, delete the selected anchor point
+        // Delete — in path editing mode, delete the selected anchor point(s)
         if (e.key === 'Backspace' || e.key === 'Delete') {
-            if (this.editingNodeId !== null && this.draggingHandleType === null
-                && this.selectedAnchorSubpath >= 0 && this.selectedAnchorIndex >= 0) {
-                this.deleteSelectedPoint();
+            if (this.editingNodeId !== null && this.selectedPoints.size > 0) {
+                this.deleteSelectedPoints();
             } else {
                 this.deleteSelection();
             }
@@ -502,6 +513,10 @@ export class InputManager {
                     const parentNode = parentId >= 0 ? this.scene.getNode(parentId) : null;
 
                     if (parentNode && parentNode.node_type === 'Group') {
+                        // Snapshot the current state BEFORE exiting the group
+                        // so that Ctrl+Z can revert back into the group context
+                        // with the element in its pre-move position.
+                        this.scene.pushHistorySnapshot();
                         // Exit group context: select the parent group
                         this.scene.selectNode(parentId, false);
                     } else {
@@ -548,7 +563,14 @@ export class InputManager {
             this.duplicateSelection();
         }
 
-        // Arrow key nudging
+        // Cmd+E / Ctrl+E: flatten selection
+        if ((e.metaKey || e.ctrlKey) && e.key === 'e' && !e.shiftKey) {
+            e.preventDefault();
+            this.flattenSelection();
+        }
+
+        // Arrow key nudging — consecutive presses within 500ms are grouped
+        // into a single undo step so Ctrl+Z reverts the whole sequence at once.
         if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
             const selection = this.scene.engine!.get_selection();
             if (selection.length > 0) {
@@ -559,7 +581,22 @@ export class InputManager {
                 if (e.key === 'ArrowRight') dx = step;
                 if (e.key === 'ArrowUp') dy = -step;
                 if (e.key === 'ArrowDown') dy = step;
-                this.scene.saveMoveHistory();
+
+                // Save history only at the START of a nudge sequence
+                if (!this.nudgeInProgress) {
+                    this.scene.saveMoveHistory();
+                    this.nudgeInProgress = true;
+                }
+
+                // Reset the debounce timer on every keypress
+                if (this.nudgeTimer !== null) {
+                    clearTimeout(this.nudgeTimer);
+                }
+                this.nudgeTimer = setTimeout(() => {
+                    this.nudgeInProgress = false;
+                    this.nudgeTimer = null;
+                }, 500);
+
                 for (const id of selection) {
                     this.scene.moveNode(id, dx, dy);
                 }
@@ -775,8 +812,8 @@ export class InputManager {
         }
 
         if (this.ui.activeTool === 'selection') {
-            // Check resize handles first
-            const handle = this.checkResizeHandle(this.startPos);
+            // Check resize handles first (skip in node-editing mode)
+            const handle = this.editingNodeId === null ? this.checkResizeHandle(this.startPos) : null;
             if (handle) {
                 this.resizeHandleType = handle.type;
                 this.resizeStartBounds = this.getSelectionBounds();
@@ -786,6 +823,21 @@ export class InputManager {
                 this.snap.begin(this.scene, this.resizeTargetIds);
                 this.scene.saveMoveHistory();
                 return;
+            }
+
+            // Check corner radius handles (skip in node-editing mode)
+            const crHandle = this.editingNodeId === null ? this.checkCornerRadiusHandle(this.startPos) : null;
+            if (crHandle) {
+                const node = this.scene.getNode(crHandle.nodeId);
+                if (node) {
+                    this.cornerRadiusDragging = {
+                        nodeId: crHandle.nodeId,
+                        startRadius: node.style.corner_radius || 0,
+                        startPos: { ...this.startPos }
+                    };
+                    this.scene.saveMoveHistory();
+                    return;
+                }
             }
 
             const isDeepSelect = e.metaKey || e.ctrlKey;
@@ -926,24 +978,64 @@ export class InputManager {
 
             const hitInfo = this.findNearestHandle(pos);
             if (hitInfo) {
-                this.draggingSubpathIndex = hitInfo.subpathIndex;
-                this.draggingPointIndex = hitInfo.index;
-                this.draggingHandleType = hitInfo.type;
-                // Track selected anchor for delete point
+                const pointKey = `${hitInfo.subpathIndex}:${hitInfo.index}`;
+
                 if (hitInfo.type === 'anchor') {
+                    if (isShift) {
+                        if (this.selectedPoints.has(pointKey)) {
+                            this.selectedPoints.delete(pointKey);
+                        } else {
+                            this.selectedPoints.add(pointKey);
+                            this.selectedAnchorSubpath = hitInfo.subpathIndex;
+                            this.selectedAnchorIndex = hitInfo.index;
+                        }
+                    } else {
+                        if (!this.selectedPoints.has(pointKey)) {
+                            this.selectedPoints.clear();
+                            this.selectedPoints.add(pointKey);
+                        }
+                        this.selectedAnchorSubpath = hitInfo.subpathIndex;
+                        this.selectedAnchorIndex = hitInfo.index;
+                    }
+                } else {
+                    // Control point clicked: usually deselects others unless it's the current point's handles
+                    if (!isShift) this.selectedPoints.clear();
+                    this.selectedPoints.add(pointKey);
                     this.selectedAnchorSubpath = hitInfo.subpathIndex;
                     this.selectedAnchorIndex = hitInfo.index;
                 }
+
+                this.draggingSubpathIndex = hitInfo.subpathIndex;
+                this.draggingPointIndex = hitInfo.index;
+                this.draggingHandleType = hitInfo.type;
                 this.scene.saveMoveHistory();
                 return;
             } else {
-                // Clicked empty space in edit mode — deselect anchor
-                this.selectedAnchorSubpath = -1;
-                this.selectedAnchorIndex = -1;
+                // Clicked empty space in edit mode — start marquee for points
+                if (!isShift) {
+                    this.selectedPoints.clear();
+                    this.selectedAnchorSubpath = -1;
+                    this.selectedAnchorIndex = -1;
+                }
+
+                // Hit test to see if we're clicking ANOTHER node
+                const hitId = this.scene.hitTest(pos.x, pos.y);
+                if (hitId !== undefined && hitId !== this.editingNodeId) {
+                    this.scene.selectNode(hitId, isShift);
+                    this.ui.syncWithSelection();
+                    this.ui.updateLayerList();
+                    this.enterPathEditMode(hitId);
+                    return;
+                }
+
+                // Otherwise, start point marquee
+                this.dragMode = 'marquee'; // Reuse marquee mode, will handle in onMouseMove
+                this.marqueeRect = { x: pos.x, y: pos.y, w: 0, h: 0 };
+                return;
             }
         }
 
-        // Hit test to find a node
+        // Not in edit mode yet: hit test to find a node
         const hitId = this.scene.hitTest(pos.x, pos.y);
         if (hitId !== undefined) {
             this.scene.selectNode(hitId, isShift);
@@ -960,18 +1052,23 @@ export class InputManager {
                     this.draggingSubpathIndex = hitInfo.subpathIndex;
                     this.draggingPointIndex = hitInfo.index;
                     this.draggingHandleType = hitInfo.type;
+                    const pointKey = `${hitInfo.subpathIndex}:${hitInfo.index}`;
+                    this.selectedPoints.add(pointKey);
+                    this.selectedAnchorSubpath = hitInfo.subpathIndex;
+                    this.selectedAnchorIndex = hitInfo.index;
                     this.scene.saveMoveHistory();
                 }
             }
         } else {
-            // Clicked empty space — deselect
+            // Clicked empty space outside any node — deselect everything and exit edit mode
             if (!isShift) {
                 this.scene.engine!.clear_selection();
                 this.ui.syncWithSelection();
                 this.ui.updateLayerList();
+                this.editingNodeId = null;
+                this.editingPoints = null;
+                this.selectedPoints.clear();
             }
-            this.editingNodeId = null;
-            this.editingPoints = null;
         }
     }
 
@@ -1152,40 +1249,55 @@ export class InputManager {
         return true;
     }
 
-    /** Delete the currently selected anchor point in path editing mode. */
-    deleteSelectedPoint() {
-        if (!this.editingNodeId || !this.editingPoints) return;
+    /** Delete the currently selected anchor points in path editing mode. */
+    deleteSelectedPoints() {
+        if (this.editingNodeId === null || !this.editingPoints) return;
+        if (this.selectedPoints.size === 0) return;
 
-        // Use the last-clicked anchor if tracked, or the dragging point
-        let si = this.selectedAnchorSubpath;
-        let pi = this.selectedAnchorIndex;
-        if (si < 0 || pi < 0) {
-            si = this.draggingSubpathIndex;
-            pi = this.draggingPointIndex;
+        let currentSubpaths = JSON.parse(JSON.stringify(this.editingPoints));
+
+        // Group points by subpath to delete efficiently
+        const grouped = new Map<number, number[]>();
+        for (const key of this.selectedPoints) {
+            const [si, pi] = key.split(':').map(Number);
+            if (!grouped.has(si)) grouped.set(si, []);
+            grouped.get(si)!.push(pi);
         }
-        if (si < 0 || pi < 0) return;
 
-        const newSubpaths = deleteAnchorPoint(this.editingPoints, si, pi);
+        // Sort subpaths in descending order to avoid index shifts if subpaths are removed
+        const sortedSubpathIndices = Array.from(grouped.keys()).sort((a, b) => b - a);
 
-        if (newSubpaths.length === 0) {
-            // All points deleted — remove the node entirely
+        for (const si of sortedSubpathIndices) {
+            const pointIndices = grouped.get(si)!.sort((a, b) => b - a);
+            const sp = currentSubpaths[si];
+            for (const pi of pointIndices) {
+                sp.points.splice(pi, 1);
+            }
+            // If too few points remain, remove the entire subpath
+            if (sp.points.length < 2) {
+                currentSubpaths.splice(si, 1);
+            }
+        }
+
+        if (currentSubpaths.length === 0) {
+            // Deleted all points — remove the node
+            this.scene.removeNodes([this.editingNodeId]);
             this.editingNodeId = null;
             this.editingPoints = null;
-            this.editingTransform = null;
+            this.selectedPoints.clear();
+        } else {
+            this.scene.saveMoveHistory();
+            this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(currentSubpaths));
+            this.editingPoints = currentSubpaths;
+            this.selectedPoints.clear();
             this.selectedAnchorSubpath = -1;
             this.selectedAnchorIndex = -1;
-            this.deleteSelection();
-            return;
+            this.draggingHandleType = null;
+            this.ui.contextBar?.refresh();
         }
 
-        this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(newSubpaths));
-        this.editingPoints = newSubpaths;
-        this.selectedAnchorSubpath = -1;
-        this.selectedAnchorIndex = -1;
-        this.draggingSubpathIndex = -1;
-        this.draggingPointIndex = -1;
-        this.draggingHandleType = null;
-        this.ui.contextBar?.refresh();
+        this.ui.syncWithSelection();
+        this.ui.updateLayerList();
     }
 
     /** Join two selected path nodes by connecting their nearest endpoints. */
@@ -1300,6 +1412,107 @@ export class InputManager {
         this.ui.syncWithSelection();
     }
 
+    /**
+     * Flatten selection: collapse each node into the simplest possible filled
+     * path(s).  This is the "Expand" operation from Illustrator:
+     *
+     *  1. Text → path outlines  (Create Outlines)
+     *  2. Rect / Ellipse → path  (Convert to Path)
+     *  3. Non-identity transform → baked into geometry  (Flatten Transform)
+     *  4. Stroke handling:
+     *     • fill + stroke → split into two sibling paths in a group
+     *       (fill path keeps fill, outline path gets fill=stroke color)
+     *     • stroke only   → outline stroke in-place (fill=stroke, stroke=none)
+     *     • fill only     → nothing extra
+     *
+     * Everything is wrapped in a single undo step.
+     */
+    flattenSelection() {
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length === 0) return;
+
+        // Exit path editing if active — flattening changes geometry
+        if (this.editingNodeId !== null) {
+            this.editingNodeId = null;
+            this.editingPoints = null;
+            this.editingTransform = null;
+        }
+
+        this.scene.transaction(() => {
+            // Track which nodes end up selected after flatten
+            const newSelection: number[] = [];
+
+            for (const id of selection) {
+                const node = this.scene.getNode(id);
+                if (!node) { newSelection.push(id); continue; }
+
+                // ── Step 1: Text → Path (create outlines) ──────────────
+                if (node.node_type === 'Text') {
+                    const subpaths = this.renderer.getTextPath(id);
+                    if (subpaths && subpaths.length > 0) {
+                        this.scene.replaceGeometryWithPath(id, subpaths);
+                    } else {
+                        // Can't outline this text — skip
+                        newSelection.push(id);
+                        continue;
+                    }
+                }
+
+                // ── Step 2: Rect / Ellipse → Path ──────────────────────
+                if (node.node_type === 'Rect' || node.node_type === 'Ellipse') {
+                    this.scene.convertToPath(id);
+                }
+
+                // ── Step 3: Bake transform into geometry ───────────────
+                this.scene.flattenTransform(id);
+
+                // ── Step 4: Handle strokes ─────────────────────────────
+                const style = this.scene.getNodeStyle(id);
+                const hasStroke = style.stroke !== null && style.stroke_width > 0;
+                const hasFill = style.fill !== null;
+
+                if (hasStroke && hasFill) {
+                    // Fill + Stroke → split into two paths in a group
+                    // 1. Duplicate the node for the stroke outline
+                    const strokeNodeId = this.scene.duplicateNode(id);
+                    // duplicate_node offsets +20,+20 — undo it so the outline sits exactly on top
+                    this.scene.moveNode(strokeNodeId, -20, -20);
+
+                    // 2. Original keeps fill, loses stroke
+                    const fillStyle = { ...style, stroke: null, stroke_width: 0 };
+                    this.scene.setNodeStyleNoHistory(id, JSON.stringify(fillStyle));
+
+                    // 3. Duplicate becomes the stroke outline (fill = stroke color, stroke = none)
+                    outlineStroke(this.ui.ck, this.scene, strokeNodeId);
+
+                    // 4. Group them (fill behind, stroke outline on top)
+                    const groupId = this.scene.groupNodes([id, strokeNodeId]);
+                    newSelection.push(groupId);
+
+                } else if (hasStroke && !hasFill) {
+                    // Stroke only → outline in place
+                    outlineStroke(this.ui.ck, this.scene, id);
+                    newSelection.push(id);
+
+                } else {
+                    // Fill only or no paint → nothing more to do
+                    newSelection.push(id);
+                }
+            }
+
+            // Restore selection to the resulting nodes
+            this.scene.engine!.clear_selection();
+            for (const id of newSelection) {
+                this.scene.selectNode(id, true);
+            }
+        });
+
+        this.scene.invalidateCache();
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.ui.contextBar?.refresh();
+    }
+
     /** Whether the current pen path was closed by clicking near the first point. */
     penPathClosed: boolean = false;
 
@@ -1378,9 +1591,9 @@ export class InputManager {
         }
         if (this.isSpacePan) return; // hand tool active — no hover/tool behavior
 
-        // Hover cursor for resize handles (when not dragging)
+        // Hover cursor for resize handles (when not dragging, skip in node-editing mode)
         if (!this.isMouseDown && this.ui.activeTool === 'selection') {
-            const handle = this.checkResizeHandle(this.currentPos);
+            const handle = this.editingNodeId === null ? this.checkResizeHandle(this.currentPos) : null;
             if (handle) {
                 this.hoverNodeId = null;
                 const cursorMap: Record<string, string> = {
@@ -1390,6 +1603,10 @@ export class InputManager {
                     'e': 'ew-resize', 'w': 'ew-resize',
                 };
                 this.canvas.style.cursor = cursorMap[handle.type] || 'default';
+            } else if (this.editingNodeId === null && this.checkCornerRadiusHandle(this.currentPos)) {
+                this.hoverNodeId = null;
+                // Diagonal pointer — corner radius handles sit on the diagonal
+                this.canvas.style.cursor = 'pointer';
             } else {
                 const hitId = this.getTargetIdForHit(this.currentPos);
                 this.hoverNodeId = hitId ?? null;
@@ -1408,9 +1625,11 @@ export class InputManager {
             this.canvas.style.cursor = faceId >= 0 ? 'crosshair' : 'default';
         }
 
-        // Scissors / Add-Point hover preview
-        if (!this.isMouseDown && (this.ui.activeTool === 'scissors' || (this.ui.activeTool === 'direct' && this.addPointMode))) {
+        // Scissors / Add-Point / Segment hover preview
+        if (!this.isMouseDown && (this.ui.activeTool === 'scissors' || (this.ui.activeTool === 'direct' && this.editingNodeId))) {
             this.scissorsHoverPoint = null;
+            this.hoverSegment = null;
+
             // For scissors: hit test all visible paths
             if (this.ui.activeTool === 'scissors') {
                 const hitId = this.scene.hitTest(this.currentPos.x, this.currentPos.y);
@@ -1423,13 +1642,19 @@ export class InputManager {
                     }
                 }
             }
-            // For add-point mode: hit test the editing path's segments
+            // For direct tool: hit test the editing path's segments for highlighting or add-point
             else if (this.editingNodeId && this.editingPoints && this.editingTransform) {
                 const seg = findNearestSegment(this.editingPoints, this.editingTransform, this.currentPos.x, this.currentPos.y, 10 / this.renderer.zoom);
-                if (seg) this.scissorsHoverPoint = { x: seg.worldX, y: seg.worldY };
+                if (seg) {
+                    this.hoverSegment = { subpathIndex: seg.subpathIndex, segmentIndex: seg.segmentIndex };
+                    if (this.addPointMode) {
+                        this.scissorsHoverPoint = { x: seg.worldX, y: seg.worldY };
+                    }
+                }
             }
         } else {
             this.scissorsHoverPoint = null;
+            this.hoverSegment = null;
         }
 
         if (!this.isMouseDown) return;
@@ -1437,6 +1662,57 @@ export class InputManager {
         const dy = this.currentPos.y - lastPos.y;
 
         if (this.ui.activeTool === 'selection') {
+            // Corner radius drag
+            if (this.cornerRadiusDragging) {
+                const { nodeId, startRadius, startPos } = this.cornerRadiusDragging;
+                const node = this.scene.getNode(nodeId);
+                if (node && node.geometry.Rect) {
+                    const rect = node.geometry.Rect;
+                    const transform = this.scene.getTransform(nodeId);
+
+                    const a = transform[0], b = transform[1], tx = transform[2];
+                    const c = transform[3], d = transform[4], ty = transform[5];
+                    const det = a * d - b * c;
+                    const invDet = 1 / det;
+                    const ia = d * invDet, ib = -b * invDet, ic = -c * invDet, id_ = a * invDet;
+                    const itx = (b * ty - d * tx) * invDet, ity = (c * tx - a * ty) * invDet;
+
+                    const slx = ia * startPos.x + ib * startPos.y + itx;
+                    const sly = ic * startPos.x + id_ * startPos.y + ity;
+                    const clx = ia * this.currentPos.x + ib * this.currentPos.y + itx;
+                    const cly = ic * this.currentPos.x + id_ * this.currentPos.y + ity;
+
+                    const corners = [
+                        [0, 0, 1, 1],
+                        [rect.width, 0, -1, 1],
+                        [rect.width, rect.height, -1, -1],
+                        [0, rect.height, 1, -1]
+                    ];
+
+                    let bestDist = Infinity;
+                    let bestCorner = corners[0];
+                    for (const cor of corners) {
+                        const d = Math.hypot(slx - cor[0], sly - cor[1]);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            bestCorner = cor;
+                        }
+                    }
+
+                    const dx_local = clx - slx;
+                    const dy_local = cly - sly;
+                    const dragProj = (dx_local * bestCorner[2] + dy_local * bestCorner[3]) / Math.SQRT2;
+
+                    let newRadius = startRadius + dragProj * Math.SQRT2;
+                    newRadius = Math.round(Math.max(0, Math.min(newRadius, rect.width / 2, rect.height / 2)));
+
+                    const style = { ...node.style, corner_radius: newRadius };
+                    this.scene.setNodeStyleNoHistory(nodeId, JSON.stringify(style));
+                    this.ui.syncWithSelection({ interactive: true });
+                    return;
+                }
+            }
+
             // Resize handle drag (checked before dragMode since resize returns early from mouseDown)
             if (this.resizeHandleType && this.resizeStartBounds && this.resizeTargetIds.length > 0 && this.resizeSnapshot) {
                 const bounds = this.resizeStartBounds;
@@ -1634,6 +1910,26 @@ export class InputManager {
             this.marqueeRect.y = y;
             this.marqueeRect.w = w;
             this.marqueeRect.h = h;
+
+            // If in path edit mode, marquee selects points
+            if (this.ui.activeTool === 'direct' && this.editingNodeId !== null && this.editingPoints && this.editingTransform) {
+                const t = this.editingTransform;
+                const rect = this.marqueeRect;
+
+                if (!e.shiftKey) this.selectedPoints.clear();
+
+                for (let si = 0; si < this.editingPoints.length; si++) {
+                    const sp = this.editingPoints[si];
+                    for (let i = 0; i < sp.points.length; i++) {
+                        const p = sp.points[i];
+                        const wx = t[0] * p.x + t[1] * p.y + t[2];
+                        const wy = t[3] * p.x + t[4] * p.y + t[5];
+                        if (wx >= rect.x && wx <= rect.x + rect.w && wy >= rect.y && wy <= rect.y + rect.h) {
+                            this.selectedPoints.add(`${si}:${i}`);
+                        }
+                    }
+                }
+            }
         }
 
         // Update live preview for shape creation
@@ -1704,29 +2000,47 @@ export class InputManager {
         }
 
         // Direct selection: drag point or handle
-        if (this.ui.activeTool === 'direct' && this.draggingHandleType && this.editingPoints) {
+        if (this.ui.activeTool === 'direct' && this.draggingHandleType && this.editingPoints && this.editingTransform) {
             const sp = this.editingPoints[this.draggingSubpathIndex];
             if (!sp) return;
             const p = sp.points[this.draggingPointIndex];
             if (!p) return;
-            let local = this.worldToLocal(this.currentPos.x, this.currentPos.y);
+
+            // Compute world-space drag position
+            let worldPos = this.currentPos;
+            this.activeSnapGuides = [];
 
             if (this.draggingHandleType === 'anchor') {
-                // Shift: constrain anchor movement to axis
-                if (e.shiftKey) {
-                    const startLocal = this.worldToLocal(this.startPos.x, this.startPos.y);
-                    const constrained = this.constrainToAxis(startLocal, local);
-                    local = constrained;
+                // Snapping for anchors (bypass with Cmd/Ctrl)
+                if (!e.metaKey && !e.ctrlKey) {
+                    const s = this.snap.snapPoint(worldPos.x, worldPos.y, 8 / this.renderer.zoom);
+                    worldPos = { x: s.x, y: s.y };
+                    this.activeSnapGuides = s.guides;
                 }
+
+                // Axis constraint (Shift)
+                if (e.shiftKey) {
+                    worldPos = this.constrainToAxis(this.startPos, worldPos);
+                }
+            }
+
+            const local = this.worldToLocal(worldPos.x, worldPos.y);
+
+            if (this.draggingHandleType === 'anchor') {
                 const ldx = local.x - p.x;
                 const ldy = local.y - p.y;
-                p.x = local.x;
-                p.y = local.y;
-                // Move handles with the anchor
-                p.cp1[0] += ldx;
-                p.cp1[1] += ldy;
-                p.cp2[0] += ldx;
-                p.cp2[1] += ldy;
+
+                // Move all selected points
+                for (const key of this.selectedPoints) {
+                    const [si, pi] = key.split(':').map(Number);
+                    const pt = this.editingPoints[si].points[pi];
+                    pt.x += ldx;
+                    pt.y += ldy;
+                    pt.cp1[0] += ldx;
+                    pt.cp1[1] += ldy;
+                    pt.cp2[0] += ldx;
+                    pt.cp2[1] += ldy;
+                }
             } else if (this.draggingHandleType === 'cp1') {
                 p.cp1[0] = local.x;
                 p.cp1[1] = local.y;
@@ -1750,6 +2064,7 @@ export class InputManager {
                 JSON.stringify(this.editingPoints)
             );
             this.scene.invalidateCache();
+            this.ui.syncWithSelection({ interactive: true });
         }
     }
 
@@ -1778,6 +2093,15 @@ export class InputManager {
             this.ui.updateLayerList();
             this.ui.syncWithSelection();
         }
+        // Clean up corner radius dragging
+        if (this.cornerRadiusDragging) {
+            this.cornerRadiusDragging = null;
+            this.scene.invalidateCache();
+            this.scene.autosave?.trigger();
+            this.ui.syncWithSelection();
+            return;
+        }
+
         this.canvas.style.cursor = 'default';
 
         if (this.resizeHandleType) {
@@ -1792,7 +2116,7 @@ export class InputManager {
             this.ui.syncWithSelection();
             return;
         }
-        
+
         const endPos = this.getPos(e);
         const dist = Math.hypot(endPos.x - this.startPos.x, endPos.y - this.startPos.y);
 
@@ -1912,9 +2236,59 @@ export class InputManager {
         return null;
     }
 
-    /** 
+    checkCornerRadiusHandle(pos: { x: number; y: number }): { nodeId: number } | null {
+        const selection = this.scene.getSelection();
+        if (selection.length !== 1) return null;
+
+        const id = selection[0];
+        const node = this.scene.getNode(id);
+        if (!node || !node.geometry.Rect) return null;
+
+        const rect = node.geometry.Rect;
+        const radius = node.style.corner_radius || 0;
+        const transform = this.scene.getTransform(id);
+
+        // Convert world position to local space
+        // Skia row-major: [a, b, tx, c, d, ty, 0, 0, 1]
+        const a = transform[0], b = transform[1], tx = transform[2];
+        const c = transform[3], d = transform[4], ty = transform[5];
+
+        const det = a * d - b * c;
+        if (Math.abs(det) < 1e-6) return null;
+        const invDet = 1 / det;
+        const ia = d * invDet;
+        const ib = -b * invDet;
+        const ic = -c * invDet;
+        const id_ = a * invDet;
+        const itx = (b * ty - d * tx) * invDet;
+        const ity = (c * tx - a * ty) * invDet;
+
+        const lx = ia * pos.x + ib * pos.y + itx;
+        const ly = ic * pos.x + id_ * pos.y + ity;
+
+        const visualMin = 14 / this.renderer.zoom;
+        const rx = Math.min(Math.max(radius, visualMin), rect.width / 2);
+        const ry = Math.min(Math.max(radius, visualMin), rect.height / 2);
+
+        const handlePos = [
+            [rx, ry],
+            [rect.width - rx, ry],
+            [rect.width - rx, rect.height - ry],
+            [rx, rect.height - ry]
+        ];
+
+        const threshold = 10 / this.renderer.zoom;
+        for (const [hx, hy] of handlePos) {
+            if (Math.abs(lx - hx) < threshold && Math.abs(ly - hy) < threshold) {
+                return { nodeId: id };
+            }
+        }
+        return null;
+    }
+
+    /**
      * Find the node that should be selected given a hit position and the current selection.
-     * This implements "context-aware" selection: if you are inside a group, you select 
+     * This implements "context-aware" selection: if you are inside a group, you select
      * siblings/children of that group. If not, you select the topmost group.
      */
     private getTargetIdForHit(pos: { x: number; y: number }, deepSelect: boolean = false): number | undefined {
@@ -1934,7 +2308,7 @@ export class InputManager {
         // We have a selection. Let's see if the raw hit is "inside" the current context.
         // A common context is the parent of the first selected item.
         const contextParentId = this.scene.getNodeParent(selection[0]);
-        
+
         if (contextParentId === -1) {
             // Selected item is at root. Default to topmost group.
             return this.scene.hitTestGrouped(pos.x, pos.y);
@@ -1953,5 +2327,15 @@ export class InputManager {
 
         // Hit is outside current context. Fall back to topmost group.
         return this.scene.hitTestGrouped(pos.x, pos.y);
+    }
+
+    /** Convert a text node to a path node (destructive). */
+    createOutlines(id: number) {
+        const subpaths = this.renderer.getTextPath(id);
+        if (subpaths && subpaths.length > 0) {
+            this.scene.replaceGeometryWithPath(id, subpaths);
+            this.ui.syncWithSelection();
+            this.ui.updateLayerList();
+        }
     }
 }

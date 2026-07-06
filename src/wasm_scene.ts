@@ -146,6 +146,17 @@ export class WasmScene {
         this.autosave?.trigger();
     }
 
+    /**
+     * Public entry point for callers (e.g. InputManager) that need to push an
+     * explicit undo snapshot — for example before a batch of grouped nudges or
+     * when exiting a group context.  Unlike the private saveHistory(), this
+     * also triggers autosave so disk state stays current.
+     */
+    pushHistorySnapshot() {
+        this.saveHistory();
+        this.autosave?.trigger();
+    }
+
     selectNode(id: number, multi: boolean) {
         this.engine!.select_node(id, multi);
     }
@@ -276,6 +287,16 @@ export class WasmScene {
     /** Get a single node's geometry. */
     getNodeGeometry(id: number): import('./types').NodeGeometry {
         return JSON.parse(this.engine!.get_node_geometry_json(id));
+    }
+
+    /**
+     * Get a Path node's outline with per-vertex corner radii resolved into
+     * explicit arcs. Returns [] for non-path geometry. Used where the rounded
+     * outline is needed rather than the editable sharp geometry (SVG export,
+     * boolean ops).
+     */
+    getResolvedSubpaths(id: number): import('./types').Subpath[] {
+        return JSON.parse(this.engine!.resolve_subpaths_json(id));
     }
 
     /** Get a single node's full data as a SceneNode. */
@@ -449,6 +470,15 @@ export class WasmScene {
     setTextProperties(id: number, fontFamily: string, textAlign: number, lineHeight: number) {
         this.saveHistory();
         this.engine!.set_text_properties(id, fontFamily, textAlign, lineHeight);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** Replace a node's geometry with a new path (for Create Outlines). */
+    replaceGeometryWithPath(id: number, subpaths: any[]) {
+        this.saveHistory();
+        const json = JSON.stringify(subpaths);
+        this.engine!.replace_geometry_with_path(id, json);
         this.invalidateCache();
         this.autosave?.trigger();
     }
