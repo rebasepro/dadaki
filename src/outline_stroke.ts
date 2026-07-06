@@ -28,7 +28,8 @@ const KAPPA = 0.5522847498;
 export function outlineStroke(ck: CanvasKit, scene: WasmScene, nodeId: number): void {
     const geometry = scene.getNodeGeometry(nodeId);
     const style = scene.getNodeStyle(nodeId);
-    if (!style || style.stroke === null || style.stroke_width <= 0) return;
+    if (!style || style.strokes.length === 0 || style.strokes[0].width <= 0) return;
+    const stroke = style.strokes[0];
 
     // Build a CanvasKit path from the node's geometry (world space is not needed
     // here — we work in local space and keep the node's transform as-is).
@@ -49,24 +50,23 @@ export function outlineStroke(ck: CanvasKit, scene: WasmScene, nodeId: number): 
     }
 
     // Map stroke cap: 0 = Butt, 1 = Round, 2 = Square
-    const capMap: Record<number, number> = {
-        0: ck.StrokeCap.Butt.value,
-        1: ck.StrokeCap.Round.value,
-        2: ck.StrokeCap.Square.value,
+    const capMap: Record<number, any> = {
+        0: ck.StrokeCap.Butt,
+        1: ck.StrokeCap.Round,
+        2: ck.StrokeCap.Square,
     };
     // Map stroke join: 0 = Miter, 1 = Round, 2 = Bevel
-    const joinMap: Record<number, number> = {
-        0: ck.StrokeJoin.Miter.value,
-        1: ck.StrokeJoin.Round.value,
-        2: ck.StrokeJoin.Bevel.value,
+    const joinMap: Record<number, any> = {
+        0: ck.StrokeJoin.Miter,
+        1: ck.StrokeJoin.Round,
+        2: ck.StrokeJoin.Bevel,
     };
 
-    // Convert stroke to filled outline via CanvasKit
     const outlined = ckPath.stroke({
-        width: style.stroke_width,
-        miter_limit: style.miter_limit || 4,
-        cap: capMap[style.stroke_cap] ?? ck.StrokeCap.Butt.value,
-        join: joinMap[style.stroke_join] ?? ck.StrokeJoin.Miter.value,
+        width: stroke.width,
+        miter_limit: stroke.miter_limit || 4,
+        cap: capMap[stroke.cap] ?? ck.StrokeCap.Butt,
+        join: joinMap[stroke.join] ?? ck.StrokeJoin.Miter,
     });
 
     ckPath.delete();
@@ -76,14 +76,15 @@ export function outlineStroke(ck: CanvasKit, scene: WasmScene, nodeId: number): 
     const subpaths = parseCkPathToSubpaths(ck, outlined);
     outlined.delete();
     if (subpaths.length === 0) return;
-
+    
     // Update the node: geometry = outlined path, fill = old stroke, stroke = none
     scene.updatePathPoints(nodeId, JSON.stringify(subpaths));
 
-    const newStyle = { ...style };
-    newStyle.fill = style.stroke;
-    newStyle.stroke = null;
-    newStyle.stroke_width = 0;
+    const newStyle = { 
+        ...style,
+        fills: [stroke.paint],
+        strokes: []
+    };
     scene.setNodeStyleNoHistory(nodeId, JSON.stringify(newStyle));
 }
 

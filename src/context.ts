@@ -7,16 +7,23 @@ import type { UIEngine } from './ui';
 import type { InputManager } from './input';
 import type { WasmScene } from './wasm_scene';
 
-/** Possible editor contexts that drive the action bar content. */
+/** Possible editor contexts that drive the action bar content.
+ *
+ *  Detection is priority-ordered and mutually exclusive:
+ *    1. Modal states win (path-editing, pen-drawing) — you're mid-gesture.
+ *    2. A selection wins over the active tool — the bar acts on what you have.
+ *    3. A non-selection tool with nothing selected shows what the tool will do.
+ *    4. Otherwise the bar is hidden.
+ */
 export type EditorContext =
-    | 'empty'           // nothing selected, selection tool
-    | 'single-shape'    // one shape selected (Rect/Ellipse/Path/Text)
-    | 'multi-select'    // 2+ nodes selected
+    | 'empty'           // selection tool, nothing selected — bar hidden
+    | 'tool'            // any non-selection tool active, nothing selected/in progress
+    | 'single-shape'    // one Rect/Ellipse/Path selected
+    | 'text-selected'   // one Text node selected
     | 'group-selected'  // exactly one Group node selected
-    | 'path-editing'    // input.editingNodeId != null
+    | 'multi-select'    // 2+ nodes selected
     | 'pen-drawing'     // input.currentPathPoints.length > 0
-    | 'shape-tool'      // rect/ellipse/polygon/star/pen active, nothing in progress
-    | 'text-tool';      // text tool active
+    | 'path-editing';   // input.editingNodeId != null
 
 /** Selected node summary for the bar. */
 export interface SelectedNodeInfo {
@@ -42,11 +49,17 @@ export interface ContextInfo {
     editingNodeId: number | null;
     /** Path point count — for editing (editingPoints) or pen-drawing (currentPathPoints) */
     pointCount: number;
+    /** Number of anchor points currently selected in node-editing mode. */
+    selectedPointCount: number;
     /** The first selected node's type (for context-specific controls like corner radius) */
     primaryNodeType: string | null;
 }
 
-const SHAPE_TOOLS = new Set(['rect', 'ellipse', 'polygon', 'star', 'pen']);
+/** Every tool that isn't plain selection gets a 'tool' context (hint + tool
+ *  options) while nothing is selected or in progress. */
+const NON_SELECTION_TOOLS = new Set([
+    'direct', 'pen', 'rect', 'ellipse', 'polygon', 'star', 'text', 'scissors', 'paint-bucket',
+]);
 
 /**
  * Compute the current editor context from the live state of ui, input, and scene.
@@ -76,30 +89,32 @@ export function getEditorContext(ui: UIEngine, input: InputManager, scene: WasmS
     // Point count: editing mode uses editingPoints, pen mode uses currentPathPoints
     let pointCount = 0;
     if (editingNodeId !== null && input.editingPoints) {
-        pointCount = input.editingPoints.length;
+        pointCount = input.editingPoints.reduce((sum, sp) => sum + sp.points.length, 0);
     } else if (input.currentPathPoints.length > 0) {
         pointCount = input.currentPathPoints.length;
     }
 
+    const selectedPointCount = editingNodeId !== null ? input.selectedPoints.size : 0;
+
     const primaryNodeType = selectedNodes.length > 0 ? selectedNodes[0].node_type : null;
 
-    // Priority-ordered context detection
+    // Priority-ordered context detection: modal gesture > selection > tool > hidden
     let context: EditorContext;
 
     if (editingNodeId !== null) {
         context = 'path-editing';
     } else if (input.currentPathPoints.length > 0) {
         context = 'pen-drawing';
-    } else if (activeTool === 'text') {
-        context = 'text-tool';
-    } else if (SHAPE_TOOLS.has(activeTool) && selectedIds.length === 0) {
-        context = 'shape-tool';
     } else if (selectedIds.length === 1 && primaryNodeType === 'Group') {
         context = 'group-selected';
+    } else if (selectedIds.length === 1 && primaryNodeType === 'Text') {
+        context = 'text-selected';
     } else if (selectedIds.length === 1) {
         context = 'single-shape';
     } else if (selectedIds.length > 1) {
         context = 'multi-select';
+    } else if (NON_SELECTION_TOOLS.has(activeTool)) {
+        context = 'tool';
     } else {
         context = 'empty';
     }
@@ -111,6 +126,7 @@ export function getEditorContext(ui: UIEngine, input: InputManager, scene: WasmS
         breadcrumb,
         editingNodeId,
         pointCount,
+        selectedPointCount,
         primaryNodeType,
     };
 }

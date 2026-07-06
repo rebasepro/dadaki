@@ -166,193 +166,33 @@ impl Paint {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub enum StrokeAlignment {
-    Center,
-    Inner,
-    Outer,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Stroke {
-    pub paint: Option<Paint>,
-    pub width: f32,
-    pub cap: u8,
-    pub join: u8,
+pub struct Style {
+    pub fill: Option<Paint>,
+    pub stroke: Option<Paint>,
+    pub stroke_width: f32,
+    pub opacity: f32,
+    pub stroke_cap: u8, // 0: butt, 1: round, 2: square
+    pub stroke_join: u8, // 0: miter, 1: round, 2: bevel
     #[serde(default)]
     pub dash_array: Vec<f32>,
     #[serde(default)]
     pub dash_offset: f32,
+    #[serde(default)]
+    pub corner_radius: f32,
+    #[serde(default)]
+    pub blend_mode: u8, // 0: normal, 1: multiply, 2: screen, 3: overlay, 4: darken, 5: lighten,
+                        // 6: color-dodge, 7: color-burn, 8: hard-light, 9: soft-light,
+                        // 10: difference, 11: exclusion, 12: hue, 13: saturation, 14: color, 15: luminosity
+    #[serde(default)]
+    pub fill_rule: u8, // 0: nonzero (SVG default), 1: evenodd
     #[serde(default = "default_miter_limit")]
-    pub miter_limit: f32,
-    #[serde(default = "default_alignment")]
-    pub alignment: StrokeAlignment,
+    pub miter_limit: f32, // SVG default is 4.0
+    #[serde(default = "default_opacity")]
+    pub fill_opacity: f32, // separate fill opacity, default 1.0
 }
 
 fn default_miter_limit() -> f32 { 4.0 }
-fn default_alignment() -> StrokeAlignment { StrokeAlignment::Center }
-
-/// Decomposed local transform — THE source of truth; matrices are always derived.
-/// Matrix = T(x,y) · R(rotation_deg) · Kx(skew_x_deg) · Ky(skew_y_deg) · S(scale_x, scale_y)
-///
-/// The skew matrices use edge-length-preserving (sin/cos) form:
-///   Kx = [[1, sin(skx)], [0, cos(skx)]]  — tilts y-axis by skx, preserving y-edge length
-///   Ky = [[cos(sky), 0], [sin(sky), 1]]   — tilts x-axis by sky, preserving x-edge length
-///
-/// This differs from the CSS `tan`-based model. The key advantage is that
-/// skew preserves edge lengths, enabling constructions like isometric cubes
-/// to tile perfectly: three identical squares with matching skew+rotation
-/// will share edges of equal length.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
-pub struct Transform2D {
-    pub x: f32,
-    pub y: f32,
-    pub rotation_deg: f32,
-    pub skew_x_deg: f32,
-    pub skew_y_deg: f32,
-    pub scale_x: f32,
-    pub scale_y: f32,
-}
-
-impl Transform2D {
-    pub const IDENTITY: Self = Self {
-        x: 0.0, y: 0.0,
-        rotation_deg: 0.0,
-        skew_x_deg: 0.0, skew_y_deg: 0.0,
-        scale_x: 1.0, scale_y: 1.0,
-    };
-
-    pub fn from_translation(x: f32, y: f32) -> Self {
-        Self { x, y, ..Self::IDENTITY }
-    }
-
-    /// Compose: M = T(x,y) · R(θ) · Kx · Ky · S
-    ///
-    /// Edge-length-preserving skew matrices:
-    ///   Kx = [[1, sin(skx)], [0, cos(skx)]]  — tilts y-axis by skx
-    ///   Ky = [[cos(sky), 0], [sin(sky), 1]]   — tilts x-axis by sky
-    ///
-    /// Kx·Ky = [[cos(sky)+sin(skx)·sin(sky), sin(skx)],
-    ///          [cos(skx)·sin(sky),           cos(skx)]]
-    ///
-    /// det(Kx·Ky) = cos(skx)·cos(sky), which is positive for |skx|,|sky| < 90°.
-    pub fn to_mat3(&self) -> Mat3 {
-        let r = self.rotation_deg.to_radians();
-        let cos_r = r.cos();
-        let sin_r = r.sin();
-        let skx = self.skew_x_deg.to_radians();
-        let sky = self.skew_y_deg.to_radians();
-        let sx = self.scale_x;
-        let sy = self.scale_y;
-        // Kx·Ky combined elements:
-        let p   = sky.cos() + skx.sin() * sky.sin();  // [0,0]
-        let q   = skx.sin();                           // [0,1]
-        let ry  = skx.cos() * sky.sin();               // [1,0]
-        let ckx = skx.cos();                           // [1,1]
-        // (R · Kx·Ky · S) columns (glam is column-major):
-        Mat3::from_cols(
-            Vec3::new((cos_r * p  - sin_r * ry) * sx, (sin_r * p  + cos_r * ry) * sx, 0.0),
-            Vec3::new((cos_r * q  - sin_r * ckx) * sy, (sin_r * q  + cos_r * ckx) * sy, 0.0),
-            Vec3::new(self.x, self.y, 1.0),
-        )
-    }
-
-    /// True when the transform is finite and its linear part is invertible
-    /// and well-conditioned. This is the invariant every node transform in
-    /// the scene must satisfy at all times; setters silently reject (or roll
-    /// back) mutations that would break it (see transform_invariants tests).
-    ///
-    /// The check is deliberately on the COMPOSED MATRIX, not on component
-    /// ranges — validity must be representation-independent.
-    ///
-    /// det/(‖col0‖·‖col1‖) = sin of the angle between the basis vectors;
-    /// requiring > 1e-2 keeps the shape more than ~0.6° away from collapsing
-    /// to a line.
-    pub fn is_valid(&self) -> bool {
-        if !(self.x.is_finite() && self.y.is_finite()
-            && self.rotation_deg.is_finite()
-            && self.skew_x_deg.is_finite() && self.skew_y_deg.is_finite()
-            && self.scale_x.is_finite() && self.scale_y.is_finite())
-        {
-            return false;
-        }
-        let m = self.to_mat3();
-        let (a, b) = (m.x_axis.x, m.x_axis.y);
-        let (c, d) = (m.y_axis.x, m.y_axis.y);
-        if !(a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite()) {
-            return false;
-        }
-        let n0 = (a * a + b * b).sqrt();
-        let n1 = (c * c + d * d).sqrt();
-        let det = a * d - b * c;
-        n0 > 1e-4 && n0 < 1e7
-            && n1 > 1e-4 && n1 < 1e7
-            && det.abs() > 1e-2 * n0 * n1
-    }
-
-    /// Decompose an arbitrary 2D affine matrix into components.
-    /// skew_y_deg is always 0 in the result.
-    /// Guarantees: from_mat3(m).to_mat3() ≈ m to float precision.
-    pub fn from_mat3(m: &Mat3) -> Self {
-        let a = m.x_axis.x;
-        let b = m.x_axis.y;
-        let c = m.y_axis.x;
-        let d = m.y_axis.y;
-        let det = a * d - b * c;
-        // Scale x = length of column 0 (always positive)
-        let sx = (a * a + b * b).sqrt().max(1e-10);
-        // Rotation from column 0 direction
-        let rotation = b.atan2(a);
-        let cos_r = rotation.cos();
-        let sin_r = rotation.sin();
-        // R^-1 · M gives the shear·scale product:
-        //   [[sx, sin(skx)·sy], [0, cos(skx)·sy]]
-        let m01_prime = cos_r * c + sin_r * d;
-        let m11_prime = -sin_r * c + cos_r * d;
-        // skewX = atan2(sin(skx)·sy, cos(skx)·sy) = atan2(m01', m11')
-        // but atan2 can return values in (-180°,180°] — we need |skewX| < 90°.
-        // When m11_prime < 0 it means sy < 0 (flip), not |skewX| > 90°.
-        // Absorb the sign into sy by flipping both inputs when m11' < 0:
-        let (m01_adj, m11_adj) = if m11_prime >= 0.0 {
-            (m01_prime, m11_prime)
-        } else {
-            (-m01_prime, -m11_prime)
-        };
-        let skew_x = m01_adj.atan2(m11_adj);
-        // det(M) = sx · sy · cos(skx) · cos(sky). With sky=0: det = sx · sy · cos(skx).
-        let cos_skx = skew_x.cos();
-        let sy = if cos_skx.abs() > 1e-10 {
-            det / (sx * cos_skx)
-        } else {
-            // Fallback for skewX near ±90° (shouldn't happen with valid inputs)
-            let sin_skx = skew_x.sin();
-            if sin_skx.abs() > 1e-10 { m01_prime / sin_skx } else { 1.0 }
-        };
-        Self {
-            x: m.z_axis.x, y: m.z_axis.y,
-            rotation_deg: rotation.to_degrees(),
-            skew_x_deg: skew_x.to_degrees(),
-            skew_y_deg: 0.0,
-            scale_x: sx, scale_y: sy,
-        }
-    }
-}
-
-/// Paint order: index 0 = bottom-most layer.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Style {
-    pub fills: Vec<Paint>,
-    pub strokes: Vec<Stroke>,
-    #[serde(default = "default_opacity")]
-    pub opacity: f32,
-    #[serde(default)]
-    pub blend_mode: u8,
-    #[serde(default)]
-    pub fill_rule: u8,
-    #[serde(default)]
-    pub corner_radius: f32,
-}
-
 fn default_opacity() -> f32 { 1.0 }
 
 // ─── Precise Path Hit-Testing ───────────────────────────────────────────────────
@@ -442,12 +282,8 @@ fn dist_sq_to_polyline(poly: &[Vec2], p: Vec2, closed: bool) -> f32 {
 /// Hit test a path node in local space: stroke outline first (within
 /// stroke_width/2 + tolerance), then fill containment if the path is filled.
 fn path_hit(subpaths: &[Subpath], style: &Style, p: Vec2, tol: f32) -> bool {
-    let max_stroke_w = style.strokes.iter()
-        .filter(|s| s.paint.is_some())
-        .map(|s| s.width)
-        .fold(0.0f32, f32::max);
-    let stroke_reach = if max_stroke_w > 0.0 {
-        max_stroke_w * 0.5 + tol
+    let stroke_reach = if style.stroke.is_some() {
+        style.stroke_width * 0.5 + tol
     } else {
         tol
     };
@@ -458,7 +294,7 @@ fn path_hit(subpaths: &[Subpath], style: &Style, p: Vec2, tol: f32) -> bool {
             return true;
         }
     }
-    if !style.fills.is_empty() {
+    if style.fill.is_some() {
         return point_in_path_fill(subpaths, p, style.fill_rule == 1);
     }
     false
@@ -620,7 +456,7 @@ pub struct Node {
     pub id: u32,
     pub name: String,
     pub node_type: NodeType,
-    pub transform: Transform2D,
+    pub transform: [f32; 9], // Mat3 as flat array
     pub style: Style,
     pub geometry: Geometry,
     pub children: Vec<u32>,
@@ -833,44 +669,27 @@ impl Engine {
                 self.render_buffer.extend_from_slice(&f.to_le_bytes());
             }
 
-            // Multi-fill, Multi-stroke, and Transforms format
+            // Style: Fill paint, Stroke paint, StrokeWidth, CornerRadius,
+            // Dash (on, off, phase), MiterLimit, StyleFlags
             let s = &node.style;
-            
-            // Fills
-            let active_fills = s.fills.clone();
-            self.render_buffer.extend_from_slice(&(active_fills.len() as u32).to_le_bytes());
-            for fill in &active_fills {
-                write_paint(&mut self.render_buffer, &Some(fill.clone()));
-            }
+            write_paint(&mut self.render_buffer, &s.fill);
+            write_paint(&mut self.render_buffer, &s.stroke);
 
-            // Strokes
-            let active_strokes = s.strokes.clone();
-            self.render_buffer.extend_from_slice(&(active_strokes.len() as u32).to_le_bytes());
-            for st in &active_strokes {
-                write_paint(&mut self.render_buffer, &st.paint);
-                self.render_buffer.extend_from_slice(&st.width.to_le_bytes());
-                self.render_buffer.extend_from_slice(&(st.cap as u32).to_le_bytes());
-                self.render_buffer.extend_from_slice(&(st.join as u32).to_le_bytes());
-                let dash_on = st.dash_array.first().copied().unwrap_or(0.0);
-                let dash_off = st.dash_array.get(1).copied().unwrap_or(dash_on);
-                self.render_buffer.extend_from_slice(&dash_on.to_le_bytes());
-                self.render_buffer.extend_from_slice(&dash_off.to_le_bytes());
-                self.render_buffer.extend_from_slice(&st.dash_offset.to_le_bytes());
-                self.render_buffer.extend_from_slice(&st.miter_limit.to_le_bytes());
-                let align = match st.alignment {
-                    StrokeAlignment::Center => 0u32,
-                    StrokeAlignment::Inner => 1u32,
-                    StrokeAlignment::Outer => 2u32,
-                };
-                self.render_buffer.extend_from_slice(&align.to_le_bytes());
-            }
-
-            // Common style properties
+            self.render_buffer.extend_from_slice(&s.stroke_width.to_le_bytes());
             self.render_buffer.extend_from_slice(&s.corner_radius.to_le_bytes());
-            let style_flags: u32 = ((s.blend_mode as u32) << 16) | ((s.fill_rule as u32) << 24);
+            let dash_on = s.dash_array.first().copied().unwrap_or(0.0);
+            let dash_off = s.dash_array.get(1).copied().unwrap_or(dash_on);
+            self.render_buffer.extend_from_slice(&dash_on.to_le_bytes());
+            self.render_buffer.extend_from_slice(&dash_off.to_le_bytes());
+            self.render_buffer.extend_from_slice(&s.dash_offset.to_le_bytes());
+            // Miter limit (f32)
+            self.render_buffer.extend_from_slice(&s.miter_limit.to_le_bytes());
+            // Pack cap/join/blend/fill_rule into one u32 to preserve 4-byte alignment
+            let style_flags: u32 = (s.stroke_cap as u32)
+                | ((s.stroke_join as u32) << 8)
+                | ((s.blend_mode as u32) << 16)
+                | ((s.fill_rule as u32) << 24);
             self.render_buffer.extend_from_slice(&style_flags.to_le_bytes());
-
-            // (transform effects removed — transforms are now decomposed components)
 
             // Geometry
             match &node.geometry {
@@ -966,21 +785,28 @@ impl Engine {
             id,
             name: format!("Rect {}", id),
             node_type: NodeType::Rect,
-            transform: Transform2D::from_translation(x, y),
+            transform: Mat3::from_translation(Vec2::new(x, y)).to_cols_array(),
             style: Style {
-                fills: vec![Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })],
-                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 2.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
+                fill: Some(Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })),
+                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
+                stroke_width: 2.0,
                 opacity: 1.0,
+                stroke_cap: 0,
+                stroke_join: 0,
+                dash_array: Vec::new(),
+                dash_offset: 0.0,
+                corner_radius: 0.0,
                 blend_mode: 0,
                 fill_rule: 0,
-                corner_radius: 0.0,
+                miter_limit: 4.0,
+                fill_opacity: 1.0,
             },
             geometry: Geometry::Rect { width: w, height: h },
             children: Vec::new(),
             parent: None,
             visible: true,
             locked: false,
-            };
+        };
 
         self.scene.nodes.insert(id, node);
         self.scene.root_nodes.push(id);
@@ -998,21 +824,28 @@ impl Engine {
             id,
             name: format!("Ellipse {}", id),
             node_type: NodeType::Ellipse,
-            transform: Transform2D::from_translation(cx, cy),
+            transform: Mat3::from_translation(Vec2::new(cx, cy)).to_cols_array(),
             style: Style {
-                fills: vec![Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })],
-                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 2.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
+                fill: Some(Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })),
+                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
+                stroke_width: 2.0,
                 opacity: 1.0,
+                stroke_cap: 0,
+                stroke_join: 0,
+                dash_array: Vec::new(),
+                dash_offset: 0.0,
+                corner_radius: 0.0,
                 blend_mode: 0,
                 fill_rule: 0,
-                corner_radius: 0.0,
+                miter_limit: 4.0,
+                fill_opacity: 1.0,
             },
             geometry: Geometry::Ellipse { radius_x: rx, radius_y: ry },
             children: Vec::new(),
             parent: None,
             visible: true,
             locked: false,
-            };
+        };
 
         self.scene.nodes.insert(id, node);
         self.scene.root_nodes.push(id);
@@ -1062,14 +895,21 @@ impl Engine {
             id,
             name: format!("Path {}", id),
             node_type: NodeType::Path,
-            transform: Transform2D::from_translation(center_x, center_y),
+            transform: Mat3::from_translation(Vec2::new(center_x, center_y)).to_cols_array(),
             style: Style {
-                fills: vec![Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })],
-                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 2.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
+                fill: Some(Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })),
+                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
+                stroke_width: 2.0,
                 opacity: 1.0,
+                stroke_cap: 0,
+                stroke_join: 0,
+                dash_array: Vec::new(),
+                dash_offset: 0.0,
+                corner_radius: 0.0,
                 blend_mode: 0,
                 fill_rule: 0,
-                corner_radius: 0.0,
+                miter_limit: 4.0,
+                fill_opacity: 1.0,
             },
             geometry: Geometry::Path {
                 network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
@@ -1079,7 +919,7 @@ impl Engine {
             parent: None,
             visible: true,
             locked: false,
-            };
+        };
 
         self.scene.nodes.insert(id, node);
         self.scene.root_nodes.push(id);
@@ -1115,14 +955,21 @@ impl Engine {
             id,
             name: format!("Polygon {}", id),
             node_type: NodeType::Path,
-            transform: Transform2D::from_translation(cx, cy),
+            transform: Mat3::from_translation(Vec2::new(cx, cy)).to_cols_array(),
             style: Style {
-                fills: vec![Paint::Solid(Color { r: 0.5, g: 0.8, b: 0.5, a: 1.0 })],
-                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 2.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
+                fill: Some(Paint::Solid(Color { r: 0.5, g: 0.8, b: 0.5, a: 1.0 })),
+                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
+                stroke_width: 2.0,
                 opacity: 1.0,
+                stroke_cap: 0,
+                stroke_join: 0,
+                dash_array: Vec::new(),
+                dash_offset: 0.0,
+                corner_radius: 0.0,
                 blend_mode: 0,
                 fill_rule: 0,
-                corner_radius: 0.0,
+                miter_limit: 4.0,
+                fill_opacity: 1.0,
             },
             geometry: Geometry::Path {
                 network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
@@ -1132,7 +979,7 @@ impl Engine {
             parent: None,
             visible: true,
             locked: false,
-            };
+        };
 
         self.scene.nodes.insert(id, node);
         self.scene.root_nodes.push(id);
@@ -1170,14 +1017,21 @@ impl Engine {
             id,
             name: format!("Star {}", id),
             node_type: NodeType::Path,
-            transform: Transform2D::from_translation(cx, cy),
+            transform: Mat3::from_translation(Vec2::new(cx, cy)).to_cols_array(),
             style: Style {
-                fills: vec![Paint::Solid(Color { r: 1.0, g: 0.8, b: 0.2, a: 1.0 })],
-                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 2.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
+                fill: Some(Paint::Solid(Color { r: 1.0, g: 0.8, b: 0.2, a: 1.0 })),
+                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
+                stroke_width: 2.0,
                 opacity: 1.0,
+                stroke_cap: 0,
+                stroke_join: 0,
+                dash_array: Vec::new(),
+                dash_offset: 0.0,
+                corner_radius: 0.0,
                 blend_mode: 0,
                 fill_rule: 0,
-                corner_radius: 0.0,
+                miter_limit: 4.0,
+                fill_opacity: 1.0,
             },
             geometry: Geometry::Path {
                 network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
@@ -1187,7 +1041,7 @@ impl Engine {
             parent: None,
             visible: true,
             locked: false,
-            };
+        };
 
         self.scene.nodes.insert(id, node);
         self.scene.root_nodes.push(id);
@@ -1297,14 +1151,9 @@ impl Engine {
                     let mut max_x = f32::MIN;
                     let mut max_y = f32::MIN;
                     let mut has_points = false;
-                    // Bounds must hug the *resolved* (corner-radius-rounded) outline —
-                    // the same geometry the renderer emits. Using the raw sharp subpaths
-                    // makes the selection/resize box overshoot to the sharp corner
-                    // vertices, which sit outside the visible rounded border.
-                    let resolved = round_subpaths(subpaths);
                     // Flatten each subpath into line segments so bounds
                     // reflect the actual curve, not the control polygon.
-                    for sp in &resolved {
+                    for sp in subpaths {
                         let flattened = flatten_subpath(sp);
                         for lp in &flattened {
                             has_points = true;
@@ -1493,14 +1342,6 @@ impl Engine {
         self.global_transforms = transforms;
     }
 
-    /// Consolidates the four-call tail after any local transform mutation.
-    fn after_local_transform_change(&mut self, id: u32) {
-        self.update_node_global_transform(id);
-        self.update_spatial_index_recursive(id);
-        self.update_ancestor_group_bounds(id);
-        self.mark_dirty(id);
-    }
-
     fn update_node_global_transform(&mut self, id: u32) {
         let parent_transform = if let Some(node) = self.scene.nodes.get(&id) {
             if let Some(pid) = node.parent {
@@ -1519,7 +1360,7 @@ impl Engine {
 
     fn compute_global_transform_recursive(nodes: &HashMap<u32, Node>, id: u32, parent_transform: Mat3, transforms: &mut HashMap<u32, [f32; 9]>) {
         if let Some(node) = nodes.get(&id) {
-            let local_transform = node.transform.to_mat3();
+            let local_transform = Mat3::from_cols_array(&node.transform);
             let global_transform = parent_transform * local_transform;
             // Store in glam's native column-major format
             transforms.insert(id, global_transform.to_cols_array());
@@ -1559,14 +1400,16 @@ impl Engine {
     }
 
     pub fn move_node(&mut self, id: u32, dx: f32, dy: f32) {
-        if !dx.is_finite() || !dy.is_finite() {
-            return;
-        }
         if let Some(node) = self.scene.nodes.get_mut(&id) {
-            node.transform.x += dx;
-            node.transform.y += dy;
+            let mut transform = Mat3::from_cols_array(&node.transform);
+            transform.z_axis.x += dx;
+            transform.z_axis.y += dy;
+            node.transform = transform.to_cols_array();
+            self.update_node_global_transform(id);
+            self.update_spatial_index_recursive(id);
+            self.update_ancestor_group_bounds(id);
+            self.mark_dirty(id);
         }
-        self.after_local_transform_change(id);
     }
 
     pub fn bring_to_front(&mut self, id: u32) {
@@ -1639,135 +1482,6 @@ impl Engine {
                 }
             }
         }
-    }
-
-    /// Move `node_id` to become a child of `new_parent` (or a root when `None`),
-    /// inserted at `index` among its new siblings. The node's global (visual)
-    /// position is preserved by recomputing its local transform. Returns false
-    /// if the move is invalid (missing node, non-group parent, or a cycle).
-    ///
-    /// `index` is a raw position in the parent's `children` vec (or `root_nodes`),
-    /// where 0 is the back-most (bottom of z-order). The layer panel renders in
-    /// reverse, so the UI is responsible for translating a visual drop position
-    /// into this bottom-up index.
-    pub fn reorder_node(&mut self, node_id: u32, new_parent: Option<u32>, index: usize) -> bool {
-        self.reorder_many(&[node_id], new_parent, index) == 1
-    }
-
-    /// Batch variant of [`reorder_node`]. Moves every node in `ids_json` (a JSON
-    /// array of ids, given in bottom-up z-order) so they become contiguous
-    /// siblings under `new_parent` (or roots when `None`), starting at `index`.
-    /// Their relative order is preserved. Nodes that fail validation (missing,
-    /// non-group parent, or a cycle) are skipped. Returns the number moved.
-    pub fn reorder_nodes(&mut self, ids_json: &str, new_parent: Option<u32>, index: usize) -> u32 {
-        let ids: Vec<u32> = serde_json::from_str(ids_json).unwrap_or_default();
-        self.reorder_many(&ids, new_parent, index)
-    }
-
-    /// Shared implementation for [`reorder_node`] / [`reorder_nodes`].
-    ///
-    /// `index` is a raw position in the destination's `children` vec (or
-    /// `root_nodes`) *after* the moved nodes have been removed, where 0 is the
-    /// back-most (bottom of z-order). The layer panel renders in reverse, so the
-    /// UI is responsible for translating a visual drop position into this index.
-    fn reorder_many(&mut self, ids: &[u32], new_parent: Option<u32>, index: usize) -> u32 {
-        // Validate the destination parent once (groups only, no cycle).
-        // Keep only nodes that exist and can legally move under `new_parent`.
-        let mut valid: Vec<u32> = Vec::with_capacity(ids.len());
-        for &id in ids {
-            if !self.scene.nodes.contains_key(&id) {
-                continue;
-            }
-            if let Some(pid) = new_parent {
-                let is_group = matches!(
-                    self.scene.nodes.get(&pid).map(|n| &n.node_type),
-                    Some(NodeType::Group)
-                );
-                // Only groups can hold children; and a node can't be moved into
-                // itself or one of its own descendants (is_ancestor is true when
-                // id == pid or id is an ancestor of pid).
-                if !is_group || self.is_ancestor(id, pid) {
-                    continue;
-                }
-            }
-            if !valid.contains(&id) {
-                valid.push(id);
-            }
-        }
-        if valid.is_empty() {
-            return 0;
-        }
-
-        // Compute each node's new local transform up front from the *current*
-        // globals, so the visual position is preserved: new_local = parent⁻¹ * global.
-        let new_parent_global = match new_parent {
-            Some(pid) => self.global_transforms.get(&pid)
-                .map(|&m| Mat3::from_cols_array(&m))
-                .unwrap_or(Mat3::IDENTITY),
-            None => Mat3::IDENTITY,
-        };
-        let inv_parent = new_parent_global.inverse();
-        let locals: Vec<(u32, Transform2D)> = valid.iter().map(|&id| {
-            let g = self.global_transforms.get(&id)
-                .map(|&m| Mat3::from_cols_array(&m))
-                .unwrap_or(Mat3::IDENTITY);
-            (id, Transform2D::from_mat3(&(inv_parent * g)))
-        }).collect();
-
-        // Remove all moved nodes from their current parents / root list.
-        let mut old_parents: Vec<u32> = Vec::new();
-        for &id in &valid {
-            let old_parent = self.scene.nodes.get(&id).and_then(|n| n.parent);
-            if let Some(old_pid) = old_parent {
-                if let Some(old_p) = self.scene.nodes.get_mut(&old_pid) {
-                    old_p.children.retain(|&c| c != id);
-                }
-                if !old_parents.contains(&old_pid) {
-                    old_parents.push(old_pid);
-                }
-            } else {
-                self.scene.root_nodes.retain(|&r| r != id);
-            }
-        }
-
-        // Re-parent and insert contiguously, preserving `valid` order.
-        for (i, (id, local)) in locals.iter().enumerate() {
-            if let Some(node) = self.scene.nodes.get_mut(id) {
-                node.parent = new_parent;
-                node.transform = *local;
-            }
-            match new_parent {
-                Some(pid) => {
-                    if let Some(p) = self.scene.nodes.get_mut(&pid) {
-                        let pos = (index + i).min(p.children.len());
-                        p.children.insert(pos, *id);
-                    }
-                }
-                None => {
-                    let pos = (index + i).min(self.scene.root_nodes.len());
-                    self.scene.root_nodes.insert(pos, *id);
-                }
-            }
-        }
-
-        // Refresh transforms and spatial indices for the moved nodes and both the
-        // old and new ancestor group chains.
-        for &id in &valid {
-            self.update_node_global_transform(id);
-            self.update_spatial_index_recursive(id);
-            self.update_ancestor_group_bounds(id);
-            self.mark_dirty(id);
-        }
-        for &old_pid in &old_parents {
-            let is_group = self.scene.nodes.get(&old_pid)
-                .map(|n| matches!(n.node_type, NodeType::Group))
-                .unwrap_or(false);
-            if is_group {
-                self.update_spatial_index(old_pid);
-            }
-            self.update_ancestor_group_bounds(old_pid);
-        }
-        valid.len() as u32
     }
 
     pub fn get_scene_json(&self) -> String {
@@ -1845,8 +1559,8 @@ impl Engine {
     /// Used by SVG export which needs the local transform, not the global one.
     pub fn get_node_local_transform(&self, id: u32) -> Vec<f32> {
         self.scene.nodes.get(&id)
-            .map(|n| n.transform.to_mat3().to_cols_array().to_vec())
-            .unwrap_or_else(|| vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+            .map(|n| n.transform.to_vec())
+            .unwrap_or_default()
     }
 
     // ─── End Per-Node Getters ───────────────────────────────────────────
@@ -2199,49 +1913,36 @@ impl Engine {
                     *radius_y = (new_h / 2.0).max(0.5);
                 }
                 Geometry::Path { subpaths, ref mut network, .. } => {
-                    // Resize semantics: make the *resolved* (corner-radius-rounded)
-                    // outline — the geometry the renderer draws and get_node_bounds
-                    // reports — fit new_w × new_h. Corner radii are absolute
-                    // (Figma-style, not scaled), so the resolved size is not a
-                    // linear function of the anchor scale; iterate to converge.
-                    let target_w = new_w.max(1.0);
-                    let target_h = new_h.max(1.0);
-                    // Convergence is geometric with ratio ~ (rounding cut / size);
-                    // 8 iterations lands well under a tenth of a pixel even for
-                    // large radii, and each pass is just a flatten of the outline.
-                    for _ in 0..8 {
-                        // Bounds of the resolved outline in local geometry space
-                        let mut min_x = f32::MAX; let mut min_y = f32::MAX;
-                        let mut max_x = f32::MIN; let mut max_y = f32::MIN;
-                        let mut has_points = false;
-                        for sp in round_subpaths(subpaths).iter() {
-                            for lp in flatten_subpath(sp) {
-                                has_points = true;
-                                min_x = min_x.min(lp.x); min_y = min_y.min(lp.y);
-                                max_x = max_x.max(lp.x); max_y = max_y.max(lp.y);
-                            }
+                    // Scale all subpath points proportionally using full bounds
+                    let mut min_x = f32::MAX; let mut min_y = f32::MAX;
+                    let mut max_x = f32::MIN; let mut max_y = f32::MIN;
+                    let mut has_points = false;
+                    for sp in subpaths.iter() {
+                        for pt in &sp.points {
+                            has_points = true;
+                            min_x = min_x.min(pt.x).min(pt.cp1.x).min(pt.cp2.x);
+                            min_y = min_y.min(pt.y).min(pt.cp1.y).min(pt.cp2.y);
+                            max_x = max_x.max(pt.x).max(pt.cp1.x).max(pt.cp2.x);
+                            max_y = max_y.max(pt.y).max(pt.cp1.y).max(pt.cp2.y);
                         }
-                        if !has_points { return; }
-                        let old_w = (max_x - min_x).max(1e-3);
-                        let old_h = (max_y - min_y).max(1e-3);
-                        if (old_w - target_w).abs() < 0.02 && (old_h - target_h).abs() < 0.02 {
-                            break;
-                        }
-                        let sx = target_w / old_w;
-                        let sy = target_h / old_h;
-                        for sp in subpaths.iter_mut() {
-                            for pt in sp.points.iter_mut() {
-                                pt.x = min_x + (pt.x - min_x) * sx;
-                                pt.y = min_y + (pt.y - min_y) * sy;
-                                pt.cp1 = Vec2::new(
-                                    min_x + (pt.cp1.x - min_x) * sx,
-                                    min_y + (pt.cp1.y - min_y) * sy,
-                                );
-                                pt.cp2 = Vec2::new(
-                                    min_x + (pt.cp2.x - min_x) * sx,
-                                    min_y + (pt.cp2.y - min_y) * sy,
-                                );
-                            }
+                    }
+                    if !has_points { return; }
+                    let old_w = (max_x - min_x).max(1.0);
+                    let old_h = (max_y - min_y).max(1.0);
+                    let sx = new_w / old_w;
+                    let sy = new_h / old_h;
+                    for sp in subpaths.iter_mut() {
+                        for pt in sp.points.iter_mut() {
+                            pt.x = min_x + (pt.x - min_x) * sx;
+                            pt.y = min_y + (pt.y - min_y) * sy;
+                            pt.cp1 = Vec2::new(
+                                min_x + (pt.cp1.x - min_x) * sx,
+                                min_y + (pt.cp1.y - min_y) * sy,
+                            );
+                            pt.cp2 = Vec2::new(
+                                min_x + (pt.cp2.x - min_x) * sx,
+                                min_y + (pt.cp2.y - min_y) * sy,
+                            );
                         }
                     }
                     // Rebuild network from scaled subpaths to keep in sync
@@ -2279,12 +1980,10 @@ impl Engine {
         let scale_about = Mat3::from_translation(anchor)
             * Mat3::from_scale(Vec2::new(sx, sy))
             * Mat3::from_translation(-anchor);
-        let new_local = Transform2D::from_mat3(&(parent_global.inverse() * scale_about * global));
-        if !new_local.is_valid() {
-            return;
-        }
+        let new_local = parent_global.inverse() * scale_about * global;
+
         if let Some(node) = self.scene.nodes.get_mut(&id) {
-            node.transform = new_local;
+            node.transform = new_local.to_cols_array();
         }
         self.update_node_global_transform(id);
         self.update_spatial_index_recursive(id);
@@ -2302,121 +2001,56 @@ impl Engine {
 
     /// Set a node's absolute position (translation part of its local transform).
     pub fn set_node_position(&mut self, id: u32, x: f32, y: f32) {
-        if !x.is_finite() || !y.is_finite() {
-            return;
-        }
         if let Some(node) = self.scene.nodes.get_mut(&id) {
-            node.transform.x = x;
-            node.transform.y = y;
+            let mut transform = Mat3::from_cols_array(&node.transform);
+            transform.z_axis.x = x;
+            transform.z_axis.y = y;
+            node.transform = transform.to_cols_array();
+            self.update_node_global_transform(id);
+            self.update_spatial_index_recursive(id);
+            self.update_ancestor_group_bounds(id);
+            self.mark_dirty(id);
         }
-        self.after_local_transform_change(id);
     }
 
     /// Set a node's full local transform from a JSON array of 9 f32 values (column-major, matching `Mat3::from_cols_array`).
-    pub fn set_node_transform_matrix(&mut self, id: u32, transform_json: &str) {
+    pub fn set_node_transform(&mut self, id: u32, transform_json: &str) {
         let parsed: [f32; 9] = match serde_json::from_str(transform_json) {
             Ok(v) => v,
             Err(_) => return,
         };
-        let t = Transform2D::from_mat3(&Mat3::from_cols_array(&parsed));
-        if !t.is_valid() {
-            return;
-        }
         if let Some(node) = self.scene.nodes.get_mut(&id) {
-            node.transform = t;
-        }
-        self.after_local_transform_change(id);
-    }
-
-    /// Mutate transform components while keeping the node's local center
-    /// fixed in parent space (Figma-style center pivot). Without this,
-    /// rotation/skew/scale edits pivot about the local origin — a rect's
-    /// top-left corner — making the shape orbit/walk as values change.
-    /// The mutation is rolled back if it would leave the transform invalid.
-    fn set_components_about_center(&mut self, id: u32, f: impl FnOnce(&mut Transform2D)) {
-        let (cx, cy) = self.compute_local_center(id);
-        if let Some(node) = self.scene.nodes.get_mut(&id) {
-            let c = Vec2::new(cx, cy);
-            let old = node.transform;
-            let before = node.transform.to_mat3().transform_point2(c);
-            f(&mut node.transform);
-            let after = node.transform.to_mat3().transform_point2(c);
-            node.transform.x += before.x - after.x;
-            node.transform.y += before.y - after.y;
-            if !node.transform.is_valid() {
-                node.transform = old;
-                return;
-            }
-        }
-        self.after_local_transform_change(id);
-    }
-
-    /// Normalize an angle into (-180, 180]. Non-finite input yields None.
-    fn normalize_deg(deg: f32) -> Option<f32> {
-        if !deg.is_finite() {
-            return None;
-        }
-        let mut d = deg % 360.0;
-        if d > 180.0 {
-            d -= 360.0;
-        } else if d <= -180.0 {
-            d += 360.0;
-        }
-        Some(d)
-    }
-
-    pub fn set_node_rotation(&mut self, id: u32, deg: f32) {
-        let Some(deg) = Self::normalize_deg(deg) else { return };
-        self.set_components_about_center(id, |t| t.rotation_deg = deg);
-    }
-
-    /// Skew is clamped to ±89° — tan() diverges at 90° and the shape would
-    /// degenerate to a line.
-    pub fn set_node_skew(&mut self, id: u32, x_deg: f32, y_deg: f32) {
-        if !x_deg.is_finite() || !y_deg.is_finite() {
-            return;
-        }
-        let x_deg = x_deg.clamp(-89.0, 89.0);
-        let y_deg = y_deg.clamp(-89.0, 89.0);
-        self.set_components_about_center(id, |t| {
-            t.skew_x_deg = x_deg;
-            t.skew_y_deg = y_deg;
-        });
-    }
-
-    /// Scale factors of ~0 (or non-finite) are rejected: they collapse the
-    /// matrix and the geometry could never be recovered by scaling back up.
-    pub fn set_node_scale(&mut self, id: u32, sx: f32, sy: f32) {
-        if !sx.is_finite() || !sy.is_finite() || sx.abs() < 1e-4 || sy.abs() < 1e-4 {
-            return;
-        }
-        self.set_components_about_center(id, |t| {
-            t.scale_x = sx;
-            t.scale_y = sy;
-        });
-    }
-
-    pub fn get_node_transform_components(&self, id: u32) -> String {
-        self.scene.nodes.get(&id)
-            .map(|n| serde_json::to_string(&n.transform).unwrap_or_default())
-            .unwrap_or_else(|| serde_json::to_string(&Transform2D::IDENTITY).unwrap())
-    }
-
-    pub fn set_node_transform_components(&mut self, id: u32, json: &str) {
-        if let Ok(t) = serde_json::from_str::<Transform2D>(json) {
-            if !t.is_valid() {
-                return;
-            }
-            if let Some(node) = self.scene.nodes.get_mut(&id) {
-                node.transform = t;
-            }
-            self.after_local_transform_change(id);
+            node.transform = parsed;
+            self.update_node_global_transform(id);
+            self.update_spatial_index_recursive(id);
+            self.update_ancestor_group_bounds(id);
+            self.mark_dirty(id);
         }
     }
 
     /// Set a node's rotation (in radians), preserving its translation and
     /// scale. The linear part is decomposed as rotation × scale; only the
     /// rotation component is replaced (a resized group keeps its size).
+    pub fn rotate_node(&mut self, id: u32, angle_rad: f32) {
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            let old = Mat3::from_cols_array(&node.transform);
+            let tx = old.z_axis.x;
+            let ty = old.z_axis.y;
+            let sx = (old.x_axis.x * old.x_axis.x + old.x_axis.y * old.x_axis.y).sqrt();
+            let sy_len = (old.y_axis.x * old.y_axis.x + old.y_axis.y * old.y_axis.y).sqrt();
+            // Negative determinant means a flip — keep it on the y axis
+            let det = old.x_axis.x * old.y_axis.y - old.y_axis.x * old.x_axis.y;
+            let sy = if det < 0.0 { -sy_len } else { sy_len };
+            let new_transform = Mat3::from_translation(Vec2::new(tx, ty))
+                * Mat3::from_angle(angle_rad)
+                * Mat3::from_scale(Vec2::new(sx.max(1e-6), sy));
+            node.transform = new_transform.to_cols_array();
+            self.update_node_global_transform(id);
+            self.update_spatial_index_recursive(id);
+            self.update_ancestor_group_bounds(id);
+            self.mark_dirty(id);
+        }
+    }
 
     /// Compute the center of a node's geometry in its local coordinate space.
     fn compute_local_center(&self, id: u32) -> (f32, f32) {
@@ -2466,56 +2100,50 @@ impl Engine {
         }
     }
 
-    /// Flip a node horizontally: mirror across the vertical axis through the
-    /// center of its WORLD bounds. The mirror must be applied in world space
-    /// (pre-multiplied): a local-space mirror is a visual no-op for any
-    /// geometry that is symmetric in local space (rects, ellipses) no matter
-    /// how the node is skewed or rotated.
+    /// Flip a node horizontally (mirror across the local vertical center axis).
+    /// The shape stays visually in the same position — only the transform changes.
     pub fn flip_node_horizontal(&mut self, id: u32) {
-        self.flip_node_world(id, true);
-    }
-
-    /// Flip a node vertically (mirror across the horizontal center axis of
-    /// its world bounds).
-    pub fn flip_node_vertical(&mut self, id: u32) {
-        self.flip_node_world(id, false);
-    }
-
-    fn flip_node_world(&mut self, id: u32, horizontal: bool) {
-        let bounds = self.get_node_bounds(id); // [min_x, min_y, max_x, max_y] world
-        if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
-            return;
-        }
-        let c = Vec2::new((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0);
-        let global = match self.global_transforms.get(&id) {
-            Some(m) => Mat3::from_cols_array(m),
-            None => return,
-        };
-        let parent_global = self.scene.nodes.get(&id)
-            .and_then(|n| n.parent)
-            .and_then(|pid| self.global_transforms.get(&pid))
-            .map(Mat3::from_cols_array)
-            .unwrap_or(Mat3::IDENTITY);
-
-        let s = if horizontal { Vec2::new(-1.0, 1.0) } else { Vec2::new(1.0, -1.0) };
-        let mirror = Mat3::from_translation(c)
-            * Mat3::from_scale(s)
-            * Mat3::from_translation(-c);
-        let t = Transform2D::from_mat3(&(parent_global.inverse() * mirror * global));
-        if !t.is_valid() {
-            return;
-        }
+        let (cx, _cy) = self.compute_local_center(id);
         if let Some(node) = self.scene.nodes.get_mut(&id) {
-            node.transform = t;
+            let mat = Mat3::from_cols_array(&node.transform);
+            // flip_around_center = T(cx,0) * S(-1,1) * T(-cx,0)
+            // Simplifies to: [-1, 0, 2*cx; 0, 1, 0; 0, 0, 1] (row-major)
+            let flip = Mat3::from_cols(
+                Vec3::new(-1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(2.0 * cx, 0.0, 1.0),
+            );
+            node.transform = (mat * flip).to_cols_array();
         }
-        self.after_local_transform_change(id);
+        self.update_node_global_transform(id);
+        self.update_spatial_index_recursive(id);
+        self.update_ancestor_group_bounds(id);
+        self.mark_dirty(id);
+    }
+
+    /// Flip a node vertically (mirror across the local horizontal center axis).
+    pub fn flip_node_vertical(&mut self, id: u32) {
+        let (_cx, cy) = self.compute_local_center(id);
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            let mat = Mat3::from_cols_array(&node.transform);
+            let flip = Mat3::from_cols(
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(0.0, 2.0 * cy, 1.0),
+            );
+            node.transform = (mat * flip).to_cols_array();
+        }
+        self.update_node_global_transform(id);
+        self.update_spatial_index_recursive(id);
+        self.update_ancestor_group_bounds(id);
+        self.mark_dirty(id);
     }
 
     /// Check whether a node's local transform has a non-identity linear part
     /// (rotation, scale != 1, skew, or flip).
     pub fn has_non_identity_linear(&self, id: u32) -> bool {
         if let Some(node) = self.scene.nodes.get(&id) {
-            let mat = node.transform.to_mat3();
+            let mat = Mat3::from_cols_array(&node.transform);
             (mat.x_axis.x - 1.0).abs() > 1e-4 || mat.x_axis.y.abs() > 1e-4 ||
             mat.y_axis.x.abs() > 1e-4 || (mat.y_axis.y - 1.0).abs() > 1e-4
         } else {
@@ -2533,7 +2161,7 @@ impl Engine {
                 Some(n) => n,
                 None => return false,
             };
-            let mat = node.transform.to_mat3();
+            let mat = Mat3::from_cols_array(&node.transform);
             let is_identity =
                 (mat.x_axis.x - 1.0).abs() < 1e-5 && mat.x_axis.y.abs() < 1e-5 &&
                 mat.y_axis.x.abs() < 1e-5 && (mat.y_axis.y - 1.0).abs() < 1e-5;
@@ -2563,12 +2191,12 @@ impl Engine {
                 };
                 for &child_id in &children {
                     if let Some(child) = self.scene.nodes.get_mut(&child_id) {
-                        let child_mat = child.transform.to_mat3();
-                        child.transform = Transform2D::from_mat3(&(linear * child_mat));
+                        let child_mat = Mat3::from_cols_array(&child.transform);
+                        child.transform = (linear * child_mat).to_cols_array();
                     }
                 }
                 if let Some(node) = self.scene.nodes.get_mut(&id) {
-                    node.transform = Transform2D::from_translation(tx, ty);
+                    node.transform = Mat3::from_translation(Vec2::new(tx, ty)).to_cols_array();
                 }
                 self.update_node_global_transform(id);
                 self.update_spatial_index_recursive(id);
@@ -2629,10 +2257,13 @@ impl Engine {
         let network = Some(NodeVectorNetwork::from_subpaths(&new_subpaths));
         if let Some(node) = self.scene.nodes.get_mut(&id) {
             node.geometry = Geometry::Path { subpaths: new_subpaths, network };
-            node.transform = Transform2D::from_translation(tx + min_x, ty + min_y);
+            node.transform = Mat3::from_translation(Vec2::new(tx + min_x, ty + min_y)).to_cols_array();
         }
 
-        self.after_local_transform_change(id);
+        self.update_node_global_transform(id);
+        self.update_spatial_index_recursive(id);
+        self.update_ancestor_group_bounds(id);
+        self.mark_dirty(id);
         true
     }
 
@@ -2641,8 +2272,10 @@ impl Engine {
         let new_id = self.deep_clone_subtree(id);
         // Offset the top-level clone by 20px
         if let Some(node) = self.scene.nodes.get_mut(&new_id) {
-            node.transform.x += 20.0;
-            node.transform.y += 20.0;
+            let mut t = Mat3::from_cols_array(&node.transform);
+            t.z_axis.x += 20.0;
+            t.z_axis.y += 20.0;
+            node.transform = t.to_cols_array();
             node.parent = None;
         }
         // Remove from any parent it was temporarily added to and add to root
@@ -2754,21 +2387,28 @@ impl Engine {
             id: group_id,
             name: format!("Group {}", group_id),
             node_type: NodeType::Group,
-            transform: Transform2D::from_mat3(&group_local),
+            transform: group_local.to_cols_array(),
             style: Style {
-    fills: Vec::new(),
-    strokes: vec![],
-    opacity: 1.0,
-    blend_mode: 0,
-    fill_rule: 0,
-    corner_radius: 0.0,
-},
+                fill: None,
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_cap: 0,
+                stroke_join: 0,
+                dash_array: Vec::new(),
+                dash_offset: 0.0,
+                corner_radius: 0.0,
+                blend_mode: 0,
+                fill_rule: 0,
+                miter_limit: 4.0,
+                fill_opacity: 1.0,
+            },
             geometry: Geometry::Rect { width: 0.0, height: 0.0 },
             children: Vec::new(),
             parent: group_parent,
             visible: true,
             locked: false,
-            };
+        };
         self.scene.nodes.insert(group_id, group_node);
 
         // Insert group at the correct z-position in its parent
@@ -2806,7 +2446,7 @@ impl Engine {
 
             // Update transform and parent
             if let Some(node) = self.scene.nodes.get_mut(&id) {
-                node.transform = Transform2D::from_mat3(&child_new_local);
+                node.transform = child_new_local.to_cols_array();
                 node.parent = Some(group_id);
             }
             if let Some(g) = self.scene.nodes.get_mut(&group_id) {
@@ -2858,13 +2498,13 @@ impl Engine {
             // child_new_local = parent_global_inv * child_global
             // where child_global = group_global * child_old_local
             let child_old_local = self.scene.nodes.get(&child_id)
-                .map(|n| n.transform.to_mat3())
+                .map(|n| Mat3::from_cols_array(&n.transform))
                 .unwrap_or(Mat3::IDENTITY);
             let child_global = group_global * child_old_local;
             let child_new_local = parent_global_inv * child_global;
 
             if let Some(child) = self.scene.nodes.get_mut(&child_id) {
-                child.transform = Transform2D::from_mat3(&child_new_local);
+                child.transform = child_new_local.to_cols_array();
                 child.parent = group_parent;
             }
 
@@ -2921,21 +2561,28 @@ impl Engine {
             id,
             name: format!("Text {}", id),
             node_type: NodeType::Text,
-            transform: Transform2D::from_translation(x, y),
+            transform: Mat3::from_translation(Vec2::new(x, y)).to_cols_array(),
             style: Style {
-    fills: vec![Paint::Solid(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })],
-    strokes: vec![],
-    opacity: 1.0,
-    blend_mode: 0,
-    fill_rule: 0,
-    corner_radius: 0.0,
-},
+                fill: Some(Paint::Solid(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })),
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_cap: 0,
+                stroke_join: 0,
+                dash_array: Vec::new(),
+                dash_offset: 0.0,
+                corner_radius: 0.0,
+                blend_mode: 0,
+                fill_rule: 0,
+                miter_limit: 4.0,
+                fill_opacity: 1.0,
+            },
             geometry: Geometry::Text { content: content.to_string(), font_size, font_family: String::new(), text_align: 0, line_height: 1.2 },
             children: Vec::new(),
             parent: None,
             visible: true,
             locked: false,
-            };
+        };
 
         self.scene.nodes.insert(id, node);
         self.scene.root_nodes.push(id);
@@ -3331,9 +2978,6 @@ impl Engine {
 }
 
 #[cfg(test)]
-mod transform_invariants;
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3346,7 +2990,7 @@ mod tests {
         
         let node = engine.scene.nodes.get(&id).unwrap();
         assert_eq!(node.name, "Rect 1");
-        let transform = node.transform.to_mat3();
+        let transform = Mat3::from_cols_array(&node.transform);
         assert_eq!(transform.z_axis.x, 10.0);
         assert_eq!(transform.z_axis.y, 20.0);
     }
@@ -3461,67 +3105,6 @@ mod tests {
         assert!(engine.set_parent(b, Some(a)));
         assert!(engine.set_parent(c, Some(b)));
         assert!(!engine.set_parent(a, Some(c))); // Cycle!
-    }
-
-    #[test]
-    fn test_reorder_node_roots() {
-        let mut engine = Engine::new();
-        let a = engine.add_rect(0.0, 0.0, 10.0, 10.0);
-        let b = engine.add_rect(0.0, 0.0, 10.0, 10.0);
-        let c = engine.add_rect(0.0, 0.0, 10.0, 10.0);
-        assert_eq!(engine.get_root_nodes(), vec![a, b, c]);
-
-        // Move `a` to the top of the z-order (end of the root vec).
-        assert!(engine.reorder_node(a, None, 3));
-        assert_eq!(engine.get_root_nodes(), vec![b, c, a]);
-
-        // Move `c` to the very back (index 0).
-        assert!(engine.reorder_node(c, None, 0));
-        assert_eq!(engine.get_root_nodes(), vec![c, b, a]);
-    }
-
-    #[test]
-    fn test_reorder_node_into_and_out_of_group() {
-        let mut engine = Engine::new();
-        let p = engine.add_rect(0.0, 0.0, 10.0, 10.0);
-        let q = engine.add_rect(0.0, 0.0, 10.0, 10.0);
-        let g = engine.group_nodes(&format!("[{},{}]", p, q));
-        let a = engine.add_rect(0.0, 0.0, 10.0, 10.0);
-
-        // Nest `a` inside the group as its top child.
-        assert!(engine.reorder_node(a, Some(g), 2));
-        assert_eq!(engine.get_node_parent(a), g as i32);
-
-        // Promote `a` back out to the root level.
-        assert!(engine.reorder_node(a, None, 0));
-        assert_eq!(engine.get_node_parent(a), -1);
-        assert_eq!(engine.get_node_parent(p), g as i32);
-
-        // A non-group node can't be used as a parent.
-        assert!(!engine.reorder_node(a, Some(p), 0));
-        // A group can't be moved inside its own subtree.
-        assert!(!engine.reorder_node(g, Some(p), 0));
-    }
-
-    #[test]
-    fn test_reorder_nodes_batch_contiguous() {
-        let mut engine = Engine::new();
-        let a = engine.add_rect(0.0, 0.0, 10.0, 10.0);
-        let b = engine.add_rect(0.0, 0.0, 10.0, 10.0);
-        let c = engine.add_rect(0.0, 0.0, 10.0, 10.0);
-        let d = engine.add_rect(0.0, 0.0, 10.0, 10.0);
-        assert_eq!(engine.get_root_nodes(), vec![a, b, c, d]);
-
-        // Move `a` and `c` to sit just below `d`. After removing a and c the vec
-        // is [b, d]; inserting at index 1 places them before d, preserving order.
-        let moved = engine.reorder_nodes(&format!("[{},{}]", a, c), None, 1);
-        assert_eq!(moved, 2);
-        assert_eq!(engine.get_root_nodes(), vec![b, a, c, d]);
-
-        // Invalid ids in the batch are skipped, valid ones still move.
-        let moved2 = engine.reorder_nodes(&format!("[{},99999]", d), None, 0);
-        assert_eq!(moved2, 1);
-        assert_eq!(engine.get_root_nodes(), vec![d, b, a, c]);
     }
 
     #[test]
@@ -3846,10 +3429,10 @@ mod tests {
             ],"closed":true}
         ]"#;
         let id = engine.add_path(subpaths);
-        // Even-odd fill rule (fill_rule=1), a solid fill, and no stroke
-        // (so the hole isn't hit via stroke reach).
-        let style = r#"{"fills":[{"r":0,"g":0,"b":0,"a":1}],"strokes":[],
-            "opacity":1.0,"corner_radius":0,"blend_mode":0,"fill_rule":1}"#;
+        // Even-odd fill rule, no stroke (so the hole isn't hit via stroke reach)
+        let style = r#"{"fill":{"r":0,"g":0,"b":0,"a":1},"stroke":null,"stroke_width":0.0,
+            "opacity":1.0,"stroke_cap":0,"stroke_join":0,"dash_array":[],"dash_offset":0,
+            "corner_radius":0,"blend_mode":0,"fill_rule":1,"miter_limit":4.0,"fill_opacity":1.0}"#;
         engine.set_node_style(id, style);
 
         assert_eq!(engine.hit_test(15.0, 50.0), Some(id), "in the ring");
@@ -3891,12 +3474,12 @@ mod tests {
 
         // Bake a 2x scale into the group transform, then rotate it.
         engine.resize_node(group_id, 400.0, 400.0);
-        engine.set_node_rotation(group_id, 45.0);
+        engine.rotate_node(group_id, std::f32::consts::FRAC_PI_4);
 
         // The linear part must still have magnitude 2 on both axes —
         // rotation must not reset the scale that resize_group applied.
         let node = engine.scene.nodes.get(&group_id).unwrap();
-        let m = node.transform.to_mat3();
+        let m = Mat3::from_cols_array(&node.transform);
         let sx = (m.x_axis.x * m.x_axis.x + m.x_axis.y * m.x_axis.y).sqrt();
         let sy = (m.y_axis.x * m.y_axis.x + m.y_axis.y * m.y_axis.y).sqrt();
         assert!((sx - 2.0).abs() < 1e-3, "x scale lost by rotate: {}", sx);
@@ -3940,192 +3523,5 @@ mod tests {
         assert!((b[0] - 100.0).abs() < 0.5, "position must be restored, got {:?}", b);
         let filled = engine.get_filled_faces();
         assert!(filled.contains("\"r\":1.0"), "face fill must be restored, got {}", filled);
-    }
-
-    #[test]
-    fn test_transform2d_skew_roundtrip() {
-        // Headline regression: applying skew then setting it back to 0 must restore
-        // the exact original matrix. The old matrix-decompose path leaked skew into
-        // scale and permanently deformed the shape.
-        let original = Transform2D {
-            x: 40.0, y: 15.0,
-            rotation_deg: 25.0,
-            skew_x_deg: 0.0, skew_y_deg: 0.0,
-            scale_x: 1.5, scale_y: 0.8,
-        };
-        let before = original.to_mat3().to_cols_array();
-
-        // Component edits leave scale/rotation untouched.
-        let mut t = original;
-        t.skew_x_deg = 30.0;
-        t.skew_x_deg = 0.0;
-        let after = t.to_mat3().to_cols_array();
-
-        for i in 0..9 {
-            assert!((before[i] - after[i]).abs() < 1e-5,
-                "skew round-trip must be exact at {}: {} vs {}", i, before[i], after[i]);
-        }
-    }
-
-    #[test]
-    fn test_transform2d_from_mat3_exact() {
-        // from_mat3(m).to_mat3() must reproduce m for any T·R·K·S, including flips.
-        let cases = [
-            Transform2D { x: 10.0, y: 20.0, rotation_deg: 33.0, skew_x_deg: 12.0, skew_y_deg: 0.0, scale_x: 2.0, scale_y: 1.3 },
-            Transform2D { x: -5.0, y: 8.0, rotation_deg: -70.0, skew_x_deg: 0.0, skew_y_deg: 0.0, scale_x: 1.0, scale_y: -1.0 }, // vertical flip
-            Transform2D { x: 0.0, y: 0.0, rotation_deg: 100.0, skew_x_deg: -20.0, skew_y_deg: 0.0, scale_x: 0.5, scale_y: 3.0 },
-        ];
-        for t in cases {
-            let m = t.to_mat3().to_cols_array();
-            let round = Transform2D::from_mat3(&t.to_mat3()).to_mat3().to_cols_array();
-            for i in 0..9 {
-                assert!((m[i] - round[i]).abs() < 1e-4,
-                    "from_mat3 not exact at {}: {} vs {}", i, m[i], round[i]);
-            }
-        }
-    }
-
-    #[test]
-    fn test_snapshot_roundtrip_transform_components() {
-        // Bincode undo snapshots must carry the decomposed transform components.
-        let mut engine = Engine::new();
-        let id = engine.add_rect(0.0, 0.0, 100.0, 100.0);
-        engine.set_node_rotation(id, 30.0);
-        engine.set_node_skew(id, 15.0, 0.0);
-
-        let snapshot = engine.serialize_scene();
-        engine.set_node_rotation(id, 0.0);
-        engine.set_node_skew(id, 0.0, 0.0);
-        assert!(engine.deserialize_scene(&snapshot), "snapshot must decode");
-
-        let t = engine.scene.nodes.get(&id).unwrap().transform;
-        assert!((t.rotation_deg - 30.0).abs() < 1e-3, "rotation restored: {}", t.rotation_deg);
-        assert!((t.skew_x_deg - 15.0).abs() < 1e-3, "skew restored: {}", t.skew_x_deg);
-    }
-
-    #[test]
-    fn test_path_bounds_hug_rounded_outline() {
-        // Regression: the resize/selection box must hug the resolved (rounded)
-        // outline the renderer draws, not the sharp corner vertices. A large
-        // corner radius on the acute apex sits far inside the sharp triangle.
-        let mut engine = Engine::new();
-        let id = engine.add_path(r#"[{"points":[
-            {"x":100,"y":0,"cp1":[100,0],"cp2":[100,0],"corner_radius":40},
-            {"x":200,"y":200,"cp1":[200,200],"cp2":[200,200],"corner_radius":0},
-            {"x":0,"y":200,"cp1":[0,200],"cp2":[0,200],"corner_radius":0}
-        ],"closed":true}]"#);
-
-        let rounded = engine.get_node_bounds(id);
-
-        // Sharp bounds: flatten the raw stored subpaths under the same transform
-        // (this is what the box used to hug — the sharp corner vertices).
-        let node = engine.scene.nodes.get(&id).unwrap();
-        let m = node.transform.to_mat3();
-        let subpaths = match &node.geometry {
-            Geometry::Path { subpaths, .. } => subpaths,
-            _ => unreachable!(),
-        };
-        let (mut sminx, mut sminy, mut smaxx, mut smaxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for sp in subpaths {
-            for lp in flatten_subpath(sp) {
-                let p = m.transform_point2(lp);
-                sminx = sminx.min(p.x); sminy = sminy.min(p.y);
-                smaxx = smaxx.max(p.x); smaxy = smaxy.max(p.y);
-            }
-        }
-
-        // The rounded box must sit strictly inside the sharp box, and the acute
-        // apex (sharp top) must be cut back — the whole point of the fix.
-        assert!(rounded[1] > sminy + 1.0,
-            "rounded top {} must be cut back below sharp apex {}", rounded[1], sminy);
-        assert!(rounded[0] >= sminx - 0.01 && rounded[2] <= smaxx + 0.01 && rounded[3] <= smaxy + 0.01,
-            "rounded bounds {:?} must be within sharp bounds [{},{},{},{}]",
-            rounded, sminx, sminy, smaxx, smaxy);
-    }
-
-    #[test]
-    fn test_resize_path_hits_resolved_bounds() {
-        // resize_node on a Path must make the *visible* (rounded) bounds equal
-        // the requested size — the resize drag maps handle positions in rounded-
-        // bounds units, so any other semantics makes the box drift during drag.
-        let mut engine = Engine::new();
-        let id = engine.add_path(r#"[{"points":[
-            {"x":100,"y":0,"cp1":[100,0],"cp2":[100,0],"corner_radius":40},
-            {"x":200,"y":200,"cp1":[200,200],"cp2":[200,200],"corner_radius":15},
-            {"x":0,"y":200,"cp1":[0,200],"cp2":[0,200],"corner_radius":15}
-        ],"closed":true}]"#);
-
-        for (w, h) in [(300.0f32, 150.0f32), (80.0, 220.0), (500.0, 500.0)] {
-            engine.resize_node(id, w, h);
-            let b = engine.get_node_bounds(id);
-            let got_w = b[2] - b[0];
-            let got_h = b[3] - b[1];
-            assert!((got_w - w).abs() < 0.25 && (got_h - h).abs() < 0.25,
-                "requested {}x{}, visible bounds came out {}x{}", w, h, got_w, got_h);
-        }
-    }
-
-    #[test]
-    fn test_isometric_cube_alignment() {
-        // Isometric cube recipe with the edge-length-preserving skew model:
-        //   Left:  skewY = +30°
-        //   Right: skewY = -30°
-        //   Top:   skewY = +30°, rotation = -60°
-        //
-        // With sin/cos skew, all edges have length 1.0 (times scale) and
-        // the faces tile perfectly without any scaleY correction.
-        let mut engine = Engine::new();
-
-        let left_id  = engine.add_rect(300.0, 300.0, 200.0, 200.0);
-        let right_id = engine.add_rect(300.0, 300.0, 200.0, 200.0);
-        let top_id   = engine.add_rect(300.0, 300.0, 200.0, 200.0);
-
-        engine.set_node_skew(left_id, 0.0, 30.0);
-        engine.set_node_skew(right_id, 0.0, -30.0);
-        // Top face: skewY=+30 then rotation=-60
-        engine.set_node_skew(top_id, 0.0, 30.0);
-        engine.set_node_rotation(top_id, -60.0);
-
-        // Check that skew values are preserved
-        let lt = engine.scene.nodes.get(&left_id).unwrap().transform;
-        let rt = engine.scene.nodes.get(&right_id).unwrap().transform;
-        let tt = engine.scene.nodes.get(&top_id).unwrap().transform;
-        assert!((lt.skew_y_deg - 30.0).abs() < 1e-3);
-        assert!((rt.skew_y_deg - (-30.0)).abs() < 1e-3);
-        assert!((tt.skew_y_deg - 30.0).abs() < 1e-3);
-        assert!((tt.rotation_deg - (-60.0)).abs() < 1e-3);
-
-        // Check edge lengths: all four column vectors should have unit length
-        let lm = lt.to_mat3();
-        let rm = rt.to_mat3();
-        let tm = tt.to_mat3();
-
-        let len = |x: f32, y: f32| (x * x + y * y).sqrt();
-        let l_col0_len = len(lm.x_axis.x, lm.x_axis.y);
-        let l_col1_len = len(lm.y_axis.x, lm.y_axis.y);
-        let r_col0_len = len(rm.x_axis.x, rm.x_axis.y);
-        let t_col0_len = len(tm.x_axis.x, tm.x_axis.y);
-        let t_col1_len = len(tm.y_axis.x, tm.y_axis.y);
-
-        // All edge lengths must be 1.0 (edge-length-preserving property)
-        assert!((l_col0_len - 1.0).abs() < 1e-3, "left col0 len {l_col0_len}");
-        assert!((l_col1_len - 1.0).abs() < 1e-3, "left col1 len {l_col1_len}");
-        assert!((r_col0_len - 1.0).abs() < 1e-3, "right col0 len {r_col0_len}");
-        assert!((t_col0_len - 1.0).abs() < 1e-3, "top col0 len {t_col0_len}");
-        assert!((t_col1_len - 1.0).abs() < 1e-3, "top col1 len {t_col1_len}");
-
-        // Check tiling: top col0 ∥ right col0, top col1 ∥ left col0
-        let angle = |x: f32, y: f32| y.atan2(x).to_degrees();
-        let l_angle = angle(lm.x_axis.x, lm.x_axis.y);
-        let r_angle = angle(rm.x_axis.x, rm.x_axis.y);
-        let t_col0_angle = angle(tm.x_axis.x, tm.x_axis.y);
-        let t_col1_angle = angle(tm.y_axis.x, tm.y_axis.y);
-
-        // Left col0 at +30°, Right col0 at -30°
-        assert!((l_angle - 30.0).abs() < 0.1, "left angle {l_angle}");
-        assert!((r_angle - (-30.0)).abs() < 0.1, "right angle {r_angle}");
-        // Top col0 at -30° (matches right), top col1 at +30° (matches left)
-        assert!((t_col0_angle - (-30.0)).abs() < 0.1, "top col0 angle {t_col0_angle}");
-        assert!((t_col1_angle - 30.0).abs() < 0.1, "top col1 angle {t_col1_angle}");
     }
 }

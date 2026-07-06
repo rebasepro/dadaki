@@ -40,21 +40,65 @@ export function isGradient(paint: Paint): paint is Gradient {
     return 'gradient_type' in paint;
 }
 
-/** Style properties for a scene node. */
-export interface NodeStyle {
-    fill: Paint | null;
-    stroke: Paint | null;
-    stroke_width: number;
-    opacity: number;
-    stroke_cap: number;
-    stroke_join: number;
+/** Stroke Alignment */
+export enum StrokeAlignment {
+    Center = "Center",
+    Inner = "Inner",
+    Outer = "Outer",
+}
+
+/** Stroke definition */
+export interface Stroke {
+    paint: Paint | null;
+    width: number;
+    cap: number;
+    join: number;
     dash_array: number[];
     dash_offset: number;
+    miter_limit: number;
+    alignment: StrokeAlignment;
+}
+
+/** Decomposed 2D transform components (matches engine's TransformComponents). */
+export interface Transform2D {
+    x: number;
+    y: number;
+    rotation_deg: number;
+    skew_x_deg: number;
+    skew_y_deg: number;
+    scale_x: number;
+    scale_y: number;
+}
+
+/** Style properties for a scene node.
+ *  The canonical paint sources are `fills` and `strokes` arrays.
+ *  Legacy scalar fields (fill, stroke, stroke_width, etc.) are kept as optional
+ *  for backwards-compatible deserialization but should not be relied upon. */
+export interface NodeStyle {
+    /** @deprecated Use `fills` array instead. */
+    fill?: Paint | null;
+    /** @deprecated Use `strokes` array instead. */
+    stroke?: Paint | null;
+    /** @deprecated Use `strokes[].width` instead. */
+    stroke_width?: number;
+    opacity: number;
+    /** @deprecated Use `strokes[].cap` instead. */
+    stroke_cap?: number;
+    /** @deprecated Use `strokes[].join` instead. */
+    stroke_join?: number;
+    /** @deprecated Use `strokes[].dash_array` instead. */
+    dash_array?: number[];
+    /** @deprecated Use `strokes[].dash_offset` instead. */
+    dash_offset?: number;
     corner_radius: number;
     blend_mode: number;
     fill_rule: number;
-    miter_limit: number;
-    fill_opacity: number;
+    /** @deprecated Use `strokes[].miter_limit` instead. */
+    miter_limit?: number;
+    /** @deprecated Subsumed by fills array. */
+    fill_opacity?: number;
+    fills: Paint[];
+    strokes: Stroke[];
 }
 
 /** A cubic Bézier path point with incoming/outgoing control points. */
@@ -148,7 +192,6 @@ export interface NodeGeometry {
     Text?: TextGeometry;
 }
 
-/** A node in the scene graph. */
 export interface SceneNode {
     name: string;
     node_type: string;

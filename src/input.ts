@@ -9,9 +9,27 @@ import {
     addAnchorPoint,
     findNearestSegment,
     joinSubpaths,
+    mergeSelectedAnchors,
     splitPathAtPoint,
     splitPathAtSegment,
+    type SegmentHitResult,
 } from './path_ops';
+
+/** Resolved scissors cut target: either an existing anchor or a point on a
+ *  segment, on a specific path node. Produced by {@link InputManager.findScissorTarget}. */
+interface ScissorTarget {
+    nodeId: number;
+    subpaths: Subpath[];
+    /** Set when the closest target is an existing anchor point. */
+    anchor?: { subpathIndex: number; pointIndex: number };
+    /** Set when the closest target is a point along a segment. */
+    segment?: SegmentHitResult;
+    /** World-space location of the cut (for the hover preview dot). */
+    worldX: number;
+    worldY: number;
+    /** World-space distance from the cursor to the cut location. */
+    distance: number;
+}
 
 export class InputManager {
     canvas: HTMLCanvasElement;
@@ -259,7 +277,14 @@ export class InputManager {
     onDoubleClick(e: MouseEvent) {
         const pos = this.getPos(e);
         const hitId = this.scene.hitTest(pos.x, pos.y); // raw hit (deepest leaf)
-        if (hitId === undefined) return;
+        if (hitId === undefined) {
+            // Double-click on empty canvas: leave node-editing mode
+            if (this.editingNodeId !== null) {
+                this.exitEditMode();
+                this.ui.setActiveTool('selection');
+            }
+            return;
+        }
 
         // Check if the currently selected node is a group
         const selection = this.scene.engine!.get_selection();
@@ -278,8 +303,6 @@ export class InputManager {
             }
         }
 
-        // Double-click on a leaf shape: enter path edit only if it's already a Path
-        // or if the user is in the 'direct' tool. Don't destructively convert Rect/Ellipse.
         const node = this.scene.getNode(hitId);
         if (!node) return;
 
@@ -291,18 +314,15 @@ export class InputManager {
             return;
         }
 
-        if (node.geometry.Path || this.ui.activeTool === 'direct') {
-            this.ui.setActiveTool('direct');
-            this.scene.selectNode(hitId, false);
-            this.ui.syncWithSelection();
-            this.ui.updateLayerList();
-            this.enterPathEditMode(hitId);
-        } else {
-            // For Rect/Ellipse with selection tool: just select, don't convert
-            this.scene.selectNode(hitId, false);
-            this.ui.syncWithSelection();
-            this.ui.updateLayerList();
-        }
+        // Double-click on any other leaf shape enters node-editing (direct
+        // selection) mode. enterPathEditMode converts Rect/Ellipse to an
+        // editable Path; corner radii carry over per-vertex, so this is
+        // non-destructive.
+        this.ui.setActiveTool('direct');
+        this.scene.selectNode(hitId, false);
+        this.ui.syncWithSelection();
+        this.ui.updateLayerList();
+        this.enterPathEditMode(hitId);
     }
 
     /**
@@ -343,6 +363,34 @@ export class InputManager {
             this.ui.updateLayerList();
             this.ui.contextBar?.refresh();
         }
+    }
+
+    /** Exit path/text editing mode and clear dimming on all exit paths. Idempotent:
+     *  safe to call when not editing. The single sanctioned way to leave edit mode —
+     *  clears all per-edit state and refreshes the panel so the scene un-dims. */
+    exitEditMode() {
+        if (this.editingNodeId === null) return;
+        this.editingNodeId = null;
+        this.editingPoints = null;
+        this.editingTransform = null;
+        this.selectedPoints.clear();
+        this.selectedAnchorSubpath = -1;
+        this.selectedAnchorIndex = -1;
+        this.addPointMode = false;
+        // syncWithSelection refreshes the property panel + context/breadcrumb bars
+        // and requests a render, which recomputes dimming (now un-dimmed).
+        this.ui.syncWithSelection();
+    }
+
+    /** Dim target for the renderer. Self-heals if the edited node no longer exists
+     *  (e.g. removed by undo or delete outside the normal exit paths). */
+    getEditingDimTarget(): number | null {
+        if (this.editingNodeId === null) return null;
+        if (this.scene.getNodeType(this.editingNodeId) === undefined) {
+            this.exitEditMode();
+            return null;
+        }
+        return this.editingNodeId;
     }
 
     onKeyDown(e: KeyboardEvent) {
@@ -424,10 +472,15 @@ export class InputManager {
             }
         }
 
-        // Join Paths: Cmd+J / Ctrl+J
+        // Cmd+J / Ctrl+J: in node editing with 2+ points selected, merge them;
+        // otherwise join the two selected path nodes.
         if ((e.metaKey || e.ctrlKey) && (e.key === 'j' || e.key === 'J')) {
             e.preventDefault();
-            this.joinSelectedPaths();
+            if (this.editingNodeId !== null && this.selectedPoints.size >= 2) {
+                this.mergeSelectedPoints();
+            } else {
+                this.joinSelectedPaths();
+            }
         }
 
         // Add point toggle: + key in path edit mode
@@ -442,6 +495,7 @@ export class InputManager {
         // Undo: Cmd+Z / Ctrl+Z
         if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
             e.preventDefault();
+            if (this.editingNodeId !== null) this.exitEditMode();
             this.scene.undo();
             this.ui.updateLayerList();
             this.ui.syncWithSelection();
@@ -450,6 +504,7 @@ export class InputManager {
         // Redo: Cmd+Shift+Z / Ctrl+Shift+Z
         if ((e.metaKey || e.ctrlKey) && e.key === 'z' && e.shiftKey) {
             e.preventDefault();
+            if (this.editingNodeId !== null) this.exitEditMode();
             this.scene.redo();
             this.ui.updateLayerList();
             this.ui.syncWithSelection();
@@ -499,9 +554,7 @@ export class InputManager {
             }
             if (this.editingNodeId !== null) {
                 // Exit direct editing mode
-                this.editingNodeId = null;
-                this.editingPoints = null;
-                this.editingTransform = null;
+                this.exitEditMode();
                 this.ui.setActiveTool('selection');
             } else if (this.currentPathPoints.length > 0) {
                 this.finalizePenPath();
@@ -911,8 +964,7 @@ export class InputManager {
                 // Text uses the active fill and no stroke — the engine default
                 // (white fill) is invisible against the white artboard.
                 const style = JSON.parse(this.ui.getCurrentStyle());
-                style.stroke = null;
-                style.stroke_width = 0;
+                style.strokes = [];
                 this.scene.setNodeStyleNoHistory(id, JSON.stringify(style));
                 this.scene.engine!.clear_selection();
                 this.scene.selectNode(id, false);
@@ -1009,6 +1061,7 @@ export class InputManager {
                 this.draggingPointIndex = hitInfo.index;
                 this.draggingHandleType = hitInfo.type;
                 this.scene.saveMoveHistory();
+                this.ui.contextBar?.refresh();
                 return;
             } else {
                 // Clicked empty space in edit mode — start marquee for points
@@ -1016,6 +1069,7 @@ export class InputManager {
                     this.selectedPoints.clear();
                     this.selectedAnchorSubpath = -1;
                     this.selectedAnchorIndex = -1;
+                    this.ui.contextBar?.refresh();
                 }
 
                 // Hit test to see if we're clicking ANOTHER node
@@ -1057,17 +1111,16 @@ export class InputManager {
                     this.selectedAnchorSubpath = hitInfo.subpathIndex;
                     this.selectedAnchorIndex = hitInfo.index;
                     this.scene.saveMoveHistory();
+                    this.ui.contextBar?.refresh();
                 }
             }
         } else {
             // Clicked empty space outside any node — deselect everything and exit edit mode
             if (!isShift) {
+                this.exitEditMode();
                 this.scene.engine!.clear_selection();
                 this.ui.syncWithSelection();
                 this.ui.updateLayerList();
-                this.editingNodeId = null;
-                this.editingPoints = null;
-                this.selectedPoints.clear();
             }
         }
     }
@@ -1164,6 +1217,10 @@ export class InputManager {
     deleteSelection() {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
+        // If the deleted node was the editing node, exit edit mode first
+        if (this.editingNodeId !== null && selection.includes(this.editingNodeId)) {
+            this.exitEditMode();
+        }
         this.scene.engine!.clear_selection();
         this.scene.removeNodes(selection);
         this.ui.updateLayerList();
@@ -1172,57 +1229,110 @@ export class InputManager {
 
     // ─── Path Operations ─────────────────────────────────────────────
 
+    /**
+     * Find the closest scissors cut target across every visible path node near
+     * `pos`, or `null` if nothing is within the catch radius.
+     *
+     * Unlike a fill/stroke hit test, this snaps to the path *outline* directly:
+     * candidate nodes are gathered from the spatial index by a threshold-sized
+     * box around the cursor, then each is measured with the full catch radius.
+     * An existing anchor wins over a segment point at (near-)equal distance so
+     * clicking on a vertex splits there. Both the hover preview and the click
+     * handler use this, so the previewed dot always matches where the cut lands.
+     */
+    findScissorTarget(pos: { x: number; y: number }): ScissorTarget | null {
+        if (!this.scene.engine) return null;
+        const threshold = 10 / this.renderer.zoom;
+
+        const ids = this.scene.getVisibleNodes(
+            pos.x - threshold, pos.y - threshold,
+            pos.x + threshold, pos.y + threshold,
+        );
+
+        let best: ScissorTarget | null = null;
+
+        for (const id of ids) {
+            const geo = this.scene.getNodeGeometry(id);
+            if (!geo?.Path) continue;
+            const subpaths = geo.Path.subpaths;
+            const transform = this.scene.getTransform(id);
+
+            // Prefer snapping to an existing anchor within the catch radius.
+            for (let si = 0; si < subpaths.length; si++) {
+                const sp = subpaths[si];
+                for (let pi = 0; pi < sp.points.length; pi++) {
+                    const p = sp.points[pi];
+                    const wx = transform[0] * p.x + transform[1] * p.y + transform[2];
+                    const wy = transform[3] * p.x + transform[4] * p.y + transform[5];
+                    const d = Math.hypot(pos.x - wx, pos.y - wy);
+                    if (d < threshold && (!best || d < best.distance)) {
+                        best = {
+                            nodeId: id, subpaths,
+                            anchor: { subpathIndex: si, pointIndex: pi },
+                            worldX: wx, worldY: wy, distance: d,
+                        };
+                    }
+                }
+            }
+
+            // Otherwise fall back to the nearest point along a segment. Uses a
+            // strict `<` so an equidistant anchor (checked above) keeps priority.
+            const segHit = findNearestSegment(subpaths, transform, pos.x, pos.y, threshold);
+            if (segHit && (!best || segHit.distance < best.distance)) {
+                best = {
+                    nodeId: id, subpaths, segment: segHit,
+                    worldX: segHit.worldX, worldY: segHit.worldY, distance: segHit.distance,
+                };
+            }
+        }
+
+        return best;
+    }
+
+    /** Apply a resolved scissors cut, pushing an undo snapshot and refreshing UI. */
+    private applyScissorCut(target: ScissorTarget) {
+        this.scene.saveMoveHistory();
+        const newSubpaths = target.anchor
+            ? splitPathAtPoint(target.subpaths, target.anchor.subpathIndex, target.anchor.pointIndex)
+            : splitPathAtSegment(
+                target.subpaths, target.segment!.subpathIndex,
+                target.segment!.segmentIndex, target.segment!.t,
+            );
+        this.scene.updatePathPoints(target.nodeId, JSON.stringify(newSubpaths));
+        this.ui.syncWithSelection();
+        this.ui.updateLayerList();
+    }
+
     /** Handle scissors tool click — cut path at segment or anchor. */
     handleScissorsDown(pos: { x: number; y: number }) {
         if (!this.scene.engine) return;
 
-        // Find the nearest path node under the cursor
+        // Primary path: cut the nearest outline of any visible path node.
+        const target = this.findScissorTarget(pos);
+        if (target) {
+            this.applyScissorCut(target);
+            return;
+        }
+
+        // Fallback: a primitive (rect/ellipse/…) under the cursor has no editable
+        // subpaths yet — convert it to a path, then cut its nearest segment.
         const hitId = this.scene.hitTest(pos.x, pos.y);
         if (hitId === undefined) return;
-
-        const geometry = this.scene.getNodeGeometry(hitId);
-        if (!geometry) return;
-
-        // Convert to path if needed
-        if (!geometry.Path) {
+        if (!this.scene.getNodeGeometry(hitId)?.Path) {
             this.scene.convertToPath(hitId);
         }
-        const updatedGeometry = this.scene.getNodeGeometry(hitId);
-        if (!updatedGeometry?.Path) return;
+        const geo = this.scene.getNodeGeometry(hitId);
+        if (!geo?.Path) return;
 
-        const subpaths = updatedGeometry.Path.subpaths;
+        const subpaths = geo.Path.subpaths;
         const transform = this.scene.getTransform(hitId);
         const threshold = 10 / this.renderer.zoom;
-
-        // First check: is the cursor near an existing anchor point?
-        for (let si = 0; si < subpaths.length; si++) {
-            const sp = subpaths[si];
-            for (let pi = 0; pi < sp.points.length; pi++) {
-                const p = sp.points[pi];
-                const wx = transform[0] * p.x + transform[1] * p.y + transform[2];
-                const wy = transform[3] * p.x + transform[4] * p.y + transform[5];
-                if (Math.hypot(pos.x - wx, pos.y - wy) < threshold) {
-                    // Split at existing anchor
-                    this.scene.saveMoveHistory();
-                    const newSubpaths = splitPathAtPoint(subpaths, si, pi);
-                    this.scene.updatePathPoints(hitId, JSON.stringify(newSubpaths));
-                    this.ui.syncWithSelection();
-                    this.ui.updateLayerList();
-                    return;
-                }
-            }
-        }
-
-        // Second check: is the cursor near a segment?
         const segHit = findNearestSegment(subpaths, transform, pos.x, pos.y, threshold);
         if (segHit) {
-            this.scene.saveMoveHistory();
-            const newSubpaths = splitPathAtSegment(
-                subpaths, segHit.subpathIndex, segHit.segmentIndex, segHit.t
-            );
-            this.scene.updatePathPoints(hitId, JSON.stringify(newSubpaths));
-            this.ui.syncWithSelection();
-            this.ui.updateLayerList();
+            this.applyScissorCut({
+                nodeId: hitId, subpaths, segment: segHit,
+                worldX: segHit.worldX, worldY: segHit.worldY, distance: segHit.distance,
+            });
         }
     }
 
@@ -1296,6 +1406,51 @@ export class InputManager {
             this.ui.contextBar?.refresh();
         }
 
+        this.ui.syncWithSelection();
+        this.ui.updateLayerList();
+    }
+
+    /** Merge (weld) the selected anchor points in path editing mode. */
+    mergeSelectedPoints() {
+        if (this.editingNodeId === null || !this.editingPoints) return;
+        if (this.selectedPoints.size < 2) return;
+
+        const selected = Array.from(this.selectedPoints).map(key => {
+            const [subpathIdx, pointIdx] = key.split(':').map(Number);
+            return { subpathIdx, pointIdx };
+        });
+
+        const merged = mergeSelectedAnchors(this.editingPoints, selected);
+        if (!merged) return; // nothing mergeable (non-adjacent interior points)
+
+        // updatePathPoints pushes the undo snapshot itself
+        this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(merged));
+        this.editingPoints = merged;
+        this.selectedPoints.clear();
+        this.selectedAnchorSubpath = -1;
+        this.selectedAnchorIndex = -1;
+        this.draggingHandleType = null;
+        this.ui.contextBar?.refresh();
+        this.ui.syncWithSelection();
+    }
+
+    /** Scissors without aiming: split the edited path at the single selected
+     *  anchor. Same operation as a scissors-tool click on that anchor. */
+    cutAtSelectedPoint() {
+        if (this.editingNodeId === null || !this.editingPoints) return;
+        if (this.selectedPoints.size !== 1) return;
+
+        const [si, pi] = Array.from(this.selectedPoints)[0].split(':').map(Number);
+
+        this.scene.saveMoveHistory();
+        const newSubpaths = splitPathAtPoint(this.editingPoints, si, pi);
+        this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(newSubpaths));
+        this.editingPoints = newSubpaths;
+        this.selectedPoints.clear();
+        this.selectedAnchorSubpath = -1;
+        this.selectedAnchorIndex = -1;
+        this.draggingHandleType = null;
+        this.ui.contextBar?.refresh();
         this.ui.syncWithSelection();
         this.ui.updateLayerList();
     }
@@ -1433,9 +1588,7 @@ export class InputManager {
 
         // Exit path editing if active — flattening changes geometry
         if (this.editingNodeId !== null) {
-            this.editingNodeId = null;
-            this.editingPoints = null;
-            this.editingTransform = null;
+            this.exitEditMode();
         }
 
         this.scene.transaction(() => {
@@ -1468,8 +1621,8 @@ export class InputManager {
 
                 // ── Step 4: Handle strokes ─────────────────────────────
                 const style = this.scene.getNodeStyle(id);
-                const hasStroke = style.stroke !== null && style.stroke_width > 0;
-                const hasFill = style.fill !== null;
+                const hasStroke = style.strokes && style.strokes.length > 0 && style.strokes.some(s => s.width > 0);
+                const hasFill = style.fills && style.fills.length > 0;
 
                 if (hasStroke && hasFill) {
                     // Fill + Stroke → split into two paths in a group
@@ -1479,7 +1632,7 @@ export class InputManager {
                     this.scene.moveNode(strokeNodeId, -20, -20);
 
                     // 2. Original keeps fill, loses stroke
-                    const fillStyle = { ...style, stroke: null, stroke_width: 0 };
+                    const fillStyle = { ...style, strokes: [] };
                     this.scene.setNodeStyleNoHistory(id, JSON.stringify(fillStyle));
 
                     // 3. Duplicate becomes the stroke outline (fill = stroke color, stroke = none)
@@ -1630,17 +1783,10 @@ export class InputManager {
             this.scissorsHoverPoint = null;
             this.hoverSegment = null;
 
-            // For scissors: hit test all visible paths
+            // For scissors: snap the preview dot to the nearest path outline.
             if (this.ui.activeTool === 'scissors') {
-                const hitId = this.scene.hitTest(this.currentPos.x, this.currentPos.y);
-                if (hitId !== undefined) {
-                    const geo = this.scene.getNodeGeometry(hitId);
-                    if (geo?.Path) {
-                        const t = this.scene.getTransform(hitId);
-                        const seg = findNearestSegment(geo.Path.subpaths, t, this.currentPos.x, this.currentPos.y, 10 / this.renderer.zoom);
-                        if (seg) this.scissorsHoverPoint = { x: seg.worldX, y: seg.worldY };
-                    }
-                }
+                const target = this.findScissorTarget(this.currentPos);
+                if (target) this.scissorsHoverPoint = { x: target.worldX, y: target.worldY };
             }
             // For direct tool: hit test the editing path's segments for highlighting or add-point
             else if (this.editingNodeId && this.editingPoints && this.editingTransform) {
@@ -1929,6 +2075,8 @@ export class InputManager {
                         }
                     }
                 }
+                // Keep the context bar's selected-point count live during the marquee
+                this.ui.contextBar?.refresh();
             }
         }
 

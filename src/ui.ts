@@ -1,15 +1,16 @@
 import type { CanvasKit } from 'canvaskit-wasm';
 import type { WasmScene } from './wasm_scene';
 import { FileIO } from './file_io';
-import type { Color } from './types';
-import { isGradient } from './types';
+import type { Color, NodeStyle, Gradient, SceneNode, Paint, Stroke } from './types';
+import { isGradient, StrokeAlignment } from './types';
 import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix } from './svg_utils';
 import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
 import type { SVGExportInput, FilledFace } from './svg_export';
 import type { SVGSubpath, SVGGradientData } from './svg_utils';
 import type { ContextBar } from './context_bar';
 import type { BreadcrumbBar } from './breadcrumb';
-import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock, iconUnlock } from './icons';
+import type { Toolbar } from './toolbar';
+import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock, iconUnlock, iconFlipH, iconFlipV, iconFlatten, iconRotateCW, iconRotateCCW } from './icons';
 
 export class UIEngine {
     ck: CanvasKit;
@@ -17,10 +18,13 @@ export class UIEngine {
     activeTool: string = 'selection';
     contextBar: ContextBar | null = null;
     breadcrumbBar: BreadcrumbBar | null = null;
+    toolbar: Toolbar | null = null;
 
     /** Tracks whether we've already taken a history snapshot for the current
      *  property-editing gesture (e.g. a color picker drag). */
     private _propertyEditSnapshotTaken: boolean = false;
+    /** W/H proportion constraint (the link button between W and H). */
+    private aspectLocked: boolean = false;
     /** Last style the user configured — applied to newly created shapes. */
     private _currentStyleJson: string | null = null;
 
@@ -34,19 +38,19 @@ export class UIEngine {
     };
     
     // DOM Elements — basic
-    fillInput: HTMLInputElement;
-    strokeInput: HTMLInputElement;
-    weightInput: HTMLInputElement;
     opacityInput: HTMLInputElement;
     layerList: HTMLElement;
     zoomText: HTMLElement;
 
+    // DOM Elements - dynamic lists
+    fillsList: HTMLElement;
+    strokesList: HTMLElement;
+
+    addFillBtn: HTMLButtonElement;
+    addStrokeBtn: HTMLButtonElement;
+
+
     // DOM Elements — extended
-    fillEnabled: HTMLInputElement;
-    strokeEnabled: HTMLInputElement;
-    strokeCap: HTMLSelectElement;
-    strokeJoin: HTMLSelectElement;
-    strokeDash: HTMLSelectElement;
     blendMode: HTMLSelectElement;
     cornerRadius: HTMLInputElement;
     propX: HTMLInputElement;
@@ -56,12 +60,10 @@ export class UIEngine {
     propRotation: HTMLInputElement;
     propSkewX: HTMLInputElement;
     propSkewY: HTMLInputElement;
+    propScaleX: HTMLInputElement;
+    propScaleY: HTMLInputElement;
 
     // DOM Elements — new SVG properties
-    fillOpacity: HTMLInputElement;
-    fillRule: HTMLSelectElement;
-    dashOffset: HTMLInputElement;
-    miterLimit: HTMLInputElement;
     toggleVisible: HTMLButtonElement;
     toggleLocked: HTMLButtonElement;
 
@@ -81,24 +83,29 @@ export class UIEngine {
     // Layer tree state
     private _collapsedGroups: Set<number> = new Set();
 
+    /** Node ids currently being dragged in the layer panel (the whole selection
+     *  when the grabbed row is part of a multi-selection), or null. */
+    private _draggingLayerIds: number[] | null = null;
+
     constructor(ck: CanvasKit, scene: WasmScene) {
         this.ck = ck;
         this.scene = scene;
 
         // Initialize DOM refs — basic
-        this.fillInput = document.getElementById('fill-color') as HTMLInputElement;
-        this.strokeInput = document.getElementById('stroke-color') as HTMLInputElement;
-        this.weightInput = document.getElementById('stroke-weight') as HTMLInputElement;
-        this.opacityInput = document.getElementById('opacity') as HTMLInputElement;
         this.layerList = document.getElementById('layer-list') as HTMLElement;
         this.zoomText = document.getElementById('zoom-level') as HTMLElement;
+        this.opacityInput = document.getElementById('opacity') as HTMLInputElement;
+
+        // Dynamic list containers
+        this.fillsList = document.getElementById('fills-list') as HTMLElement;
+        this.strokesList = document.getElementById('strokes-list') as HTMLElement;
+
+        
+        this.addFillBtn = document.getElementById('add-fill-btn') as HTMLButtonElement;
+        this.addStrokeBtn = document.getElementById('add-stroke-btn') as HTMLButtonElement;
+
 
         // Initialize DOM refs — extended
-        this.fillEnabled = document.getElementById('fill-enabled') as HTMLInputElement;
-        this.strokeEnabled = document.getElementById('stroke-enabled') as HTMLInputElement;
-        this.strokeCap = document.getElementById('stroke-cap') as HTMLSelectElement;
-        this.strokeJoin = document.getElementById('stroke-join') as HTMLSelectElement;
-        this.strokeDash = document.getElementById('stroke-dash') as HTMLSelectElement;
         this.blendMode = document.getElementById('blend-mode') as HTMLSelectElement;
         this.cornerRadius = document.getElementById('prop-corner-radius') as HTMLInputElement;
         this.propX = document.getElementById('prop-x') as HTMLInputElement;
@@ -108,12 +115,10 @@ export class UIEngine {
         this.propRotation = document.getElementById('prop-rotation') as HTMLInputElement;
         this.propSkewX = document.getElementById('prop-skew-x') as HTMLInputElement;
         this.propSkewY = document.getElementById('prop-skew-y') as HTMLInputElement;
+        this.propScaleX = document.getElementById('prop-scale-x') as HTMLInputElement;
+        this.propScaleY = document.getElementById('prop-scale-y') as HTMLInputElement;
 
         // Initialize DOM refs — new SVG properties
-        this.fillOpacity = document.getElementById('fill-opacity') as HTMLInputElement;
-        this.fillRule = document.getElementById('fill-rule') as HTMLSelectElement;
-        this.dashOffset = document.getElementById('stroke-dash-offset') as HTMLInputElement;
-        this.miterLimit = document.getElementById('stroke-miter-limit') as HTMLInputElement;
         this.toggleVisible = document.getElementById('toggle-visible') as HTMLButtonElement;
         this.toggleLocked = document.getElementById('toggle-locked') as HTMLButtonElement;
 
@@ -134,6 +139,67 @@ export class UIEngine {
         this._currentStyleJson = this.buildCurrentStyleJson();
     }
 
+    /** Figma-style label scrubbing: dragging the label inside a dimension
+     *  field adjusts its value (Shift = ×10). One undo snapshot per gesture;
+     *  live edits apply without history. A plain click focuses the field. */
+    private initScrubbing() {
+        document.querySelectorAll<HTMLElement>('.dim-label[data-scrub]').forEach(label => {
+            const input = document.getElementById(label.dataset.scrub!) as HTMLInputElement | null;
+            if (!input) return;
+
+            label.addEventListener('pointerdown', (e: PointerEvent) => {
+                if (input.disabled) return;
+                if (this.scene.engine!.get_selection().length === 0) return;
+                e.preventDefault();
+                try { label.setPointerCapture(e.pointerId); } catch { }
+
+                const startX = e.clientX;
+                const startVal = parseFloat(input.value) || 0;
+                const step = parseFloat(input.step) || 1;
+                const min = input.min !== '' ? parseFloat(input.min) : -Infinity;
+                let moved = false;
+
+                const onMove = (ev: PointerEvent) => {
+                    const dx = ev.clientX - startX;
+                    if (!moved && Math.abs(dx) < 3) return; // click-vs-drag threshold
+                    if (!moved) this.scene.beginGesture(); // one undo snapshot for the whole drag
+                    moved = true;
+                    document.body.classList.add('scrubbing');
+
+                    const mult = ev.shiftKey ? 10 : 1;
+                    const val = Math.max(min, startVal + Math.round(dx) * step * mult);
+                    const next = String(Math.round(val * 100) / 100);
+                    if (next === input.value) return;
+                    input.value = next;
+
+                    if (input === this.cornerRadius) {
+                        this.applyCornerRadiusToSelection();
+                    } else {
+                        this.updateTransform(false);
+                    }
+                };
+
+                const onUp = () => {
+                    label.removeEventListener('pointermove', onMove);
+                    label.removeEventListener('pointerup', onUp);
+                    label.removeEventListener('pointercancel', onUp);
+                    document.body.classList.remove('scrubbing');
+                    if (moved) {
+                        this.scene.endGesture();
+                        this.syncWithSelection({ interactive: true });
+                    } else {
+                        input.focus();
+                        input.select();
+                    }
+                };
+
+                label.addEventListener('pointermove', onMove);
+                label.addEventListener('pointerup', onUp);
+                label.addEventListener('pointercancel', onUp);
+            });
+        });
+    }
+
     private initCollapsibleSections() {
         document.querySelectorAll('.panel-section-header').forEach(header => {
             header.addEventListener('click', () => {
@@ -150,22 +216,11 @@ export class UIEngine {
     }
 
     private initEvents() {
-        // Toolbar
-        document.querySelectorAll('.tool-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                if (btn.id.startsWith('tool-')) {
-                    const toolId = btn.id.replace('tool-', '');
-                    this.setActiveTool(toolId);
-                }
-            });
-        });
+        // (Toolbar clicks are wired by the Toolbar class itself — see toolbar.ts)
 
         // Style properties — coalesced undo: one snapshot per gesture
         const styleInputs = [
-            this.fillInput, this.strokeInput, this.weightInput, this.opacityInput,
-            this.fillEnabled, this.strokeEnabled, this.strokeCap, this.strokeJoin,
-            this.strokeDash, this.blendMode,
-            this.fillOpacity, this.fillRule, this.dashOffset, this.miterLimit,
+            this.opacityInput, this.blendMode,
         ];
         for (const el of styleInputs) {
             if (el) {
@@ -237,10 +292,60 @@ export class UIEngine {
         }
 
         // Transform properties
-        const transformInputs = [this.propX, this.propY, this.propW, this.propH, this.propRotation, this.propSkewX, this.propSkewY];
+        const transformInputs = [this.propX, this.propY, this.propW, this.propH, this.propRotation, this.propSkewX, this.propSkewY, this.propScaleX, this.propScaleY];
         for (const el of transformInputs) {
             if (el) el.addEventListener('change', () => this.updateTransform());
         }
+
+        // Shift+Arrow = ±10 on all dimension fields (Figma convention).
+        // Setting the value and dispatching 'change' reuses each field's handler.
+        for (const el of [...transformInputs, this.cornerRadius]) {
+            if (!el) continue;
+            el.addEventListener('keydown', (e: KeyboardEvent) => {
+                if (!e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+                e.preventDefault();
+                const min = el.min !== '' ? parseFloat(el.min) : -Infinity;
+                const cur = parseFloat(el.value) || 0;
+                el.value = String(Math.max(min, cur + (e.key === 'ArrowUp' ? 10 : -10)));
+                el.dispatchEvent(new Event('change'));
+            });
+        }
+
+        // Constrain-proportions toggle between W and H
+        const aspectBtn = document.getElementById('aspect-lock');
+        aspectBtn?.addEventListener('click', () => {
+            this.aspectLocked = !this.aspectLocked;
+            aspectBtn.classList.toggle('active', this.aspectLocked);
+            aspectBtn.title = this.aspectLocked ? 'Remove proportion constraint' : 'Constrain proportions';
+        });
+
+        this.initScrubbing();
+
+        // Quick transform actions: rotate 90°, flip, flatten. One undo step
+        // for the whole selection via transaction().
+        const bindAction = (btnId: string, icon: string, fn: (id: number) => void) => {
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            btn.innerHTML = icon;
+            btn.addEventListener('click', () => {
+                const sel = this.scene.engine!.get_selection();
+                if (sel.length === 0) return;
+                this.scene.transaction(() => { for (const id of sel) fn(id); });
+                this.syncWithSelection();
+            });
+        };
+        // Normalize to (-180, 180] so repeated quarter-turns don't accumulate
+        // into display values like 450°.
+        const rotateBy = (id: number, delta: number) => {
+            const tc = this.scene.getNodeTransformComponents(id);
+            const deg = ((tc.rotation_deg + delta + 180) % 360 + 360) % 360 - 180;
+            this.scene.engine!.set_node_rotation(id, deg);
+        };
+        bindAction('rotate-ccw-btn', iconRotateCCW(12), id => rotateBy(id, -90));
+        bindAction('rotate-cw-btn', iconRotateCW(12), id => rotateBy(id, 90));
+        bindAction('flip-h-btn', iconFlipH(12), id => this.scene.flipNodeH(id));
+        bindAction('flip-v-btn', iconFlipV(12), id => this.scene.flipNodeV(id));
+        bindAction('flatten-btn', iconFlatten(12), id => this.scene.flattenTransform(id));
 
         // Visibility toggle
         this.toggleVisible?.addEventListener('click', () => {
@@ -250,6 +355,61 @@ export class UIEngine {
         // Locked toggle
         this.toggleLocked?.addEventListener('click', () => {
             this.toggleNodeLocked();
+        });
+
+
+        const forceExpand = (sectionName: string) => {
+            const body = document.querySelector(`[data-section-body="${sectionName}"]`);
+            const header = document.querySelector(`.panel-section-header[data-section="${sectionName}"]`);
+            const chevron = header?.querySelector('.chevron');
+            if (body && body.classList.contains('collapsed')) {
+                body.classList.remove('collapsed');
+                chevron?.classList.remove('collapsed');
+            }
+        };
+
+        this.addFillBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const selection = this.scene.engine!.get_selection();
+            if (selection.length === 0) return;
+            const node = this.scene.getNode(selection[0]);
+            if (!node) return;
+            forceExpand('fill');
+            const currentFills = this.getFills(node);
+            this.updateNodeStyle(node, { fills: [...currentFills, { r: 0.8, g: 0.8, b: 0.8, a: 1 }] });
+        });
+
+        this.addStrokeBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const selection = this.scene.engine!.get_selection();
+            if (selection.length === 0) return;
+            const node = this.scene.getNode(selection[0]);
+            if (!node) return;
+            forceExpand('stroke');
+            const currentStrokes = this.getStrokes(node);
+            this.updateNodeStyle(node, { strokes: [...currentStrokes, {
+                paint: { r: 0, g: 0, b: 0, a: 1 },
+                width: 1,
+                cap: 0,
+                join: 0,
+                dash_array: [],
+                dash_offset: 0,
+                miter_limit: 4,
+                alignment: StrokeAlignment.Center
+            }] });
+        });
+
+
+        // Undo / Redo (header — global actions, deliberately not in the context bar)
+        document.getElementById('undo-btn')?.addEventListener('click', () => {
+            this.scene.undo();
+            this.syncWithSelection();
+            this.updateLayerList();
+        });
+        document.getElementById('redo-btn')?.addEventListener('click', () => {
+            this.scene.redo();
+            this.syncWithSelection();
+            this.updateLayerList();
         });
 
         // Export
@@ -273,9 +433,13 @@ export class UIEngine {
 
     setActiveTool(toolId: string) {
         this.activeTool = toolId;
-        document.querySelectorAll('.tool-btn').forEach(btn => {
-            btn.classList.toggle('active', btn.id === `tool-${toolId}`);
-        });
+        this.toolbar?.sync(toolId);
+
+        // Exit path/text editing when switching tools to clear dimming
+        const im = this.scene.renderer?.inputManager;
+        if (im && im.editingNodeId !== null) {
+            im.exitEditMode();
+        }
 
         // Set cursor on canvas based on tool
         const canvas = document.getElementById('editor-canvas') as HTMLCanvasElement;
@@ -301,9 +465,73 @@ export class UIEngine {
     }
 
     /** Get the current fill color from the UI as {r, g, b, a} in 0-1 range. */
+    
+    updateActiveFillColor(hex: string) {
+        const c = this.hexToRgb(hex);
+        const selection = this.scene.engine!.get_selection();
+        if (selection.length > 0) {
+            const node = this.scene.getNode(selection[0]);
+            if (node) {
+                const newFills = node.style.fills ? [...node.style.fills] : [];
+                if (newFills.length === 0) newFills.push(c);
+                else if (!isGradient(newFills[0])) newFills[0] = c;
+                else if ((newFills[0] as Gradient).stops.length > 0) (newFills[0] as Gradient).stops[0].color = c;
+                this.updateNodeStyle(node, { fills: newFills });
+            }
+        } else {
+            // Update default style if nothing selected
+            try {
+                const s = JSON.parse(this._currentStyleJson || "{}");
+                if (!s.fills) s.fills = [];
+                if (s.fills.length === 0) s.fills.push(c);
+                else s.fills[0] = c;
+                this._currentStyleJson = JSON.stringify(s);
+            } catch {}
+        }
+        this.contextBar?.refresh();
+    }
+
+    getActiveStrokeColor(): Color {
+        try {
+            const s = JSON.parse(this.getCurrentStyle());
+            if (s.strokes && s.strokes.length > 0 && s.strokes[0].paint) {
+                if (isGradient(s.strokes[0].paint) && s.strokes[0].paint.stops.length > 0) return s.strokes[0].paint.stops[0].color;
+                if (!isGradient(s.strokes[0].paint)) return s.strokes[0].paint;
+            }
+        } catch {}
+        return { r: 0, g: 0, b: 0, a: 1 };
+    }
+
+    updateActiveStrokeColor(hex: string) {
+        const c = this.hexToRgb(hex);
+        const selection = this.scene.engine!.get_selection();
+        if (selection.length > 0) {
+            const node = this.scene.getNode(selection[0]);
+            if (node) {
+                const newStrokes = node.style.strokes ? [...node.style.strokes] : [];
+                if (newStrokes.length === 0) newStrokes.push({ paint: c, width: 1, cap: 0, join: 0, dash_array: [], dash_offset: 0, miter_limit: 4, alignment: StrokeAlignment.Center });
+                else if (newStrokes[0].paint && !isGradient(newStrokes[0].paint)) newStrokes[0].paint = c;
+                else if ((newStrokes[0].paint as Gradient).stops.length > 0) (newStrokes[0].paint as Gradient).stops[0].color = c;
+                this.updateNodeStyle(node, { strokes: newStrokes });
+            }
+        } else {
+            try {
+                const s = JSON.parse(this._currentStyleJson || "{}");
+                if (!s.strokes) s.strokes = [];
+                if (s.strokes.length === 0) s.strokes.push({ paint: c, width: 1, cap: 0, join: 0, dash_array: [], dash_offset: 0, miter_limit: 4, alignment: StrokeAlignment.Center });
+                else s.strokes[0].paint = c;
+                this._currentStyleJson = JSON.stringify(s);
+            } catch {}
+        }
+        this.contextBar?.refresh();
+    }
+    
     getActiveFillColor(): Color {
-        const hex = this.fillInput?.value || '#4285F4';
-        return this.hexToRgb(hex);
+        try {
+            const s = JSON.parse(this.getCurrentStyle());
+            if (s.fills && s.fills.length > 0) return s.fills[0];
+        } catch {}
+        return { r: 66/255, g: 133/255, b: 244/255, a: 1 };
     }
 
     private toggleNodeVisibility() {
@@ -398,42 +626,12 @@ export class UIEngine {
 
     /** Build a style JSON string from the current UI panel values. */
     private buildCurrentStyleJson(): string {
-        const fillOn = this.fillEnabled ? this.fillEnabled.checked : true;
-        const strokeOn = this.strokeEnabled ? this.strokeEnabled.checked : true;
-
-        const fill = fillOn ? this.hexToRgb(this.fillInput.value) : null;
-        const stroke = strokeOn ? this.hexToRgb(this.strokeInput.value) : null;
-        const strokeWidth = parseFloat(this.weightInput.value) || 1;
-        const opacity = (parseFloat(this.opacityInput.value) || 100) / 100;
-        const strokeCap = this.strokeCap ? parseInt(this.strokeCap.value) || 0 : 0;
-        const strokeJoin = this.strokeJoin ? parseInt(this.strokeJoin.value) || 0 : 0;
-        const blendMode = this.blendMode ? parseInt(this.blendMode.value) || 0 : 0;
-        const cornerRadius = this.cornerRadius ? parseFloat(this.cornerRadius.value) || 0 : 0;
-
-        const fillOpacity = this.fillOpacity ? (parseFloat(this.fillOpacity.value) || 100) / 100 : 1;
-        const fillRule = this.fillRule ? parseInt(this.fillRule.value) || 0 : 0;
-        const dashOffset = this.dashOffset ? parseFloat(this.dashOffset.value) || 0 : 0;
-        const miterLimit = this.miterLimit ? parseFloat(this.miterLimit.value) || 4 : 4;
-
-        let dashArray: number[] = [];
-        if (this.strokeDash && this.strokeDash.value) {
-            dashArray = this.strokeDash.value.split(',').map(Number).filter(n => !isNaN(n));
-        }
-
-        return JSON.stringify({
-            fill,
-            stroke,
-            stroke_width: strokeWidth,
-            opacity,
-            stroke_cap: strokeCap,
-            stroke_join: strokeJoin,
-            dash_array: dashArray,
-            dash_offset: dashOffset,
-            corner_radius: cornerRadius,
-            blend_mode: blendMode,
-            fill_rule: fillRule,
-            miter_limit: miterLimit,
-            fill_opacity: fillOpacity,
+        return this._currentStyleJson || JSON.stringify({
+            fills: [{ r: 0.8, g: 0.8, b: 0.8, a: 1.0 }],
+            strokes: [{ paint: { r: 0, g: 0, b: 0, a: 1.0 }, width: 2, cap: 0, join: 0, dash_array: [], dash_offset: 0, miter_limit: 4, alignment: StrokeAlignment.Center }],
+            opacity: (parseFloat(this.opacityInput?.value) || 100) / 100,
+            blend_mode: this.blendMode ? parseInt(this.blendMode.value) || 0 : 0,
+            corner_radius: this.cornerRadius ? parseFloat(this.cornerRadius.value) || 0 : 0,
         });
     }
 
@@ -445,7 +643,53 @@ export class UIEngine {
         return this._currentStyleJson ?? this.buildCurrentStyleJson();
     }
 
-    updateTransform() {
+    /** Write a transform field and remember what was written, so change events
+     *  can tell a real user edit from an untouched (rounded) display value. */
+    private syncField(input: HTMLInputElement | null, value: string) {
+        if (!input) return;
+        input.value = value;
+        input.dataset.synced = value;
+    }
+
+    /** True when the user actually changed this field since the last sync. */
+    private fieldEdited(input: HTMLInputElement | null): boolean {
+        return !!input && input.value !== input.dataset.synced;
+    }
+
+    /** Current visual size of a node, full precision — the same measure the
+     *  panel displays and resizeNode targets (resolved rounded outline for paths). */
+    private getNodeDisplaySize(node: SceneNode, id: number): { w: number; h: number } | null {
+        if (node.geometry.Rect) {
+            return { w: node.geometry.Rect.width, h: node.geometry.Rect.height };
+        }
+        if (node.geometry.Ellipse) {
+            return { w: node.geometry.Ellipse.radius_x * 2, h: node.geometry.Ellipse.radius_y * 2 };
+        }
+        if (node.geometry.Path) {
+            const resolved = this.scene.getResolvedSubpaths(id);
+            const b = this.scene.renderer?.calculatePathBounds({ subpaths: resolved });
+            if (b && b.maxX > b.minX && b.maxY > b.minY) {
+                return { w: b.maxX - b.minX, h: b.maxY - b.minY };
+            }
+            return null;
+        }
+        return null;
+    }
+
+    /** Convert a world-space translation delta into the delta to add to the
+     *  node's LOCAL translation, undoing the parent's linear transform. For a
+     *  top-level node (identity parent) this is a no-op passthrough. */
+    private worldDeltaToLocal(id: number, wdx: number, wdy: number): [number, number] {
+        const parentId = this.scene.getNodeParent(id);
+        if (parentId < 0) return [wdx, wdy]; // top-level: parent is identity
+        const p = this.scene.getTransform(parentId); // row-major global
+        const a = p[0], b = p[1], c = p[3], d = p[4];
+        const det = a * d - b * c;
+        if (Math.abs(det) < 1e-9) return [wdx, wdy];
+        return [(d * wdx - b * wdy) / det, (-c * wdx + a * wdy) / det];
+    }
+
+    updateTransform(pushHistory: boolean = true) {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
 
@@ -453,83 +697,94 @@ export class UIEngine {
         const node = this.scene.getNode(id);
         if (!node) return;
 
-        this.scene.saveMoveHistory();
+        // Only write the components the user actually edited. Writing back
+        // untouched fields would quantize the exact stored values to the
+        // rounded display strings (and spuriously resize on rotation edits).
+        const anyEdit = [this.propX, this.propY, this.propW, this.propH,
+            this.propRotation, this.propSkewX, this.propSkewY,
+            this.propScaleX, this.propScaleY]
+            .some(i => this.fieldEdited(i));
+        if (!anyEdit) return;
 
-        // Position
-        const currentT = this.scene.getTransform(id);
-        const newX = parseFloat(this.propX?.value) || 0;
-        const newY = parseFloat(this.propY?.value) || 0;
-        if (Math.abs(newX - currentT[2]) > 0.01 || Math.abs(newY - currentT[5]) > 0.01) {
-            this.scene.setNodePosition(id, newX, newY);
-        }
+        const applyEdits = () => {
+            // Position — the fields hold the bounding box top-left, so move by
+            // the world-space delta from the current bounds, not by setting the
+            // transform origin absolutely (which flip/rotation would offset).
+            if (this.fieldEdited(this.propX) || this.fieldEdited(this.propY)) {
+                const b = this.scene.getNodeBounds(id);
+                const worldDx = this.fieldEdited(this.propX)
+                    ? (parseFloat(this.propX!.value) || 0) - b[0] : 0;
+                const worldDy = this.fieldEdited(this.propY)
+                    ? (parseFloat(this.propY!.value) || 0) - b[1] : 0;
+                const [ldx, ldy] = this.worldDeltaToLocal(id, worldDx, worldDy);
+                this.scene.moveNode(id, ldx, ldy);
+            }
 
-        // Size (W/H)
-        const newW = parseFloat(this.propW?.value) || 0;
-        const newH = parseFloat(this.propH?.value) || 0;
-        if (newW > 0 && newH > 0) {
-            this.scene.resizeNode(id, newW, newH);
-        }
+            // Size (W/H) — the untouched axis keeps its exact current size
+            // (the field only shows a rounded value).
+            if (this.fieldEdited(this.propW) || this.fieldEdited(this.propH)) {
+                const cur = this.getNodeDisplaySize(node, id);
+                let newW = this.fieldEdited(this.propW)
+                    ? (parseFloat(this.propW!.value) || 0) : (cur?.w ?? 0);
+                let newH = this.fieldEdited(this.propH)
+                    ? (parseFloat(this.propH!.value) || 0) : (cur?.h ?? 0);
+                // Proportion constraint: editing one axis scales the other.
+                if (this.aspectLocked && cur && cur.w > 0 && cur.h > 0) {
+                    if (this.fieldEdited(this.propW) && !this.fieldEdited(this.propH)) {
+                        newH = newW * (cur.h / cur.w);
+                    } else if (this.fieldEdited(this.propH) && !this.fieldEdited(this.propW)) {
+                        newW = newH * (cur.w / cur.h);
+                    }
+                }
+                if (newW > 0 && newH > 0) {
+                    this.scene.resizeNode(id, newW, newH);
+                }
+            }
 
-        // Rotation + Skew — recompose the full transform as T × R × Skew × S
-        // We read the current local transform to get the current scale,
-        // then apply the new rotation and skew from the UI fields.
-        {
-            const lt = this.scene.getNodeLocalTransform(id);
-            // lt is column-major [m00, m10, m20, m01, m11, m21, m02, m12, m22]
-            // Decompose current scale from the local transform
-            const sx = Math.sqrt(lt[0] * lt[0] + lt[1] * lt[1]) || 1;
-            const det = lt[0] * lt[4] - lt[3] * lt[1];
-            const sy = det < 0 ? -Math.sqrt(lt[3] * lt[3] + lt[4] * lt[4]) || -1 : Math.sqrt(lt[3] * lt[3] + lt[4] * lt[4]) || 1;
+            // Rotation / skew / scale — components are canonical in the engine.
+            if (this.fieldEdited(this.propRotation)) {
+                this.scene.engine!.set_node_rotation(id, parseFloat(this.propRotation!.value) || 0);
+            }
+            if (this.fieldEdited(this.propSkewX) || this.fieldEdited(this.propSkewY)) {
+                const tc = this.scene.getNodeTransformComponents(id);
+                const skewX = this.fieldEdited(this.propSkewX)
+                    ? (parseFloat(this.propSkewX!.value) || 0) : tc.skew_x_deg;
+                const skewY = this.fieldEdited(this.propSkewY)
+                    ? (parseFloat(this.propSkewY!.value) || 0) : tc.skew_y_deg;
+                this.scene.engine!.set_node_skew(id, skewX, skewY);
+            }
+            if (this.fieldEdited(this.propScaleX) || this.fieldEdited(this.propScaleY)) {
+                const tc = this.scene.getNodeTransformComponents(id);
+                // Percent fields; empty or ~0 entries keep the current factor
+                // (scale 0 would collapse the matrix irrecoverably). Negative
+                // values are legal — that's a flip.
+                const parseScale = (el: HTMLInputElement, cur: number) => {
+                    const v = (parseFloat(el.value) || 0) / 100;
+                    return Math.abs(v) > 0.001 ? v : cur;
+                };
+                const sx = this.fieldEdited(this.propScaleX)
+                    ? parseScale(this.propScaleX!, tc.scale_x) : tc.scale_x;
+                const sy = this.fieldEdited(this.propScaleY)
+                    ? parseScale(this.propScaleY!, tc.scale_y) : tc.scale_y;
+                this.scene.engine!.set_node_scale(id, sx, sy);
+            }
+        };
 
-            const tx = lt[6]; // translation X (column-major: m02)
-            const ty = lt[7]; // translation Y (column-major: m12)
-
-            const angleDeg = parseFloat(this.propRotation?.value) || 0;
-            const angleRad = angleDeg * (Math.PI / 180);
-            const skewXDeg = parseFloat(this.propSkewX?.value) || 0;
-            const skewYDeg = parseFloat(this.propSkewY?.value) || 0;
-            const skewXRad = skewXDeg * (Math.PI / 180);
-            const skewYRad = skewYDeg * (Math.PI / 180);
-
-            const cosR = Math.cos(angleRad);
-            const sinR = Math.sin(angleRad);
-            const tanSkX = Math.tan(skewXRad);
-            const tanSkY = Math.tan(skewYRad);
-
-            // Compose: T(tx,ty) × R(θ) × Skew(skewX, skewY) × S(sx, sy)
-            // Skew matrix:  [1, tan(skX), 0,  tan(skY), 1, 0,  0, 0, 1] (column-major)
-            // R × Skew × S (column-major):
-            //   col0 = R × [sx, sx*tan(skY), 0]
-            //   col1 = R × [sy*tan(skX), sy, 0]
-            const m00 = cosR * sx + (-sinR) * sx * tanSkY;
-            const m10 = sinR * sx + cosR * sx * tanSkY;
-            const m01 = cosR * sy * tanSkX + (-sinR) * sy;
-            const m11 = sinR * sy * tanSkX + cosR * sy;
-
-            // Column-major transform: [m00, m10, 0, m01, m11, 0, tx, ty, 1]
-            const newTransform = [m00, m10, 0, m01, m11, 0, tx, ty, 1];
-            this.scene.setNodeTransform(id, newTransform);
-        }
+        // One undo step per edit: transaction() snapshots once and suppresses
+        // the inner wrappers' own pushes. Scrub gestures (pushHistory=false)
+        // already run inside a beginGesture()/endGesture() bracket.
+        if (pushHistory) this.scene.transaction(applyEdits);
+        else applyEdits();
 
         this.scene.invalidateCache();
-        this.ui_syncSelection();
-    }
-
-    /** Internal sync helper to avoid recursion. */
-    private ui_syncSelection() {
-        // Lightweight sync that doesn't trigger updateTransform again
-        const selection = this.scene.engine!.get_selection();
-        if (selection.length === 0) return;
-        const nodeType = this.scene.getNodeType(selection[0]);
-        if (nodeType === undefined) return;
+        // Full field re-sync so values and the per-field synced markers reflect
+        // what the engine actually stored (resize may clamp, radius may cap).
+        this.syncWithSelection({ interactive: true });
         this.updateLayerList();
     }
 
     syncWithSelection(opts: { interactive?: boolean } = {}) {
         const interactive = opts.interactive === true;
-        // Any selection change must repaint the overlay — otherwise stale
-        // selection/corner-radius handles linger after deselecting via paths
-        // that don't go through the canvas input handlers (e.g. layer panel).
         this.scene.renderer?.requestRender();
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) {
@@ -554,62 +809,17 @@ export class UIEngine {
         }
         const style = node.style;
 
-        // Fill
-        if (style.fill) {
-            if (isGradient(style.fill)) {
-                // Gradient fill — show first stop color in picker
-                const firstStop = style.fill.stops?.[0]?.color;
-                if (firstStop) {
-                    this.fillInput.value = this.rgbToHex(firstStop);
-                }
-            } else {
-                this.fillInput.value = this.rgbToHex(style.fill);
-            }
-            if (this.fillEnabled) this.fillEnabled.checked = true;
-        } else {
-            if (this.fillEnabled) this.fillEnabled.checked = false;
-        }
-
-        // Stroke
-        if (style.stroke) {
-            if (isGradient(style.stroke)) {
-                const firstStop = style.stroke.stops?.[0]?.color;
-                if (firstStop) {
-                    this.strokeInput.value = this.rgbToHex(firstStop);
-                }
-            } else {
-                this.strokeInput.value = this.rgbToHex(style.stroke);
-            }
-            if (this.strokeEnabled) this.strokeEnabled.checked = true;
-        } else {
-            if (this.strokeEnabled) this.strokeEnabled.checked = false;
-        }
-
-        // Weight, opacity
-        this.weightInput.value = (style.stroke_width !== undefined ? style.stroke_width : 1).toString();
         this.opacityInput.value = ((style.opacity !== undefined ? style.opacity : 1) * 100).toFixed(0);
-
-        // Stroke cap, join
-        if (this.strokeCap) this.strokeCap.value = (style.stroke_cap || 0).toString();
-        if (this.strokeJoin) this.strokeJoin.value = (style.stroke_join || 0).toString();
-
-        // Dash
-        if (this.strokeDash) {
-            const dashStr = (style.dash_array || []).join(',');
-            // Try to match a preset
-            const options = Array.from(this.strokeDash.options);
-            const match = options.find(o => o.value === dashStr);
-            this.strokeDash.value = match ? dashStr : '';
-        }
-
-        // Blend mode
         if (this.blendMode) this.blendMode.value = (style.blend_mode || 0).toString();
 
-        // Corner radius — Rect uses the parametric shape radius; Path shows the
-        // per-vertex radius (blank when corners differ), editable via the field.
+        // Corner radius: the field is always present (Figma-style); it is
+        // disabled/dimmed when the selected geometry doesn't support it.
         const cornerRadiusCell = document.getElementById('corner-radius-cell');
         const im = this.scene.renderer?.inputManager;
+        const radiusSupported = !!(node.geometry.Rect || node.geometry.Path);
         if (this.cornerRadius) {
+            this.cornerRadius.disabled = !radiusSupported;
+            this.cornerRadius.placeholder = '';
             if (node.geometry.Rect) {
                 this.cornerRadius.value = (style.corner_radius || 0).toString();
             } else if (node.geometry.Path) {
@@ -626,112 +836,47 @@ export class UIEngine {
                 const uniform = radii.length > 0 && radii.every(r => Math.abs(r - radii[0]) < 1e-3);
                 this.cornerRadius.value = uniform ? String(radii[0]) : '';
                 if (!uniform) this.cornerRadius.placeholder = 'Mixed';
+            } else {
+                this.cornerRadius.value = '';
             }
         }
-        if (cornerRadiusCell) {
-            cornerRadiusCell.style.display = (node.geometry.Rect || node.geometry.Path) ? '' : 'none';
-        }
+        cornerRadiusCell?.classList.toggle('disabled', !radiusSupported);
 
-        // New SVG properties
-        if (this.fillOpacity) this.fillOpacity.value = ((style.fill_opacity !== undefined ? style.fill_opacity : 1) * 100).toFixed(0);
-        if (this.fillRule) this.fillRule.value = (style.fill_rule || 0).toString();
-        if (this.dashOffset) this.dashOffset.value = (style.dash_offset || 0).toString();
-        if (this.miterLimit) this.miterLimit.value = (style.miter_limit !== undefined ? style.miter_limit : 4).toString();
-
-        // Visibility / Locked
         if (this.toggleVisible) this.toggleVisible.classList.toggle('active', node.visible !== false);
         if (this.toggleLocked) this.toggleLocked.classList.toggle('active', node.locked === true);
 
-        // Transform — read position and size
-        const t = this.scene.getTransform(selection[0]);
-        if (this.propX) this.propX.value = Math.round(t[2]).toString();
-        if (this.propY) this.propY.value = Math.round(t[5]).toString();
+        // X/Y show the top-left of the world-space bounding box (Figma-style),
+        // which matches the on-screen selection rectangle — not the transform
+        // origin, which drifts under rotation/flip.
+        const b = this.scene.getNodeBounds(selection[0]);
+        this.syncField(this.propX, Math.round(b[0]).toString());
+        this.syncField(this.propY, Math.round(b[1]).toString());
 
-        // Width/Height from geometry
-        if (node.geometry.Rect) {
-            if (this.propW) this.propW.value = Math.round(node.geometry.Rect.width).toString();
-            if (this.propH) this.propH.value = Math.round(node.geometry.Rect.height).toString();
-        } else if (node.geometry.Ellipse) {
-            if (this.propW) this.propW.value = Math.round(node.geometry.Ellipse.radius_x * 2).toString();
-            if (this.propH) this.propH.value = Math.round(node.geometry.Ellipse.radius_y * 2).toString();
-        } else if (node.geometry.Path) {
-            const subpaths = node.geometry.Path.subpaths;
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            let hasPoints = false;
-            for (const sp of subpaths) {
-                for (const p of sp.points) {
-                    hasPoints = true;
-                    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-                    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
-                }
-            }
-            if (hasPoints) {
-                if (this.propW) this.propW.value = Math.round(maxX - minX).toString();
-                if (this.propH) this.propH.value = Math.round(maxY - minY).toString();
-            }
+        // W/H shows the same measure resizeNode targets: geometry size for
+        // rects/ellipses, resolved (corner-rounded) outline size for paths.
+        const size = this.getNodeDisplaySize(node, selection[0]);
+        if (size) {
+            this.syncField(this.propW, Math.round(size.w).toString());
+            this.syncField(this.propH, Math.round(size.h).toString());
         }
 
-        // Decompose rotation and skew from the local transform matrix
-        // The local transform is column-major: [m00, m10, m20, m01, m11, m21, m02, m12, m22]
-        // Row-major (t from getTransform): [scaleX, skewX, transX, skewY, scaleY, transY, p0, p1, p2]
         {
-            const lt = this.scene.getNodeLocalTransform(selection[0]);
-            // Column-major: m00=lt[0], m10=lt[1], m01=lt[3], m11=lt[4]
-            // Decompose as R × Skew × S
-            const sx = Math.sqrt(lt[0] * lt[0] + lt[1] * lt[1]);
-            const rotation = Math.atan2(lt[1], lt[0]);
-
-            if (this.propRotation) {
-                this.propRotation.value = Math.round(rotation * (180 / Math.PI)).toString();
-            }
-
-            // Remove rotation to get Skew × S
-            if (sx > 1e-6) {
-                const cosR = Math.cos(rotation);
-                const sinR = Math.sin(rotation);
-                // R⁻¹ × M  (only need the 2×2 linear part)
-                // R⁻¹ = [cos, sin; -sin, cos]
-                const r10 = -sinR * lt[0] + cosR * lt[1]; // ≈ sx * tan(skewY)
-                const r01 = cosR * lt[3] + sinR * lt[4];  // = sx * tan(skewX)  ... actually sy*tan(skewX)
-                const r11 = -sinR * lt[3] + cosR * lt[4]; // = sy
-
-                // r00 = sx, r10 ≈ 0, r01 = sy * tan(skewX), r11 = sy
-                // skewX = atan2(r01, r11)  — or atan(r01/r11) when r11 ≈ sy
-                const skewXRad = Math.abs(r11) > 1e-6 ? Math.atan2(r01, r11) : 0;
-                // skewY is not directly extractable from a simple R×Skew×S decomposition
-                // because our compose order is R × SkewMatrix(skX, skY) × S
-                // SkewMatrix col0 = [1, tan(skY)] × sx → after R: [cos-sin*tan(skY), sin+cos*tan(skY)] × sx
-                // r10 = sx * tan(skY) when decomposed correctly, but r10 should be ≈ 0 in R×Skew×S
-                // Actually: r10 = -sinR*lt[0] + cosR*lt[1]
-                //   lt[0] = cosR*sx + (-sinR)*sx*tan(skY) = sx*(cosR - sinR*tan(skY))
-                //   lt[1] = sinR*sx + cosR*sx*tan(skY) = sx*(sinR + cosR*tan(skY))
-                //   r10 = -sinR*sx*(cosR-sinR*tanSkY) + cosR*sx*(sinR+cosR*tanSkY)
-                //       = sx*(-sinR*cosR + sin²R*tanSkY + cosR*sinR + cos²R*tanSkY)
-                //       = sx * tanSkY
-                const skewYRad = Math.abs(sx) > 1e-6 ? Math.atan(r10 / sx) : 0;
-
-                if (this.propSkewX) {
-                    const deg = skewXRad * (180 / Math.PI);
-                    this.propSkewX.value = Math.abs(deg) < 0.05 ? '0' : deg.toFixed(1);
-                }
-                if (this.propSkewY) {
-                    const deg = skewYRad * (180 / Math.PI);
-                    this.propSkewY.value = Math.abs(deg) < 0.05 ? '0' : deg.toFixed(1);
-                }
-            } else {
-                if (this.propSkewX) this.propSkewX.value = '0';
-                if (this.propSkewY) this.propSkewY.value = '0';
-            }
+            const tc = this.scene.getNodeTransformComponents(selection[0]);
+            this.syncField(this.propRotation, Math.round(tc.rotation_deg).toString());
+            this.syncField(this.propSkewX,
+                Math.abs(tc.skew_x_deg) < 0.05 ? '0' : tc.skew_x_deg.toFixed(1));
+            this.syncField(this.propSkewY,
+                Math.abs(tc.skew_y_deg) < 0.05 ? '0' : tc.skew_y_deg.toFixed(1));
+            this.syncField(this.propScaleX, String(Math.round(tc.scale_x * 100)));
+            this.syncField(this.propScaleY, String(Math.round(tc.scale_y * 100)));
         }
 
-        // During interactive drags, skip expensive DOM rebuilds — the mouseup
-        // handler will do a full syncWithSelection() to reconcile everything.
         if (!interactive) {
             this.updateLayerList();
             this.contextBar?.refresh();
             this.breadcrumbBar?.refresh();
         }
-        // Typography — show/hide section and populate values
+        
         if (node.geometry.Text) {
             if (this.typographySection) this.typographySection.style.display = '';
             if (this.textFontFamily) this.textFontFamily.value = node.geometry.Text.font_family || '';
@@ -741,31 +886,22 @@ export class UIEngine {
         } else {
             if (this.typographySection) this.typographySection.style.display = 'none';
         }
+        
+        // Render dynamic lists
+        this.renderFillsList(node);
+        this.renderStrokesList(node);
+
     }
+
 
     /** Clear the property panel (when nothing is selected). Show the CURRENT style (what a newly drawn
      *  shape will get) in the style controls and blank the transform fields. */
     private clearPropertyPanel() {
-        // Restore style widgets from the persistent current style
         try {
             const s = JSON.parse(this.getCurrentStyle());
-            if (this.fillEnabled) this.fillEnabled.checked = s.fill !== null;
-            if (s.fill) this.fillInput.value = this.rgbToHex(s.fill);
-            if (this.strokeEnabled) this.strokeEnabled.checked = s.stroke !== null;
-            if (s.stroke) this.strokeInput.value = this.rgbToHex(s.stroke);
-            this.weightInput.value = String(s.stroke_width ?? 2);
             this.opacityInput.value = String(Math.round((s.opacity ?? 1) * 100));
-            if (this.strokeCap) this.strokeCap.value = String(s.stroke_cap ?? 0);
-            if (this.strokeJoin) this.strokeJoin.value = String(s.stroke_join ?? 0);
-            if (this.strokeDash) this.strokeDash.value = (s.dash_array ?? []).join(',');
             if (this.blendMode) this.blendMode.value = String(s.blend_mode ?? 0);
-            if (this.cornerRadius) this.cornerRadius.value = String(s.corner_radius ?? 0);
-            if (this.fillOpacity) this.fillOpacity.value = String(Math.round((s.fill_opacity ?? 1) * 100));
-            if (this.fillRule) this.fillRule.value = String(s.fill_rule ?? 0);
-            if (this.dashOffset) this.dashOffset.value = String(s.dash_offset ?? 0);
-            if (this.miterLimit) this.miterLimit.value = String(s.miter_limit ?? 4);
-        } catch { /* keep whatever the panel shows */ }
-        // Transform fields have no meaning without a selection
+        } catch { }
         if (this.propX) this.propX.value = '';
         if (this.propY) this.propY.value = '';
         if (this.propW) this.propW.value = '';
@@ -773,11 +909,21 @@ export class UIEngine {
         if (this.propRotation) this.propRotation.value = '';
         if (this.propSkewX) this.propSkewX.value = '';
         if (this.propSkewY) this.propSkewY.value = '';
+        if (this.propScaleX) this.propScaleX.value = '';
+        if (this.propScaleY) this.propScaleY.value = '';
+        if (this.cornerRadius) {
+            this.cornerRadius.value = '';
+            this.cornerRadius.placeholder = '';
+            this.cornerRadius.disabled = true;
+        }
         if (this.toggleVisible) this.toggleVisible.classList.remove('active');
         if (this.toggleLocked) this.toggleLocked.classList.remove('active');
         if (this.typographySection) this.typographySection.style.display = 'none';
-        const cornerRadiusCell = document.getElementById('corner-radius-cell');
-        if (cornerRadiusCell) cornerRadiusCell.style.display = 'none';
+        document.getElementById('corner-radius-cell')?.classList.add('disabled');
+        
+        if (this.fillsList) this.fillsList.innerHTML = '';
+        if (this.strokesList) this.strokesList.innerHTML = '';
+
     }
 
     /** Apply typography properties from the side panel to the selected text node. */
@@ -809,6 +955,222 @@ export class UIEngine {
     /** Map from numeric node type (engine enum) to string key for icon lookup.
      *  0=Path, 1=Rect, 2=Ellipse, 3=Group, 4=Text */
     private static readonly NODE_TYPE_KEY: readonly string[] = ['Path', 'Rect', 'Ellipse', 'Group', 'Text'];
+
+
+    private getFills(node: SceneNode): Paint[] {
+        return node.style.fills || [];
+    }
+
+    private getStrokes(node: SceneNode): Stroke[] {
+        return node.style.strokes || [];
+    }
+
+        renderFillsList(node: SceneNode) {
+        if (!this.fillsList) return;
+        this.fillsList.innerHTML = '';
+        const fills = this.getFills(node);
+        
+        fills.forEach((fill: any, index: number) => {
+            const row = document.createElement('div');
+            row.className = 'fill-stroke-row';
+            
+            const colorInput = document.createElement('input');
+            colorInput.type = 'color';
+            colorInput.className = 'color-input';
+            const currentColor = isGradient(fill) && fill.stops.length > 0 ? fill.stops[0].color : (!isGradient(fill) ? fill : {r:0, g:0, b:0, a:1});
+            colorInput.value = this.rgbToHex(currentColor);
+            
+            const hexInput = document.createElement('input');
+            hexInput.type = 'text';
+            hexInput.className = 'prop-input';
+            hexInput.style.width = '60px';
+            hexInput.style.flex = '0 0 60px';
+            hexInput.value = this.rgbToHex(currentColor).toUpperCase();
+
+            colorInput.addEventListener('input', () => {
+                const newFills = [...fills];
+                const c = this.hexToRgb(colorInput.value);
+                hexInput.value = colorInput.value.toUpperCase();
+                if (isGradient(newFills[index])) {
+                    if ((newFills[index] as Gradient).stops.length > 0) {
+                        (newFills[index] as Gradient).stops[0].color = c;
+                    }
+                } else {
+                    newFills[index] = c;
+                }
+                this.updateNodeStyle(node, { fills: newFills }, true);
+            });
+
+            hexInput.addEventListener('change', () => {
+                const val = hexInput.value.startsWith('#') ? hexInput.value : '#' + hexInput.value;
+                if (/^#[0-9A-F]{6}$/i.test(val)) {
+                    colorInput.value = val;
+                    const newFills = [...fills];
+                    const c = this.hexToRgb(val);
+                    if (isGradient(newFills[index])) {
+                        if ((newFills[index] as Gradient).stops.length > 0) {
+                            (newFills[index] as Gradient).stops[0].color = c;
+                        }
+                    } else {
+                        newFills[index] = c;
+                    }
+                    this.updateNodeStyle(node, { fills: newFills });
+                }
+            });
+            
+            const delBtn = document.createElement('button');
+            delBtn.className = 'icon-toggle';
+            delBtn.innerHTML = '×';
+            delBtn.title = 'Remove Fill';
+            delBtn.onclick = () => {
+                const newFills = fills.filter((_: any, i: number) => i !== index);
+                this.updateNodeStyle(node, { fills: newFills });
+            };
+
+            row.appendChild(colorInput);
+            row.appendChild(hexInput);
+            const spacer = document.createElement('div');
+            spacer.style.flex = '1';
+            row.appendChild(spacer);
+            row.appendChild(delBtn);
+            this.fillsList.appendChild(row);
+        });
+    }
+
+        renderStrokesList(node: SceneNode) {
+        if (!this.strokesList) return;
+        this.strokesList.innerHTML = '';
+        const strokes = this.getStrokes(node);
+        
+        strokes.forEach((stroke: any, index: number) => {
+            const row = document.createElement('div');
+            row.className = 'fill-stroke-row';
+            
+            const colorInput = document.createElement('input');
+            colorInput.type = 'color';
+            colorInput.className = 'color-input';
+            const currentPaint = stroke.paint || {r:0, g:0, b:0, a:1};
+            const currentColor = isGradient(currentPaint) && currentPaint.stops.length > 0 ? currentPaint.stops[0].color : (!isGradient(currentPaint) ? currentPaint : {r:0, g:0, b:0, a:1});
+            colorInput.value = this.rgbToHex(currentColor);
+            
+            const hexInput = document.createElement('input');
+            hexInput.type = 'text';
+            hexInput.className = 'prop-input';
+            hexInput.style.width = '60px';
+            hexInput.style.flex = '0 0 60px';
+            hexInput.value = this.rgbToHex(currentColor).toUpperCase();
+
+            colorInput.addEventListener('input', () => {
+                const newStrokes = [...strokes];
+                const c = this.hexToRgb(colorInput.value);
+                hexInput.value = colorInput.value.toUpperCase();
+                if (stroke.paint && isGradient(stroke.paint)) {
+                    if (stroke.paint.stops.length > 0) {
+                        stroke.paint.stops[0].color = c;
+                    }
+                } else {
+                    newStrokes[index].paint = c;
+                }
+                this.updateNodeStyle(node, { strokes: newStrokes }, true);
+            });
+
+            hexInput.addEventListener('change', () => {
+                const val = hexInput.value.startsWith('#') ? hexInput.value : '#' + hexInput.value;
+                if (/^#[0-9A-F]{6}$/i.test(val)) {
+                    colorInput.value = val;
+                    const newStrokes = [...strokes];
+                    const c = this.hexToRgb(val);
+                    if (stroke.paint && isGradient(stroke.paint)) {
+                        if (stroke.paint.stops.length > 0) {
+                            stroke.paint.stops[0].color = c;
+                        }
+                    } else {
+                        newStrokes[index].paint = c;
+                    }
+                    this.updateNodeStyle(node, { strokes: newStrokes });
+                }
+            });
+
+            const wInput = document.createElement('input');
+            wInput.type = 'number';
+            wInput.className = 'prop-input';
+            wInput.value = String(stroke.width);
+            wInput.step = '0.5';
+            wInput.min = '0';
+            wInput.style.width = '36px';
+            wInput.style.flex = '0 0 36px';
+            wInput.addEventListener('input', () => {
+                const newStrokes = [...strokes];
+                newStrokes[index].width = parseFloat(wInput.value) || 0;
+                this.updateNodeStyle(node, { strokes: newStrokes }, true);
+            });
+
+            const alignSelect = document.createElement('select');
+            alignSelect.className = 'prop-select';
+            alignSelect.style.width = '60px';
+            alignSelect.style.flex = '0 0 60px';
+            alignSelect.innerHTML = `
+                <option value="Center">Ctr</option>
+                <option value="Inner">In</option>
+                <option value="Outer">Out</option>
+            `;
+            alignSelect.value = stroke.alignment || 'Center';
+            alignSelect.addEventListener('change', () => {
+                const newStrokes = [...strokes];
+                newStrokes[index].alignment = alignSelect.value as unknown as StrokeAlignment;
+                this.updateNodeStyle(node, { strokes: newStrokes });
+            });
+
+            const delBtn = document.createElement('button');
+            delBtn.className = 'icon-toggle';
+            delBtn.innerHTML = '×';
+            delBtn.title = 'Remove Stroke';
+            delBtn.onclick = () => {
+                const newStrokes = strokes.filter((_: any, i: number) => i !== index);
+                this.updateNodeStyle(node, { strokes: newStrokes });
+            };
+
+            row.appendChild(colorInput);
+            row.appendChild(hexInput);
+            row.appendChild(wInput);
+            row.appendChild(alignSelect);
+            row.appendChild(delBtn);
+            this.strokesList.appendChild(row);
+        });
+    }
+
+
+    private updateNodeStyle(_node: SceneNode, styleOverrides: Partial<NodeStyle>, skipSync: boolean = false) {
+        const selection = this.scene.engine!.get_selection();
+        if (selection.length === 0) return;
+
+        const applyToNodeAndChildren = (id: number) => {
+            const targetNode = this.scene.getNode(id);
+            if (!targetNode) return;
+
+            const newStyle = { ...targetNode.style, ...styleOverrides };
+            this.scene.setNodeStyleNoHistory(id, JSON.stringify(newStyle));
+
+            const nodeTypeNum = this.scene.getNodeType(id);
+            if (nodeTypeNum !== undefined && UIEngine.NODE_TYPE_KEY[nodeTypeNum] === 'Group') {
+                const children = this.scene.getNodeChildren(id);
+                if (children) {
+                    for (const childId of children) {
+                        applyToNodeAndChildren(childId);
+                    }
+                }
+            }
+        };
+
+        for (const id of selection) {
+            applyToNodeAndChildren(id);
+        }
+
+        this.scene.saveMoveHistory();
+        if (!skipSync) this.syncWithSelection();
+    }
+
+
 
     updateLayerList() {
         if (!this.scene.engine) return;
@@ -889,6 +1251,11 @@ export class UIEngine {
                 if (target.classList.contains('layer-chevron') ||
                     target.classList.contains('layer-vis-btn') ||
                     target.classList.contains('layer-lock-btn')) return;
+                // Leaving path-edit mode when selecting a different node clears dimming.
+                const im = this.scene.renderer?.inputManager;
+                if (im && im.editingNodeId !== null && im.editingNodeId !== id) {
+                    im.exitEditMode();
+                }
                 this.scene.selectNode(id, e.shiftKey);
                 this.syncWithSelection();
             });
@@ -933,6 +1300,47 @@ export class UIEngine {
                     this.updateLayerList();
                 });
             }
+
+            // Drag-and-drop reordering
+            item.draggable = true;
+            item.addEventListener('dragstart', (e) => {
+                // If the grabbed row is part of a multi-selection, drag the whole
+                // selection; otherwise just this row.
+                const selection = Array.from(this.scene.getSelection());
+                const dragIds = selection.length > 1 && selection.includes(id) ? selection : [id];
+                this._draggingLayerIds = dragIds;
+                this._markDraggingLayers(dragIds);
+                if (e.dataTransfer) {
+                    e.dataTransfer.effectAllowed = 'move';
+                    // Firefox needs data set for the drag to begin.
+                    e.dataTransfer.setData('text/plain', dragIds.join(','));
+                }
+            });
+            item.addEventListener('dragend', () => {
+                this._draggingLayerIds = null;
+                this._clearLayerDropIndicators();
+                this.layerList.querySelectorAll('.layer-item.dragging')
+                    .forEach(el => el.classList.remove('dragging'));
+            });
+            item.addEventListener('dragover', (e) => {
+                const dragIds = this._draggingLayerIds;
+                if (!dragIds || this._isInvalidDropTarget(id, dragIds)) return;
+                e.preventDefault();
+                if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+                const zone = this._computeLayerDropZone(row, isGroup, e);
+                this._clearLayerDropIndicators();
+                row.classList.add(zone === 'into' ? 'drop-into' : zone === 'above' ? 'drop-above' : 'drop-below');
+            });
+            item.addEventListener('drop', (e) => {
+                const dragIds = this._draggingLayerIds;
+                if (!dragIds || this._isInvalidDropTarget(id, dragIds)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                const zone = this._computeLayerDropZone(row, isGroup, e);
+                this._clearLayerDropIndicators();
+                this._draggingLayerIds = null;
+                this._performLayerDrop(dragIds, id, zone);
+            });
 
             this.layerList.appendChild(item);
 
@@ -992,6 +1400,117 @@ export class UIEngine {
                 input.blur();
             }
         });
+
+        // A draggable ancestor blocks caret placement inside the input in some
+        // browsers; disable dragging on the row while renaming.
+        const item = nameEl.closest('.layer-item') as HTMLElement | null;
+        if (item) {
+            item.draggable = false;
+            input.addEventListener('blur', () => { item.draggable = true; }, { once: true });
+        }
+    }
+
+    /** True if `nodeId` is `ancestorId` itself or nested somewhere beneath it. */
+    private _isLayerDescendant(nodeId: number, ancestorId: number): boolean {
+        let cur = this.scene.getNodeParent(nodeId);
+        while (cur !== -1) {
+            if (cur === ancestorId) return true;
+            cur = this.scene.getNodeParent(cur);
+        }
+        return false;
+    }
+
+    /** A drop target is invalid if it's one of the dragged nodes or sits inside
+     *  one of them (can't drop a node into its own subtree). */
+    private _isInvalidDropTarget(targetId: number, draggedIds: number[]): boolean {
+        return draggedIds.some(d => d === targetId || this._isLayerDescendant(targetId, d));
+    }
+
+    /** Add the `dragging` class to every layer row in `ids`. */
+    private _markDraggingLayers(ids: number[]) {
+        const set = new Set(ids);
+        this.layerList.querySelectorAll('.layer-item').forEach(el => {
+            const nid = Number((el as HTMLElement).dataset.nodeId);
+            if (set.has(nid)) el.classList.add('dragging');
+        });
+    }
+
+    /** Flattened scene draw order (bottom-up: back to front), used to preserve
+     *  the relative z-order of a multi-selection when it's moved. */
+    private _flattenDrawOrder(): number[] {
+        const out: number[] = [];
+        const walk = (ids: Uint32Array) => {
+            for (const id of ids) {
+                out.push(id);
+                const children = this.scene.getNodeChildren(id);
+                if (children.length) walk(children);
+            }
+        };
+        walk(this.scene.getRootNodes());
+        return out;
+    }
+
+    /** Remove any drag drop-indicator classes from the layer list. */
+    private _clearLayerDropIndicators() {
+        this.layerList.querySelectorAll('.drop-above, .drop-below, .drop-into')
+            .forEach(el => el.classList.remove('drop-above', 'drop-below', 'drop-into'));
+    }
+
+    /**
+     * Decide whether a drop over `row` should place the node above the target,
+     * below it, or (for group targets) inside it, based on the pointer's
+     * vertical position within the row.
+     */
+    private _computeLayerDropZone(row: HTMLElement, isGroup: boolean, e: DragEvent): 'above' | 'below' | 'into' {
+        const rect = row.getBoundingClientRect();
+        const f = rect.height > 0 ? (e.clientY - rect.top) / rect.height : 0.5;
+        if (isGroup && f > 0.3 && f < 0.7) return 'into';
+        return f < 0.5 ? 'above' : 'below';
+    }
+
+    /**
+     * Apply a layer-panel drag drop: move `draggedIds` relative to `targetId`.
+     * The layer list renders top-to-bottom (highest z first), while the engine's
+     * child order is bottom-up, so a visual "above" maps to a higher vec index.
+     */
+    private _performLayerDrop(draggedIds: number[], targetId: number, zone: 'above' | 'below' | 'into') {
+        // Drop nodes whose ancestor is also being dragged (a selected group
+        // carries its children), then order them by draw order (bottom-up) so
+        // their relative stacking is preserved after the move.
+        const deduped = new Set(this.scene.dedupSelection(draggedIds));
+        if (deduped.size === 0) return;
+        if (this._isInvalidDropTarget(targetId, [...deduped])) return;
+        const ordered = this._flattenDrawOrder().filter(id => deduped.has(id));
+        if (ordered.length === 0) return;
+
+        let newParent: number | null;
+        let index: number;
+
+        if (zone === 'into') {
+            // Drop as the top-most (highest z) children of the target group.
+            newParent = targetId;
+            const children = Array.from(this.scene.getNodeChildren(targetId)).filter(c => !deduped.has(c));
+            index = children.length;
+        } else {
+            // Reorder as siblings of the target.
+            const tParent = this.scene.getNodeParent(targetId);
+            newParent = tParent === -1 ? null : tParent;
+            const sibs = (newParent === null
+                ? Array.from(this.scene.getRootNodes())
+                : Array.from(this.scene.getNodeChildren(newParent))
+            ).filter(c => !deduped.has(c));
+            const tIdx = sibs.indexOf(targetId);
+            if (tIdx === -1) return;
+            // Visually "above" the target = higher z = after it in the bottom-up vec.
+            index = zone === 'above' ? tIdx + 1 : tIdx;
+        }
+
+        if (this.scene.reorderNodes(ordered, newParent, index) > 0) {
+            // Reveal the result when dropping into a collapsed group.
+            if (zone === 'into') this._collapsedGroups.delete(targetId);
+            this.updateLayerList();
+            this.syncWithSelection();
+        }
     }
 
     setZoom(level: number) {
@@ -1076,7 +1595,7 @@ export class UIEngine {
         return hexToRgb(hex);
     }
 
-    private rgbToHex(color: { r: number; g: number; b: number }): string {
+    public rgbToHex(color: { r: number; g: number; b: number }): string {
         return rgbToHex(color);
     }
 

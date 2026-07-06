@@ -12,6 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
 import type { SVGExportInput, FilledFace } from './svg_export';
 import type { SceneNode, NodeStyle } from './types';
+import { StrokeAlignment } from './types';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -31,6 +32,8 @@ function defaultStyle(overrides: Partial<NodeStyle> = {}): NodeStyle {
         fill_rule: 0,
         miter_limit: 4,
         fill_opacity: 1.0,
+        fills: [],
+        strokes: [],
         ...overrides,
     };
 }
@@ -45,6 +48,7 @@ function makeNode(overrides: Partial<SceneNode>): SceneNode {
         visible: true,
         locked: false,
         transform: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+
         ...overrides,
     };
 }
@@ -152,7 +156,7 @@ describe('SVG Export — Basic Shapes', () => {
             docWidth: 800, docHeight: 600,
             nodes: {
                 1: makeNode({
-                    geometry: { Text: { content: 'Hello <World> & "Friends"', font_size: 24 } },
+                    geometry: { Text: { content: 'Hello <World> & "Friends"', font_size: 24, font_family: 'sans-serif', text_align: 0, line_height: 1.2 } },
                 }),
             },
             rootNodeIds: [1],
@@ -300,7 +304,12 @@ describe('SVG Export — Stroke Properties', () => {
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
-                    style: defaultStyle({ miter_limit: 8 }),
+                    style: defaultStyle({ strokes: [{
+                        paint: { r: 0, g: 0, b: 0, a: 1 },
+                        width: 1, cap: 0, join: 0,
+                        dash_array: [], dash_offset: 0,
+                        miter_limit: 8, alignment: StrokeAlignment.Center,
+                    }] }),
                 }),
             },
             rootNodeIds: [1],
@@ -384,7 +393,7 @@ describe('SVG Export — Fill Rule & Opacity', () => {
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
-                    style: defaultStyle({ fill_opacity: 0.5 }),
+                    style: defaultStyle({ fills: [{ r: 0.5, g: 0.5, b: 0.5, a: 0.5 }] }),
                 }),
             },
             rootNodeIds: [1],
@@ -834,7 +843,7 @@ describe('SVG Export — Document Structure', () => {
 describe('SVG Round-Trip — Export then Parse', () => {
     it('round-trips a rect with all style fields', () => {
         const style = defaultStyle({
-            fill: { r: 0.2, g: 0.4, b: 0.8, a: 1.0 },
+            fill: { r: 0.2, g: 0.4, b: 0.8, a: 0.75 },
             stroke: { r: 1, g: 0, b: 0, a: 1.0 },
             stroke_width: 3,
             opacity: 0.9,
@@ -845,7 +854,6 @@ describe('SVG Round-Trip — Export then Parse', () => {
             corner_radius: 10,
             fill_rule: 1,
             miter_limit: 8,
-            fill_opacity: 0.75,
             blend_mode: 3, // overlay
         });
 
@@ -947,7 +955,7 @@ describe('SVG Round-Trip — Export then Parse', () => {
             docWidth: 800, docHeight: 600,
             nodes: {
                 1: makeNode({
-                    geometry: { Text: { content: 'Héllo Wörld', font_size: 32 } },
+                    geometry: { Text: { content: 'Héllo Wörld', font_size: 32, font_family: 'sans-serif', text_align: 0, line_height: 1.2 } },
                     style: defaultStyle({ fill: { r: 0, g: 0, b: 0, a: 1 } }),
                 }),
             },

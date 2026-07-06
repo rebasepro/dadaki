@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "vector-editor",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["dev", "--port", "5199", "--strictPort"],
+      "runtimeExecutable": "./node_modules/.bin/vite",
+      "runtimeArgs": ["--port", "5199", "--strictPort"],
       "port": 5199,
       "autoPort": true
     }

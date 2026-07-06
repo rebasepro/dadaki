@@ -359,6 +359,22 @@ export function iconFlipV(size = 14): string {
     );
 }
 
+/** Rotate 90° clockwise */
+export function iconRotateCW(size = 14): string {
+    return svg(
+        '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+        size,
+    );
+}
+
+/** Rotate 90° counterclockwise */
+export function iconRotateCCW(size = 14): string {
+    return svg(
+        '<path d="M3 12a9 9 0 1 0 9-9c-2.52 0-4.93 1-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+        size,
+    );
+}
+
 /** Flatten Transform – bake rotation/scale/flip into geometry */
 export function iconFlatten(size = 14): string {
     return svg(

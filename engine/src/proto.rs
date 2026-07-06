@@ -14,7 +14,9 @@ use crate::{
 
 /// Current file format version. Bump when schema changes.
 /// v3: per-node vector network.
-pub const FORMAT_VERSION: u32 = 4;
+/// v4: Live Paint face fills.
+/// v5: Multiple strokes and non-destructive transforms.
+pub const FORMAT_VERSION: u32 = 6;
 
 // ─── Proto Message Types ────────────────────────────────────────────────────────
 
@@ -31,37 +33,67 @@ pub struct ProtoColor {
 }
 
 #[derive(Clone, PartialEq, Message)]
-pub struct ProtoStyle {
+pub struct ProtoPaint {
     #[prost(message, optional, tag = "1")]
-    pub fill: Option<ProtoColor>,
+    pub solid: Option<ProtoColor>,
     #[prost(message, optional, tag = "2")]
-    pub stroke: Option<ProtoColor>,
-    #[prost(float, tag = "3")]
-    pub stroke_width: f32,
-    #[prost(float, optional, tag = "4")]
-    pub opacity: Option<f32>,
-    #[prost(uint32, tag = "5")]
-    pub stroke_cap: u32,
-    #[prost(uint32, tag = "6")]
-    pub stroke_join: u32,
-    #[prost(float, repeated, tag = "7")]
+    pub gradient: Option<ProtoGradient>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoStroke {
+    #[prost(message, optional, tag = "1")]
+    pub paint: Option<ProtoPaint>,
+    #[prost(float, tag = "2")]
+    pub width: f32,
+    #[prost(uint32, tag = "3")]
+    pub cap: u32,
+    #[prost(uint32, tag = "4")]
+    pub join: u32,
+    #[prost(float, repeated, tag = "5")]
     pub dash_array: Vec<f32>,
-    #[prost(float, tag = "8")]
+    #[prost(float, tag = "6")]
     pub dash_offset: f32,
-    #[prost(float, tag = "9")]
+    #[prost(float, tag = "7")]
+    pub miter_limit: f32,
+    #[prost(uint32, tag = "8")]
+    pub alignment: u32, // 0: Center, 1: Inner, 2: Outer
+}
+
+
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoTransform {
+    #[prost(float, tag = "1")]
+    pub x: f32,
+    #[prost(float, tag = "2")]
+    pub y: f32,
+    #[prost(float, tag = "3")]
+    pub rotation_deg: f32,
+    #[prost(float, tag = "4")]
+    pub skew_x_deg: f32,
+    #[prost(float, tag = "5")]
+    pub skew_y_deg: f32,
+    #[prost(float, tag = "6")]
+    pub scale_x: f32,
+    #[prost(float, tag = "7")]
+    pub scale_y: f32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoStyle {
+    #[prost(message, repeated, tag = "1")]
+    pub fills: Vec<ProtoPaint>,
+    #[prost(message, repeated, tag = "2")]
+    pub strokes: Vec<ProtoStroke>,
+    #[prost(float, optional, tag = "3")]
+    pub opacity: Option<f32>,
+    #[prost(float, tag = "4")]
     pub corner_radius: f32,
-    #[prost(uint32, tag = "10")]
+    #[prost(uint32, tag = "5")]
     pub blend_mode: u32,
-    #[prost(uint32, tag = "11")]
+    #[prost(uint32, tag = "6")]
     pub fill_rule: u32,
-    #[prost(float, optional, tag = "12")]
-    pub miter_limit: Option<f32>,
-    #[prost(float, optional, tag = "13")]
-    pub fill_opacity: Option<f32>,
-    #[prost(message, optional, tag = "14")]
-    pub fill_gradient: Option<ProtoGradient>,
-    #[prost(message, optional, tag = "15")]
-    pub stroke_gradient: Option<ProtoGradient>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -225,8 +257,8 @@ pub struct ProtoNode {
     #[prost(uint32, tag = "3")]
     pub node_type: u32,
     /// 3x3 transform matrix (9 floats, column-major)
-    #[prost(float, repeated, tag = "4")]
-    pub transform: Vec<f32>,
+    #[prost(message, optional, tag = "4")]
+    pub transform: Option<ProtoTransform>,
     #[prost(message, optional, tag = "5")]
     pub style: Option<ProtoStyle>,
     #[prost(message, optional, tag = "6")]
@@ -329,65 +361,128 @@ impl From<&ProtoGradient> for Gradient {
 
 impl From<&Style> for ProtoStyle {
     fn from(s: &Style) -> Self {
-        let (fill_color, fill_gradient) = match &s.fill {
-            Some(Paint::Solid(c)) => (Some(c.into()), None),
-            Some(Paint::Gradient(g)) => (None, Some(g.into())),
-            None => (None, None),
-        };
-        let (stroke_color, stroke_gradient) = match &s.stroke {
-            Some(Paint::Solid(c)) => (Some(c.into()), None),
-            Some(Paint::Gradient(g)) => (None, Some(g.into())),
-            None => (None, None),
-        };
         ProtoStyle {
-            fill: fill_color,
-            stroke: stroke_color,
-            fill_gradient,
-            stroke_gradient,
-            stroke_width: s.stroke_width,
+            fills: s.fills.iter().map(|f| f.into()).collect(),
+            strokes: s.strokes.iter().map(|st| st.into()).collect(),
             opacity: Some(s.opacity),
-            stroke_cap: s.stroke_cap as u32,
-            stroke_join: s.stroke_join as u32,
-            dash_array: s.dash_array.clone(),
-            dash_offset: s.dash_offset,
             corner_radius: s.corner_radius,
             blend_mode: s.blend_mode as u32,
             fill_rule: s.fill_rule as u32,
-            miter_limit: Some(s.miter_limit),
-            fill_opacity: Some(s.fill_opacity),
         }
     }
 }
 
 impl From<&ProtoStyle> for Style {
     fn from(s: &ProtoStyle) -> Self {
-        let fill = if let Some(g) = &s.fill_gradient {
-            Some(Paint::Gradient(g.into()))
-        } else {
-            s.fill.as_ref().map(|c| Paint::Solid(c.into()))
-        };
-        let stroke = if let Some(g) = &s.stroke_gradient {
-            Some(Paint::Gradient(g.into()))
-        } else {
-            s.stroke.as_ref().map(|c| Paint::Solid(c.into()))
-        };
         Style {
-            fill,
-            stroke,
-            stroke_width: s.stroke_width,
+            fills: s.fills.iter().map(|f| Paint::from(f)).collect(),
+            strokes: s.strokes.iter().map(|st| crate::Stroke::from(st)).collect(),
             opacity: s.opacity.unwrap_or(1.0),
-            stroke_cap: s.stroke_cap as u8,
-            stroke_join: s.stroke_join as u8,
-            dash_array: s.dash_array.clone(),
-            dash_offset: s.dash_offset,
-            corner_radius: s.corner_radius,
             blend_mode: s.blend_mode as u8,
             fill_rule: s.fill_rule as u8,
-            miter_limit: s.miter_limit.unwrap_or(4.0),
-            fill_opacity: s.fill_opacity.unwrap_or(1.0),
+            corner_radius: s.corner_radius,
         }
     }
 }
+
+impl From<&crate::Transform2D> for ProtoTransform {
+    fn from(t: &crate::Transform2D) -> Self {
+        ProtoTransform {
+            x: t.x, y: t.y,
+            rotation_deg: t.rotation_deg,
+            skew_x_deg: t.skew_x_deg,
+            skew_y_deg: t.skew_y_deg,
+            scale_x: t.scale_x,
+            scale_y: t.scale_y,
+        }
+    }
+}
+
+impl From<&ProtoTransform> for crate::Transform2D {
+    fn from(pt: &ProtoTransform) -> Self {
+        crate::Transform2D {
+            x: pt.x, y: pt.y,
+            rotation_deg: pt.rotation_deg,
+            skew_x_deg: pt.skew_x_deg,
+            skew_y_deg: pt.skew_y_deg,
+            scale_x: if pt.scale_x == 0.0 { 1.0 } else { pt.scale_x },
+            scale_y: if pt.scale_y == 0.0 { 1.0 } else { pt.scale_y },
+        }
+    }
+}
+
+impl From<&Paint> for ProtoPaint {
+    fn from(p: &Paint) -> Self {
+        match p {
+            Paint::Solid(c) => ProtoPaint { solid: Some(c.into()), gradient: None },
+            Paint::Gradient(g) => ProtoPaint { solid: None, gradient: Some(g.into()) },
+        }
+    }
+}
+
+impl From<&ProtoPaint> for Paint {
+    fn from(p: &ProtoPaint) -> Self {
+        if let Some(g) = &p.gradient {
+            Paint::Gradient(g.into())
+        } else if let Some(c) = &p.solid {
+            Paint::Solid(c.into())
+        } else {
+            Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+        }
+    }
+}
+
+impl From<&crate::StrokeAlignment> for u32 {
+    fn from(a: &crate::StrokeAlignment) -> Self {
+        match a {
+            crate::StrokeAlignment::Center => 0,
+            crate::StrokeAlignment::Inner => 1,
+            crate::StrokeAlignment::Outer => 2,
+        }
+    }
+}
+
+impl From<u32> for crate::StrokeAlignment {
+    fn from(v: u32) -> Self {
+        match v {
+            1 => crate::StrokeAlignment::Inner,
+            2 => crate::StrokeAlignment::Outer,
+            _ => crate::StrokeAlignment::Center,
+        }
+    }
+}
+
+impl From<&crate::Stroke> for ProtoStroke {
+    fn from(s: &crate::Stroke) -> Self {
+        ProtoStroke {
+            paint: s.paint.as_ref().map(|p| p.into()),
+            width: s.width,
+            cap: s.cap as u32,
+            join: s.join as u32,
+            dash_array: s.dash_array.clone(),
+            dash_offset: s.dash_offset,
+            miter_limit: s.miter_limit,
+            alignment: (&s.alignment).into(),
+        }
+    }
+}
+
+impl From<&ProtoStroke> for crate::Stroke {
+    fn from(s: &ProtoStroke) -> Self {
+        crate::Stroke {
+            paint: s.paint.as_ref().map(|p| p.into()),
+            width: s.width,
+            cap: s.cap as u8,
+            join: s.join as u8,
+            dash_array: s.dash_array.clone(),
+            dash_offset: s.dash_offset,
+            miter_limit: s.miter_limit,
+            alignment: s.alignment.into(),
+        }
+    }
+}
+
+
 
 impl From<&PathPoint> for ProtoPathPoint {
     fn from(p: &PathPoint) -> Self {
@@ -559,7 +654,7 @@ fn node_to_proto(node: &Node) -> ProtoNode {
         id: node.id,
         name: node.name.clone(),
         node_type: node_type_to_u32(node.node_type),
-        transform: node.transform.to_vec(),
+        transform: Some((&node.transform).into()),
         style: Some((&node.style).into()),
         geometry: Some(geometry_to_proto(&node.geometry)),
         children: node.children.clone(),
@@ -570,33 +665,20 @@ fn node_to_proto(node: &Node) -> ProtoNode {
 }
 
 fn proto_to_node(pn: &ProtoNode) -> Node {
-    let transform: [f32; 9] = if pn.transform.len() == 9 {
-        let mut t = [0.0f32; 9];
-        t.copy_from_slice(&pn.transform);
-        t
-    } else {
-        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-    };
-
     Node {
         id: pn.id,
         name: pn.name.clone(),
         node_type: u32_to_node_type(pn.node_type),
-        transform,
+        transform: pn.transform.as_ref()
+            .map(|t| crate::Transform2D::from(t))
+            .unwrap_or(crate::Transform2D::IDENTITY),
         style: pn.style.as_ref().map(|s| s.into()).unwrap_or_else(|| Style {
-            fill: Some(Paint::Solid(Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 })),
-            stroke: None,
-            stroke_width: 1.0,
+            fills: vec![Paint::Solid(Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 })],
+            strokes: Vec::new(),
             opacity: 1.0,
-            stroke_cap: 0,
-            stroke_join: 0,
-            dash_array: Vec::new(),
-            dash_offset: 0.0,
-            corner_radius: 0.0,
             blend_mode: 0,
             fill_rule: 0,
-            miter_limit: 4.0,
-            fill_opacity: 1.0,
+            corner_radius: 0.0,
         }),
         geometry: pn.geometry.as_ref().map(proto_to_geometry).unwrap_or(
             Geometry::Rect { width: 100.0, height: 100.0 }
@@ -753,25 +835,30 @@ fn legacy_points_to_subpath(mut points: Vec<ProtoPathPoint>) -> ProtoSubpath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Transform2D, Stroke, StrokeAlignment};
     use std::collections::HashMap;
 
     fn make_style() -> ProtoStyle {
         ProtoStyle {
-            fill: Some(ProtoColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
-            stroke: None,
-            stroke_width: 2.0,
+            fills: vec![ProtoPaint {
+                solid: Some(ProtoColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+                gradient: None,
+            }],
+            strokes: Vec::new(),
             opacity: Some(1.0),
-            stroke_cap: 0,
-            stroke_join: 0,
-            dash_array: Vec::new(),
-            dash_offset: 0.0,
             corner_radius: 0.0,
             blend_mode: 0,
             fill_rule: 0,
-            miter_limit: Some(4.0),
-            fill_opacity: Some(1.0),
-            fill_gradient: None,
-            stroke_gradient: None,
+        }
+    }
+
+    /// Identity transform for proto node fixtures.
+    fn ident_transform() -> ProtoTransform {
+        ProtoTransform {
+            x: 0.0, y: 0.0,
+            rotation_deg: 0.0,
+            skew_x_deg: 0.0, skew_y_deg: 0.0,
+            scale_x: 1.0, scale_y: 1.0,
         }
     }
 
@@ -792,7 +879,7 @@ mod tests {
                 id: 1,
                 name: "Triangle".into(),
                 node_type: 0, // Path
-                transform: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                transform: Some(ident_transform()),
                 style: Some(make_style()),
                 geometry: Some(ProtoGeometry {
                     rect: None,
@@ -855,7 +942,7 @@ mod tests {
             id: 1,
             name: "Line".into(),
             node_type: 0,
-            transform: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            transform: Some(ident_transform()),
             style: Some(make_style()),
             geometry: Some(ProtoGeometry {
                 rect: None,
@@ -893,21 +980,23 @@ mod tests {
             id: 7,
             name: "Shape".into(),
             node_type: NodeType::Path,
-            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 25.0, 30.0, 1.0],
+            transform: Transform2D::from_translation(25.0, 30.0),
             style: Style {
-                fill: Some(Paint::Solid(Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 })),
-                stroke: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
-                stroke_width: 3.0,
+                fills: vec![Paint::Solid(Color { r: 0.2, g: 0.4, b: 0.6, a: 0.75 })],
+                strokes: vec![Stroke {
+                    paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })),
+                    width: 3.0,
+                    cap: 1,
+                    join: 2,
+                    dash_array: vec![4.0, 2.0],
+                    dash_offset: 1.0,
+                    miter_limit: 4.0,
+                    alignment: StrokeAlignment::Center,
+                }],
                 opacity: 0.5,
-                stroke_cap: 1,
-                stroke_join: 2,
-                dash_array: vec![4.0, 2.0],
-                dash_offset: 1.0,
                 corner_radius: 0.0,
                 blend_mode: 0,
                 fill_rule: 1,
-                miter_limit: 4.0,
-                fill_opacity: 0.75,
             },
             geometry: Geometry::Path {
                 subpaths: vec![
@@ -952,7 +1041,13 @@ mod tests {
 
         let node = scene2.nodes.get(&7).unwrap();
         assert_eq!(node.style.opacity, 0.5);
-        assert_eq!(node.style.fill_opacity, 0.75);
+        // Fill opacity now lives in the fill paint's alpha channel.
+        match &node.style.fills[0] {
+            Paint::Solid(c) => assert_eq!(c.a, 0.75),
+            other => panic!("expected solid fill, got {:?}", other),
+        }
+        assert_eq!(node.style.strokes.len(), 1);
+        assert_eq!(node.style.strokes[0].width, 3.0);
         match &node.geometry {
             Geometry::Path { subpaths, .. } => {
                 assert_eq!(subpaths.len(), 2);

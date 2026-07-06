@@ -1,6 +1,6 @@
 import init, { Engine, History } from '../engine/pkg/engine';
 import { PersistenceManager, AutosaveManager } from './persistence';
-import type { SceneData } from './types';
+import type { SceneData, Transform2D } from './types';
 import type { CanvasKit } from 'canvaskit-wasm';
 
 import type { Renderer } from './renderer';
@@ -120,6 +120,8 @@ export class WasmScene {
         this.invalidateCache();
     }
 
+
+
     setNodeVisible(id: number, visible: boolean) {
         this.saveHistory();
         this.engine!.set_node_visible(id, visible);
@@ -214,8 +216,13 @@ export class WasmScene {
         }
     }
 
-    /** True while inside a transaction() — intermediate history pushes are suppressed. */
+    /** True while inside a transaction() or gesture — intermediate history
+     *  pushes are suppressed. */
     private _inTransaction = false;
+    /** True only when an active gesture is the owner of the current
+     *  suppression (i.e. beginGesture actually acquired it). Guards endGesture
+     *  from closing a transaction it didn't open, or firing with no begin. */
+    private _gestureOwnsSuppression = false;
 
     /**
      * Group several mutations into ONE undo step. A single history snapshot
@@ -239,6 +246,32 @@ export class WasmScene {
         if (this._inTransaction) return;
         const state = this.engine!.serialize_scene();
         this.history!.push_state(state);
+    }
+
+    /**
+     * Bracketed variant of transaction() for multi-event gestures (label
+     * scrubbing, slider drags): one undo snapshot at beginGesture(), then all
+     * intermediate saveHistory pushes are suppressed until endGesture().
+     * No-op when already inside a transaction/gesture.
+     */
+    beginGesture() {
+        // If suppression is already active (e.g. inside a transaction), this
+        // gesture piggybacks on it and must NOT claim ownership — the outer
+        // owner is responsible for closing it.
+        if (this._inTransaction) return;
+        this.saveHistory();
+        this._inTransaction = true;
+        this._gestureOwnsSuppression = true;
+    }
+
+    endGesture() {
+        // Only release suppression this gesture actually acquired. A stray
+        // endGesture, or one nested inside a transaction, is a no-op.
+        if (!this._gestureOwnsSuppression) return;
+        this._gestureOwnsSuppression = false;
+        this._inTransaction = false;
+        this.invalidateCache();
+        this.autosave?.trigger();
     }
 
     /**
@@ -347,17 +380,56 @@ export class WasmScene {
         this.autosave?.trigger();
     }
 
-    /** Set the full local transform of a node (column-major [f32; 9]). */
+    /** Set the full local transform of a node via a [f32; 9] matrix (column-major). */
     setNodeTransform(id: number, transform: number[]) {
         this.saveHistory();
-        this.engine!.set_node_transform(id, JSON.stringify(transform));
+        this.engine!.set_node_transform_matrix(id, JSON.stringify(transform));
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** Set rotation in degrees. */
+    setNodeRotation(id: number, deg: number) {
+        this.saveHistory();
+        this.engine!.set_node_rotation(id, deg);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** Set skew in degrees. */
+    setNodeSkew(id: number, xDeg: number, yDeg: number) {
+        this.saveHistory();
+        this.engine!.set_node_skew(id, xDeg, yDeg);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** Set scale factors. */
+    setNodeScale(id: number, sx: number, sy: number) {
+        this.saveHistory();
+        this.engine!.set_node_scale(id, sx, sy);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** Get decomposed transform components (position, rotation, skew, scale). */
+    getNodeTransformComponents(id: number): Transform2D {
+        return JSON.parse(this.engine!.get_node_transform_components(id));
+    }
+
+    /** Set all transform components at once. */
+    setNodeTransformComponents(id: number, components: Transform2D) {
+        this.saveHistory();
+        this.engine!.set_node_transform_components(id, JSON.stringify(components));
         this.invalidateCache();
         this.autosave?.trigger();
     }
 
     rotateNode(id: number, angleRad: number) {
         this.saveHistory();
-        this.engine!.rotate_node(id, angleRad);
+        // Convert radians to degrees for the new set_node_rotation API
+        const components = this.getNodeTransformComponents(id);
+        this.engine!.set_node_rotation(id, components.rotation_deg + angleRad * (180 / Math.PI));
         this.invalidateCache();
         this.autosave?.trigger();
     }
@@ -531,5 +603,33 @@ export class WasmScene {
         this.engine!.send_backward(id);
         this.invalidateCache();
         this.autosave?.trigger();
+    }
+
+    /**
+     * Move `nodeId` to become a child of `newParent` (or a root when null),
+     * inserted at `index` in the parent's bottom-up child order. Preserves the
+     * node's visual position. Returns false if the move was rejected (e.g. a
+     * cycle or a non-group parent). One undo snapshot per call.
+     */
+    reorderNode(nodeId: number, newParent: number | null, index: number): boolean {
+        return this.reorderNodes([nodeId], newParent, index) === 1;
+    }
+
+    /**
+     * Move several nodes (given in bottom-up z-order) so they become contiguous
+     * siblings under `newParent` (or roots when null), starting at `index`.
+     * Preserves their relative order and visual positions. Returns the number of
+     * nodes actually moved. One undo snapshot per call, taken only if at least
+     * one node moved so an invalid drop leaves no dead undo step.
+     */
+    reorderNodes(nodeIds: number[], newParent: number | null, index: number): number {
+        const snapshot = this._inTransaction ? null : this.engine!.serialize_scene();
+        const moved = this.engine!.reorder_nodes(JSON.stringify(nodeIds), newParent ?? undefined, index);
+        if (moved > 0) {
+            if (snapshot !== null) this.history!.push_state(snapshot);
+            this.invalidateCache();
+            this.autosave?.trigger();
+        }
+        return moved;
     }
 }

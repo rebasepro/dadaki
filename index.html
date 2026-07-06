@@ -22,6 +22,10 @@
             <div id="breadcrumb-bar" class="breadcrumb-bar">
                 <!-- Breadcrumb items injected by JS -->
             </div>
+            <div class="history-controls">
+                <button id="undo-btn" class="zoom-btn" title="Undo (⌘Z)"><i data-lucide="undo-2"></i></button>
+                <button id="redo-btn" class="zoom-btn" title="Redo (⌘⇧Z)"><i data-lucide="redo-2"></i></button>
+            </div>
             <button id="import-svg" class="header-btn header-btn-secondary">Import SVG</button>
             <button id="export-svg" class="header-btn header-btn-primary">Export SVG</button>
             <div class="zoom-controls">
@@ -46,17 +50,7 @@
             </aside>
 
             <nav id="toolbar">
-                <div class="tool-btn active" id="tool-selection" data-tooltip="Selection" data-shortcut="V"><i data-lucide="mouse-pointer-2"></i></div>
-                <div class="tool-btn" id="tool-direct" data-tooltip="Direct Selection" data-shortcut="A"><i data-lucide="mouse-pointer-click"></i></div>
-                <div class="tool-btn" id="tool-pen" data-tooltip="Pen" data-shortcut="P"><i data-lucide="pen-tool"></i></div>
-                <div class="tool-btn" id="tool-scissors" data-tooltip="Scissors" data-shortcut="C"><i data-lucide="scissors"></i></div>
-                <div class="tool-btn" id="tool-rect" data-tooltip="Rectangle" data-shortcut="R"><i data-lucide="square"></i></div>
-                <div class="tool-btn" id="tool-ellipse" data-tooltip="Ellipse" data-shortcut="O"><i data-lucide="circle"></i></div>
-                <div class="tool-btn" id="tool-polygon" data-tooltip="Polygon"><i data-lucide="hexagon"></i></div>
-                <div class="tool-btn" id="tool-star" data-tooltip="Star"><i data-lucide="star"></i></div>
-                <div class="tool-btn" id="tool-text" data-tooltip="Text" data-shortcut="T"><i data-lucide="type"></i></div>
-                <div class="toolbar-spacer"></div>
-                <div class="tool-btn" id="tool-paint-bucket" data-tooltip="Live Paint" data-shortcut="B"><i data-lucide="paint-bucket"></i></div>
+                <!-- Tool rail rendered by src/toolbar.ts -->
             </nav>
 
             <section id="canvas-container">
@@ -72,47 +66,77 @@
                         <span class="section-title">Transform</span>
                     </div>
                     <div class="panel-section-body" data-section-body="transform">
-                        <div class="transform-grid">
-                            <div class="transform-cell">
-                                <label>X</label>
-                                <input type="number" id="prop-x" class="prop-input" value="0" step="1">
+                        <div class="dim-grid">
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="prop-x" title="X position">X</span>
+                                <input type="number" id="prop-x" value="0" step="1">
                             </div>
-                            <div class="transform-cell">
-                                <label>Y</label>
-                                <input type="number" id="prop-y" class="prop-input" value="0" step="1">
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="prop-y" title="Y position">Y</span>
+                                <input type="number" id="prop-y" value="0" step="1">
                             </div>
-                            <div class="transform-cell">
-                                <label>W</label>
-                                <input type="number" id="prop-w" class="prop-input" value="0" step="1" min="0">
+                            <span></span>
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="prop-w" title="Width">W</span>
+                                <input type="number" id="prop-w" value="0" step="1" min="0">
                             </div>
-                            <div class="transform-cell">
-                                <label>H</label>
-                                <input type="number" id="prop-h" class="prop-input" value="0" step="1" min="0">
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="prop-h" title="Height">H</span>
+                                <input type="number" id="prop-h" value="0" step="1" min="0">
                             </div>
-                            <div class="transform-cell">
-                                <label>Rotation</label>
-                                <div class="input-with-unit">
-                                    <input type="number" id="prop-rotation" class="prop-input" value="0" step="1">
-                                    <span class="input-unit">°</span>
-                                </div>
+                            <button id="aspect-lock" class="dim-icon-btn" title="Constrain proportions">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                            </button>
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="prop-rotation" title="Rotation">
+                                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><path d="M2.5 1.5v8h8"/><path d="M6.7 9.5a4.2 4.2 0 0 0-4.2-4.2"/></svg>
+                                </span>
+                                <input type="number" id="prop-rotation" value="0" step="1">
+                                <span class="dim-unit">°</span>
                             </div>
-                            <div class="transform-cell" id="corner-radius-cell">
-                                <label>Radius</label>
-                                <input type="number" id="prop-corner-radius" class="prop-input" value="0" step="1" min="0">
+                            <div class="dim-input" id="corner-radius-cell">
+                                <span class="dim-label" data-scrub="prop-corner-radius" title="Corner radius">
+                                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><path d="M2.5 10.5V7A4.5 4.5 0 0 1 7 2.5h3.5"/></svg>
+                                </span>
+                                <input type="number" id="prop-corner-radius" value="0" step="1" min="0">
                             </div>
-                            <div class="transform-cell">
-                                <label>Skew X</label>
-                                <div class="input-with-unit">
-                                    <input type="number" id="prop-skew-x" class="prop-input" value="0" step="0.1">
-                                    <span class="input-unit">°</span>
-                                </div>
+                            <span></span>
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="prop-skew-x" title="Skew X">
+                                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"><path d="M4.5 3h6l-3 6h-6z"/></svg>
+                                </span>
+                                <input type="number" id="prop-skew-x" value="0" step="1">
+                                <span class="dim-unit">°</span>
                             </div>
-                            <div class="transform-cell">
-                                <label>Skew Y</label>
-                                <div class="input-with-unit">
-                                    <input type="number" id="prop-skew-y" class="prop-input" value="0" step="0.1">
-                                    <span class="input-unit">°</span>
-                                </div>
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="prop-skew-y" title="Skew Y">
+                                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"><path d="M3 7.5v-6l6 3v6z"/></svg>
+                                </span>
+                                <input type="number" id="prop-skew-y" value="0" step="1">
+                                <span class="dim-unit">°</span>
+                            </div>
+                            <span></span>
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="prop-scale-x" title="Scale X (negative = flipped)">
+                                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 6h9M3.5 4l-2 2 2 2M8.5 4l2 2-2 2"/></svg>
+                                </span>
+                                <input type="number" id="prop-scale-x" value="100" step="1">
+                                <span class="dim-unit">%</span>
+                            </div>
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="prop-scale-y" title="Scale Y (negative = flipped)">
+                                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><path d="M6 1.5v9M4 3.5l2-2 2 2M4 8.5l2 2 2-2"/></svg>
+                                </span>
+                                <input type="number" id="prop-scale-y" value="100" step="1">
+                                <span class="dim-unit">%</span>
+                            </div>
+                            <span></span>
+                            <div class="dim-actions">
+                                <button id="rotate-ccw-btn" class="dim-icon-btn" title="Rotate 90° counterclockwise"></button>
+                                <button id="rotate-cw-btn" class="dim-icon-btn" title="Rotate 90° clockwise"></button>
+                                <button id="flip-h-btn" class="dim-icon-btn" title="Flip horizontal"></button>
+                                <button id="flip-v-btn" class="dim-icon-btn" title="Flip vertical"></button>
+                                <button id="flatten-btn" class="dim-icon-btn" title="Flatten transform into geometry (⌘E)"></button>
                             </div>
                         </div>
                     </div>
@@ -173,23 +197,11 @@
                 <div class="panel-section">
                     <div class="panel-section-header" data-section="fill">
                         <span class="chevron">▾</span>
-                        <span class="section-title">Fill</span>
+                        <span class="section-title" style="flex:1;">Fill</span>
+                        <button id="add-fill-btn" class="add-property-btn" title="Add Fill">+</button>
                     </div>
-                    <div class="panel-section-body" data-section-body="fill">
-                        <div class="fill-stroke-row">
-                            <label class="toggle-label" title="Toggle fill on/off"><input type="checkbox" id="fill-enabled" checked></label>
-                            <input type="color" id="fill-color" class="color-input" value="#cccccc">
-                            <span class="label-short" style="min-width: 30px;">Alpha</span>
-                            <input type="number" id="fill-opacity" class="prop-input" value="100" min="0" max="100" step="1" style="width: 48px; flex: 0 0 48px;">
-                            <span class="unit">%</span>
-                        </div>
-                        <div class="prop-row" style="margin-top: 4px;">
-                            <span class="label">Fill Rule</span>
-                            <select id="fill-rule" class="prop-select">
-                                <option value="0">Non-Zero</option>
-                                <option value="1">Even-Odd</option>
-                            </select>
-                        </div>
+                    <div class="panel-section-body" id="fills-list" data-section-body="fill" style="display:flex; flex-direction:column; gap:4px;">
+                        <!-- Dynamically populated by ui.ts -->
                     </div>
                 </div>
 
@@ -197,47 +209,23 @@
                 <div class="panel-section">
                     <div class="panel-section-header" data-section="stroke">
                         <span class="chevron">▾</span>
-                        <span class="section-title">Stroke</span>
+                        <span class="section-title" style="flex:1;">Stroke</span>
+                        <button id="add-stroke-btn" class="add-property-btn" title="Add Stroke">+</button>
                     </div>
-                    <div class="panel-section-body" data-section-body="stroke">
-                        <div class="fill-stroke-row">
-                            <label class="toggle-label" title="Toggle stroke on/off"><input type="checkbox" id="stroke-enabled" checked></label>
-                            <input type="color" id="stroke-color" class="color-input" value="#000000">
-                            <span class="label-short">W</span>
-                            <input type="number" id="stroke-weight" class="prop-input" value="2" min="0" step="0.5" style="width: 44px; flex: 0 0 44px;">
-                        </div>
-                        <div class="stroke-details">
-                            <div class="prop-row">
-                                <span class="label">Cap</span>
-                                <select id="stroke-cap" class="prop-select">
-                                    <option value="0">Butt</option>
-                                    <option value="1">Round</option>
-                                    <option value="2">Square</option>
-                                </select>
-                                <span class="label" style="margin-left: 4px;">Join</span>
-                                <select id="stroke-join" class="prop-select">
-                                    <option value="0">Miter</option>
-                                    <option value="1">Round</option>
-                                    <option value="2">Bevel</option>
-                                </select>
-                            </div>
-                            <div class="prop-row">
-                                <span class="label">Dash</span>
-                                <select id="stroke-dash" class="prop-select">
-                                    <option value="">Solid</option>
-                                    <option value="8,4">Dashed</option>
-                                    <option value="2,4">Dotted</option>
-                                    <option value="12,4,4,4">Dash-Dot</option>
-                                    <option value="16,4,2,4,2,4">Dash-Dot-Dot</option>
-                                </select>
-                                <span class="label" style="min-width: 28px; margin-left: 4px;">Off</span>
-                                <input type="number" id="stroke-dash-offset" class="prop-input" value="0" step="1" style="width: 36px; flex: 0 0 36px;">
-                            </div>
-                            <div class="prop-row">
-                                <span class="label">Miter</span>
-                                <input type="number" id="stroke-miter-limit" class="prop-input" value="4" min="1" step="0.5" style="width: 44px; flex: 0 0 44px;">
-                            </div>
-                        </div>
+                    <div class="panel-section-body" id="strokes-list" data-section-body="stroke" style="display:flex; flex-direction:column; gap:4px;">
+                        <!-- Dynamically populated by ui.ts -->
+                    </div>
+                </div>
+
+                <!-- EFFECTS -->
+                <div class="panel-section">
+                    <div class="panel-section-header" data-section="effects">
+                        <span class="chevron">▾</span>
+                        <span class="section-title" style="flex:1;">Effects</span>
+                        <button id="add-effect-btn" class="add-property-btn" title="Add Transform Effect">+</button>
+                    </div>
+                    <div class="panel-section-body" id="effects-list" data-section-body="effects" style="display:flex; flex-direction:column; gap:4px;">
+                        <!-- Dynamically populated by ui.ts -->
                     </div>
                 </div>
 

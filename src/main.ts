@@ -4,6 +4,7 @@ import { InputManager } from './input';
 import { WasmScene } from './wasm_scene';
 import { ContextBar } from './context_bar';
 import { BreadcrumbBar } from './breadcrumb';
+import { Toolbar } from './toolbar';
 
 async function bootstrap() {
     // @ts-ignore - Loaded from script tag in index.html
@@ -20,6 +21,12 @@ async function bootstrap() {
     const ui = new UIEngine(ck, wasmScene);
     const input = new InputManager(canvas, wasmScene, ui, renderer);
     renderer.inputManager = input;
+    (window as any).app = { scene: wasmScene, input: input };
+
+
+    // Tool rail — grouped tools with flyouts
+    const toolbarEl = document.getElementById('toolbar') as HTMLElement;
+    ui.toolbar = new Toolbar(toolbarEl, ui);
 
     // Context bar — floating action bar over the canvas
     const canvasContainer = document.getElementById('canvas-container') as HTMLElement;

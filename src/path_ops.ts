@@ -431,6 +431,169 @@ export function joinSubpaths(
     return result;
 }
 
+// ─── mergeSelectedAnchors ────────────────────────────────────────────
+
+/** Reference to an anchor point by subpath and point index. */
+export interface AnchorRef {
+    subpathIdx: number;
+    pointIdx: number;
+}
+
+/** Build the merged (welded) anchor for a run of points: averaged position,
+ *  incoming handle from the first point, outgoing handle from the last. */
+function weldPoints(run: PathPoint[]): PathPoint {
+    const first = run[0];
+    const last = run[run.length - 1];
+    const merged: PathPoint = {
+        x: run.reduce((s, p) => s + p.x, 0) / run.length,
+        y: run.reduce((s, p) => s + p.y, 0) / run.length,
+        cp1: [first.cp1[0], first.cp1[1]],
+        cp2: [last.cp2[0], last.cp2[1]],
+    };
+    const cr = Math.max(...run.map(p => p.corner_radius ?? 0));
+    if (cr > 0) merged.corner_radius = cr;
+    return merged;
+}
+
+/** Which end of an open subpath `idx` is, or `null` if it's interior / the subpath is closed. */
+function endOf(sp: Subpath, idx: number): 'start' | 'end' | null {
+    if (sp.closed) return null;
+    if (idx === 0) return 'start';
+    if (idx === sp.points.length - 1) return 'end';
+    return null;
+}
+
+/** Collapse maximal runs of consecutive selected anchors in one subpath into a
+ *  single welded anchor each (wraparound-aware for closed subpaths).
+ *  Mutates `sp` in place. Returns true if anything changed. */
+function collapseSelectedRuns(sp: Subpath, selectedIdx: Set<number>): boolean {
+    const n = sp.points.length;
+    // Refuse to collapse the entire subpath into a single point.
+    if (selectedIdx.size < 2 || selectedIdx.size >= n) return false;
+
+    // For closed subpaths, start the walk on an unselected point so a run that
+    // wraps around index 0 is seen as contiguous.
+    let start = 0;
+    if (sp.closed) {
+        while (selectedIdx.has(start)) start++;
+    }
+
+    const newPoints: PathPoint[] = [];
+    let run: PathPoint[] = [];
+    let changed = false;
+    const flushRun = () => {
+        if (run.length === 0) return;
+        if (run.length === 1) {
+            newPoints.push(run[0]);
+        } else {
+            newPoints.push(weldPoints(run));
+            changed = true;
+        }
+        run = [];
+    };
+
+    for (let k = 0; k < n; k++) {
+        const i = (start + k) % n;
+        // In an open subpath the last→first jump is not a real segment, so a
+        // "run" spanning it must not weld: break the run at the wrap point.
+        if (!sp.closed && i === 0 && k > 0) flushRun();
+        if (selectedIdx.has(i)) {
+            run.push(sp.points[i]);
+        } else {
+            flushRun();
+            newPoints.push(sp.points[i]);
+        }
+    }
+    flushRun();
+
+    if (changed) sp.points = newPoints;
+    return changed;
+}
+
+/**
+ * Merge (weld) selected anchor points into single anchors.
+ *
+ * Handled cases, in priority order:
+ * 1. **Two endpoints of two different open subpaths** → the subpaths are
+ *    joined into one, with the two endpoints welded into a single anchor at
+ *    their midpoint.
+ * 2. **The two endpoints of the same open subpath** → the subpath is closed
+ *    and the endpoints are welded into one anchor.
+ * 3. **Runs of consecutive selected anchors** (any count, per subpath) → each
+ *    run collapses into one anchor at the run's average position. Wraparound
+ *    runs on closed subpaths are supported.
+ *
+ * The welded anchor keeps the incoming handle (cp1) of the run's first point
+ * and the outgoing handle (cp2) of its last, so adjoining curves are preserved.
+ *
+ * @returns A new subpaths array, or `null` if nothing could be merged.
+ */
+export function mergeSelectedAnchors(
+    subpaths: Subpath[],
+    selected: AnchorRef[],
+): Subpath[] | null {
+    if (selected.length < 2) return null;
+    const result = cloneSubpaths(subpaths);
+
+    if (selected.length === 2) {
+        const [s0, s1] = selected;
+
+        if (s0.subpathIdx !== s1.subpathIdx) {
+            // ── Case 1: endpoints of two different open subpaths ─────────
+            const a = result[s0.subpathIdx];
+            const b = result[s1.subpathIdx];
+            if (!a || !b) return null;
+            const aEnd = endOf(a, s0.pointIdx);
+            const bEnd = endOf(b, s1.pointIdx);
+            if (!aEnd || !bEnd) return null;
+
+            // Orient so we weld A's tail onto B's head
+            if (aEnd === 'start') reverseSubpath(a);
+            if (bEnd === 'end') reverseSubpath(b);
+
+            const tail = a.points[a.points.length - 1];
+            const head = b.points[0];
+            const welded = weldPoints([tail, head]);
+            a.points = [...a.points.slice(0, -1), welded, ...b.points.slice(1)];
+            result.splice(s1.subpathIdx, 1);
+            return result;
+        }
+
+        // Same subpath: if the two anchors are the endpoints of an open
+        // subpath, close it and weld them (Case 2).
+        const sp = result[s0.subpathIdx];
+        if (!sp) return null;
+        const lo = Math.min(s0.pointIdx, s1.pointIdx);
+        const hi = Math.max(s0.pointIdx, s1.pointIdx);
+        if (!sp.closed && sp.points.length > 2 && lo === 0 && hi === sp.points.length - 1) {
+            const head = sp.points[0];
+            const tail = sp.points[sp.points.length - 1];
+            // Incoming handle from the tail side, outgoing from the head side
+            const welded = weldPoints([tail, head]);
+            sp.points = [welded, ...sp.points.slice(1, -1)];
+            sp.closed = true;
+            return result;
+        }
+        // Otherwise fall through to run-collapse (handles adjacent pairs).
+    }
+
+    // ── Case 3: collapse consecutive selected runs per subpath ───────────
+    const bySubpath = new Map<number, Set<number>>();
+    for (const s of selected) {
+        if (!bySubpath.has(s.subpathIdx)) bySubpath.set(s.subpathIdx, new Set());
+        bySubpath.get(s.subpathIdx)!.add(s.pointIdx);
+    }
+
+    let changed = false;
+    for (const [si, idxSet] of bySubpath) {
+        const sp = result[si];
+        if (!sp) continue;
+        if (collapseSelectedRuns(sp, idxSet)) changed = true;
+    }
+
+    return changed ? result : null;
+}
+
 // ─── findNearestSegment ──────────────────────────────────────────────
 
 /**

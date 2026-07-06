@@ -203,6 +203,18 @@ body, html {
     color: var(--text-main);
 }
 
+.history-controls {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-right: 4px;
+}
+
+.history-controls .zoom-btn svg {
+    width: 14px;
+    height: 14px;
+}
+
 #main-layout {
     display: flex;
     flex: 1;
@@ -237,11 +249,17 @@ body, html {
     z-index: 10;
 }
 
-.toolbar-spacer {
-    flex: 1;
+/* Divider between the toolbar's intent groups: select · create · modify */
+.toolbar-sep {
+    width: 20px;
+    height: 1px;
+    background: var(--border);
+    margin: 4px 0 8px;
+    flex-shrink: 0;
 }
 
 .tool-btn {
+    position: relative;
     width: 28px;
     height: 28px;
     display: flex;
@@ -253,6 +271,65 @@ body, html {
     font-size: 16px;
     transition: background 0.15s;
     user-select: none;
+}
+
+/* Corner marker on group buttons: long-press / right-click opens the flyout */
+.tool-flyout-indicator {
+    position: absolute;
+    right: 3px;
+    bottom: 3px;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-bottom: 4px solid currentColor;
+    opacity: 0.55;
+    pointer-events: none;
+}
+
+/* Flyout panel listing a group's member tools */
+.tool-flyout {
+    position: fixed;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    padding: 4px;
+    z-index: 300;
+    display: flex;
+    flex-direction: column;
+    min-width: 150px;
+}
+
+.tool-flyout-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--text-main);
+    white-space: nowrap;
+}
+
+.tool-flyout-item:hover {
+    background: var(--bg-hover);
+}
+
+.tool-flyout-item.active {
+    color: var(--accent);
+}
+
+.tool-flyout-item svg {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
+.tool-flyout-shortcut {
+    margin-left: auto;
+    padding-left: 16px;
+    color: var(--text-dim);
 }
 
 .tool-btn:hover {
@@ -608,25 +685,194 @@ body, html {
     line-height: 1;
 }
 
+/* ─── Dimension Inputs (Figma-style: label inside the field) ─── */
+
+.dim-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 22px;
+    gap: 6px 8px;
+    align-items: center;
+    padding-top: 4px;
+}
+
+.dim-input {
+    display: flex;
+    align-items: center;
+    height: 26px;
+    background: var(--bg-input);
+    border: 1px solid transparent;
+    border-radius: 5px;
+    min-width: 0;
+    transition: border-color 0.1s;
+}
+
+.dim-input:hover {
+    border-color: var(--border-light);
+}
+
+.dim-input:focus-within {
+    border-color: var(--accent);
+}
+
+.dim-input .dim-label {
+    width: 24px;
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-dim);
+    cursor: ew-resize;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+}
+
+.dim-input .dim-label svg {
+    display: block;
+}
+
+.dim-input input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    padding: 0;
+    color: var(--text-main);
+    font-size: 11px;
+    font-family: inherit;
+}
+
+.dim-input input::-webkit-inner-spin-button,
+.dim-input input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.dim-input input::placeholder {
+    color: var(--text-dim);
+}
+
+.dim-input .dim-unit {
+    font-size: 10px;
+    color: var(--text-dim);
+    padding-right: 6px;
+    pointer-events: none;
+}
+
+.dim-input.disabled {
+    opacity: 0.45;
+}
+
+.dim-input.disabled .dim-label {
+    cursor: default;
+}
+
+.dim-input.disabled input {
+    pointer-events: none;
+}
+
+/* Quick transform actions row (rotate 90°, flip, flatten) */
+.dim-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 2px;
+    margin-top: 2px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.dim-actions .dim-icon-btn {
+    flex: 1;
+    height: 24px;
+}
+
+.dim-icon-btn {
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    padding: 0;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+}
+
+.dim-icon-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-main);
+}
+
+.dim-icon-btn.active {
+    color: var(--accent);
+    background: var(--accent-dim);
+}
+
+/* While scrubbing a dim-label, keep the resize cursor everywhere */
+body.scrubbing,
+body.scrubbing * {
+    cursor: ew-resize !important;
+}
+
 /* ─── Fill / Stroke compact row ─── */
 
 .fill-stroke-row {
     display: flex;
     align-items: center;
-    gap: 6px;
-    height: 24px;
+    gap: 4px;
+    height: 28px;
+    padding: 0 4px;
+    border-radius: 4px;
 }
 
-.fill-stroke-row .toggle-label {
-    flex-shrink: 0;
+.fill-stroke-row:hover {
+    background: rgba(255,255,255,0.03);
 }
 
 .fill-stroke-row .color-input {
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 1px solid var(--panel-border);
+    border-radius: 3px;
+    background: none;
+    cursor: pointer;
     flex-shrink: 0;
 }
 
+.fill-stroke-row .color-input::-webkit-color-swatch-wrapper {
+    padding: 0;
+}
+
+.fill-stroke-row .color-input::-webkit-color-swatch {
+    border: none;
+    border-radius: 2px;
+}
+
 .fill-stroke-row .prop-input {
-    flex: 1;
+    height: 20px;
+    font-size: 11px;
+    padding: 0 4px;
+}
+
+.fill-stroke-row .prop-select {
+    height: 20px;
+    font-size: 11px;
+    padding: 0 2px;
+}
+
+.fill-stroke-row .label-short {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-right: 2px;
 }
 
 .fill-stroke-row .unit {
@@ -769,6 +1015,24 @@ body, html {
 .layer-item-row:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
+}
+
+/* Layer drag-and-drop reordering */
+.layer-item.dragging {
+    opacity: 0.4;
+}
+
+.layer-item-row.drop-above {
+    box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.layer-item-row.drop-below {
+    box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.layer-item-row.drop-into {
+    background: var(--accent-dim);
+    box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 /* Chevron expand/collapse */
@@ -1058,13 +1322,6 @@ body, html {
     border-radius: 2px;
 }
 
-/* Labels */
-.cb-label {
-    color: var(--text-dim);
-    font-size: 11px;
-    user-select: none;
-}
-
 /* Badge */
 .cb-badge {
     background: var(--accent-dim);
@@ -1086,41 +1343,6 @@ body, html {
     user-select: none;
 }
 
-
-/* Number input */
-.cb-number-wrapper {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    background: var(--bg-input);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 2px 4px;
-}
-
-.cb-number-input {
-    width: 36px;
-    border: none;
-    background: transparent;
-    color: var(--text-main);
-    font-size: 11px;
-    font-family: inherit;
-    text-align: right;
-    outline: none;
-    -moz-appearance: textfield;
-}
-
-.cb-number-input::-webkit-outer-spin-button,
-.cb-number-input::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-
-.cb-number-suffix {
-    color: var(--text-dim);
-    font-size: 10px;
-    user-select: none;
-}
 
 /* Editing mode accent border on canvas */
 #canvas-container.editing-mode {
@@ -1146,33 +1368,26 @@ body, html {
     font-size: 11px;
 }
 
-/* ─── Context Bar: Font Picker ─────────────────────────────── */
-.cb-font-picker {
-    display: flex;
-    align-items: center;
-}
-
-.cb-font-select {
-    background: rgba(255,255,255,0.08);
-    color: #e0e0e0;
-    border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 4px;
-    padding: 2px 4px;
-    font-size: 11px;
-    height: 24px;
-    max-width: 120px;
-    cursor: pointer;
-}
-
-.cb-font-select:hover {
-    background: rgba(255,255,255,0.14);
-}
-
-.cb-font-select:focus {
-    outline: 1px solid var(--accent, #4a9eff);
-}
-
 .cb-btn-active {
     background: rgba(74, 158, 255, 0.25) !important;
     color: #4a9eff !important;
+}
+
+.add-property-btn {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 14px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+}
+
+.add-property-btn:hover {
+    background: rgba(255,255,255,0.08);
+    color: var(--text-main);
 }

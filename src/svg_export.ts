@@ -97,31 +97,40 @@ export function buildSVGFromData(input: SVGExportInput): string {
         return `url(#${gradId})`;
     };
 
-    /** Build SVG style attributes string for a shape node. */
+    /** Build SVG style attributes string for a shape node.
+     *  Reads from the canonical `fills[]` / `strokes[]` arrays, with
+     *  fallback to legacy scalar fields for older documents. */
     const buildStyleAttrs = (style: NodeStyle): string => {
-        const fill = paintToSvgValue(style.fill);
-        const stroke = paintToSvgValue(style.stroke);
-        const sw = style.stroke_width;
+        // Resolve canonical fill/stroke from arrays, falling back to legacy fields
+        const fills = style.fills && style.fills.length > 0 ? style.fills : (style.fill ? [style.fill] : []);
+        const strokeEntries = style.strokes && style.strokes.length > 0 ? style.strokes : (style.stroke ? [{
+            paint: style.stroke, width: style.stroke_width ?? 0,
+            cap: style.stroke_cap ?? 0, join: style.stroke_join ?? 0,
+            dash_array: style.dash_array ?? [], dash_offset: style.dash_offset ?? 0,
+            miter_limit: style.miter_limit ?? 4
+        }] : []);
+
+        const fillPaint = fills.length > 0 ? fills[0] : null;
+        const sk = strokeEntries.length > 0 ? strokeEntries[0] : null;
+
+        const fill = paintToSvgValue(fillPaint);
+        const stroke = paintToSvgValue(sk?.paint ?? null);
+        const sw = sk?.width ?? 0;
         const op = style.opacity ?? 1.0;
 
         let attrs = `fill="${fill}" stroke="${stroke}" stroke-width="${sw}" opacity="${op}"`;
-        attrs += ` stroke-linecap="${CAP_MAP[style.stroke_cap || 0]}"`;
-        attrs += ` stroke-linejoin="${JOIN_MAP[style.stroke_join || 0]}"`;
+        attrs += ` stroke-linecap="${CAP_MAP[sk?.cap ?? 0]}"`;
+        attrs += ` stroke-linejoin="${JOIN_MAP[sk?.join ?? 0]}"`;
 
         // Dash array and offset
-        if (style.dash_array && style.dash_array.length > 0) {
-            attrs += ` stroke-dasharray="${style.dash_array.join(',')}"`;
-            if (style.dash_offset) attrs += ` stroke-dashoffset="${style.dash_offset}"`;
+        if (sk?.dash_array && sk.dash_array.length > 0) {
+            attrs += ` stroke-dasharray="${sk.dash_array.join(',')}"`;
+            if (sk.dash_offset) attrs += ` stroke-dashoffset="${sk.dash_offset}"`;
         }
 
         // Miter limit
-        if (style.miter_limit !== undefined && style.miter_limit !== 4) {
-            attrs += ` stroke-miterlimit="${style.miter_limit}"`;
-        }
-
-        // Fill opacity
-        if (style.fill_opacity !== undefined && style.fill_opacity !== 1) {
-            attrs += ` fill-opacity="${style.fill_opacity}"`;
+        if (sk?.miter_limit !== undefined && sk.miter_limit !== 4) {
+            attrs += ` stroke-miterlimit="${sk.miter_limit}"`;
         }
 
         // Fill rule
@@ -136,9 +145,15 @@ export function buildSVGFromData(input: SVGExportInput): string {
             attrs += ` style="mix-blend-mode:${bm}"`;
         }
 
-        // Stroke opacity — extract from stroke color alpha
-        if (style.stroke && !isGradient(style.stroke) && style.stroke.a < 1) {
-            attrs += ` stroke-opacity="${style.stroke.a}"`;
+        // Fill opacity — extract from fill paint alpha (solid fills only;
+        // gradient stops carry their own stop-opacity).
+        if (fillPaint && !isGradient(fillPaint) && fillPaint.a < 1) {
+            attrs += ` fill-opacity="${fillPaint.a}"`;
+        }
+
+        // Stroke opacity — extract from stroke paint alpha
+        if (sk?.paint && !isGradient(sk.paint) && sk.paint.a < 1) {
+            attrs += ` stroke-opacity="${sk.paint.a}"`;
         }
 
         return attrs;

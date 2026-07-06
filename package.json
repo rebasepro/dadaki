@@ -28,6 +28,7 @@
     "vitest": "^4.1.9"
   },
   "dependencies": {
-    "canvaskit-wasm": "0.39.1"
+    "canvaskit-wasm": "0.39.1",
+    "puppeteer": "^25.3.0"
   }
 }

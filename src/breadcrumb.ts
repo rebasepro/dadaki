@@ -84,7 +84,7 @@ export class BreadcrumbBar {
         this.addItem({
             icon: iconHome(13),
             label: 'Canvas',
-            isActive: info.context === 'empty' || info.context === 'shape-tool' || info.context === 'text-tool' || info.context === 'pen-drawing',
+            isActive: info.context === 'empty' || info.context === 'tool' || info.context === 'pen-drawing',
             onClick: () => this.navigateToCanvas(),
         });
 
@@ -134,12 +134,8 @@ export class BreadcrumbBar {
 
     /** Navigate to root canvas — clear selection, exit all modes. */
     private navigateToCanvas() {
-        // Exit path editing if active
-        if (this.input.editingNodeId !== null) {
-            this.input.editingNodeId = null;
-            this.input.editingPoints = null;
-            this.input.editingTransform = null;
-        }
+        // Exit path editing if active (full cleanup + un-dim)
+        this.input.exitEditMode();
         // Cancel pen drawing
         if (this.input.currentPathPoints.length > 0) {
             this.input.currentPathPoints = [];
@@ -153,11 +149,9 @@ export class BreadcrumbBar {
 
     /** Navigate to a specific node — select it, exit deeper contexts. */
     private navigateToNode(nodeId: number, _info: ContextInfo) {
-        // Exit path editing if we're going higher
+        // Exit path editing if we're going higher (full cleanup + un-dim)
         if (this.input.editingNodeId !== null) {
-            this.input.editingNodeId = null;
-            this.input.editingPoints = null;
-            this.input.editingTransform = null;
+            this.input.exitEditMode();
             this.ui.setActiveTool('selection');
         }
         // Select the target node
