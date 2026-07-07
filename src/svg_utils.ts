@@ -472,6 +472,50 @@ function skewYMatrix(angle: number): number[] {
     return [1, Math.tan(angle), 0, 0, 1, 0, 0, 0, 1];
 }
 
+/** Context for resolving relative CSS length units. */
+export interface LengthContext {
+    /** Reference length for `%` (e.g. the viewport dimension or parent font-size). */
+    percentBasis?: number;
+    /** Current font-size in user units, for `em`/`ex`. Defaults to 16. */
+    fontSize?: number;
+    /** Root font-size, for `rem`. Defaults to `fontSize`. */
+    rootFontSize?: number;
+}
+
+/**
+ * Parse an SVG/CSS length string to user units (CSS px, 96 per inch).
+ *
+ * Absolute units (px, pt, pc, in, cm, mm, Q) convert unconditionally. Relative
+ * units use `ctx`: em/ex → fontSize, rem → rootFontSize, % → percentBasis.
+ * A `%` with no `percentBasis` returns the raw number (non-regressive vs a bare
+ * parseFloat), and an unknown unit is treated as user units. Empty/invalid
+ * input returns `fallback`.
+ */
+export function parseSvgLength(value: string | null | undefined, fallback: number, ctx?: LengthContext): number {
+    if (value == null) return fallback;
+    const m = String(value).trim().match(/^([+-]?(?:\d*\.\d+|\d+\.?\d*)(?:e[+-]?\d+)?)\s*([a-z%]*)$/i);
+    if (!m) return fallback;
+    const n = parseFloat(m[1]);
+    if (isNaN(n)) return fallback;
+    const fs = ctx?.fontSize ?? 16;
+    const rfs = ctx?.rootFontSize ?? fs;
+    switch (m[2].toLowerCase()) {
+        case '':
+        case 'px': return n;
+        case 'pt': return n * 96 / 72;
+        case 'pc': return n * 16;
+        case 'in': return n * 96;
+        case 'cm': return n * 96 / 2.54;
+        case 'mm': return n * 96 / 25.4;
+        case 'q':  return n * 96 / 101.6;   // quarter-millimeter
+        case 'em': return n * fs;
+        case 'ex': return n * fs * 0.5;     // approx x-height
+        case 'rem': return n * rfs;
+        case '%':  return ctx?.percentBasis != null ? n * ctx.percentBasis / 100 : n;
+        default:   return n;                // unknown unit → user units
+    }
+}
+
 /**
  * Parse a full SVG `transform` attribute into a composed column-major 3×3 matrix.
  * Handles: translate, scale, rotate, matrix, skewX, skewY.

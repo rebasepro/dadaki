@@ -3,7 +3,7 @@ import type { WasmScene } from './wasm_scene';
 import { FileIO } from './file_io';
 import type { Color, NodeStyle, Gradient, SceneNode, Paint, Stroke } from './types';
 import { isGradient, StrokeAlignment } from './types';
-import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix } from './svg_utils';
+import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix, parseSvgLength } from './svg_utils';
 import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
 import { parseSvgStylesheet, matchedCssStyles } from './svg_css';
 import type { CssDecl } from './svg_css';
@@ -2102,7 +2102,7 @@ export class UIEngine {
             const inlineStyles = parseInlineStyle(el);
             const fillPaint = parseFill(el, inlineStyles, inherited);
             const strokePaint = parseStroke(el, inlineStyles, inherited);
-            const sw = parseFloat(resolveAttr(el, 'stroke-width', inlineStyles, inherited, '1') || '1');
+            const sw = parseSvgLength(resolveAttr(el, 'stroke-width', inlineStyles, inherited, '1'), 1);
             const op = parseFloat(resolveAttr(el, 'opacity', inlineStyles, inherited, '1') || '1');
 
             // Parse fill-opacity and stroke-opacity (multiply into paint alpha)
@@ -2149,7 +2149,7 @@ export class UIEngine {
             // Corner radius (rects)
             let cornerRadius = 0;
             const rx = el.getAttribute('rx');
-            if (rx) cornerRadius = parseFloat(rx) || 0;
+            if (rx) cornerRadius = parseSvgLength(rx, 0);
 
             // mix-blend-mode from inline style
             let blendMode = 0;
@@ -2233,8 +2233,10 @@ export class UIEngine {
             if (!vb) return identityMatrix();
             const p = vb.trim().split(/[\s,]+/).map(Number);
             if (p.length < 4 || p[2] <= 0 || p[3] <= 0) return identityMatrix();
-            const vpW = parseFloat(el.getAttribute('width') || '0');
-            const vpH = parseFloat(el.getAttribute('height') || '0');
+            // The viewport width/height can carry absolute units (Inkscape
+            // exports e.g. width="210mm"); convert to user px for the viewBox fit.
+            const vpW = parseSvgLength(el.getAttribute('width'), 0);
+            const vpH = parseSvgLength(el.getAttribute('height'), 0);
             if (vpW > 0 && vpH > 0) {
                 const par = el.getAttribute('preserveAspectRatio');
                 return parsePreserveAspectRatio(par, p[0], p[1], p[2], p[3], vpW, vpH);
@@ -2413,36 +2415,42 @@ export class UIEngine {
             let nodeId: number | null = null;
 
             if (tag === 'rect') {
-                const x = parseFloat(el.getAttribute('x') || '0');
-                const y = parseFloat(el.getAttribute('y') || '0');
-                const w = parseFloat(el.getAttribute('width') || '100');
-                const h = parseFloat(el.getAttribute('height') || '100');
+                const x = parseSvgLength(el.getAttribute('x'), 0);
+                const y = parseSvgLength(el.getAttribute('y'), 0);
+                const w = parseSvgLength(el.getAttribute('width'), 100);
+                const h = parseSvgLength(el.getAttribute('height'), 100);
                 // Create at origin, then set full transform (origin offset baked into matrix)
                 nodeId = this.scene.addRect(0, 0, w, h);
                 const offsetMat = composeMatrices(composedMat, translateMatrix(x, y));
                 this.scene.setNodeTransform(nodeId, offsetMat);
             } else if (tag === 'ellipse') {
-                const cx = parseFloat(el.getAttribute('cx') || '0');
-                const cy = parseFloat(el.getAttribute('cy') || '0');
-                const rx = parseFloat(el.getAttribute('rx') || '50');
-                const ry = parseFloat(el.getAttribute('ry') || '50');
+                const cx = parseSvgLength(el.getAttribute('cx'), 0);
+                const cy = parseSvgLength(el.getAttribute('cy'), 0);
+                const rx = parseSvgLength(el.getAttribute('rx'), 50);
+                const ry = parseSvgLength(el.getAttribute('ry'), 50);
                 // Create at origin, then set full transform (center offset baked into matrix)
                 nodeId = this.scene.addEllipse(0, 0, rx, ry);
                 const offsetMat = composeMatrices(composedMat, translateMatrix(cx, cy));
                 this.scene.setNodeTransform(nodeId, offsetMat);
             } else if (tag === 'circle') {
-                const cx = parseFloat(el.getAttribute('cx') || '0');
-                const cy = parseFloat(el.getAttribute('cy') || '0');
-                const r = parseFloat(el.getAttribute('r') || '50');
+                const cx = parseSvgLength(el.getAttribute('cx'), 0);
+                const cy = parseSvgLength(el.getAttribute('cy'), 0);
+                const r = parseSvgLength(el.getAttribute('r'), 50);
                 nodeId = this.scene.addEllipse(0, 0, r, r);
                 const offsetMat = composeMatrices(composedMat, translateMatrix(cx, cy));
                 this.scene.setNodeTransform(nodeId, offsetMat);
             } else if (tag === 'text') {
-                // Resolve font-size through the CSS cascade
+                // Resolve font-size through the CSS cascade. em/% are relative to
+                // the inherited (parent) font-size; absolute units (pt, mm, …)
+                // convert to user px.
                 const inlineStyles = parseInlineStyle(el);
-                const fontSize = parseFloat(resolveAttr(el, 'font-size', inlineStyles, mergedStyles, '24') || '24');
-                const textX = parseFloat(el.getAttribute('x') || '0');
-                const textY = parseFloat(el.getAttribute('y') || '0');
+                // em/% on font-size are relative to the INHERITED (parent)
+                // font-size — the `inherited` context, NOT mergedStyles (which
+                // already folds in this element's own font-size).
+                const parentFs = parseSvgLength(inherited['font-size'], 16);
+                const fontSize = parseSvgLength(resolveAttr(el, 'font-size', inlineStyles, mergedStyles, '24'), 24, { fontSize: parentFs, percentBasis: parentFs });
+                const textX = parseSvgLength(el.getAttribute('x'), 0, { fontSize });
+                const textY = parseSvgLength(el.getAttribute('y'), 0, { fontSize });
 
                 // Check for <tspan> children
                 const tspans = el.querySelectorAll('tspan');
@@ -2451,9 +2459,9 @@ export class UIEngine {
                     for (const tspan of tspans) {
                         const tspanInline = parseInlineStyle(tspan);
                         const tspanStyles = collectInheritedStyles(tspan, mergedStyles);
-                        const tx = parseFloat(tspan.getAttribute('x') ?? String(textX));
-                        const ty = parseFloat(tspan.getAttribute('y') ?? String(textY));
-                        const tfs = parseFloat(resolveAttr(tspan, 'font-size', tspanInline, tspanStyles, String(fontSize)) || String(fontSize));
+                        const tx = parseSvgLength(tspan.getAttribute('x'), textX, { fontSize });
+                        const ty = parseSvgLength(tspan.getAttribute('y'), textY, { fontSize });
+                        const tfs = parseSvgLength(resolveAttr(tspan, 'font-size', tspanInline, tspanStyles, String(fontSize)), fontSize, { fontSize, percentBasis: fontSize });
                         const content = tspan.textContent?.trim() || '';
                         if (!content) continue;
                         const tid = this.scene.addText(0, 0, content, tfs);
@@ -2484,10 +2492,10 @@ export class UIEngine {
                 this.scene.setNodeTransform(nodeId, offsetMat);
                 this.applyTextStyleFromEl(nodeId, el, inlineStyles, mergedStyles);
             } else if (tag === 'line') {
-                const x1 = parseFloat(el.getAttribute('x1') || '0');
-                const y1 = parseFloat(el.getAttribute('y1') || '0');
-                const x2 = parseFloat(el.getAttribute('x2') || '100');
-                const y2 = parseFloat(el.getAttribute('y2') || '100');
+                const x1 = parseSvgLength(el.getAttribute('x1'), 0);
+                const y1 = parseSvgLength(el.getAttribute('y1'), 0);
+                const x2 = parseSvgLength(el.getAttribute('x2'), 100);
+                const y2 = parseSvgLength(el.getAttribute('y2'), 100);
                 // Bake transform into point coordinates
                 const [tx1, ty1] = transformPoint(composedMat, x1, y1);
                 const [tx2, ty2] = transformPoint(composedMat, x2, y2);
@@ -2519,10 +2527,10 @@ export class UIEngine {
                 }
             } else if (tag === 'image') {
                 const href = el.getAttribute('href') || el.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '';
-                const ix = parseFloat(el.getAttribute('x') || '0');
-                const iy = parseFloat(el.getAttribute('y') || '0');
-                const iw = parseFloat(el.getAttribute('width') || '0') || 100;
-                const ih = parseFloat(el.getAttribute('height') || '0') || 100;
+                const ix = parseSvgLength(el.getAttribute('x'), 0);
+                const iy = parseSvgLength(el.getAttribute('y'), 0);
+                const iw = parseSvgLength(el.getAttribute('width'), 0) || 100;
+                const ih = parseSvgLength(el.getAttribute('height'), 0) || 100;
                 const m = href.match(/^data:([^;,]*)(;base64)?,(.*)$/s);
                 if (m && m[2]) {
                     // base64 data URI → decode and register the bytes

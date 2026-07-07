@@ -14,6 +14,7 @@ import {
     resolveGradientColor,
     parseCssColor,
     resolveGradient,
+    parseSvgLength,
 } from './svg_utils';
 
 // ─── Color Conversion ───────────────────────────────────────────────────────
@@ -496,5 +497,49 @@ describe('resolveGradient', () => {
         const g = resolveGradient(doc, 'url(#g)', 100, 100);
         expect(g).not.toBeNull();
         expect(g!.gradient_type).toBe('Linear');
+    });
+});
+
+// ─── Length / unit parsing ────────────────────────────────────────────────────
+
+describe('parseSvgLength', () => {
+    it('passes through unitless and px values', () => {
+        expect(parseSvgLength('42', 0)).toBe(42);
+        expect(parseSvgLength('42px', 0)).toBe(42);
+        expect(parseSvgLength('3.5', 0)).toBe(3.5);
+        expect(parseSvgLength('-1.5px', 0)).toBe(-1.5);
+    });
+
+    it('converts absolute units to user px (96/in)', () => {
+        expect(parseSvgLength('12pt', 0)).toBeCloseTo(16);      // 12 * 96/72
+        expect(parseSvgLength('1in', 0)).toBe(96);
+        expect(parseSvgLength('1pc', 0)).toBe(16);              // 1pc = 12pt = 16px
+        expect(parseSvgLength('2.54cm', 0)).toBeCloseTo(96);
+        expect(parseSvgLength('25.4mm', 0)).toBeCloseTo(96);
+        expect(parseSvgLength('40Q', 0)).toBeCloseTo(96 * 40 / 101.6);
+    });
+
+    it('resolves em/ex/rem against the context font-size', () => {
+        expect(parseSvgLength('2em', 0, { fontSize: 10 })).toBe(20);
+        expect(parseSvgLength('2ex', 0, { fontSize: 20 })).toBe(20);  // 2 * 20 * 0.5
+        expect(parseSvgLength('1.5rem', 0, { fontSize: 12, rootFontSize: 16 })).toBe(24);
+        expect(parseSvgLength('1em', 0)).toBe(16);                    // default fontSize 16
+    });
+
+    it('resolves % against percentBasis, else returns the raw number', () => {
+        expect(parseSvgLength('50%', 0, { percentBasis: 200 })).toBe(100);
+        expect(parseSvgLength('50%', 0)).toBe(50);                    // non-regressive: no basis
+    });
+
+    it('is tolerant of whitespace and unknown units', () => {
+        expect(parseSvgLength('  10pt  ', 0)).toBeCloseTo(10 * 96 / 72);
+        expect(parseSvgLength('7wtf', 0)).toBe(7);                    // unknown unit → user units
+    });
+
+    it('returns the fallback for empty / invalid input', () => {
+        expect(parseSvgLength(null, 5)).toBe(5);
+        expect(parseSvgLength('', 5)).toBe(5);
+        expect(parseSvgLength('auto', 5)).toBe(5);
+        expect(parseSvgLength('none', 5)).toBe(5);
     });
 });
