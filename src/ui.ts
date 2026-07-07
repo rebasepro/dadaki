@@ -1,7 +1,7 @@
 import type { CanvasKit } from 'canvaskit-wasm';
 import type { WasmScene } from './wasm_scene';
 import { FileIO } from './file_io';
-import type { Color, NodeStyle, Gradient, SceneNode, Paint, Stroke } from './types';
+import type { Color, NodeStyle, Gradient, GradientStop, SceneNode, Paint, Stroke } from './types';
 import { isGradient, StrokeAlignment } from './types';
 import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix, parseSvgLength } from './svg_utils';
 import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
@@ -990,75 +990,255 @@ export class UIEngine {
         return node.style.strokes || [];
     }
 
+        /** Local-space bounding box of a node's geometry, used to place default
+         *  gradient endpoints so a new gradient spans the shape. */
+        private nodeLocalExtent(node: SceneNode): { minX: number; minY: number; maxX: number; maxY: number } {
+        const g = node.geometry;
+        if (g.Rect) return { minX: 0, minY: 0, maxX: g.Rect.width, maxY: g.Rect.height };
+        if (g.Image) return { minX: 0, minY: 0, maxX: g.Image.width, maxY: g.Image.height };
+        if (g.Ellipse) return { minX: -g.Ellipse.radius_x, minY: -g.Ellipse.radius_y, maxX: g.Ellipse.radius_x, maxY: g.Ellipse.radius_y };
+        if (g.Path) {
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const sp of g.Path.subpaths) for (const p of sp.points) {
+                minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+                maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+            }
+            if (minX <= maxX) return { minX, minY, maxX, maxY };
+        }
+        if (g.Text) { const fs = g.Text.font_size || 16; return { minX: 0, minY: -fs, maxX: (g.Text.content.length * fs * 0.6) || fs, maxY: 0 }; }
+        return { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+    }
+
+        /** Set a linear gradient's endpoints so it spans the node's bbox at `angleDeg`. */
+        private setLinearAngle(grad: Gradient, node: SceneNode, angleDeg: number): void {
+        const e = this.nodeLocalExtent(node);
+        const cx = (e.minX + e.maxX) / 2, cy = (e.minY + e.maxY) / 2;
+        const a = angleDeg * Math.PI / 180, dx = Math.cos(a), dy = Math.sin(a);
+        let min = Infinity, max = -Infinity;
+        for (const [px, py] of [[e.minX, e.minY], [e.maxX, e.minY], [e.minX, e.maxY], [e.maxX, e.maxY]]) {
+            const t = (px - cx) * dx + (py - cy) * dy;
+            min = Math.min(min, t); max = Math.max(max, t);
+        }
+        grad.start_x = cx + dx * min; grad.start_y = cy + dy * min;
+        grad.end_x = cx + dx * max; grad.end_y = cy + dy * max;
+    }
+
+        /** Build a default 2-stop gradient (seed color → transparent) spanning the node. */
+        private makeDefaultGradient(type: 'Linear' | 'Radial', node: SceneNode, seed: Color): Gradient {
+        const e = this.nodeLocalExtent(node);
+        const cx = (e.minX + e.maxX) / 2, cy = (e.minY + e.maxY) / 2;
+        const stops: GradientStop[] = [
+            { offset: 0, color: { r: seed.r, g: seed.g, b: seed.b, a: seed.a ?? 1 } },
+            { offset: 1, color: { r: seed.r, g: seed.g, b: seed.b, a: 0 } },
+        ];
+        if (type === 'Linear') return { gradient_type: 'Linear', stops, start_x: e.minX, start_y: cy, end_x: e.maxX, end_y: cy };
+        return { gradient_type: 'Radial', stops, start_x: cx, start_y: cy, end_x: e.maxX, end_y: cy };
+    }
+
+        /** CSS gradient string for a swatch/preview from a Gradient's stops. */
+        private gradientPreviewCss(grad: Gradient): string {
+        const stops = [...grad.stops].sort((a, b) => a.offset - b.offset)
+            .map(s => `rgba(${Math.round(s.color.r * 255)},${Math.round(s.color.g * 255)},${Math.round(s.color.b * 255)},${s.color.a}) ${Math.round(s.offset * 100)}%`)
+            .join(', ');
+        return grad.gradient_type === 'Radial'
+            ? `radial-gradient(circle, ${stops})`
+            : `linear-gradient(90deg, ${stops})`;
+    }
+
         renderFillsList(node: SceneNode) {
         if (!this.fillsList) return;
         this.fillsList.innerHTML = '';
         const fills = this.getFills(node);
-        
-        fills.forEach((fill: any, index: number) => {
+
+        // Commit a mutated copy of the fills array to the engine.
+        const commit = (mutate: (f: Paint[]) => void, live = false) => {
+            const next = fills.map(f => (isGradient(f) ? { ...f, stops: f.stops.map(s => ({ ...s, color: { ...s.color } })) } : { ...f }) as Paint);
+            mutate(next);
+            this.updateNodeStyle(node, { fills: next }, live);
+        };
+
+        fills.forEach((fill: Paint, index: number) => {
+            const item = document.createElement('div');
+            item.className = 'fill-item';
+
             const row = document.createElement('div');
             row.className = 'fill-stroke-row';
-            
-            const colorInput = document.createElement('input');
-            colorInput.type = 'color';
-            colorInput.className = 'color-input';
-            const currentColor = isGradient(fill) && fill.stops.length > 0 ? fill.stops[0].color : (!isGradient(fill) ? fill : {r:0, g:0, b:0, a:1});
-            colorInput.value = this.rgbToHex(currentColor);
-            
-            const hexInput = document.createElement('input');
-            hexInput.type = 'text';
-            hexInput.className = 'prop-input';
-            hexInput.style.width = '60px';
-            hexInput.style.flex = '0 0 60px';
-            hexInput.value = this.rgbToHex(currentColor).toUpperCase();
 
-            colorInput.addEventListener('input', () => {
-                const newFills = [...fills];
-                const c = this.hexToRgb(colorInput.value);
-                hexInput.value = colorInput.value.toUpperCase();
-                if (isGradient(newFills[index])) {
-                    if ((newFills[index] as Gradient).stops.length > 0) {
-                        (newFills[index] as Gradient).stops[0].color = c;
-                    }
-                } else {
-                    newFills[index] = c;
-                }
-                this.updateNodeStyle(node, { fills: newFills }, true);
-            });
-
-            hexInput.addEventListener('change', () => {
-                const val = hexInput.value.startsWith('#') ? hexInput.value : '#' + hexInput.value;
-                if (/^#[0-9A-F]{6}$/i.test(val)) {
-                    colorInput.value = val;
-                    const newFills = [...fills];
-                    const c = this.hexToRgb(val);
-                    if (isGradient(newFills[index])) {
-                        if ((newFills[index] as Gradient).stops.length > 0) {
-                            (newFills[index] as Gradient).stops[0].color = c;
-                        }
+            // Fill-type selector: Solid / Linear / Radial.
+            const typeSel = document.createElement('select');
+            typeSel.className = 'prop-select fill-type-select';
+            typeSel.innerHTML = `<option value="solid">Solid</option><option value="linear">Linear</option><option value="radial">Radial</option>`;
+            typeSel.value = isGradient(fill) ? (fill.gradient_type === 'Radial' ? 'radial' : 'linear') : 'solid';
+            typeSel.addEventListener('change', () => {
+                const seed: Color = isGradient(fill) ? (fill.stops[0]?.color ?? { r: 0.5, g: 0.5, b: 0.5, a: 1 }) : fill as Color;
+                commit(f => {
+                    if (typeSel.value === 'solid') {
+                        f[index] = { ...seed };
                     } else {
-                        newFills[index] = c;
+                        const t = typeSel.value === 'radial' ? 'Radial' : 'Linear';
+                        // Preserve existing stops when switching between gradient types.
+                        if (isGradient(fill) && fill.stops.length >= 2) {
+                            const g = this.makeDefaultGradient(t, node, seed);
+                            g.stops = fill.stops.map(s => ({ offset: s.offset, color: { ...s.color } }));
+                            f[index] = g;
+                        } else {
+                            f[index] = this.makeDefaultGradient(t, node, seed);
+                        }
                     }
-                    this.updateNodeStyle(node, { fills: newFills });
-                }
+                });
+                // commit() → updateNodeStyle → syncWithSelection re-renders the
+                // fills list with the FRESH node (re-fetched from the engine);
+                // re-rendering here with the stale captured `node` would revert it.
             });
-            
+            row.appendChild(typeSel);
+
+            if (!isGradient(fill)) {
+                // ── Solid: color swatch + hex ──
+                const colorInput = document.createElement('input');
+                colorInput.type = 'color';
+                colorInput.className = 'color-input';
+                colorInput.value = this.rgbToHex(fill);
+                const hexInput = document.createElement('input');
+                hexInput.type = 'text';
+                hexInput.className = 'prop-input';
+                hexInput.style.cssText = 'width:60px;flex:0 0 60px';
+                hexInput.value = this.rgbToHex(fill).toUpperCase();
+                colorInput.addEventListener('input', () => {
+                    hexInput.value = colorInput.value.toUpperCase();
+                    commit(f => { f[index] = this.hexToRgb(colorInput.value); }, true);
+                });
+                hexInput.addEventListener('change', () => {
+                    const val = hexInput.value.startsWith('#') ? hexInput.value : '#' + hexInput.value;
+                    if (/^#[0-9A-F]{6}$/i.test(val)) { colorInput.value = val; commit(f => { f[index] = this.hexToRgb(val); }); }
+                });
+                row.appendChild(colorInput);
+                row.appendChild(hexInput);
+            } else {
+                // ── Gradient: a preview bar ──
+                const preview = document.createElement('div');
+                preview.className = 'gradient-preview';
+                preview.style.background = this.gradientPreviewCss(fill);
+                row.appendChild(preview);
+            }
+
+            const spacer = document.createElement('div');
+            spacer.style.flex = '1';
+            row.appendChild(spacer);
+
             const delBtn = document.createElement('button');
             delBtn.className = 'icon-toggle';
             delBtn.innerHTML = '×';
             delBtn.title = 'Remove Fill';
-            delBtn.onclick = () => {
-                const newFills = fills.filter((_: any, i: number) => i !== index);
-                this.updateNodeStyle(node, { fills: newFills });
-            };
-
-            row.appendChild(colorInput);
-            row.appendChild(hexInput);
-            const spacer = document.createElement('div');
-            spacer.style.flex = '1';
-            row.appendChild(spacer);
+            delBtn.onclick = () => commit(f => { f.splice(index, 1); });
             row.appendChild(delBtn);
-            this.fillsList.appendChild(row);
+
+            item.appendChild(row);
+
+            // ── Gradient stop editor ──
+            if (isGradient(fill)) {
+                const editor = document.createElement('div');
+                editor.className = 'gradient-editor';
+
+                if (fill.gradient_type === 'Linear') {
+                    const angleRow = document.createElement('div');
+                    angleRow.className = 'gradient-angle-row';
+                    const label = document.createElement('span');
+                    label.textContent = 'Angle';
+                    label.className = 'gradient-sub-label';
+                    const angleInput = document.createElement('input');
+                    angleInput.type = 'number';
+                    angleInput.className = 'prop-input';
+                    angleInput.style.cssText = 'width:56px;flex:0 0 56px';
+                    const curAngle = Math.round(Math.atan2(fill.end_y - fill.start_y, fill.end_x - fill.start_x) * 180 / Math.PI);
+                    angleInput.value = String(curAngle);
+                    angleInput.addEventListener('change', () => {
+                        commit(f => { this.setLinearAngle(f[index] as Gradient, node, parseFloat(angleInput.value) || 0); });
+                    });
+                    angleRow.appendChild(label);
+                    angleRow.appendChild(angleInput);
+                    const deg = document.createElement('span'); deg.textContent = '°'; deg.className = 'gradient-sub-label';
+                    angleRow.appendChild(deg);
+                    editor.appendChild(angleRow);
+                }
+
+                const sorted = fill.stops.map((s, i) => ({ s, i })).sort((a, b) => a.s.offset - b.s.offset);
+                for (const { s, i } of sorted) {
+                    const stopRow = document.createElement('div');
+                    stopRow.className = 'gradient-stop-row';
+
+                    const sw = document.createElement('input');
+                    sw.type = 'color';
+                    sw.className = 'color-input';
+                    sw.value = this.rgbToHex(s.color);
+                    sw.addEventListener('input', () => {
+                        const c = this.hexToRgb(sw.value);
+                        commit(f => { const st = (f[index] as Gradient).stops[i]; st.color = { ...c, a: st.color.a }; }, true);
+                    });
+                    // Refresh the preview swatch when the drag ends.
+                    // Live drags skip re-render; on drag-end refresh via sync
+                    // (re-fetches the fresh node so the preview swatch updates).
+                    sw.addEventListener('change', () => this.syncWithSelection());
+
+                    const offset = document.createElement('input');
+                    offset.type = 'number'; offset.min = '0'; offset.max = '100';
+                    offset.className = 'prop-input';
+                    offset.style.cssText = 'width:48px;flex:0 0 48px';
+                    offset.value = String(Math.round(s.offset * 100));
+                    offset.title = 'Position %';
+                    offset.addEventListener('change', () => {
+                        const v = Math.max(0, Math.min(100, parseFloat(offset.value) || 0)) / 100;
+                        commit(f => { (f[index] as Gradient).stops[i].offset = v; });
+                    });
+
+                    const alpha = document.createElement('input');
+                    alpha.type = 'number'; alpha.min = '0'; alpha.max = '100';
+                    alpha.className = 'prop-input';
+                    alpha.style.cssText = 'width:48px;flex:0 0 48px';
+                    alpha.value = String(Math.round((s.color.a ?? 1) * 100));
+                    alpha.title = 'Opacity %';
+                    alpha.addEventListener('change', () => {
+                        const a = Math.max(0, Math.min(100, parseFloat(alpha.value) || 0)) / 100;
+                        commit(f => { (f[index] as Gradient).stops[i].color.a = a; });
+                    });
+
+                    const delStop = document.createElement('button');
+                    delStop.className = 'icon-toggle';
+                    delStop.innerHTML = '×';
+                    delStop.title = 'Remove Stop';
+                    delStop.onclick = () => {
+                        if ((fill as Gradient).stops.length <= 2) return; // keep at least two
+                        commit(f => { (f[index] as Gradient).stops.splice(i, 1); });
+                    };
+
+                    stopRow.appendChild(sw);
+                    stopRow.appendChild(offset);
+                    stopRow.appendChild(alpha);
+                    const sp2 = document.createElement('div'); sp2.style.flex = '1'; stopRow.appendChild(sp2);
+                    stopRow.appendChild(delStop);
+                    editor.appendChild(stopRow);
+                }
+
+                const addStop = document.createElement('button');
+                addStop.className = 'add-property-btn gradient-add-stop';
+                addStop.textContent = '+ Stop';
+                addStop.onclick = () => {
+                    commit(f => {
+                        const g = f[index] as Gradient;
+                        const s = [...g.stops].sort((a, b) => a.offset - b.offset);
+                        // Insert a stop at the midpoint of the largest gap.
+                        let gapStart = 0, gapEnd = 1, best = -1;
+                        for (let k = 0; k < s.length - 1; k++) { const d = s[k + 1].offset - s[k].offset; if (d > best) { best = d; gapStart = s[k].offset; gapEnd = s[k + 1].offset; } }
+                        const mid = (gapStart + gapEnd) / 2;
+                        const c0 = s[0].color;
+                        g.stops.push({ offset: mid, color: { r: c0.r, g: c0.g, b: c0.b, a: c0.a ?? 1 } });
+                    });
+                };
+                editor.appendChild(addStop);
+
+                item.appendChild(editor);
+            }
+
+            this.fillsList.appendChild(item);
         });
     }
 

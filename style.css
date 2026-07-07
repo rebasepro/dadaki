@@ -875,6 +875,68 @@ body.scrubbing * {
     margin-right: 2px;
 }
 
+/* ── Gradient fill editor ────────────────────────────────────────────── */
+.fill-type-select {
+    flex: 0 0 62px;
+    width: 62px;
+}
+/* Gradient preview swatch shown in place of the solid color input. */
+.gradient-preview {
+    width: 40px;
+    height: 20px;
+    flex: 0 0 40px;
+    border: 1px solid var(--panel-border);
+    border-radius: 3px;
+    /* checkerboard behind, so transparent stops read correctly */
+    background-color: #fff;
+    background-image:
+        linear-gradient(45deg, #ccc 25%, transparent 25%),
+        linear-gradient(-45deg, #ccc 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #ccc 75%),
+        linear-gradient(-45deg, transparent 75%, #ccc 75%);
+    background-size: 8px 8px;
+    background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+}
+.gradient-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 4px 4px 6px 22px; /* indent under the type selector */
+}
+.gradient-angle-row,
+.gradient-stop-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.gradient-sub-label {
+    font-size: 10px;
+    color: var(--text-dim);
+}
+.gradient-stop-row .color-input {
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 1px solid var(--panel-border);
+    border-radius: 3px;
+    background: none;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.gradient-stop-row .prop-input,
+.gradient-angle-row .prop-input {
+    height: 20px;
+    font-size: 11px;
+    padding: 0 4px;
+}
+.gradient-add-stop {
+    align-self: flex-start;
+    font-size: 10px;
+    height: 18px;
+    padding: 0 6px;
+    width: auto;
+}
+
 .fill-stroke-row .unit {
     font-size: 9px;
     color: var(--text-dim);
