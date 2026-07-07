@@ -3,7 +3,7 @@ import type { WasmScene } from './wasm_scene';
 import { FileIO } from './file_io';
 import type { Color, NodeStyle, Gradient, GradientStop, SceneNode, Paint, Stroke } from './types';
 import { isGradient, isPattern, StrokeAlignment } from './types';
-import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix, parseSvgLength } from './svg_utils';
+import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix, scaleMatrix, parseSvgLength } from './svg_utils';
 import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
 import { parseSvgStylesheet, matchedCssStyles } from './svg_css';
 import type { CssDecl } from './svg_css';
@@ -2682,6 +2682,112 @@ export class UIEngine {
             return childIds;
         };
 
+        // ─── Markers (marker-start / -mid / -end, arrowheads) ────────────────
+        // Resolved at import: the referenced <marker>'s shapes are baked as
+        // nodes at each vertex, oriented to the path tangent and scaled by the
+        // stroke width, since the engine has no native marker concept.
+        const bisector = (a1: number, a2: number) =>
+            Math.atan2(Math.sin(a1) + Math.sin(a2), Math.cos(a1) + Math.cos(a2));
+
+        /** Resolve a marker-* property (or the `marker` shorthand) to a def id. */
+        const markerRef = (el: Element, prop: string, inlineStyles: Record<string, string>, inherited: InheritedStyles): string | null => {
+            const specific = resolveAttr(el, prop, inlineStyles, inherited, null);
+            const shorthand = resolveAttr(el, 'marker', inlineStyles, inherited, null);
+            const v = (specific && specific !== 'none') ? specific : (shorthand && shorthand !== 'none' ? shorthand : null);
+            const m = v?.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
+            return m ? m[1] : null;
+        };
+
+        /** Vertices (local coords) with tangent angle (radians) and marker kind. */
+        const markerVertices = (el: Element, tag: string): { x: number; y: number; angle: number; kind: 'start' | 'mid' | 'end' }[] => {
+            const anchors: { x: number; y: number; out?: number; in_?: number }[] = [];
+            let closed = false;
+            if (tag === 'line') {
+                anchors.push({ x: parseSvgLength(el.getAttribute('x1'), 0), y: parseSvgLength(el.getAttribute('y1'), 0) });
+                anchors.push({ x: parseSvgLength(el.getAttribute('x2'), 0), y: parseSvgLength(el.getAttribute('y2'), 0) });
+            } else if (tag === 'polyline' || tag === 'polygon') {
+                const nums = (el.getAttribute('points') || '').trim().split(/[\s,]+/).map(Number).filter(n => !isNaN(n));
+                for (let i = 0; i + 1 < nums.length; i += 2) anchors.push({ x: nums[i], y: nums[i + 1] });
+                closed = tag === 'polygon';
+            } else if (tag === 'path') {
+                for (const sp of parseSVGPathDUtil(el.getAttribute('d') || '', 0, 0)) {
+                    for (const p of sp.points) {
+                        const out = (Math.abs(p.cp2[0] - p.x) > 1e-6 || Math.abs(p.cp2[1] - p.y) > 1e-6) ? Math.atan2(p.cp2[1] - p.y, p.cp2[0] - p.x) : undefined;
+                        const in_ = (Math.abs(p.x - p.cp1[0]) > 1e-6 || Math.abs(p.y - p.cp1[1]) > 1e-6) ? Math.atan2(p.y - p.cp1[1], p.x - p.cp1[0]) : undefined;
+                        anchors.push({ x: p.x, y: p.y, out, in_ });
+                    }
+                }
+            }
+            const n = anchors.length;
+            if (n < 1) return [];
+            const dirTo = (i: number, j: number) => Math.atan2(anchors[j].y - anchors[i].y, anchors[j].x - anchors[i].x);
+            const out: { x: number; y: number; angle: number; kind: 'start' | 'mid' | 'end' }[] = [];
+            for (let i = 0; i < n; i++) {
+                const a = anchors[i];
+                const prev = i > 0 ? i - 1 : (closed ? n - 1 : -1);
+                const next = i < n - 1 ? i + 1 : (closed ? 0 : -1);
+                const inAng = a.in_ ?? (prev >= 0 ? dirTo(prev, i) : (next >= 0 ? dirTo(i, next) : 0));
+                const outAng = a.out ?? (next >= 0 ? dirTo(i, next) : (prev >= 0 ? dirTo(prev, i) : 0));
+                if (i === 0 && !closed) out.push({ x: a.x, y: a.y, angle: outAng, kind: 'start' });
+                else if (i === n - 1 && !closed) out.push({ x: a.x, y: a.y, angle: inAng, kind: 'end' });
+                else out.push({ x: a.x, y: a.y, angle: bisector(inAng, outAng), kind: 'mid' });
+            }
+            return out;
+        };
+
+        const applyMarkers = (el: Element, tag: string, composedMat: number[], inherited: InheritedStyles, useRefStack: Set<string>) => {
+            const inlineStyles = parseInlineStyle(el);
+            const refs = {
+                start: markerRef(el, 'marker-start', inlineStyles, inherited),
+                mid: markerRef(el, 'marker-mid', inlineStyles, inherited),
+                end: markerRef(el, 'marker-end', inlineStyles, inherited),
+            };
+            if (!refs.start && !refs.mid && !refs.end) return;
+            const strokeWidth = parseSvgLength(resolveAttr(el, 'stroke-width', inlineStyles, inherited, '1'), 1);
+            const rot = (rad: number): number[] => { const c = Math.cos(rad), s = Math.sin(rad); return [c, s, 0, -s, c, 0, 0, 0, 1]; };
+
+            for (const v of markerVertices(el, tag)) {
+                const refId = v.kind === 'start' ? refs.start : v.kind === 'end' ? refs.end : refs.mid;
+                if (!refId || useRefStack.has(refId)) continue;
+                const markerEl = doc.getElementById(refId);
+                if (!markerEl || markerEl.tagName.toLowerCase() !== 'marker') continue;
+
+                const mW = parseSvgLength(markerEl.getAttribute('markerWidth'), 3);
+                const mH = parseSvgLength(markerEl.getAttribute('markerHeight'), 3);
+                const refX = parseSvgLength(markerEl.getAttribute('refX'), 0);
+                const refY = parseSvgLength(markerEl.getAttribute('refY'), 0);
+                const scale = (markerEl.getAttribute('markerUnits') || 'strokeWidth') === 'userSpaceOnUse' ? 1 : strokeWidth;
+
+                const orient = markerEl.getAttribute('orient') || '0';
+                let angle: number;
+                if (orient === 'auto') angle = v.angle;
+                else if (orient === 'auto-start-reverse') angle = v.angle + (v.kind === 'start' ? Math.PI : 0);
+                else { const num = parseFloat(orient); angle = isNaN(num) ? 0 : num * Math.PI / 180; }
+
+                // Content matrix: viewBox fit + refX/refY reference point.
+                let cm: number[];
+                const vb = markerEl.getAttribute('viewBox');
+                const p = vb ? vb.trim().split(/[\s,]+/).map(Number) : null;
+                if (p && p.length >= 4 && p[2] > 0 && p[3] > 0) {
+                    const sx = mW / p[2], sy = mH / p[3];
+                    cm = composeMatrices(translateMatrix(-(refX - p[0]) * sx, -(refY - p[1]) * sy),
+                        composeMatrices(scaleMatrix(sx, sy), translateMatrix(-p[0], -p[1])));
+                } else {
+                    cm = translateMatrix(-refX, -refY);
+                }
+
+                // T(vertex)·R(angle)·S(scale)·cm in local space, then the element CTM.
+                const placement = composeMatrices(translateMatrix(v.x, v.y),
+                    composeMatrices(rot(angle), composeMatrices(scaleMatrix(scale, scale), cm)));
+                const full = composeMatrices(composedMat, placement);
+                const stack = new Set(useRefStack); stack.add(refId);
+                // Marker content does NOT inherit the referencing element's paint
+                // (else an arrowhead would pick up the line's stroke); it uses its
+                // own styles on a clean context.
+                processChildren(markerEl, full, {}, stack); // baked ids land in createdIds
+            }
+        };
+
         /** Helper: turn a list of child IDs into a group (or leave as-is for 0–1 children).
          *  Removes child IDs from createdIds and pushes the group ID instead. */
         const groupChildIds = (childIds: number[], name: string) => {
@@ -2733,7 +2839,7 @@ export class UIEngine {
 
             // Skip metadata, defs, style, desc, title, clipPath
             // Note: <symbol> is NOT skipped — it is processed when referenced by <use>
-            if (['defs', 'style', 'metadata', 'desc', 'title', 'clippath', 'mask', 'pattern', 'lineargradient', 'radialgradient', 'filter'].includes(tag)) return;
+            if (['defs', 'style', 'metadata', 'desc', 'title', 'clippath', 'mask', 'pattern', 'lineargradient', 'radialgradient', 'filter', 'marker'].includes(tag)) return;
 
             // <symbol> is only renderable when referenced by <use>, not as a top-level element
             if (tag === 'symbol') return;
@@ -3038,6 +3144,11 @@ export class UIEngine {
                     try { this.scene.engine!.set_node_effects(nodeId, JSON.stringify(fx)); } catch { /* noop */ }
                 }
                 createdIds.push(nodeId);
+
+                // Markers (arrowheads etc.): bake marker shapes at the vertices.
+                if (tag === 'line' || tag === 'polyline' || tag === 'polygon' || tag === 'path') {
+                    applyMarkers(el, tag, composedMat, mergedStyles, useRefStack);
+                }
             }
         };
 
