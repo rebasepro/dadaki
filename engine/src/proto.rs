@@ -271,6 +271,15 @@ pub struct ProtoNode {
     pub visible: bool,
     #[prost(bool, tag = "10")]
     pub locked: bool,
+    /// Masking (Figma-style): this node masks the siblings painted above it.
+    #[prost(bool, tag = "11")]
+    pub is_mask: bool,
+    /// 0 = alpha (default), 1 = luminance (reserved).
+    #[prost(uint32, tag = "12")]
+    pub mask_type: u32,
+    /// Reserved: clip descendants to this node's bounds (frames — not yet wired).
+    #[prost(bool, tag = "13")]
+    pub clip_content: bool,
 }
 
 /// A preserved face fill from the vector network.
@@ -675,6 +684,9 @@ fn node_to_proto(node: &Node) -> ProtoNode {
         parent: node.parent,
         visible: node.visible,
         locked: node.locked,
+        is_mask: node.is_mask,
+        mask_type: node.mask_type as u32,
+        clip_content: node.clip_content,
     }
 }
 
@@ -701,6 +713,9 @@ fn proto_to_node(pn: &ProtoNode) -> Node {
         parent: pn.parent,
         visible: pn.visible,
         locked: pn.locked,
+        is_mask: pn.is_mask,
+        mask_type: pn.mask_type as u8,
+        clip_content: pn.clip_content,
     }
 }
 
@@ -954,6 +969,9 @@ mod tests {
                 parent: None,
                 visible: true,
                 locked: false,
+                is_mask: false,
+                mask_type: 0,
+                clip_content: false,
             }],
             root_ids: vec![1],
             next_id: 2,
@@ -1014,6 +1032,9 @@ mod tests {
             parent: None,
             visible: true,
             locked: false,
+            is_mask: false,
+            mask_type: 0,
+            clip_content: false,
         });
 
         let bytes = doc.encode_to_vec();
@@ -1078,6 +1099,9 @@ mod tests {
             parent: None,
             visible: true,
             locked: false,
+            is_mask: false,
+            mask_type: 0,
+            clip_content: false,
         });
 
         let scene = Scene {

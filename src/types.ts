@@ -199,6 +199,12 @@ export interface SceneNode {
     style: NodeStyle;
     visible: boolean;
     locked: boolean;
+    /** True when this node masks the siblings painted above it in its group. */
+    is_mask?: boolean;
+    /** Mask coverage source: 0 = alpha (default), 1 = luminance (reserved). */
+    mask_type?: number;
+    /** Reserved: clip descendants to this node's bounds (frames — not yet wired). */
+    clip_content?: boolean;
     children?: number[];
     /** Local transform as column-major [f32; 9] (matches glam Mat3). */
     transform: number[];

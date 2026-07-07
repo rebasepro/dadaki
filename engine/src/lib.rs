@@ -581,6 +581,23 @@ pub struct Node {
     pub parent: Option<u32>,
     pub visible: bool,
     pub locked: bool,
+    /// When true, this node acts as a mask for the sibling(s) painted above it
+    /// within the same parent, up to the next mask or the end of the parent
+    /// (Figma-style). The mask node itself is not painted as normal content;
+    /// only its coverage gates the siblings. See `mask_type`.
+    #[serde(default)]
+    pub is_mask: bool,
+    /// How the mask's coverage is derived: 0 = alpha (default, uses the mask's
+    /// painted alpha), 1 = luminance (reserved, not yet implemented — treated
+    /// as alpha until the renderer grows a luminance path).
+    #[serde(default)]
+    pub mask_type: u8,
+    /// Reserved: when true, this (group/frame) node clips its descendants to
+    /// its own bounds. Frames don't exist yet, so the renderer treats this as a
+    /// no-op; the field is serialized now so the format won't churn when frame
+    /// clipping lands.
+    #[serde(default)]
+    pub clip_content: bool,
 }
 
 use rstar::{RTree, RTreeObject, AABB, PointDistance};
@@ -599,10 +616,22 @@ use rstar::{RTree, RTreeObject, AABB, PointDistance};
 // of silently garbling the frame. Bump RENDER_PROTOCOL_VERSION (and the matching
 // EXPECTED_RENDER_PROTOCOL_VERSION in renderer.ts) whenever the layout changes.
 
+// Render command types (first u32 of each record's payload).
+const CMD_START_GROUP: u32 = 1;
+const CMD_DRAW_NODE: u32 = 2;
+const CMD_END_GROUP: u32 = 3;
+/// Open a mask coverage layer; the following record draws the mask shape.
+const CMD_BEGIN_MASK: u32 = 4;
+/// Open the masked-content layer (composited into the mask via SrcIn).
+const CMD_BEGIN_MASKED_CONTENT: u32 = 5;
+/// Close both the content and mask layers, compositing the masked result.
+const CMD_END_MASK: u32 = 6;
+
 /// Magic marker: ASCII "VEC1" as a little-endian u32.
 pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// Render-buffer layout version. Writer and renderer.ts reader must agree.
-pub const RENDER_PROTOCOL_VERSION: u32 = 1;
+/// v2: added mask commands (CMD_BEGIN_MASK/BEGIN_MASKED_CONTENT/END_MASK).
+pub const RENDER_PROTOCOL_VERSION: u32 = 2;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -762,6 +791,16 @@ impl Engine {
         self.render_buffer[count_pos..count_pos + 4].copy_from_slice(&count_bytes);
     }
 
+    /// Emit a payload-free mask bracketing command (BEGIN_MASK /
+    /// BEGIN_MASKED_CONTENT / END_MASK). `id` is advisory (for debugging).
+    fn emit_mask_cmd(&mut self, cmd: u32, id: u32, total_nodes: &mut u32) {
+        let rec = begin_record(&mut self.render_buffer);
+        self.render_buffer.extend_from_slice(&cmd.to_le_bytes());
+        self.render_buffer.extend_from_slice(&id.to_le_bytes());
+        end_record(&mut self.render_buffer, rec);
+        *total_nodes += 1;
+    }
+
     fn write_node_recursive(
         &mut self,
         id: u32,
@@ -785,22 +824,48 @@ impl Engine {
             // If none of the descendants are in visible_set, we can skip.
             // For now, let's be safe and always process groups if they are visible.
             
-            // CMD_START_GROUP = 1
+            // CMD_START_GROUP
             let rec = begin_record(&mut self.render_buffer);
-            self.render_buffer.extend_from_slice(&1u32.to_le_bytes());
+            self.render_buffer.extend_from_slice(&CMD_START_GROUP.to_le_bytes());
             self.render_buffer.extend_from_slice(&id.to_le_bytes());
             self.render_buffer.extend_from_slice(&node.style.opacity.to_le_bytes());
             end_record(&mut self.render_buffer, rec);
             *total_nodes += 1;
 
+            // Emit children, bracketing any mask spans. A visible child with
+            // is_mask=true masks the following siblings (up to the next mask or
+            // the end of the group), Figma-style: [mask, content...]. A mask
+            // with nothing drawable after it renders as a normal node so the
+            // shape isn't silently lost.
             let children = node.children.clone();
-            for child_id in children {
-                self.write_node_recursive(child_id, visible_set, total_nodes);
+            let mut open_mask = false;
+            for (i, &child_id) in children.iter().enumerate() {
+                let child_is_mask = self.scene.nodes.get(&child_id)
+                    .map(|c| c.is_mask && c.visible)
+                    .unwrap_or(false);
+                let masks_something = child_is_mask && children[i + 1..].iter().any(|&s| {
+                    self.scene.nodes.get(&s).map(|n| n.visible && !n.is_mask).unwrap_or(false)
+                });
+
+                if child_is_mask && masks_something {
+                    if open_mask {
+                        self.emit_mask_cmd(CMD_END_MASK, child_id, total_nodes);
+                    }
+                    self.emit_mask_cmd(CMD_BEGIN_MASK, child_id, total_nodes);
+                    self.write_node_recursive(child_id, visible_set, total_nodes);
+                    self.emit_mask_cmd(CMD_BEGIN_MASKED_CONTENT, child_id, total_nodes);
+                    open_mask = true;
+                } else {
+                    self.write_node_recursive(child_id, visible_set, total_nodes);
+                }
+            }
+            if open_mask {
+                self.emit_mask_cmd(CMD_END_MASK, id, total_nodes);
             }
 
-            // CMD_END_GROUP = 3
+            // CMD_END_GROUP
             let rec = begin_record(&mut self.render_buffer);
-            self.render_buffer.extend_from_slice(&3u32.to_le_bytes());
+            self.render_buffer.extend_from_slice(&CMD_END_GROUP.to_le_bytes());
             self.render_buffer.extend_from_slice(&id.to_le_bytes());
             end_record(&mut self.render_buffer, rec);
             *total_nodes += 1;
@@ -982,6 +1047,9 @@ impl Engine {
             parent: None,
             visible: true,
             locked: false,
+            is_mask: false,
+            mask_type: 0,
+            clip_content: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -1014,6 +1082,9 @@ impl Engine {
             parent: None,
             visible: true,
             locked: false,
+            is_mask: false,
+            mask_type: 0,
+            clip_content: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -1081,6 +1152,9 @@ impl Engine {
             parent: None,
             visible: true,
             locked: false,
+            is_mask: false,
+            mask_type: 0,
+            clip_content: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -1134,6 +1208,9 @@ impl Engine {
             parent: None,
             visible: true,
             locked: false,
+            is_mask: false,
+            mask_type: 0,
+            clip_content: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -1189,6 +1266,9 @@ impl Engine {
             parent: None,
             visible: true,
             locked: false,
+            is_mask: false,
+            mask_type: 0,
+            clip_content: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -1231,6 +1311,31 @@ impl Engine {
         if let Some(node) = self.scene.nodes.get_mut(&id) {
             node.locked = locked;
         }
+    }
+
+    /// Toggle whether a node masks the siblings painted above it. Marks the
+    /// parent dirty so the mask span is recomputed on the next render.
+    pub fn set_node_is_mask(&mut self, id: u32, is_mask: bool) {
+        let parent = self.scene.nodes.get(&id).and_then(|n| n.parent);
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            node.is_mask = is_mask;
+        }
+        self.mark_dirty(id);
+        if let Some(pid) = parent {
+            self.mark_dirty(pid);
+        }
+    }
+
+    /// Set the mask coverage source: 0 = alpha, 1 = luminance (reserved).
+    pub fn set_node_mask_type(&mut self, id: u32, mask_type: u32) {
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            node.mask_type = mask_type as u8;
+        }
+        self.mark_dirty(id);
+    }
+
+    pub fn get_node_is_mask(&self, id: u32) -> bool {
+        self.scene.nodes.get(&id).map(|n| n.is_mask).unwrap_or(false)
     }
 
     fn update_spatial_index(&mut self, id: u32) {
@@ -2774,6 +2879,9 @@ impl Engine {
             parent: group_parent,
             visible: true,
             locked: false,
+            is_mask: false,
+            mask_type: 0,
+            clip_content: false,
             };
         self.scene.nodes.insert(group_id, group_node);
 
@@ -2941,6 +3049,9 @@ impl Engine {
             parent: None,
             visible: true,
             locked: false,
+            is_mask: false,
+            mask_type: 0,
+            clip_content: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -4084,6 +4195,77 @@ mod tests {
             off = end;
         }
         assert_eq!(off, buf.len(), "records must tile the whole buffer exactly");
+    }
+
+    #[test]
+    fn test_mask_command_emission() {
+        // A masked group [mask, content] must emit the bracketing commands
+        // BEGIN_MASK, (mask draw), BEGIN_MASKED_CONTENT, (content draw),
+        // END_MASK — and the mask must not be drawn as a normal node outside
+        // that bracket.
+        let mut engine = Engine::new();
+        let mask = engine.add_ellipse(300.0, 300.0, 100.0, 100.0);
+        let content = engine.add_rect(200.0, 200.0, 200.0, 200.0);
+        let g = engine.group_nodes(&format!("[{},{}]", mask, content));
+        engine.set_node_is_mask(mask, true);
+
+        engine.update_render_buffer(vec![mask, content, g]);
+        let buf = &engine.render_buffer;
+        let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
+
+        // Walk records, collecting the command sequence.
+        let count = rd(8);
+        let mut cmds = Vec::new();
+        let mut off = 12usize;
+        for _ in 0..count {
+            let len = rd(off) as usize;
+            cmds.push(rd(off + 4));
+            off += 4 + len;
+        }
+        // Expected: START_GROUP(1), BEGIN_MASK(4), DRAW(2 mask), BEGIN_CONTENT(5),
+        // DRAW(2 content), END_MASK(6), END_GROUP(3).
+        assert_eq!(cmds, vec![1, 4, 2, 5, 2, 6, 3], "mask bracket sequence, got {:?}", cmds);
+
+        // Turning the mask off collapses back to two plain draws.
+        engine.set_node_is_mask(mask, false);
+        engine.update_render_buffer(vec![mask, content, g]);
+        let buf = &engine.render_buffer;
+        let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
+        let count = rd(8);
+        let mut cmds = Vec::new();
+        let mut off = 12usize;
+        for _ in 0..count {
+            let len = rd(off) as usize;
+            cmds.push(rd(off + 4));
+            off += 4 + len;
+        }
+        assert_eq!(cmds, vec![1, 2, 2, 3], "no-mask sequence, got {:?}", cmds);
+    }
+
+    #[test]
+    fn test_mask_with_no_content_renders_normally() {
+        // A mask that is the topmost (last) child has nothing to mask; it must
+        // render as a normal node rather than vanish.
+        let mut engine = Engine::new();
+        let content = engine.add_rect(200.0, 200.0, 100.0, 100.0);
+        let mask = engine.add_ellipse(250.0, 250.0, 60.0, 60.0);
+        let g = engine.group_nodes(&format!("[{},{}]", content, mask)); // mask is LAST → on top
+        engine.set_node_is_mask(mask, true);
+
+        engine.update_render_buffer(vec![mask, content, g]);
+        let buf = &engine.render_buffer;
+        let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
+        let count = rd(8);
+        let mut cmds = Vec::new();
+        let mut off = 12usize;
+        for _ in 0..count {
+            let len = rd(off) as usize;
+            cmds.push(rd(off + 4));
+            off += 4 + len;
+        }
+        // No BEGIN_MASK(4) — both nodes draw plainly inside the group.
+        assert!(!cmds.contains(&4), "mask with no content above must not bracket, got {:?}", cmds);
+        assert_eq!(cmds, vec![1, 2, 2, 3], "got {:?}", cmds);
     }
 
     #[test]

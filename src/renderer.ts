@@ -52,7 +52,7 @@ import type { InputManager } from './input';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 1;
+const EXPECTED_RENDER_PROTOCOL_VERSION = 2; // v2: mask commands (4/5/6)
 
 export class Renderer {
     /** Generate a path for a text node (for "Create Outlines"). */
@@ -134,6 +134,8 @@ export class Renderer {
     private _needsRender = true;
     /** One-shot guard so a render-protocol desync logs once, not every frame. */
     private _protocolDesyncWarned = false;
+    /** Dedicated SrcIn paint for compositing masked-content layers. */
+    private _maskPaint: Paint | null = null;
 
     // ─── Path object cache (avoid rebuilding CanvasKit paths every frame) ───
     private _pathCache: Map<number, { path: ReturnType<CanvasKit['Path']['prototype']['copy']>; fillRule: number }> = new Map();
@@ -434,6 +436,20 @@ export class Renderer {
                 }
             } else if (cmdType === 3) { // CMD_END_GROUP
                 canvas.restore();
+            } else if (cmdType === 4) { // CMD_BEGIN_MASK
+                // Isolated layer that will accumulate the mask shape's coverage.
+                canvas.saveLayer();
+            } else if (cmdType === 5) { // CMD_BEGIN_MASKED_CONTENT
+                // Content layer: on restore it composites into the mask layer
+                // with SrcIn, so content survives only where the mask is opaque
+                // (alpha mask). Luminance masks (mask_type=1) are not yet
+                // distinguished — treated as alpha for now.
+                if (!this._maskPaint) this._maskPaint = new this.ck.Paint();
+                this._maskPaint.setBlendMode(this.ck.BlendMode.SrcIn);
+                canvas.saveLayer(this._maskPaint);
+            } else if (cmdType === 6) { // CMD_END_MASK
+                canvas.restore(); // content → mask layer (SrcIn): clip to coverage
+                canvas.restore(); // masked result → canvas
             } else if (cmdType === 2) { // CMD_DRAW_NODE
                 const nodeType = reader.u32();
                 const matrix = reader.f32Array(9);

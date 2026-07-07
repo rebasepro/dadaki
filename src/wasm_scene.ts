@@ -136,6 +136,18 @@ export class WasmScene {
         this.autosave?.trigger();
     }
 
+    /** Toggle whether a node masks the siblings painted above it in its group. */
+    setNodeIsMask(id: number, isMask: boolean) {
+        this.saveHistory();
+        this.engine!.set_node_is_mask(id, isMask);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    getNodeIsMask(id: number): boolean {
+        return this.engine!.get_node_is_mask(id);
+    }
+
     moveNode(id: number, dx: number, dy: number) {
         this.engine!.move_node(id, dx, dy);
         this.invalidateCache();
