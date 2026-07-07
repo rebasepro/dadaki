@@ -268,6 +268,9 @@ export class InputManager {
             case 'flatten':
                 this.flattenSelection();
                 break;
+            case 'toggle-mask':
+                this.toggleMaskSelection();
+                break;
         }
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
@@ -1563,6 +1566,36 @@ export class InputManager {
                 this.scene.ungroupNode(id);
             }
         });
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+    }
+
+    /**
+     * Toggle "use as mask" on the selection (Figma-style alpha mask).
+     *  - Any selected node already a mask → release all.
+     *  - A single node → mark it as a mask for the siblings above it.
+     *  - Multiple nodes → group them and make the bottom-most the mask.
+     */
+    toggleMaskSelection() {
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length === 0) return;
+        const anyMask = selection.some(id => this.scene.getNodeIsMask(id));
+
+        if (anyMask) {
+            this.scene.transaction(() => {
+                for (const id of selection) this.scene.setNodeIsMask(id, false);
+            });
+        } else if (selection.length === 1) {
+            this.scene.setNodeIsMask(selection[0], true);
+        } else {
+            this.scene.transaction(() => {
+                const groupId = this.scene.groupNodes(selection);
+                const kids = Array.from(this.scene.getNodeChildren(groupId));
+                if (kids.length > 0) this.scene.setNodeIsMask(kids[0], true);
+                this.scene.engine!.clear_selection();
+                this.scene.selectNode(groupId, false);
+            });
+        }
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
     }

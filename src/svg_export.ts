@@ -62,6 +62,10 @@ export function buildSVGFromData(input: SVGExportInput): string {
     const gradientDefs: string[] = [];
     let gradientIdCounter = 0;
 
+    // Collect <mask> defs (Figma-style is_mask children → SVG alpha masks)
+    const maskDefs: string[] = [];
+    let maskIdCounter = 0;
+
     /** Convert a Paint to an SVG fill/stroke value. For gradients, adds a def and returns url(#id). */
     const paintToSvgValue = (paint: Paint | null): string => {
         if (!paint) return 'none';
@@ -191,10 +195,42 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 }
             }
 
-            // Render children
+            // Render children, bracketing any mask spans. A visible child with
+            // is_mask=true masks the siblings above it (up to the next mask or
+            // the end of the group) — exported as a <mask> def + a <g mask=...>
+            // wrapper. mask-type="alpha" matches our alpha-mask semantics.
             const children = node.children || [];
-            for (const childId of children) {
-                nodeSvg += renderNodeToSVG(childId);
+            let ci = 0;
+            while (ci < children.length) {
+                const childId = children[ci];
+                const child = nodes[childId];
+                const isMaskChild = !!(child && child.is_mask && child.visible);
+                let hasContentAbove = false;
+                if (isMaskChild) {
+                    for (let j = ci + 1; j < children.length; j++) {
+                        const c = nodes[children[j]];
+                        if (c && c.visible && !c.is_mask) { hasContentAbove = true; break; }
+                    }
+                }
+                if (isMaskChild && hasContentAbove) {
+                    const maskId = `mask${maskIdCounter++}`;
+                    maskDefs.push(
+                        `<mask id="${maskId}" mask-type="alpha" style="mask-type:alpha">` +
+                        `${renderNodeToSVG(childId)}</mask>`);
+                    // Gather content siblings up to the next mask.
+                    let contentSvg = '';
+                    let j = ci + 1;
+                    for (; j < children.length; j++) {
+                        const c = nodes[children[j]];
+                        if (c && c.is_mask && c.visible) break;
+                        contentSvg += renderNodeToSVG(children[j]);
+                    }
+                    nodeSvg += `<g mask="url(#${maskId})">${contentSvg}</g>`;
+                    ci = j;
+                } else {
+                    nodeSvg += renderNodeToSVG(childId);
+                    ci++;
+                }
             }
         } else {
             const attrs = buildStyleAttrs(node.style);
@@ -257,9 +293,9 @@ export function buildSVGFromData(input: SVGExportInput): string {
         }
     }
 
-    // Insert gradient <defs> if any were collected during rendering
-    if (gradientDefs.length > 0) {
-        const defsBlock = `<defs>${gradientDefs.join('')}</defs>`;
+    // Insert <defs> (gradients + masks) if any were collected during rendering
+    if (gradientDefs.length > 0 || maskDefs.length > 0) {
+        const defsBlock = `<defs>${gradientDefs.join('')}${maskDefs.join('')}</defs>`;
         // Insert after the opening <svg ...> tag
         const insertIdx = svg.indexOf('>') + 1;
         svg = svg.slice(0, insertIdx) + defsBlock + svg.slice(insertIdx);

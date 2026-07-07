@@ -1206,6 +1206,8 @@ export class UIEngine {
             const nodeVisible = this.scene.getNodeVisible(id);
             const nodeLocked = this.scene.getNodeLocked(id);
             const nodeName = this.scene.getNodeName(id);
+            let nodeIsMask = false;
+            try { nodeIsMask = this.scene.getNodeIsMask(id); } catch { /* noop */ }
 
             const item = document.createElement('div');
             item.className = 'layer-item';
@@ -1230,12 +1232,15 @@ export class UIEngine {
 
             const visIcon = nodeVisible !== false ? iconEye(12) : iconEyeOff(12);
             const lockIcon = nodeLocked === true ? iconLock(12) : iconUnlock(12);
+            // Mask badge: a small marker so mask layers are recognizable.
+            const maskBadge = nodeIsMask ? `<span class="layer-mask-badge" title="Mask">◐</span>` : '';
 
             item.innerHTML = `
                 <div class="layer-item-row" style="padding-left: ${indent + 4}px">
                     ${chevronHtml}
                     <span class="layer-icon">${icon}</span>
                     <span class="layer-name" data-node-id="${id}">${nodeName || `Node ${id}`}</span>
+                    ${maskBadge}
                     <span class="layer-actions">
                         <span class="layer-lock-btn" data-lock-id="${id}" title="${nodeLocked ? 'Unlock' : 'Lock'}">${lockIcon}</span>
                         <span class="layer-vis-btn" data-vis-id="${id}" title="Toggle visibility">${visIcon}</span>
@@ -1965,7 +1970,7 @@ export class UIEngine {
          * @param inherited    Cascaded presentation attributes from ancestor elements
          * @param useRefStack  Set of href IDs currently being resolved (cycle detection)
          */
-        const processElement = (el: Element, parentMat: number[], inherited: InheritedStyles, useRefStack: Set<string> = new Set()) => {
+        const processElement = (el: Element, parentMat: number[], inherited: InheritedStyles, useRefStack: Set<string> = new Set(), suppressMask = false) => {
             const tag = el.tagName.toLowerCase();
 
             // Skip metadata, defs, style, desc, title, clipPath
@@ -1979,6 +1984,58 @@ export class UIEngine {
             const transformAttr = el.getAttribute('transform');
             const localMat = transformAttr ? parseSVGTransform(transformAttr) : identityMatrix();
             const composedMat = composeMatrices(parentMat, localMat);
+
+            // Resolve a clip-path / mask attribute into an is_mask group. We
+            // render the element's own content (suppressing this branch on the
+            // re-entry), import the referenced <clipPath>/<mask> children as
+            // mask shapes in the SAME user space, mark them is_mask, and group
+            // [mask..., content...] with the mask at the bottom. clipPath
+            // shapes are opaque, so alpha-masking reproduces clipping.
+            if (!suppressMask) {
+                const ref = el.getAttribute('mask') || el.getAttribute('clip-path');
+                const refMatch = ref && ref.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
+                const defEl = refMatch ? doc.getElementById(refMatch[1]) : null;
+                const defTag = defEl?.tagName.toLowerCase();
+                if (defEl && (defTag === 'clippath' || defTag === 'mask')) {
+                    const contentStart = createdIds.length;
+                    processElement(el, parentMat, inherited, useRefStack, true);
+                    const contentIds = createdIds.slice(contentStart);
+
+                    // Mask shapes live in the element's user space (composedMat).
+                    const maskStart = createdIds.length;
+                    for (const dc of Array.from(defEl.children)) {
+                        processElement(dc, composedMat, inherited, useRefStack, true);
+                    }
+                    const maskIds = createdIds.slice(maskStart);
+
+                    if (contentIds.length > 0 && maskIds.length > 0) {
+                        // Union multiple mask shapes under one group so they mask
+                        // together (a single mask span, not one-per-shape).
+                        let maskNode = maskIds[0];
+                        if (maskIds.length > 1) {
+                            maskNode = this.scene.groupNodes(maskIds);
+                            try { this.scene.engine!.set_node_name(maskNode, 'Mask'); } catch { /* noop */ }
+                        }
+                        try { this.scene.engine!.set_node_is_mask(maskNode, true); } catch { /* noop */ }
+
+                        const groupId = this.scene.groupNodes([maskNode, ...contentIds]);
+                        try {
+                            this.scene.engine!.set_node_name(groupId, el.getAttribute('id') || (defTag === 'mask' ? 'Masked' : 'Clipped'));
+                        } catch { /* noop */ }
+
+                        // Reconcile createdIds: drop the individual content+mask
+                        // shapes, push the wrapping group.
+                        const consumed = new Set([...contentIds, ...maskIds]);
+                        let write = 0;
+                        for (let read = 0; read < createdIds.length; read++) {
+                            if (!consumed.has(createdIds[read])) createdIds[write++] = createdIds[read];
+                        }
+                        createdIds.length = write;
+                        createdIds.push(groupId);
+                    }
+                    return;
+                }
+            }
 
             // Merge this element's styles on top of inherited ones
             const mergedStyles = collectInheritedStyles(el, inherited);
@@ -2240,6 +2297,12 @@ export class UIEngine {
 
     showContextMenu(x: number, y: number, callback: (action: string) => void) {
         this._contextMenuCallback = callback;
+
+        // "Use as Mask" toggles depending on the current selection state.
+        const sel = Array.from(this.scene.engine?.get_selection() ?? []);
+        const anyMask = sel.some(id => { try { return this.scene.getNodeIsMask(id); } catch { return false; } });
+        const maskLabel = anyMask ? 'Release Mask' : 'Use as Mask';
+
         const items: Array<{ label: string; action: string; shortcut: string } | 'separator'> = [
             { label: 'Bring to Front', action: 'bring-to-front', shortcut: '⌘]' },
             { label: 'Bring Forward', action: 'bring-forward', shortcut: ']' },
@@ -2249,6 +2312,7 @@ export class UIEngine {
             { label: 'Group', action: 'group', shortcut: '⌘G' },
             { label: 'Ungroup', action: 'ungroup', shortcut: '⌘⇧G' },
             { label: 'Flatten', action: 'flatten', shortcut: '⌘E' },
+            { label: maskLabel, action: 'toggle-mask', shortcut: '' },
             'separator',
             { label: 'Duplicate', action: 'duplicate', shortcut: '⌘D' },
             { label: 'Delete', action: 'delete', shortcut: '⌫' },

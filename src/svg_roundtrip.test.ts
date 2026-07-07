@@ -175,6 +175,69 @@ describe('SVG Export — Basic Shapes', () => {
     });
 });
 
+// ─── Export: Masks ──────────────────────────────────────────────────────────
+
+describe('SVG Export — Masks', () => {
+    it('a group with an is_mask child exports a <mask> def and a masked <g>', () => {
+        const input: SVGExportInput = {
+            docWidth: 800, docHeight: 600,
+            nodes: {
+                1: makeNode({ node_type: 'Group', children: [2, 3] }),
+                // mask (bottom child) — an ellipse
+                2: makeNode({ node_type: 'Shape', is_mask: true,
+                    geometry: { Ellipse: { radius_x: 60, radius_y: 60 } } }),
+                // content (above) — a red rect
+                3: makeNode({ node_type: 'Shape',
+                    geometry: { Rect: { width: 200, height: 200 } },
+                    style: defaultStyle({ fill: { r: 1, g: 0, b: 0, a: 1 } }) }),
+            },
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY, 2: IDENTITY, 3: IDENTITY },
+        };
+
+        const svg = buildSVGFromData(input);
+        const doc = parseSVG(svg);
+
+        const mask = queryTag(doc, 'mask');
+        expect(mask, 'a <mask> def must be emitted').toBeTruthy();
+        expect(mask!.getAttribute('mask-type')).toBe('alpha');
+        // The mask def contains the ellipse (the mask shape).
+        expect(mask!.querySelector('ellipse'), 'mask shape inside def').toBeTruthy();
+
+        // The content is wrapped in a <g mask="url(#...)">.
+        const maskId = mask!.getAttribute('id')!;
+        const maskedG = Array.from(doc.querySelectorAll('g')).find(
+            g => g.getAttribute('mask') === `url(#${maskId})`);
+        expect(maskedG, 'content wrapped in a masked group').toBeTruthy();
+        expect(maskedG!.querySelector('rect'), 'content rect inside masked group').toBeTruthy();
+        // The mask shape must NOT also be painted as normal content.
+        expect(maskedG!.querySelector('ellipse')).toBeFalsy();
+    });
+
+    it('a mask with no content above it renders normally (not wrapped)', () => {
+        const input: SVGExportInput = {
+            docWidth: 800, docHeight: 600,
+            nodes: {
+                1: makeNode({ node_type: 'Group', children: [2, 3] }),
+                2: makeNode({ node_type: 'Shape',
+                    geometry: { Rect: { width: 100, height: 100 } } }),
+                // mask is the TOP child → nothing above to mask
+                3: makeNode({ node_type: 'Shape', is_mask: true,
+                    geometry: { Ellipse: { radius_x: 40, radius_y: 40 } } }),
+            },
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY, 2: IDENTITY, 3: IDENTITY },
+        };
+
+        const svg = buildSVGFromData(input);
+        const doc = parseSVG(svg);
+        expect(queryTag(doc, 'mask'), 'no mask def when nothing to mask').toBeFalsy();
+        // Both shapes are drawn plainly.
+        expect(queryTag(doc, 'rect')).toBeTruthy();
+        expect(queryTag(doc, 'ellipse')).toBeTruthy();
+    });
+});
+
 // ─── Export: Corner Radius ──────────────────────────────────────────────────
 
 describe('SVG Export — Corner Radius', () => {
