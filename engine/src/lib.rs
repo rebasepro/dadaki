@@ -328,6 +328,10 @@ pub enum Effect {
     Blur { radius: f32 },
     /// Drop shadow offset by (dx, dy), blurred by `blur` (sigma), tinted `color`.
     DropShadow { dx: f32, dy: f32, blur: f32, color: Color },
+    /// A 4×5 color matrix (row-major, applied to [R G B A 1]), matching SVG
+    /// feColorMatrix / Skia ColorFilter.MakeMatrix. Covers grayscale, sepia,
+    /// saturate, hue-rotate, luminanceToAlpha, etc.
+    ColorMatrix { matrix: [f32; 20] },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -697,7 +701,8 @@ pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// v4: added a per-node effects block (blur / drop shadow) after style_flags.
 /// v5: text geometry gained font_weight + italic + letter_spacing.
 /// v6: paint type 4 = pattern (image_id + tile w/h + 6-float transform).
-pub const RENDER_PROTOCOL_VERSION: u32 = 6;
+/// v7: effects records are self-describing per kind; added kind 2 = ColorMatrix.
+pub const RENDER_PROTOCOL_VERSION: u32 = 7;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -1033,23 +1038,35 @@ impl Engine {
             let style_flags: u32 = ((s.blend_mode as u32) << 16) | ((s.fill_rule as u32) << 24);
             self.render_buffer.extend_from_slice(&style_flags.to_le_bytes());
 
-            // Effects block: count u32, then per effect a fixed 32-byte record
-            // [kind u32][radius f32][dx f32][dy f32][r f32][g f32][b f32][a f32].
-            // kind 0 = blur (radius = sigma), 1 = drop shadow (all fields).
+            // Effects block: count u32, then per effect a self-describing record
+            // [kind u32][payload...] where the payload size is fixed per kind:
+            //   0 = Blur:        radius f32                              (4B)
+            //   1 = DropShadow:  dx,dy,blur,r,g,b,a  (7 f32)             (28B)
+            //   2 = ColorMatrix: 20 f32 (row-major 4×5)                  (80B)
             self.render_buffer.extend_from_slice(&(s.effects.len() as u32).to_le_bytes());
             for eff in &s.effects {
-                let (kind, radius, dx, dy, col) = match eff {
-                    Effect::Blur { radius } => (0u32, *radius, 0.0f32, 0.0f32, Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
-                    Effect::DropShadow { dx, dy, blur, color } => (1u32, *blur, *dx, *dy, color.clone()),
-                };
-                self.render_buffer.extend_from_slice(&kind.to_le_bytes());
-                self.render_buffer.extend_from_slice(&radius.to_le_bytes());
-                self.render_buffer.extend_from_slice(&dx.to_le_bytes());
-                self.render_buffer.extend_from_slice(&dy.to_le_bytes());
-                self.render_buffer.extend_from_slice(&col.r.to_le_bytes());
-                self.render_buffer.extend_from_slice(&col.g.to_le_bytes());
-                self.render_buffer.extend_from_slice(&col.b.to_le_bytes());
-                self.render_buffer.extend_from_slice(&col.a.to_le_bytes());
+                match eff {
+                    Effect::Blur { radius } => {
+                        self.render_buffer.extend_from_slice(&0u32.to_le_bytes());
+                        self.render_buffer.extend_from_slice(&radius.to_le_bytes());
+                    }
+                    Effect::DropShadow { dx, dy, blur, color } => {
+                        self.render_buffer.extend_from_slice(&1u32.to_le_bytes());
+                        self.render_buffer.extend_from_slice(&dx.to_le_bytes());
+                        self.render_buffer.extend_from_slice(&dy.to_le_bytes());
+                        self.render_buffer.extend_from_slice(&blur.to_le_bytes());
+                        self.render_buffer.extend_from_slice(&color.r.to_le_bytes());
+                        self.render_buffer.extend_from_slice(&color.g.to_le_bytes());
+                        self.render_buffer.extend_from_slice(&color.b.to_le_bytes());
+                        self.render_buffer.extend_from_slice(&color.a.to_le_bytes());
+                    }
+                    Effect::ColorMatrix { matrix } => {
+                        self.render_buffer.extend_from_slice(&2u32.to_le_bytes());
+                        for v in matrix {
+                            self.render_buffer.extend_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                }
             }
 
             // (transform effects removed — transforms are now decomposed components)
@@ -4600,6 +4617,30 @@ mod tests {
         match &engine.scene.nodes.get(&rect).unwrap().style.fills[0] {
             Paint::Pattern(p) => { assert_eq!(p.image_id, img); assert_eq!(p.transform[4], 5.0); }
             other => panic!("pattern must survive snapshot, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_color_matrix_effect_json_and_snapshot() {
+        let mut engine = Engine::new();
+        let rect = engine.add_rect(0.0, 0.0, 50.0, 50.0);
+        // Grayscale-ish matrix via the JSON effects path (as UI/import would send).
+        let json = r#"[{"ColorMatrix":{"matrix":[0.3,0.6,0.1,0,0, 0.3,0.6,0.1,0,0, 0.3,0.6,0.1,0,0, 0,0,0,1,0]}}]"#;
+        engine.set_node_effects(rect, json);
+        match &engine.scene.nodes.get(&rect).unwrap().style.effects[0] {
+            Effect::ColorMatrix { matrix } => {
+                assert_eq!(matrix[0], 0.3);
+                assert_eq!(matrix[18], 1.0);
+            }
+            other => panic!("expected ColorMatrix, got {:?}", other),
+        }
+        // Snapshot round-trip preserves the matrix.
+        let snap = engine.serialize_scene();
+        engine.set_node_effects(rect, "[]");
+        assert!(engine.deserialize_scene(&snap), "snapshot decodes");
+        match &engine.scene.nodes.get(&rect).unwrap().style.effects[0] {
+            Effect::ColorMatrix { matrix } => assert_eq!(matrix[1], 0.6),
+            other => panic!("ColorMatrix must survive snapshot, got {:?}", other),
         }
     }
 

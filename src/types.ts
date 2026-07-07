@@ -121,7 +121,8 @@ export interface NodeStyle {
 /** A serde-tagged Effect (matches the engine's `Effect` enum JSON). */
 export type EffectData =
     | { Blur: { radius: number } }
-    | { DropShadow: { dx: number; dy: number; blur: number; color: { r: number; g: number; b: number; a: number } } };
+    | { DropShadow: { dx: number; dy: number; blur: number; color: { r: number; g: number; b: number; a: number } } }
+    | { ColorMatrix: { matrix: number[] } };
 
 /** A cubic Bézier path point with incoming/outgoing control points. */
 export interface PathPoint {

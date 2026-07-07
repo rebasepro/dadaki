@@ -109,6 +109,9 @@ pub struct ProtoEffect {
     pub dy: f32,
     #[prost(message, optional, tag = "5")]
     pub color: Option<ProtoColor>,
+    /// 4×5 color matrix (kind 2 = ColorMatrix), row-major 20 floats.
+    #[prost(float, repeated, tag = "6")]
+    pub matrix: Vec<f32>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -478,10 +481,13 @@ impl From<&ProtoStyle> for Style {
 fn effect_to_proto(e: &crate::Effect) -> ProtoEffect {
     match e {
         crate::Effect::Blur { radius } => ProtoEffect {
-            kind: 0, radius: *radius, dx: 0.0, dy: 0.0, color: None,
+            kind: 0, radius: *radius, dx: 0.0, dy: 0.0, color: None, matrix: Vec::new(),
         },
         crate::Effect::DropShadow { dx, dy, blur, color } => ProtoEffect {
-            kind: 1, radius: *blur, dx: *dx, dy: *dy, color: Some(color.into()),
+            kind: 1, radius: *blur, dx: *dx, dy: *dy, color: Some(color.into()), matrix: Vec::new(),
+        },
+        crate::Effect::ColorMatrix { matrix } => ProtoEffect {
+            kind: 2, radius: 0.0, dx: 0.0, dy: 0.0, color: None, matrix: matrix.to_vec(),
         },
     }
 }
@@ -493,6 +499,11 @@ fn proto_to_effect(e: &ProtoEffect) -> Option<crate::Effect> {
             dx: e.dx, dy: e.dy, blur: e.radius,
             color: e.color.as_ref().map(Color::from).unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
         }),
+        2 => {
+            let mut m = [0.0f32; 20];
+            if e.matrix.len() == 20 { m.copy_from_slice(&e.matrix); }
+            Some(crate::Effect::ColorMatrix { matrix: m })
+        }
         _ => None,
     }
 }

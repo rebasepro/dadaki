@@ -52,13 +52,14 @@ import type { InputManager } from './input';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 6; // v6: pattern paint (type 4)
+const EXPECTED_RENDER_PROTOCOL_VERSION = 7; // v7: self-describing effects + ColorMatrix
 
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {
-    kind: number; // 0 = blur, 1 = drop shadow
+    kind: number; // 0 = blur, 1 = drop shadow, 2 = color matrix
     radius: number; dx: number; dy: number;
     r: number; g: number; b: number; a: number;
+    matrix?: number[]; // 20 floats, for kind 2
 }
 
 export class Renderer {
@@ -235,17 +236,21 @@ export class Renderer {
     /** Build (or fetch a cached) ImageFilter chain for a node's effects.
      *  Effects stack: each filter takes the previous as input. */
     private getEffectFilter(effects: EffectRecord[]): ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null {
-        const key = effects.map(e => `${e.kind}:${e.radius},${e.dx},${e.dy},${e.r},${e.g},${e.b},${e.a}`).join('|');
+        const key = effects.map(e => `${e.kind}:${e.radius},${e.dx},${e.dy},${e.r},${e.g},${e.b},${e.a},${e.matrix?.join(',') ?? ''}`).join('|');
         const cached = this._effectFilterCache.get(key);
         if (cached !== undefined) return cached;
         let filter: ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null = null;
         for (const e of effects) {
-            const s = Math.max(0, e.radius);
             if (e.kind === 0) {
+                const s = Math.max(0, e.radius);
                 filter = this.ck.ImageFilter.MakeBlur(s, s, this.ck.TileMode.Decal, filter);
-            } else {
+            } else if (e.kind === 1) {
+                const s = Math.max(0, e.radius);
                 const color = this.ck.Color4f(e.r, e.g, e.b, e.a);
                 filter = this.ck.ImageFilter.MakeDropShadow(e.dx, e.dy, s, s, color, filter);
+            } else if (e.kind === 2 && e.matrix && e.matrix.length === 20) {
+                const cf = this.ck.ColorFilter.MakeMatrix(e.matrix);
+                filter = this.ck.ImageFilter.MakeColorFilter(cf, filter);
             }
         }
         this._effectFilterCache.set(key, filter);
@@ -682,17 +687,22 @@ export class Renderer {
                 const blendMode  = (styleFlags >>> 16) & 0xFF;
                 const fillRule   = (styleFlags >>> 24) & 0xFF;
 
-                // Effects block: count + fixed 32-byte records (kind 0=blur,
-                // 1=drop shadow). Read before geometry so offsets stay aligned.
+                // Effects block: count + self-describing records (payload size
+                // fixed per kind). Read before geometry so offsets stay aligned.
                 const effectCount = reader.u32();
                 const effects: EffectRecord[] = [];
                 for (let e = 0; e < effectCount; e++) {
                     const kind = reader.u32();
-                    const radius = reader.f32();
-                    const dx = reader.f32();
-                    const dy = reader.f32();
-                    const r = reader.f32(), g = reader.f32(), b = reader.f32(), a = reader.f32();
-                    effects.push({ kind, radius, dx, dy, r, g, b, a });
+                    if (kind === 0) { // Blur
+                        effects.push({ kind, radius: reader.f32(), dx: 0, dy: 0, r: 0, g: 0, b: 0, a: 0 });
+                    } else if (kind === 1) { // DropShadow: dx,dy,blur,r,g,b,a
+                        const dx = reader.f32(), dy = reader.f32(), radius = reader.f32();
+                        effects.push({ kind, radius, dx, dy, r: reader.f32(), g: reader.f32(), b: reader.f32(), a: reader.f32() });
+                    } else if (kind === 2) { // ColorMatrix: 20 floats
+                        const matrix: number[] = [];
+                        for (let i = 0; i < 20; i++) matrix.push(reader.f32());
+                        effects.push({ kind, radius: 0, dx: 0, dy: 0, r: 0, g: 0, b: 0, a: 0, matrix });
+                    }
                 }
 
                 canvas.save();

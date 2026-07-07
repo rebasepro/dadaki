@@ -83,6 +83,9 @@ export function buildSVGFromData(input: SVGExportInput): string {
             if ('Blur' in eff) {
                 return `<feGaussianBlur stdDeviation="${eff.Blur.radius}" />`;
             }
+            if ('ColorMatrix' in eff) {
+                return `<feColorMatrix type="matrix" values="${eff.ColorMatrix.matrix.join(' ')}" />`;
+            }
             const d = eff.DropShadow;
             const flood = `#${[d.color.r, d.color.g, d.color.b].map(c => Math.round(c * 255).toString(16).padStart(2, '0')).join('')}`;
             return `<feDropShadow dx="${d.dx}" dy="${d.dy}" stdDeviation="${d.blur}" flood-color="${flood}" flood-opacity="${d.color.a}" />`;

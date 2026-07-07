@@ -21,7 +21,7 @@ async function bootstrap() {
     const ui = new UIEngine(ck, wasmScene);
     const input = new InputManager(canvas, wasmScene, ui, renderer);
     renderer.inputManager = input;
-    (window as any).app = { scene: wasmScene, input: input };
+    (window as any).app = { scene: wasmScene, input: input, ui: ui, renderer: renderer, ck: ck };
 
 
     // Tool rail — grouped tools with flyouts

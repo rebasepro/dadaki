@@ -33,6 +33,14 @@ export class UIEngine {
     /** Last style the user configured — applied to newly created shapes. */
     private _currentStyleJson: string | null = null;
 
+    /** Named 4×5 color-matrix presets for the Color effect (row-major 20 floats). */
+    private static readonly COLOR_PRESETS: Record<string, number[]> = {
+        grayscale: [0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0, 0, 0, 1, 0],
+        sepia: [0.393, 0.769, 0.189, 0, 0, 0.349, 0.686, 0.168, 0, 0, 0.272, 0.534, 0.131, 0, 0, 0, 0, 0, 1, 0],
+        invert: [-1, 0, 0, 0, 1, 0, -1, 0, 0, 1, 0, 0, -1, 0, 1, 0, 0, 0, 1, 0],
+        saturate: [0.6063, 0.3575, 0.0361, 0, 0, 0.1065, 0.8575, 0.0361, 0, 0, 0.1065, 0.3575, 0.5361, 0, 0, 0, 0, 0, 1, 0], // ~1.8×
+    };
+
     // Static lookup tables (avoid re-creation each call)
     private static readonly ICON_MAP: Record<string, () => string> = {
         'Group': () => iconFolder(14),
@@ -2143,14 +2151,17 @@ export class UIEngine {
             row.style.cssText = 'display:flex; align-items:center; gap:4px; flex-wrap:wrap;';
 
             const isShadow = 'DropShadow' in eff;
+            const isColor = 'ColorMatrix' in eff;
             const typeSel = document.createElement('select');
-            typeSel.innerHTML = `<option value="blur">Blur</option><option value="shadow">Drop Shadow</option>`;
-            typeSel.value = isShadow ? 'shadow' : 'blur';
+            typeSel.innerHTML = `<option value="blur">Blur</option><option value="shadow">Drop Shadow</option><option value="color">Color</option>`;
+            typeSel.value = isShadow ? 'shadow' : isColor ? 'color' : 'blur';
             typeSel.style.flex = '1';
             typeSel.addEventListener('change', () => {
                 effects[idx] = typeSel.value === 'shadow'
                     ? { DropShadow: { dx: 6, dy: 6, blur: 6, color: { r: 0, g: 0, b: 0, a: 0.4 } } }
-                    : { Blur: { radius: 6 } };
+                    : typeSel.value === 'color'
+                        ? { ColorMatrix: { matrix: UIEngine.COLOR_PRESETS.grayscale.slice() } }
+                        : { Blur: { radius: 6 } };
                 commit();
                 this.renderEffectsList(nodeId);
             });
@@ -2181,6 +2192,21 @@ export class UIEngine {
                 });
                 row.appendChild(color);
                 row.appendChild(numInput(d.color.a, v => d.color.a = Math.max(0, Math.min(1, v)), 'Shadow opacity (0–1)'));
+            } else if (isColor) {
+                // Preset picker (a custom imported matrix shows as "Custom").
+                const cm = eff.ColorMatrix;
+                const presetSel = document.createElement('select');
+                presetSel.style.flex = '1';
+                const names = Object.keys(UIEngine.COLOR_PRESETS);
+                const cur = names.find(nm => UIEngine.COLOR_PRESETS[nm].every((x, i) => Math.abs(x - cm.matrix[i]) < 1e-4));
+                presetSel.innerHTML = names.map(nm => `<option value="${nm}">${nm[0].toUpperCase() + nm.slice(1)}</option>`).join('')
+                    + (cur ? '' : `<option value="__custom" selected>Custom</option>`);
+                if (cur) presetSel.value = cur;
+                presetSel.addEventListener('change', () => {
+                    const preset = UIEngine.COLOR_PRESETS[presetSel.value];
+                    if (preset) { cm.matrix = preset.slice(); commit(); }
+                });
+                row.appendChild(presetSel);
             } else {
                 const b = eff.Blur;
                 row.appendChild(numInput(b.radius, v => b.radius = v, 'Blur radius'));
@@ -2316,14 +2342,65 @@ export class UIEngine {
     async parseSVG(svgText: string, afterImport?: (newRootIds: number[]) => void) {
         const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
         const patternImages = await this.rasterizePatterns(doc);
+        // Rasterize elements whose filter has primitives we can't map natively;
+        // this tags them with __rasterFilter which parseSVGInternal turns into an
+        // image node. (Uses the SAME doc so the tags survive to the sync pass.)
+        await this.rasterizeFilteredElements(doc);
         this.scene.transaction(() => {
             const before = new Set(this.scene.getRootNodes());
-            this.parseSVGInternal(svgText, patternImages);
+            this.parseSVGInternal(svgText, patternImages, doc);
             if (afterImport) {
                 const newRoots = Array.from(this.scene.getRootNodes()).filter(id => !before.has(id));
                 afterImport(newRoots);
             }
         });
+    }
+
+    /** For each element whose filter can't be mapped to native effects,
+     *  rasterize element+filter to an image and tag it with `__rasterFilter`. */
+    private async rasterizeFilteredElements(doc: Document): Promise<void> {
+        const svg = doc.querySelector('svg');
+        if (!svg) return;
+        // Candidates: elements with a filter= attr whose filter is unsupported.
+        const candidates: Element[] = [];
+        for (const el of Array.from(doc.querySelectorAll('[filter]'))) {
+            if (this.parseFilterEffects(el, doc) === 'rasterize') candidates.push(el);
+        }
+        if (candidates.length === 0) return;
+
+        // getBBox needs the SVG live in the document; attach a hidden clone-host.
+        const host = document.createElement('div');
+        host.style.cssText = 'position:absolute;left:-99999px;top:0;width:0;height:0;overflow:hidden';
+        const liveSvg = svg.cloneNode(true) as SVGSVGElement;
+        host.appendChild(liveSvg);
+        document.body.appendChild(host);
+        const defsHtml = Array.from(doc.querySelectorAll('defs')).map(d => d.innerHTML).join('');
+        try {
+            for (const el of candidates) {
+                const id = el.getAttribute('id');
+                // Find the matching live element for getBBox.
+                const live = id ? liveSvg.querySelector(`#${CSS.escape(id)}`) : null;
+                let bx = 0, by = 0, bw = 0, bh = 0;
+                try {
+                    const bb = (live as SVGGraphicsElement | null)?.getBBox?.();
+                    if (bb) { bx = bb.x; by = bb.y; bw = bb.width; bh = bb.height; }
+                } catch { /* getBBox may throw for empty geometry */ }
+                if (bw <= 0 || bh <= 0) continue;
+                // Expand for filter overflow (blur/offset spill past the geometry).
+                const mx = Math.max(bw, bh) * 0.4 + 10;
+                bx -= mx; by -= mx; bw += 2 * mx; bh += 2 * mx;
+                const scale = 2;
+                const tile = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
+                    `width="${bw * scale}" height="${bh * scale}" viewBox="${bx} ${by} ${bw} ${bh}"><defs>${defsHtml}</defs>${el.outerHTML}</svg>`;
+                const bytes = await this.rasterizeSvgToPng(tile, Math.round(bw * scale), Math.round(bh * scale));
+                if (!bytes) continue;
+                let imageId = 0;
+                try { imageId = this.scene.engine!.register_image(bytes, 'image/png'); } catch { continue; }
+                (el as unknown as { __rasterFilter?: unknown }).__rasterFilter = { imageId, x: bx, y: by, w: bw, h: bh };
+            }
+        } finally {
+            document.body.removeChild(host);
+        }
     }
 
     /** Rasterize every `<pattern>` in the doc to a tile image (via the browser's
@@ -2374,9 +2451,10 @@ export class UIEngine {
         });
     }
 
-    private parseSVGInternal(svgText: string, patternImages?: Map<string, { image_id: number; width: number; height: number; transform: number[] }>) {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(svgText, 'image/svg+xml');
+    private parseSVGInternal(svgText: string, patternImages?: Map<string, { image_id: number; width: number; height: number; transform: number[] }>, docIn?: Document) {
+        // Reuse the doc from parseSVG when given (so __rasterFilter tags on
+        // elements survive); otherwise parse fresh.
+        const doc = docIn ?? new DOMParser().parseFromString(svgText, 'image/svg+xml');
         const svg = doc.querySelector('svg');
         if (!svg) return;
 
@@ -2849,6 +2927,21 @@ export class UIEngine {
             const localMat = transformAttr ? parseSVGTransform(transformAttr) : identityMatrix();
             const composedMat = composeMatrices(parentMat, localMat);
 
+            // Rasterize-fallback: an element whose filter couldn't be mapped to
+            // native effects was pre-rendered to an image (see
+            // rasterizeFilteredElements) — place that image instead of the shape.
+            const raster = (el as unknown as { __rasterFilter?: { imageId: number; x: number; y: number; w: number; h: number } }).__rasterFilter;
+            if (raster) {
+                try {
+                    const imgNode = this.scene.engine!.add_image(0, 0, raster.w, raster.h, raster.imageId);
+                    this.scene.setNodeTransform(imgNode, composeMatrices(composedMat, translateMatrix(raster.x, raster.y)));
+                    const nm = el.getAttribute('id') || el.getAttribute('class');
+                    if (nm) { try { this.scene.engine!.set_node_name(imgNode, nm); } catch { /* noop */ } }
+                    createdIds.push(imgNode);
+                } catch (err) { console.warn('Filter rasterize placement failed:', err); }
+                return;
+            }
+
             // Resolve a clip-path / mask attribute into an is_mask group. We
             // render the element's own content (suppressing this branch on the
             // re-entry), import the referenced <clipPath>/<mask> children as
@@ -3138,9 +3231,11 @@ export class UIEngine {
                 if (elName) {
                     try { this.scene.engine!.set_node_name(nodeId, elName); } catch { /* noop */ }
                 }
-                // Effects: resolve a filter="url(#id)" into blur/drop-shadow.
+                // Effects: resolve filter="url(#id)" into blur/shadow/color-matrix.
+                // ('rasterize' filters are handled up-front — see below — so here
+                // we only apply natively-mappable effect arrays.)
                 const fx = this.parseFilterEffects(el, doc);
-                if (fx && fx.length) {
+                if (Array.isArray(fx) && fx.length) {
                     try { this.scene.engine!.set_node_effects(nodeId, JSON.stringify(fx)); } catch { /* noop */ }
                 }
                 createdIds.push(nodeId);
@@ -3207,7 +3302,46 @@ export class UIEngine {
      * contains any other primitive, the whole filter is skipped (a partial
      * approximation would look worse than none).
      */
-    private parseFilterEffects(el: Element, doc: Document): any[] | null {
+    /** The 20-float (4×5, row-major) color matrix for an feColorMatrix primitive. */
+    private feColorMatrix(prim: Element): number[] {
+        const type = (prim.getAttribute('type') || 'matrix').toLowerCase();
+        const vals = (prim.getAttribute('values') || '').trim().split(/[\s,]+/).map(Number).filter(n => !isNaN(n));
+        if (type === 'matrix') {
+            return vals.length === 20 ? vals : [1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,1,0];
+        }
+        if (type === 'saturate') {
+            const s = vals.length ? vals[0] : 1;
+            return [
+                0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s, 0, 0,
+                0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s, 0, 0,
+                0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s, 0, 0,
+                0, 0, 0, 1, 0,
+            ];
+        }
+        if (type === 'huerotate') {
+            const a = (vals.length ? vals[0] : 0) * Math.PI / 180;
+            const c = Math.cos(a), s = Math.sin(a);
+            return [
+                0.213 + c * 0.787 - s * 0.213, 0.715 - c * 0.715 - s * 0.715, 0.072 - c * 0.072 + s * 0.928, 0, 0,
+                0.213 - c * 0.213 + s * 0.143, 0.715 + c * 0.285 + s * 0.140, 0.072 - c * 0.072 - s * 0.283, 0, 0,
+                0.213 - c * 0.213 - s * 0.787, 0.715 - c * 0.715 + s * 0.715, 0.072 + c * 0.928 + s * 0.072, 0, 0,
+                0, 0, 0, 1, 0,
+            ];
+        }
+        if (type === 'luminancetoalpha') {
+            return [0,0,0,0,0, 0,0,0,0,0, 0,0,0,0,0, 0.2125, 0.7154, 0.0721, 0, 0];
+        }
+        return [1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,1,0];
+    }
+
+    /**
+     * Resolve an element's filter into engine effects.
+     * Returns the effects array when every primitive maps natively
+     * (feGaussianBlur, feDropShadow, feColorMatrix), 'rasterize' when the filter
+     * has an unsupported primitive (caller bakes the element to an image), or
+     * null when there is no filter.
+     */
+    private parseFilterEffects(el: Element, doc: Document): any[] | 'rasterize' | null {
         const ref = el.getAttribute('filter');
         const m = ref && ref.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
         if (!m) return null;
@@ -3234,10 +3368,11 @@ export class UIEngine {
                     blur: firstNum(prim.getAttribute('stdDeviation')),
                     color: { r: c.r, g: c.g, b: c.b, a: fo },
                 } });
+            } else if (t === 'fecolormatrix') {
+                effects.push({ ColorMatrix: { matrix: this.feColorMatrix(prim) } });
             } else {
-                // Unsupported primitive — don't half-apply the filter.
-                console.warn(`Skipping <filter> with unsupported primitive <${t}>`);
-                return null;
+                // Unsupported primitive — fall back to rasterizing the element.
+                return 'rasterize';
             }
         }
         return effects.length ? effects : null;

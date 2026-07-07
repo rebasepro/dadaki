@@ -289,6 +289,26 @@ describe('SVG Export — Masks', () => {
         expect(g, 'node group references the filter').toBeTruthy();
     });
 
+    it('a node with a color-matrix effect exports feColorMatrix', () => {
+        const gray = [0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0, 0, 0, 1, 0];
+        const input: SVGExportInput = {
+            docWidth: 400, docHeight: 400,
+            nodes: {
+                1: makeNode({
+                    geometry: { Rect: { width: 100, height: 100 } },
+                    style: defaultStyle({ effects: [{ ColorMatrix: { matrix: gray } }] }),
+                }),
+            },
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY },
+        };
+        const doc = parseSVG(buildSVGFromData(input));
+        const cm = doc.querySelector('feColorMatrix');
+        expect(cm).toBeTruthy();
+        expect(cm!.getAttribute('type')).toBe('matrix');
+        expect(cm!.getAttribute('values')).toContain('0.2126 0.7152 0.0722');
+    });
+
     it('a node with a blur effect exports feGaussianBlur', () => {
         const input: SVGExportInput = {
             docWidth: 400, docHeight: 400,
