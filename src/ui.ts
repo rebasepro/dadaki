@@ -97,6 +97,7 @@ export class UIEngine {
 
         // Initialize DOM refs — basic
         this.layerList = document.getElementById('layer-list') as HTMLElement;
+        this._initLayerListEmptyAreaDrop();
         this.zoomText = document.getElementById('zoom-level') as HTMLElement;
         this.opacityInput = document.getElementById('opacity') as HTMLInputElement;
 
@@ -1463,33 +1464,35 @@ export class UIEngine {
         }
     }
 
-    /** Compute each node's mask role for the layers panel. Within a group, a
-     *  mask marks the non-mask siblings that follow it (higher paint index,
-     *  until the next mask) as "masked"; the mask itself is "mask". Only applies
-     *  inside groups (root-level masks don't render as masks). */
+    /** Compute each node's mask role for the layers panel. Within any sibling
+     *  list (root nodes or a group's children), a mask marks the non-mask
+     *  siblings that follow it (higher paint index, until the next mask) as
+     *  "masked"; the mask itself is "mask". Mirrors the engine's
+     *  write_siblings_with_masks — identical at every nesting level. */
     private _computeMaskRoles(): Map<number, 'mask' | 'masked'> {
         const roles = new Map<number, 'mask' | 'masked'>();
         const isMask = (id: number): boolean => {
             try { return this.scene.getNodeIsMask(id); } catch { return false; }
         };
-        const visit = (parentId: number) => {
-            const children = Array.from(this.scene.getNodeChildren(parentId));
-            if (children.length === 0) return;
+        const visitList = (siblings: number[]) => {
             let active = false;
-            for (let i = 0; i < children.length; i++) {
-                const cid = children[i];
+            for (let i = 0; i < siblings.length; i++) {
+                const cid = siblings[i];
                 if (isMask(cid)) {
                     // Acts as a mask only if a non-mask sibling follows it.
-                    const masksSomething = children.slice(i + 1).some(c => !isMask(c));
+                    const masksSomething = siblings.slice(i + 1).some(c => !isMask(c));
                     if (masksSomething) { active = true; roles.set(cid, 'mask'); }
                     else { active = false; }
                 } else if (active) {
                     roles.set(cid, 'masked');
                 }
             }
-            for (const cid of children) visit(cid);
+            for (const cid of siblings) {
+                const children = Array.from(this.scene.getNodeChildren(cid));
+                if (children.length) visitList(children);
+            }
         };
-        for (const rid of Array.from(this.scene.getRootNodes())) visit(rid);
+        visitList(Array.from(this.scene.getRootNodes()));
         return roles;
     }
 
@@ -1594,6 +1597,39 @@ export class UIEngine {
             this.updateLayerList();
             this.syncWithSelection();
         }
+    }
+
+    /**
+     * Accept drops on the layer list's empty area (below the last row). Rows
+     * handle their own drops; without this, dragging past the last item hits
+     * the bare container, the browser rejects the drop, and the drag snaps
+     * back — making the bottom-most position unreachable. Dropping here sends
+     * the dragged nodes to the back of the root z-order (the panel's last row).
+     */
+    private _initLayerListEmptyAreaDrop() {
+        this.layerList.addEventListener('dragover', (e) => {
+            if (!this._draggingLayerIds) return;
+            if ((e.target as HTMLElement).closest('.layer-item')) return;
+            e.preventDefault();
+            if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+            this._clearLayerDropIndicators();
+            this.layerList.querySelector('.layer-item:last-child .layer-item-row')
+                ?.classList.add('drop-below');
+        });
+        this.layerList.addEventListener('drop', (e) => {
+            const dragIds = this._draggingLayerIds;
+            if (!dragIds || (e.target as HTMLElement).closest('.layer-item')) return;
+            e.preventDefault();
+            this._clearLayerDropIndicators();
+            this._draggingLayerIds = null;
+            const deduped = new Set(this.scene.dedupSelection(dragIds));
+            const ordered = this._flattenDrawOrder().filter(id => deduped.has(id));
+            if (ordered.length === 0) return;
+            if (this.scene.reorderNodes(ordered, null, 0) > 0) {
+                this.updateLayerList();
+                this.syncWithSelection();
+            }
+        });
     }
 
     setZoom(level: number) {

@@ -826,10 +826,10 @@ impl Engine {
         self.render_buffer.extend_from_slice(&[0u8; 4]);
 
         let mut total_nodes = 0;
+        // Root nodes are a sibling list like any group's children: masks work
+        // there identically (a root-level mask masks the roots painted above it).
         let root_nodes = self.scene.root_nodes.clone();
-        for root_id in root_nodes {
-            self.write_node_recursive(root_id, &visible_set, &mut total_nodes);
-        }
+        self.write_siblings_with_masks(&root_nodes, &visible_set, &mut total_nodes);
 
         // Fill in the total node count (number of "commands")
         let count_bytes = (total_nodes as u32).to_le_bytes();
@@ -844,6 +844,44 @@ impl Engine {
         self.render_buffer.extend_from_slice(&id.to_le_bytes());
         end_record(&mut self.render_buffer, rec);
         *total_nodes += 1;
+    }
+
+    /// Emit a sibling list (root nodes or a group's children), bracketing any
+    /// mask spans. A visible sibling with is_mask=true masks the following
+    /// siblings (up to the next mask or the end of the list), Figma-style:
+    /// [mask, content...]. A mask with nothing drawable after it renders as a
+    /// normal node so the shape isn't silently lost. This is THE mask semantics
+    /// — identical at every nesting level.
+    fn write_siblings_with_masks(
+        &mut self,
+        siblings: &[u32],
+        visible_set: &HashSet<u32>,
+        total_nodes: &mut u32,
+    ) {
+        let mut open_mask = false;
+        for (i, &child_id) in siblings.iter().enumerate() {
+            let child_is_mask = self.scene.nodes.get(&child_id)
+                .map(|c| c.is_mask && c.visible)
+                .unwrap_or(false);
+            let masks_something = child_is_mask && siblings[i + 1..].iter().any(|&s| {
+                self.scene.nodes.get(&s).map(|n| n.visible && !n.is_mask).unwrap_or(false)
+            });
+
+            if child_is_mask && masks_something {
+                if open_mask {
+                    self.emit_mask_cmd(CMD_END_MASK, child_id, total_nodes);
+                }
+                self.emit_mask_cmd(CMD_BEGIN_MASK, child_id, total_nodes);
+                self.write_node_recursive(child_id, visible_set, total_nodes);
+                self.emit_mask_cmd(CMD_BEGIN_MASKED_CONTENT, child_id, total_nodes);
+                open_mask = true;
+            } else {
+                self.write_node_recursive(child_id, visible_set, total_nodes);
+            }
+        }
+        if open_mask {
+            self.emit_mask_cmd(CMD_END_MASK, 0, total_nodes);
+        }
     }
 
     fn write_node_recursive(
@@ -877,36 +915,9 @@ impl Engine {
             end_record(&mut self.render_buffer, rec);
             *total_nodes += 1;
 
-            // Emit children, bracketing any mask spans. A visible child with
-            // is_mask=true masks the following siblings (up to the next mask or
-            // the end of the group), Figma-style: [mask, content...]. A mask
-            // with nothing drawable after it renders as a normal node so the
-            // shape isn't silently lost.
+            // Children are a sibling list — same mask-span semantics as roots.
             let children = node.children.clone();
-            let mut open_mask = false;
-            for (i, &child_id) in children.iter().enumerate() {
-                let child_is_mask = self.scene.nodes.get(&child_id)
-                    .map(|c| c.is_mask && c.visible)
-                    .unwrap_or(false);
-                let masks_something = child_is_mask && children[i + 1..].iter().any(|&s| {
-                    self.scene.nodes.get(&s).map(|n| n.visible && !n.is_mask).unwrap_or(false)
-                });
-
-                if child_is_mask && masks_something {
-                    if open_mask {
-                        self.emit_mask_cmd(CMD_END_MASK, child_id, total_nodes);
-                    }
-                    self.emit_mask_cmd(CMD_BEGIN_MASK, child_id, total_nodes);
-                    self.write_node_recursive(child_id, visible_set, total_nodes);
-                    self.emit_mask_cmd(CMD_BEGIN_MASKED_CONTENT, child_id, total_nodes);
-                    open_mask = true;
-                } else {
-                    self.write_node_recursive(child_id, visible_set, total_nodes);
-                }
-            }
-            if open_mask {
-                self.emit_mask_cmd(CMD_END_MASK, id, total_nodes);
-            }
+            self.write_siblings_with_masks(&children, visible_set, total_nodes);
 
             // CMD_END_GROUP
             let rec = begin_record(&mut self.render_buffer);
@@ -4443,6 +4454,30 @@ mod tests {
             off += 4 + len;
         }
         assert_eq!(cmds, vec![1, 2, 2, 3], "no-mask sequence, got {:?}", cmds);
+    }
+
+    #[test]
+    fn test_root_level_mask_emission() {
+        // Masks are not group-scoped: a root-level mask must bracket the root
+        // siblings painted above it, exactly like inside a group.
+        let mut engine = Engine::new();
+        let mask = engine.add_ellipse(300.0, 300.0, 100.0, 100.0); // bottom root
+        let content = engine.add_rect(200.0, 200.0, 200.0, 200.0);  // above it
+        engine.set_node_is_mask(mask, true);
+
+        engine.update_render_buffer(vec![mask, content]);
+        let buf = &engine.render_buffer;
+        let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
+        let count = rd(8);
+        let mut cmds = Vec::new();
+        let mut off = 12usize;
+        for _ in 0..count {
+            let len = rd(off) as usize;
+            cmds.push(rd(off + 4));
+            off += 4 + len;
+        }
+        // BEGIN_MASK(4), DRAW(mask), BEGIN_CONTENT(5), DRAW(content), END_MASK(6)
+        assert_eq!(cmds, vec![4, 2, 5, 2, 6], "root-level mask bracket, got {:?}", cmds);
     }
 
     #[test]

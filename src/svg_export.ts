@@ -186,6 +186,51 @@ export function buildSVGFromData(input: SVGExportInput): string {
         return attrs;
     };
 
+    /**
+     * Render a sibling list (root nodes or a group's children), bracketing any
+     * mask spans. A visible sibling with is_mask=true masks the siblings above
+     * it (up to the next mask or the end of the list) — exported as a <mask>
+     * def + a <g mask=...> wrapper. mask-type="alpha" matches our alpha-mask
+     * semantics. Identical at every nesting level (mutually recursive with
+     * renderNodeToSVG).
+     */
+    const renderSiblingsWithMasks = (siblings: number[]): string => {
+        let out = '';
+        let ci = 0;
+        while (ci < siblings.length) {
+            const childId = siblings[ci];
+            const child = nodes[childId];
+            const isMaskChild = !!(child && child.is_mask && child.visible);
+            let hasContentAbove = false;
+            if (isMaskChild) {
+                for (let j = ci + 1; j < siblings.length; j++) {
+                    const c = nodes[siblings[j]];
+                    if (c && c.visible && !c.is_mask) { hasContentAbove = true; break; }
+                }
+            }
+            if (isMaskChild && hasContentAbove) {
+                const maskId = `mask${maskIdCounter++}`;
+                maskDefs.push(
+                    `<mask id="${maskId}" mask-type="alpha" style="mask-type:alpha">` +
+                    `${renderNodeToSVG(childId)}</mask>`);
+                // Gather content siblings up to the next mask.
+                let contentSvg = '';
+                let j = ci + 1;
+                for (; j < siblings.length; j++) {
+                    const c = nodes[siblings[j]];
+                    if (c && c.is_mask && c.visible) break;
+                    contentSvg += renderNodeToSVG(siblings[j]);
+                }
+                out += `<g mask="url(#${maskId})">${contentSvg}</g>`;
+                ci = j;
+            } else {
+                out += renderNodeToSVG(childId);
+                ci++;
+            }
+        }
+        return out;
+    };
+
     /** Recursively render a node and its children to SVG elements. */
     const renderNodeToSVG = (id: number): string => {
         const node = nodes[id];
@@ -222,43 +267,8 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 }
             }
 
-            // Render children, bracketing any mask spans. A visible child with
-            // is_mask=true masks the siblings above it (up to the next mask or
-            // the end of the group) — exported as a <mask> def + a <g mask=...>
-            // wrapper. mask-type="alpha" matches our alpha-mask semantics.
-            const children = node.children || [];
-            let ci = 0;
-            while (ci < children.length) {
-                const childId = children[ci];
-                const child = nodes[childId];
-                const isMaskChild = !!(child && child.is_mask && child.visible);
-                let hasContentAbove = false;
-                if (isMaskChild) {
-                    for (let j = ci + 1; j < children.length; j++) {
-                        const c = nodes[children[j]];
-                        if (c && c.visible && !c.is_mask) { hasContentAbove = true; break; }
-                    }
-                }
-                if (isMaskChild && hasContentAbove) {
-                    const maskId = `mask${maskIdCounter++}`;
-                    maskDefs.push(
-                        `<mask id="${maskId}" mask-type="alpha" style="mask-type:alpha">` +
-                        `${renderNodeToSVG(childId)}</mask>`);
-                    // Gather content siblings up to the next mask.
-                    let contentSvg = '';
-                    let j = ci + 1;
-                    for (; j < children.length; j++) {
-                        const c = nodes[children[j]];
-                        if (c && c.is_mask && c.visible) break;
-                        contentSvg += renderNodeToSVG(children[j]);
-                    }
-                    nodeSvg += `<g mask="url(#${maskId})">${contentSvg}</g>`;
-                    ci = j;
-                } else {
-                    nodeSvg += renderNodeToSVG(childId);
-                    ci++;
-                }
-            }
+            // Children are a sibling list — same mask-span semantics as roots.
+            nodeSvg += renderSiblingsWithMasks(node.children || []);
         } else {
             const attrs = buildStyleAttrs(node.style);
             const geo = node.geometry;
@@ -315,9 +325,8 @@ export function buildSVGFromData(input: SVGExportInput): string {
         return nodeSvg;
     };
 
-    for (const rootId of rootNodeIds) {
-        svg += renderNodeToSVG(rootId);
-    }
+    // Root nodes are a sibling list — root-level masks bracket the same way.
+    svg += renderSiblingsWithMasks(rootNodeIds);
 
     // Append live-paint face fills after the scene tree
     if (filledFaces && filledFaces.length > 0) {
