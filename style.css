@@ -880,28 +880,63 @@ body.scrubbing * {
     flex: 0 0 62px;
     width: 62px;
 }
-/* Gradient preview swatch shown in place of the solid color input. */
+/* Gradient preview swatch shown in place of the solid color input.
+   Click to activate gradient editing (ramp + on-canvas handles). */
 .gradient-preview {
-    width: 40px;
+    flex: 1;
+    min-width: 40px;
     height: 20px;
-    flex: 0 0 40px;
     border: 1px solid var(--panel-border);
     border-radius: 3px;
-    /* checkerboard behind, so transparent stops read correctly */
+    cursor: pointer;
+    /* checkerboard behind, so transparent stops read correctly
+       (gradient layer is set inline as the first background-image) */
     background-color: #fff;
-    background-image:
-        linear-gradient(45deg, #ccc 25%, transparent 25%),
-        linear-gradient(-45deg, #ccc 25%, transparent 25%),
-        linear-gradient(45deg, transparent 75%, #ccc 75%),
-        linear-gradient(-45deg, transparent 75%, #ccc 75%);
-    background-size: 8px 8px;
-    background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+    background-size: auto, 8px 8px;
+}
+.gradient-preview:hover {
+    border-color: var(--border-light);
+}
+.gradient-preview.active {
+    outline: 1px solid var(--accent);
+    outline-offset: 1px;
 }
 .gradient-editor {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    padding: 4px 4px 6px 22px; /* indent under the type selector */
+    gap: 4px;
+    padding: 2px 4px 6px 6px;
+}
+/* ── Ramp: the draggable stop strip (Figma-style) ── */
+.gradient-ramp {
+    position: relative;
+    height: 14px;
+    margin: 8px 6px 10px;
+    border-radius: 7px;
+    box-shadow: 0 0 0 1px var(--border-light);
+    background-color: #fff;
+    background-size: auto, 8px 8px;
+    cursor: copy; /* clicking an empty spot adds a stop */
+}
+.gradient-stop-chip {
+    position: absolute;
+    top: 50%;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid #fff;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+    transform: translate(-50%, -50%);
+    cursor: grab;
+}
+.gradient-stop-chip:active {
+    cursor: grabbing;
+}
+.gradient-stop-chip.selected {
+    width: 14px;
+    height: 14px;
+    box-shadow: 0 0 0 2px var(--accent), 0 1px 3px rgba(0, 0, 0, 0.4);
+    z-index: 1;
 }
 .gradient-angle-row,
 .gradient-stop-row {
@@ -929,12 +964,9 @@ body.scrubbing * {
     font-size: 11px;
     padding: 0 4px;
 }
-.gradient-add-stop {
-    align-self: flex-start;
-    font-size: 10px;
-    height: 18px;
-    padding: 0 6px;
-    width: auto;
+.gradient-stop-row .icon-toggle:disabled {
+    opacity: 0.35;
+    cursor: default;
 }
 
 .fill-stroke-row .unit {
@@ -1381,6 +1413,56 @@ body.scrubbing * {
 
 .cb-btn-text {
     font-size: 11px;
+}
+
+/* ─── Context bar tooltips (fast, above the bar; shortcut appended) ─── */
+
+#context-bar [data-tooltip] {
+    position: relative;
+}
+
+#context-bar [data-tooltip]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1a1a1a;
+    color: #e8e8e8;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 4px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    z-index: 1000;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    letter-spacing: 0.01em;
+}
+
+#context-bar [data-tooltip][data-shortcut]::after {
+    content: attr(data-tooltip) "  " attr(data-shortcut);
+}
+
+#context-bar [data-tooltip]::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 5px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: #1a1a1a;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    z-index: 1000;
+}
+
+#context-bar [data-tooltip]:hover::after,
+#context-bar [data-tooltip]:hover::before {
+    opacity: 1;
 }
 
 /* Color Swatch */

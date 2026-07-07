@@ -842,6 +842,8 @@ export class Renderer {
             this.drawHoverOutline(canvas, dpr);
             // Draw selection overlay
             this.renderSelectionOverlay(canvas, dpr);
+            // Draw gradient editing handles (axis + stops on the shape)
+            this.drawGradientOverlay(canvas, dpr);
             // Draw direct selection edit handles
             this.drawDirectEditHandles(canvas, dpr);
             // Draw scissors / add-point hover dot
@@ -1327,6 +1329,116 @@ export class Renderer {
                 canvas.restore();
             }
         }
+
+        canvas.restore();
+    }
+
+    /**
+     * On-canvas gradient editing overlay (Figma-style): the gradient axis with
+     * a start ring, an end square, and color-filled stop dots along the line.
+     * Radial gradients additionally show the radius circle in node space.
+     * State lives in ui.gradientEdit; only drawn for the selection tool.
+     */
+    private drawGradientOverlay(canvas: Canvas, dpr: number) {
+        const im = this.inputManager;
+        if (!im || im.ui.activeTool !== 'selection' || im.editingNodeId !== null) return;
+        const ge = im.ui.gradientEdit;
+        if (!ge || !ge.isActive()) return;
+        const selection = this.scene.getSelection();
+        if (selection.length !== 1 || selection[0] !== ge.nodeId) return;
+        const grad = ge.gradient();
+        if (!grad) return;
+
+        const { p0, p1 } = ge.endpoints(grad);
+        const z = this.zoom;
+        const ck = this.ck;
+
+        canvas.save();
+        canvas.scale(dpr, dpr);
+        canvas.translate(this.pan.x, this.pan.y);
+        canvas.scale(z, z);
+
+        const halo = new ck.Paint();
+        halo.setColor(ck.Color(0, 0, 0, 0.35));
+        halo.setStyle(ck.PaintStyle.Stroke);
+        halo.setAntiAlias(true);
+
+        const white = new ck.Paint();
+        white.setColor(ck.Color(255, 255, 255, 1));
+        white.setStyle(ck.PaintStyle.Stroke);
+        white.setAntiAlias(true);
+
+        const fill = new ck.Paint();
+        fill.setStyle(ck.PaintStyle.Fill);
+        fill.setAntiAlias(true);
+
+        const accent = new ck.Paint();
+        accent.setColor(ck.Color(0, 162, 255, 1));
+        accent.setStyle(ck.PaintStyle.Stroke);
+        accent.setAntiAlias(true);
+
+        // Radius circle for radial gradients — drawn in node space so it
+        // follows the node's rotation/scale.
+        if (grad.gradient_type === 'Radial') {
+            const t = this.scene.getTransform(ge.nodeId!);
+            const r = Math.hypot(grad.end_x - grad.start_x, grad.end_y - grad.start_y);
+            if (r > 1e-6) {
+                canvas.save();
+                canvas.concat(t);
+                // Approximate screen-constant stroke width in node space
+                const sx = Math.hypot(t[0], t[3]) || 1;
+                halo.setStrokeWidth(2.5 / (z * sx));
+                white.setStrokeWidth(1 / (z * sx));
+                canvas.drawCircle(grad.start_x, grad.start_y, r, halo);
+                canvas.drawCircle(grad.start_x, grad.start_y, r, white);
+                canvas.restore();
+            }
+        }
+
+        // Axis line
+        halo.setStrokeWidth(3 / z);
+        white.setStrokeWidth(1.5 / z);
+        canvas.drawLine(p0.x, p0.y, p1.x, p1.y, halo);
+        canvas.drawLine(p0.x, p0.y, p1.x, p1.y, white);
+
+        // Stop dots: white backing disc + stop color + dark outline
+        halo.setStrokeWidth(1 / z);
+        for (let i = 0; i < grad.stops.length; i++) {
+            const s = grad.stops[i];
+            const x = p0.x + (p1.x - p0.x) * s.offset;
+            const y = p0.y + (p1.y - p0.y) * s.offset;
+            const selected = i === ge.stopIndex;
+            const r = (selected ? 5.5 : 4.5) / z;
+            fill.setColor(ck.Color4f(1, 1, 1, 1));
+            canvas.drawCircle(x, y, r, fill);
+            fill.setColor(ck.Color4f(s.color.r, s.color.g, s.color.b, s.color.a ?? 1));
+            canvas.drawCircle(x, y, r, fill);
+            canvas.drawCircle(x, y, r, halo);
+            if (selected) {
+                accent.setStrokeWidth(1.5 / z);
+                canvas.drawCircle(x, y, r + 1.5 / z, accent);
+            }
+        }
+
+        // Start handle: larger ring (radial: the center)
+        white.setStrokeWidth(2 / z);
+        halo.setStrokeWidth(3.5 / z);
+        canvas.drawCircle(p0.x, p0.y, 8 / z, halo);
+        canvas.drawCircle(p0.x, p0.y, 8 / z, white);
+
+        // End handle: square, rotated to the axis (radial: the radius handle)
+        const angleDeg = Math.atan2(p1.y - p0.y, p1.x - p0.x) * 180 / Math.PI;
+        const hs = 6 / z;
+        canvas.save();
+        canvas.rotate(angleDeg, p1.x, p1.y);
+        canvas.drawRect(ck.LTRBRect(p1.x - hs, p1.y - hs, p1.x + hs, p1.y + hs), halo);
+        canvas.drawRect(ck.LTRBRect(p1.x - hs, p1.y - hs, p1.x + hs, p1.y + hs), white);
+        canvas.restore();
+
+        halo.delete();
+        white.delete();
+        fill.delete();
+        accent.delete();
 
         canvas.restore();
     }

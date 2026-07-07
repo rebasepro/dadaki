@@ -177,7 +177,7 @@ export class ContextBar {
                 this.ui.setActiveTool('direct');
                 this.input.enterPathEditMode(info.selectedIds[0]);
             }
-        }));
+        }, false, '⏎'));
 
         this.appendTransformActions(info, { flatten: true });
         this.appendLifecycleActions();
@@ -191,11 +191,11 @@ export class ContextBar {
 
         this.el.appendChild(this.createButton('Edit Text', iconPencil(14), () => {
             this.input.editTextNode(nodeId);
-        }));
+        }, false, '⏎'));
 
         this.el.appendChild(this.createButton('Create Outlines', iconCreateOutlines(14), () => {
-            document.dispatchEvent(new CustomEvent('create-outlines', { detail: { nodeId } }));
-        }));
+            this.input.createOutlines(nodeId);
+        }, false, '⌘⇧O'));
 
         this.appendTransformActions(info, { flatten: false });
         this.appendLifecycleActions();
@@ -207,18 +207,13 @@ export class ContextBar {
 
         this.el.appendChild(this.createButton('Enter Group', iconCornerDownRight(14), () => {
             if (info.selectedIds.length === 1) {
-                const children = Array.from(this.scene.getNodeChildren(info.selectedIds[0]));
-                if (children.length > 0) {
-                    this.scene.selectNode(children[0], false);
-                    this.ui.syncWithSelection();
-                    this.ui.updateLayerList();
-                }
+                this.input.enterSelectedNode(info.selectedIds[0]);
             }
-        }));
+        }, false, '⏎'));
 
-        this.el.appendChild(this.createButton('Ungroup ⌘⇧G', iconUngroup(14), () => {
+        this.el.appendChild(this.createButton('Ungroup', iconUngroup(14), () => {
             this.input.ungroupSelection();
-        }));
+        }, false, '⌘⇧G'));
 
         this.appendTransformActions(info, { flatten: true });
         this.appendLifecycleActions();
@@ -284,14 +279,14 @@ export class ContextBar {
             && info.selectedNodes.length === 2
             && info.selectedNodes.every(n => n.node_type === 'Path');
         if (twoPaths) {
-            this.el.appendChild(this.createButton('Join ⌘J', iconLink(14), () => {
+            this.el.appendChild(this.createButton('Join', iconLink(14), () => {
                 this.input.joinSelectedPaths();
-            }));
+            }, false, '⌘J'));
         }
 
-        this.el.appendChild(this.createButton('Group ⌘G', iconGroup(14), () => {
+        this.el.appendChild(this.createButton('Group', iconGroup(14), () => {
             this.input.groupSelection();
-        }));
+        }, false, '⌘G'));
 
         this.appendTransformActions(info, { flatten: false });
         this.appendLifecycleActions();
@@ -310,12 +305,12 @@ export class ContextBar {
 
         this.el.appendChild(this.createButton('Finish', '✓', () => {
             this.input.finalizePenPath();
-        }));
+        }, false, '⏎'));
 
         this.el.appendChild(this.createButton('Cancel', '✕', () => {
             this.input.currentPathPoints = [];
             this.refresh();
-        }, true));
+        }, true, '⎋'));
     }
 
     /** Node-editing mode: point counts + point actions + exit. */
@@ -328,17 +323,17 @@ export class ContextBar {
         this.el.appendChild(this.createSeparator());
 
         // Add Point (toggles; highlighted while armed)
-        const addBtn = this.createIconButton('Add Point (+)', iconPlusCircle(14), () => {
+        const addBtn = this.createIconButton('Add Point', iconPlusCircle(14), () => {
             this.input.addPointMode = !this.input.addPointMode;
             this.refresh();
-        });
+        }, '+');
         if (this.input.addPointMode) addBtn.classList.add('cb-btn-active');
         this.el.appendChild(addBtn);
 
         // Delete Point (needs a selection)
-        const delBtn = this.createIconButton('Delete Point (⌫)', iconMinusCircle(14), () => {
+        const delBtn = this.createIconButton('Delete Point', iconMinusCircle(14), () => {
             this.input.deleteSelectedPoints();
-        });
+        }, '⌫');
         if (info.selectedPointCount === 0) delBtn.setAttribute('disabled', '');
         this.el.appendChild(delBtn);
 
@@ -352,9 +347,9 @@ export class ContextBar {
 
         // Merge selected points into one (endpoints weld/close, adjacent collapse)
         if (info.selectedPointCount >= 2) {
-            this.el.appendChild(this.createButton('Merge ⌘J', iconLink(14), () => {
+            this.el.appendChild(this.createButton('Merge', iconLink(14), () => {
                 this.input.mergeSelectedPoints();
-            }));
+            }, false, '⌘J'));
         }
 
         this.el.appendChild(this.createSeparator());
@@ -372,7 +367,7 @@ export class ContextBar {
         this.el.appendChild(this.createButton('Done', '✓', () => {
             this.input.exitEditMode();
             this.ui.setActiveTool('selection');
-        }));
+        }, false, '⏎'));
     }
 
     // ─── Shared segments (keep every selection state on the same grammar) ──
@@ -386,27 +381,19 @@ export class ContextBar {
     }
 
     /** Flip H / Flip V (+ optional Flatten), preceded by a separator. */
-    private appendTransformActions(info: ContextInfo, opts: { flatten: boolean }) {
+    private appendTransformActions(_info: ContextInfo, opts: { flatten: boolean }) {
         this.el.appendChild(this.createSeparator());
 
         this.el.appendChild(this.createIconButton('Flip Horizontal', iconFlipH(), () => {
-            for (const nid of info.selectedIds) {
-                this.scene.flipNodeH(nid);
-            }
-            this.scene.invalidateCache();
-            this.ui.syncWithSelection();
-        }));
+            this.input.flipSelection('h');
+        }, '⇧H'));
         this.el.appendChild(this.createIconButton('Flip Vertical', iconFlipV(), () => {
-            for (const nid of info.selectedIds) {
-                this.scene.flipNodeV(nid);
-            }
-            this.scene.invalidateCache();
-            this.ui.syncWithSelection();
-        }));
+            this.input.flipSelection('v');
+        }, '⇧V'));
         if (opts.flatten) {
             this.el.appendChild(this.createIconButton('Flatten', iconFlatten(), () => {
                 this.input.flattenSelection();
-            }));
+            }, '⌘E'));
         }
     }
 
@@ -416,11 +403,11 @@ export class ContextBar {
 
         this.el.appendChild(this.createButton('Duplicate', iconCopy(14), () => {
             this.input.duplicateSelection();
-        }));
+        }, false, '⌘D'));
 
         this.el.appendChild(this.createButton('Delete', iconTrash(14), () => {
             this.input.deleteSelection();
-        }, true));
+        }, true, '⌫'));
     }
 
     // ─── DOM Helpers ────────────────────────────────────────────────
@@ -432,7 +419,7 @@ export class ContextBar {
     ): HTMLElement {
         const wrapper = document.createElement('div');
         wrapper.className = 'cb-swatch-wrapper';
-        wrapper.title = label;
+        wrapper.setAttribute('data-tooltip', `Default ${label}`);
 
         const swatch = document.createElement('input');
         swatch.type = 'color';
@@ -471,11 +458,13 @@ export class ContextBar {
         return hint;
     }
 
-    /** Compact icon-only button (align/boolean/flip rows). */
-    private createIconButton(title: string, icon: string, onClick: () => void): HTMLElement {
+    /** Compact icon-only button (align/boolean/flip rows). The label lives in
+     *  the tooltip, with the shortcut appended when the action has one. */
+    private createIconButton(title: string, icon: string, onClick: () => void, shortcut?: string): HTMLElement {
         const btn = document.createElement('button');
         btn.className = 'cb-btn cb-btn-icon-only';
-        btn.title = title;
+        btn.setAttribute('data-tooltip', title);
+        if (shortcut) btn.setAttribute('data-shortcut', shortcut);
         btn.innerHTML = icon;
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -484,15 +473,21 @@ export class ContextBar {
         return btn;
     }
 
+    /** Labeled button. Shortcuts never appear in the label — only in the
+     *  tooltip, so a tooltip is added exactly when the action has a shortcut. */
     private createButton(
         title: string,
         icon: string,
         onClick: () => void,
         danger = false,
+        shortcut?: string,
     ): HTMLElement {
         const btn = document.createElement('button');
         btn.className = `cb-btn${danger ? ' cb-btn-danger' : ''}`;
-        btn.title = title;
+        if (shortcut) {
+            btn.setAttribute('data-tooltip', title);
+            btn.setAttribute('data-shortcut', shortcut);
+        }
         btn.innerHTML = `<span class="cb-btn-icon">${icon}</span><span class="cb-btn-text">${title}</span>`;
         btn.addEventListener('click', (e) => {
             e.stopPropagation();

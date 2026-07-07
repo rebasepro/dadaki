@@ -133,6 +133,10 @@ export class InputManager {
     // --- Corner radius handle state ---
     cornerRadiusDragging: { nodeId: number; startRadius: number; startPos: { x: number; y: number } } | null = null;
 
+    // --- Gradient handle state ---
+    /** True while dragging an on-canvas gradient handle (ui.gradientEdit owns the details). */
+    gradientDragActive: boolean = false;
+
     // --- Rotate handle state ---
     /** Which corner the rotation drag grabbed ('nw'|'ne'|'se'|'sw'), or null when not rotating. */
     rotateHandleType: string | null = null;
@@ -472,17 +476,23 @@ export class InputManager {
             return;
         }
 
-        // Tool shortcuts
+        // Tool shortcuts — plain letters only; ⇧letter is reserved for actions (flip etc.)
         if (!e.metaKey && !e.ctrlKey) {
-            if (e.key === 'v' || e.key === 'V') this.ui.setActiveTool('selection');
-            if (e.key === 'a' || e.key === 'A') this.ui.setActiveTool('direct');
-            if (e.key === 'p' || e.key === 'P') this.ui.setActiveTool('pen');
-            if (e.key === 'r' || e.key === 'R') this.ui.setActiveTool('rect');
-            if (e.key === 'o' || e.key === 'O') this.ui.setActiveTool('ellipse');
+            if (!e.shiftKey) {
+                if (e.key === 'v' || e.key === 'V') this.ui.setActiveTool('selection');
+                if (e.key === 'a' || e.key === 'A') this.ui.setActiveTool('direct');
+                if (e.key === 'p' || e.key === 'P') this.ui.setActiveTool('pen');
+                if (e.key === 'r' || e.key === 'R') this.ui.setActiveTool('rect');
+                if (e.key === 'o' || e.key === 'O') this.ui.setActiveTool('ellipse');
 
-            if (e.key === 'b' || e.key === 'B') this.ui.setActiveTool('paint-bucket');
-            if (e.key === 'c' || e.key === 'C') this.ui.setActiveTool('scissors');
-            if (e.key === 't' || e.key === 'T') this.ui.setActiveTool('text');
+                if (e.key === 'b' || e.key === 'B') this.ui.setActiveTool('paint-bucket');
+                if (e.key === 'c' || e.key === 'C') this.ui.setActiveTool('scissors');
+                if (e.key === 't' || e.key === 'T') this.ui.setActiveTool('text');
+            }
+
+            // Shift+H / Shift+V: flip selection in place
+            if (e.shiftKey && (e.key === 'H' || e.key === 'h')) this.flipSelection('h');
+            if (e.shiftKey && (e.key === 'V' || e.key === 'v')) this.flipSelection('v');
 
             // View shortcuts (Figma-style)
             if (e.key === '!' || (e.shiftKey && e.key === '1')) {
@@ -513,10 +523,15 @@ export class InputManager {
             }
         }
 
-        // Delete — in path editing mode, delete the selected anchor point(s)
+        // Delete — in path editing mode, delete the selected anchor point(s);
+        // with a gradient stop focused, delete the stop instead of the node.
         if (e.key === 'Backspace' || e.key === 'Delete') {
             if (this.editingNodeId !== null && this.selectedPoints.size > 0) {
                 this.deleteSelectedPoints();
+            } else if (this.ui.gradientEdit.isActive() && this.ui.gradientEdit.stopFocused) {
+                if (this.ui.gradientEdit.deleteStop(this.ui.gradientEdit.stopIndex)) {
+                    this.ui.syncWithSelection();
+                }
             } else {
                 this.deleteSelection();
             }
@@ -576,8 +591,17 @@ export class InputManager {
             }
         }
 
+        // Create Outlines: Cmd+Shift+O / Ctrl+Shift+O (selected text nodes → paths)
+        if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'o' || e.key === 'O')) {
+            e.preventDefault();
+            for (const id of this.scene.engine!.get_selection()) {
+                const node = this.scene.getNode(id);
+                if (node?.node_type === 'Text') this.createOutlines(id);
+            }
+        }
+
         // Open: Cmd+O / Ctrl+O
-        if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'o' && !e.shiftKey) {
             e.preventDefault();
             if (this.scene.engine) {
                 FileIO.openFile(this.scene.engine, (svgText) => this.ui.parseSVG(svgText)).then((loaded) => {
@@ -596,10 +620,21 @@ export class InputManager {
             this.ui.exportSVG();
         }
 
-        // Escape: cancel in-flight drag → exit path edit → exit group → deselect
+        // Escape: cancel in-flight drag → unfocus gradient stop → exit path edit → exit group → deselect
         if (e.key === 'Escape') {
+            if (this.isMouseDown && this.gradientDragActive) {
+                this.gradientDragActive = false;
+                this.isMouseDown = false; // swallow the drag; onMouseUp early-returns
+                this.ui.gradientEdit.cancelDrag();
+                this.ui.syncWithSelection();
+                return;
+            }
             if (this.isMouseDown && (this.moveSnapshot || this.resizeSnapshot || this.previewRect || this.marqueeRect)) {
                 this.cancelActiveDrag();
+                return;
+            }
+            if (this.ui.gradientEdit.stopFocused) {
+                this.ui.gradientEdit.stopFocused = false;
                 return;
             }
             if (this.editingNodeId !== null) {
@@ -635,9 +670,21 @@ export class InputManager {
             }
         }
 
-        // Enter: finalize pen path
-        if (e.key === 'Enter' && this.currentPathPoints.length > 0) {
-            this.finalizePenPath();
+        // Enter: finalize pen path → finish path editing → enter group / edit selected object
+        if (e.key === 'Enter') {
+            if (this.currentPathPoints.length > 0) {
+                this.finalizePenPath();
+            } else if (this.editingNodeId !== null) {
+                e.preventDefault();
+                this.exitEditMode();
+                this.ui.setActiveTool('selection');
+            } else {
+                const selection = this.scene.engine!.get_selection();
+                if (selection.length === 1) {
+                    e.preventDefault();
+                    this.enterSelectedNode(selection[0]);
+                }
+            }
         }
 
         // Z-ordering: ]/[ = step forward/backward, Cmd+]/Cmd+[ = front/back
@@ -915,6 +962,22 @@ export class InputManager {
         }
 
         if (this.ui.activeTool === 'selection') {
+            // Gradient handles take priority over resize/rotate while a
+            // gradient fill is being edited (skip in node-editing mode)
+            if (this.editingNodeId === null && this.ui.gradientEdit.isActive()) {
+                const gHit = this.ui.gradientEdit.hitTest(this.startPos, this.renderer.zoom);
+                if (gHit) {
+                    if (gHit.type === 'insert') {
+                        this.ui.gradientEdit.beginInsertDrag(gHit.t, this.startPos);
+                    } else {
+                        this.ui.gradientEdit.beginDrag(gHit, this.startPos);
+                    }
+                    this.gradientDragActive = true;
+                    this.ui.syncWithSelection({ interactive: true });
+                    return;
+                }
+            }
+
             // Check resize handles first (skip in node-editing mode)
             const frame = this.editingNodeId === null ? this.getSelectionFrame() : null;
             const handle = frame ? this.checkResizeHandle(this.startPos, frame) : null;
@@ -1272,6 +1335,44 @@ export class InputManager {
             dx: ( e * wdx - b * wdy) / det,
             dy: (-d * wdx + a * wdy) / det,
         };
+    }
+
+    /** Flip every selected node in place (⇧H / ⇧V and the context bar flip buttons). */
+    flipSelection(axis: 'h' | 'v') {
+        const selection = this.scene.engine!.get_selection();
+        if (selection.length === 0) return;
+        for (const id of selection) {
+            if (axis === 'h') this.scene.flipNodeH(id);
+            else this.scene.flipNodeV(id);
+        }
+        this.scene.invalidateCache();
+        this.ui.syncWithSelection();
+    }
+
+    /** Enter (⏎): drill into a group, or open the type-appropriate edit mode. */
+    enterSelectedNode(id: number) {
+        const node = this.scene.getNode(id);
+        if (!node) return;
+        switch (node.node_type) {
+            case 'Group': {
+                const children = Array.from(this.scene.getNodeChildren(id));
+                if (children.length > 0) {
+                    this.scene.selectNode(children[0], false);
+                    this.ui.syncWithSelection();
+                    this.ui.updateLayerList();
+                }
+                break;
+            }
+            case 'Text':
+                this.editTextNode(id);
+                break;
+            case 'Rect':
+            case 'Ellipse':
+            case 'Path':
+                this.ui.setActiveTool('direct');
+                this.enterPathEditMode(id);
+                break;
+        }
     }
 
     duplicateSelection() {
@@ -1875,10 +1976,17 @@ export class InputManager {
 
         // Hover cursor for resize handles (when not dragging, skip in node-editing mode)
         if (!this.isMouseDown && this.ui.activeTool === 'selection') {
-            const frame = this.editingNodeId === null ? this.getSelectionFrame() : null;
+            const gHit = this.editingNodeId === null && this.ui.gradientEdit.isActive()
+                ? this.ui.gradientEdit.hitTest(this.currentPos, this.renderer.zoom)
+                : null;
+            const frame = this.editingNodeId === null && !gHit ? this.getSelectionFrame() : null;
             const handle = frame ? this.checkResizeHandle(this.currentPos, frame) : null;
             const rotHandle = !handle && frame ? this.checkRotateHandle(this.currentPos, frame) : null;
-            if (handle && frame) {
+            if (gHit) {
+                this.hoverNodeId = null;
+                // 'copy' hints that clicking the axis inserts a new stop
+                this.canvas.style.cursor = gHit.type === 'insert' ? 'copy' : 'default';
+            } else if (handle && frame) {
                 this.hoverNodeId = null;
                 this.canvas.style.cursor = this.resizeCursorFor(handle.type, frame);
             } else if (rotHandle && frame) {
@@ -1932,6 +2040,13 @@ export class InputManager {
         }
 
         if (!this.isMouseDown) return;
+
+        // On-canvas gradient handle drag (endpoints / stops / freshly inserted stop)
+        if (this.gradientDragActive) {
+            this.ui.gradientEdit.moveDrag(this.currentPos, e.shiftKey);
+            return;
+        }
+
         const dx = this.currentPos.x - lastPos.x;
         const dy = this.currentPos.y - lastPos.y;
 
@@ -2465,6 +2580,14 @@ export class InputManager {
         if (this.panDrag) {
             this.panDrag = null;
             this.canvas.style.cursor = this.isSpacePan ? 'grab' : 'default';
+            return;
+        }
+
+        // Commit gradient handle drag
+        if (this.gradientDragActive) {
+            this.gradientDragActive = false;
+            this.ui.gradientEdit.endDrag();
+            this.ui.syncWithSelection();
             return;
         }
 

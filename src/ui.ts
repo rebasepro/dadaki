@@ -13,11 +13,14 @@ import type { ContextBar } from './context_bar';
 import type { BreadcrumbBar } from './breadcrumb';
 import type { Toolbar } from './toolbar';
 import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock, iconUnlock, iconFlipH, iconFlipV, iconFlatten, iconRotateCW, iconRotateCCW } from './icons';
+import { GradientEditController, sampleGradientColor } from './gradient_edit';
 
 export class UIEngine {
     ck: CanvasKit;
     scene: WasmScene;
     activeTool: string = 'selection';
+    /** Shared gradient-editing state (panel ramp + on-canvas handles). */
+    gradientEdit: GradientEditController;
     contextBar: ContextBar | null = null;
     breadcrumbBar: BreadcrumbBar | null = null;
     toolbar: Toolbar | null = null;
@@ -96,6 +99,7 @@ export class UIEngine {
     constructor(ck: CanvasKit, scene: WasmScene) {
         this.ck = ck;
         this.scene = scene;
+        this.gradientEdit = new GradientEditController(scene);
 
         // Initialize DOM refs — basic
         this.layerList = document.getElementById('layer-list') as HTMLElement;
@@ -800,6 +804,8 @@ export class UIEngine {
     syncWithSelection(opts: { interactive?: boolean } = {}) {
         const interactive = opts.interactive === true;
         this.scene.renderer?.requestRender();
+        // Keep gradient-editing state consistent with the selection
+        this.gradientEdit.syncSelection();
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) {
             this.clearPropertyPanel();
@@ -1009,18 +1015,20 @@ export class UIEngine {
         return { minX: 0, minY: 0, maxX: 100, maxY: 100 };
     }
 
-        /** Set a linear gradient's endpoints so it spans the node's bbox at `angleDeg`. */
-        private setLinearAngle(grad: Gradient, node: SceneNode, angleDeg: number): void {
-        const e = this.nodeLocalExtent(node);
-        const cx = (e.minX + e.maxX) / 2, cy = (e.minY + e.maxY) / 2;
-        const a = angleDeg * Math.PI / 180, dx = Math.cos(a), dy = Math.sin(a);
-        let min = Infinity, max = -Infinity;
-        for (const [px, py] of [[e.minX, e.minY], [e.maxX, e.minY], [e.minX, e.maxY], [e.maxX, e.maxY]]) {
-            const t = (px - cx) * dx + (py - cy) * dy;
-            min = Math.min(min, t); max = Math.max(max, t);
-        }
-        grad.start_x = cx + dx * min; grad.start_y = cy + dy * min;
-        grad.end_x = cx + dx * max; grad.end_y = cy + dy * max;
+        /** Rotate a gradient's axis to `angleDeg` around its midpoint,
+         *  preserving the axis length (so custom endpoints keep their span). */
+        private static rotateGradientTo(grad: Gradient, angleDeg: number): void {
+        const cx = (grad.start_x + grad.end_x) / 2, cy = (grad.start_y + grad.end_y) / 2;
+        const half = Math.hypot(grad.end_x - grad.start_x, grad.end_y - grad.start_y) / 2;
+        const a = angleDeg * Math.PI / 180;
+        const dx = Math.cos(a) * half, dy = Math.sin(a) * half;
+        grad.start_x = cx - dx; grad.start_y = cy - dy;
+        grad.end_x = cx + dx; grad.end_y = cy + dy;
+    }
+
+        /** Current angle (deg) of a gradient's axis in node-local space. */
+        private static gradientAngle(grad: Gradient): number {
+        return Math.atan2(grad.end_y - grad.start_y, grad.end_x - grad.start_x) * 180 / Math.PI;
     }
 
         /** Build a default 2-stop gradient (seed color → transparent) spanning the node. */
@@ -1049,6 +1057,8 @@ export class UIEngine {
         if (!this.fillsList) return;
         this.fillsList.innerHTML = '';
         const fills = this.getFills(node);
+        const selId: number | undefined = this.scene.getSelection()[0];
+        const ge = this.gradientEdit;
 
         // Commit a mutated copy of the fills array to the engine.
         const commit = (mutate: (f: Paint[]) => void, live = false) => {
@@ -1071,15 +1081,32 @@ export class UIEngine {
             typeSel.value = isGradient(fill) ? (fill.gradient_type === 'Radial' ? 'radial' : 'linear') : 'solid';
             typeSel.addEventListener('change', () => {
                 const seed: Color = isGradient(fill) ? (fill.stops[0]?.color ?? { r: 0.5, g: 0.5, b: 0.5, a: 1 }) : fill as Color;
+                // Switching to a gradient type puts this fill into gradient-edit
+                // mode (canvas handles + panel ramp). syncSelection validates
+                // this after the commit lands.
+                if (typeSel.value !== 'solid' && selId !== undefined) ge.activate(selId, index);
                 commit(f => {
                     if (typeSel.value === 'solid') {
                         f[index] = { ...seed };
                     } else {
-                        const t = typeSel.value === 'radial' ? 'Radial' : 'Linear';
-                        // Preserve existing stops when switching between gradient types.
-                        if (isGradient(fill) && fill.stops.length >= 2) {
-                            const g = this.makeDefaultGradient(t, node, seed);
-                            g.stops = fill.stops.map(s => ({ offset: s.offset, color: { ...s.color } }));
+                        const t: 'Linear' | 'Radial' = typeSel.value === 'radial' ? 'Radial' : 'Linear';
+                        // Preserve stops AND axis placement when switching between gradient types.
+                        if (isGradient(fill)) {
+                            const g: Gradient = {
+                                gradient_type: t,
+                                stops: fill.stops.map(s => ({ offset: s.offset, color: { ...s.color } })),
+                                start_x: fill.start_x, start_y: fill.start_y,
+                                end_x: fill.end_x, end_y: fill.end_y,
+                            };
+                            if (t === 'Radial' && fill.gradient_type === 'Linear') {
+                                // Radial center = the linear axis midpoint
+                                g.start_x = (fill.start_x + fill.end_x) / 2;
+                                g.start_y = (fill.start_y + fill.end_y) / 2;
+                            } else if (t === 'Linear' && fill.gradient_type === 'Radial') {
+                                // Linear axis spans the radial diameter
+                                g.start_x = 2 * fill.start_x - fill.end_x;
+                                g.start_y = 2 * fill.start_y - fill.end_y;
+                            }
                             f[index] = g;
                         } else {
                             f[index] = this.makeDefaultGradient(t, node, seed);
@@ -1114,10 +1141,19 @@ export class UIEngine {
                 row.appendChild(colorInput);
                 row.appendChild(hexInput);
             } else {
-                // ── Gradient: a preview bar ──
+                // ── Gradient: clickable preview swatch (activates editing) ──
+                const isActiveGrad = ge.isActive() && ge.nodeId === selId && ge.fillIndex === index;
                 const preview = document.createElement('div');
                 preview.className = 'gradient-preview';
-                preview.style.background = this.gradientPreviewCss(fill);
+                preview.classList.toggle('active', isActiveGrad);
+                preview.title = 'Edit gradient';
+                preview.style.backgroundImage = `${this.gradientPreviewCss(fill)}, ${UIEngine.CHECKER_CSS}`;
+                preview.style.backgroundSize = 'auto, 8px 8px';
+                preview.addEventListener('click', () => {
+                    if (selId === undefined) return;
+                    ge.activate(selId, index);
+                    this.syncWithSelection({ interactive: true });
+                });
                 row.appendChild(preview);
             }
 
@@ -1134,112 +1170,248 @@ export class UIEngine {
 
             item.appendChild(row);
 
-            // ── Gradient stop editor ──
-            if (isGradient(fill)) {
-                const editor = document.createElement('div');
-                editor.className = 'gradient-editor';
-
-                if (fill.gradient_type === 'Linear') {
-                    const angleRow = document.createElement('div');
-                    angleRow.className = 'gradient-angle-row';
-                    const label = document.createElement('span');
-                    label.textContent = 'Angle';
-                    label.className = 'gradient-sub-label';
-                    const angleInput = document.createElement('input');
-                    angleInput.type = 'number';
-                    angleInput.className = 'prop-input';
-                    angleInput.style.cssText = 'width:56px;flex:0 0 56px';
-                    const curAngle = Math.round(Math.atan2(fill.end_y - fill.start_y, fill.end_x - fill.start_x) * 180 / Math.PI);
-                    angleInput.value = String(curAngle);
-                    angleInput.addEventListener('change', () => {
-                        commit(f => { this.setLinearAngle(f[index] as Gradient, node, parseFloat(angleInput.value) || 0); });
-                    });
-                    angleRow.appendChild(label);
-                    angleRow.appendChild(angleInput);
-                    const deg = document.createElement('span'); deg.textContent = '°'; deg.className = 'gradient-sub-label';
-                    angleRow.appendChild(deg);
-                    editor.appendChild(angleRow);
-                }
-
-                const sorted = fill.stops.map((s, i) => ({ s, i })).sort((a, b) => a.s.offset - b.s.offset);
-                for (const { s, i } of sorted) {
-                    const stopRow = document.createElement('div');
-                    stopRow.className = 'gradient-stop-row';
-
-                    const sw = document.createElement('input');
-                    sw.type = 'color';
-                    sw.className = 'color-input';
-                    sw.value = this.rgbToHex(s.color);
-                    sw.addEventListener('input', () => {
-                        const c = this.hexToRgb(sw.value);
-                        commit(f => { const st = (f[index] as Gradient).stops[i]; st.color = { ...c, a: st.color.a }; }, true);
-                    });
-                    // Refresh the preview swatch when the drag ends.
-                    // Live drags skip re-render; on drag-end refresh via sync
-                    // (re-fetches the fresh node so the preview swatch updates).
-                    sw.addEventListener('change', () => this.syncWithSelection());
-
-                    const offset = document.createElement('input');
-                    offset.type = 'number'; offset.min = '0'; offset.max = '100';
-                    offset.className = 'prop-input';
-                    offset.style.cssText = 'width:48px;flex:0 0 48px';
-                    offset.value = String(Math.round(s.offset * 100));
-                    offset.title = 'Position %';
-                    offset.addEventListener('change', () => {
-                        const v = Math.max(0, Math.min(100, parseFloat(offset.value) || 0)) / 100;
-                        commit(f => { (f[index] as Gradient).stops[i].offset = v; });
-                    });
-
-                    const alpha = document.createElement('input');
-                    alpha.type = 'number'; alpha.min = '0'; alpha.max = '100';
-                    alpha.className = 'prop-input';
-                    alpha.style.cssText = 'width:48px;flex:0 0 48px';
-                    alpha.value = String(Math.round((s.color.a ?? 1) * 100));
-                    alpha.title = 'Opacity %';
-                    alpha.addEventListener('change', () => {
-                        const a = Math.max(0, Math.min(100, parseFloat(alpha.value) || 0)) / 100;
-                        commit(f => { (f[index] as Gradient).stops[i].color.a = a; });
-                    });
-
-                    const delStop = document.createElement('button');
-                    delStop.className = 'icon-toggle';
-                    delStop.innerHTML = '×';
-                    delStop.title = 'Remove Stop';
-                    delStop.onclick = () => {
-                        if ((fill as Gradient).stops.length <= 2) return; // keep at least two
-                        commit(f => { (f[index] as Gradient).stops.splice(i, 1); });
-                    };
-
-                    stopRow.appendChild(sw);
-                    stopRow.appendChild(offset);
-                    stopRow.appendChild(alpha);
-                    const sp2 = document.createElement('div'); sp2.style.flex = '1'; stopRow.appendChild(sp2);
-                    stopRow.appendChild(delStop);
-                    editor.appendChild(stopRow);
-                }
-
-                const addStop = document.createElement('button');
-                addStop.className = 'add-property-btn gradient-add-stop';
-                addStop.textContent = '+ Stop';
-                addStop.onclick = () => {
-                    commit(f => {
-                        const g = f[index] as Gradient;
-                        const s = [...g.stops].sort((a, b) => a.offset - b.offset);
-                        // Insert a stop at the midpoint of the largest gap.
-                        let gapStart = 0, gapEnd = 1, best = -1;
-                        for (let k = 0; k < s.length - 1; k++) { const d = s[k + 1].offset - s[k].offset; if (d > best) { best = d; gapStart = s[k].offset; gapEnd = s[k + 1].offset; } }
-                        const mid = (gapStart + gapEnd) / 2;
-                        const c0 = s[0].color;
-                        g.stops.push({ offset: mid, color: { r: c0.r, g: c0.g, b: c0.b, a: c0.a ?? 1 } });
-                    });
-                };
-                editor.appendChild(addStop);
-
-                item.appendChild(editor);
+            // ── Gradient editor (ramp + selected stop + actions) — only for
+            //    the fill currently in gradient-edit mode ──
+            if (isGradient(fill) && ge.isActive() && ge.nodeId === selId && ge.fillIndex === index) {
+                item.appendChild(this.buildGradientEditor(fill, index, commit));
             }
 
             this.fillsList.appendChild(item);
         });
+    }
+
+    /** Checkerboard layer used behind transparent gradient previews. */
+    private static readonly CHECKER_CSS = 'repeating-conic-gradient(#c8c8c8 0% 25%, #ffffff 0% 50%)';
+
+    /**
+     * Figma-style gradient editor: a ramp with draggable stop chips (click to
+     * add, drag away to remove), a detail row for the selected stop, and an
+     * angle/reverse/rotate action row.
+     */
+    private buildGradientEditor(
+        fill: Gradient,
+        index: number,
+        commit: (mutate: (f: Paint[]) => void, live?: boolean) => void,
+    ): HTMLElement {
+        const ge = this.gradientEdit;
+        const editor = document.createElement('div');
+        editor.className = 'gradient-editor';
+
+        const cloneStops = (stops: GradientStop[]) => stops.map(s => ({ offset: s.offset, color: { ...s.color } }));
+        const rgbCss = (c: Color) => `rgb(${Math.round(c.r * 255)},${Math.round(c.g * 255)},${Math.round(c.b * 255)})`;
+
+        // ── Ramp with draggable stop chips ──
+        const ramp = document.createElement('div');
+        ramp.className = 'gradient-ramp';
+        const setRampBg = (g: Gradient) => {
+            const stops = [...g.stops].sort((a, b) => a.offset - b.offset)
+                .map(s => `rgba(${Math.round(s.color.r * 255)},${Math.round(s.color.g * 255)},${Math.round(s.color.b * 255)},${s.color.a ?? 1}) ${(s.offset * 100).toFixed(1)}%`)
+                .join(', ');
+            ramp.style.backgroundImage = `linear-gradient(90deg, ${stops}), ${UIEngine.CHECKER_CSS}`;
+        };
+        setRampBg(fill);
+
+        const chips: HTMLElement[] = [];
+
+        /** Drag stop `si` of `orig` along the ramp. Live-writes without
+         *  history (one gesture = one undo step); dragging vertically away
+         *  removes the stop, Figma-style. `applyNow` places the stop under
+         *  the cursor immediately (used for freshly inserted stops). */
+        const dragStop = (downEv: MouseEvent, si: number, orig: GradientStop[], applyNow: boolean) => {
+            const rampRect = ramp.getBoundingClientRect();
+            let gestureStarted = false;
+            let removed = false;
+            const apply = (ev: MouseEvent) => {
+                if (!gestureStarted) { this.scene.beginGesture(); gestureStarted = true; }
+                let t = Math.max(0, Math.min(1, (ev.clientX - rampRect.left) / rampRect.width));
+                if (ev.shiftKey) t = Math.round(t * 10) / 10; // 10% snap
+                removed = orig.length > 2 && Math.abs(ev.clientY - (rampRect.top + rampRect.height / 2)) > 40;
+                const stops = cloneStops(orig);
+                if (removed) stops.splice(si, 1); else stops[si].offset = t;
+                ge.setStopsLive(stops);
+                setRampBg({ ...fill, stops });
+                const chip = chips[si];
+                if (chip) {
+                    chip.style.display = removed ? 'none' : '';
+                    if (!removed) chip.style.left = `${t * 100}%`;
+                }
+            };
+            if (applyNow) apply(downEv);
+            const onMove = (ev: MouseEvent) => {
+                // Ignore sub-pixel jitter on a plain click so the offset
+                // doesn't drift from where the stop already sits.
+                if (!gestureStarted && Math.hypot(ev.clientX - downEv.clientX, ev.clientY - downEv.clientY) < 2) return;
+                apply(ev);
+            };
+            const onUp = () => {
+                window.removeEventListener('mousemove', onMove);
+                if (gestureStarted) this.scene.endGesture();
+                if (removed) { ge.stopFocused = false; ge.stopIndex = 0; }
+                this.syncWithSelection();
+            };
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp, { once: true });
+        };
+
+        const makeChip = (i: number, s: GradientStop) => {
+            const chip = document.createElement('div');
+            chip.className = 'gradient-stop-chip';
+            chip.style.left = `${s.offset * 100}%`;
+            chip.style.background = rgbCss(s.color);
+            chip.classList.toggle('selected', i === ge.stopIndex);
+            chip.addEventListener('mousedown', (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                ge.stopIndex = i;
+                ge.stopFocused = true;
+                chips.forEach((c, ci) => c.classList.toggle('selected', ci === i));
+                this.scene.renderer?.requestRender(); // canvas highlights the stop
+                dragStop(ev, i, cloneStops(fill.stops), false);
+            });
+            chips[i] = chip;
+            ramp.appendChild(chip);
+        };
+        fill.stops.forEach((s, i) => makeChip(i, s));
+
+        // Click an empty spot on the ramp → insert a stop there and drag it
+        ramp.addEventListener('mousedown', (ev) => {
+            if (ev.target !== ramp) return;
+            ev.preventDefault();
+            const rampRect = ramp.getBoundingClientRect();
+            const t = Math.max(0, Math.min(1, (ev.clientX - rampRect.left) / rampRect.width));
+            const orig = cloneStops(fill.stops);
+            orig.push({ offset: t, color: sampleGradientColor(fill, t) });
+            const si = orig.length - 1;
+            ge.stopIndex = si;
+            ge.stopFocused = true;
+            makeChip(si, orig[si]);
+            chips.forEach((c, ci) => c.classList.toggle('selected', ci === si));
+            dragStop(ev, si, orig, true);
+        });
+        editor.appendChild(ramp);
+
+        // ── Selected stop detail row ──
+        const si = Math.max(0, Math.min(ge.stopIndex, fill.stops.length - 1));
+        const stop = fill.stops[si];
+        const stopRow = document.createElement('div');
+        stopRow.className = 'gradient-stop-row';
+
+        const sw = document.createElement('input');
+        sw.type = 'color';
+        sw.className = 'color-input';
+        sw.value = this.rgbToHex(stop.color);
+        const hexInput = document.createElement('input');
+        hexInput.type = 'text';
+        hexInput.className = 'prop-input';
+        hexInput.style.cssText = 'width:56px;flex:0 0 56px';
+        hexInput.value = this.rgbToHex(stop.color).toUpperCase();
+        sw.addEventListener('input', () => {
+            const c = this.hexToRgb(sw.value);
+            hexInput.value = sw.value.toUpperCase();
+            commit(f => { const st = (f[index] as Gradient).stops[si]; st.color = { ...c, a: st.color.a }; }, true);
+        });
+        // Live drags skip re-render; refresh previews when the picker closes.
+        sw.addEventListener('change', () => this.syncWithSelection());
+        hexInput.addEventListener('change', () => {
+            const val = hexInput.value.startsWith('#') ? hexInput.value : '#' + hexInput.value;
+            if (/^#[0-9A-F]{6}$/i.test(val)) {
+                sw.value = val;
+                const c = this.hexToRgb(val);
+                commit(f => { const st = (f[index] as Gradient).stops[si]; st.color = { ...c, a: st.color.a }; });
+            }
+        });
+
+        const pos = document.createElement('input');
+        pos.type = 'number'; pos.min = '0'; pos.max = '100';
+        pos.className = 'prop-input';
+        pos.style.cssText = 'width:44px;flex:0 0 44px';
+        pos.value = String(Math.round(stop.offset * 100));
+        pos.title = 'Stop position %';
+        pos.addEventListener('change', () => {
+            const v = Math.max(0, Math.min(100, parseFloat(pos.value) || 0)) / 100;
+            commit(f => { (f[index] as Gradient).stops[si].offset = v; });
+        });
+
+        const alpha = document.createElement('input');
+        alpha.type = 'number'; alpha.min = '0'; alpha.max = '100';
+        alpha.className = 'prop-input';
+        alpha.style.cssText = 'width:44px;flex:0 0 44px';
+        alpha.value = String(Math.round((stop.color.a ?? 1) * 100));
+        alpha.title = 'Stop opacity %';
+        alpha.addEventListener('change', () => {
+            const a = Math.max(0, Math.min(100, parseFloat(alpha.value) || 0)) / 100;
+            commit(f => { (f[index] as Gradient).stops[si].color.a = a; });
+        });
+
+        const delStop = document.createElement('button');
+        delStop.className = 'icon-toggle';
+        delStop.innerHTML = '×';
+        delStop.title = 'Remove stop';
+        delStop.disabled = fill.stops.length <= 2;
+        delStop.onclick = () => {
+            if (fill.stops.length <= 2) return; // keep at least two
+            ge.stopIndex = 0;
+            ge.stopFocused = false;
+            commit(f => { (f[index] as Gradient).stops.splice(si, 1); });
+        };
+
+        stopRow.appendChild(sw);
+        stopRow.appendChild(hexInput);
+        stopRow.appendChild(pos);
+        stopRow.appendChild(alpha);
+        const sp = document.createElement('div'); sp.style.flex = '1'; stopRow.appendChild(sp);
+        stopRow.appendChild(delStop);
+        editor.appendChild(stopRow);
+
+        // ── Actions row: angle (linear) + reverse + rotate 90° ──
+        const actions = document.createElement('div');
+        actions.className = 'gradient-angle-row';
+
+        if (fill.gradient_type === 'Linear') {
+            const label = document.createElement('span');
+            label.textContent = 'Angle';
+            label.className = 'gradient-sub-label';
+            const angleInput = document.createElement('input');
+            angleInput.type = 'number';
+            angleInput.className = 'prop-input';
+            angleInput.style.cssText = 'width:48px;flex:0 0 48px';
+            angleInput.value = String(Math.round(UIEngine.gradientAngle(fill)));
+            angleInput.addEventListener('change', () => {
+                commit(f => { UIEngine.rotateGradientTo(f[index] as Gradient, parseFloat(angleInput.value) || 0); });
+            });
+            const deg = document.createElement('span'); deg.textContent = '°'; deg.className = 'gradient-sub-label';
+            actions.appendChild(label);
+            actions.appendChild(angleInput);
+            actions.appendChild(deg);
+        }
+
+        const sp2 = document.createElement('div'); sp2.style.flex = '1'; actions.appendChild(sp2);
+
+        const reverseBtn = document.createElement('button');
+        reverseBtn.className = 'icon-toggle';
+        reverseBtn.textContent = '⇄';
+        reverseBtn.title = 'Reverse stops';
+        reverseBtn.onclick = () => {
+            commit(f => {
+                const g = f[index] as Gradient;
+                g.stops = g.stops.map(s => ({ offset: 1 - s.offset, color: { ...s.color } })).reverse();
+            });
+        };
+        actions.appendChild(reverseBtn);
+
+        if (fill.gradient_type === 'Linear') {
+            const rotateBtn = document.createElement('button');
+            rotateBtn.className = 'icon-toggle';
+            rotateBtn.innerHTML = iconRotateCW(11);
+            rotateBtn.title = 'Rotate 90°';
+            rotateBtn.onclick = () => {
+                commit(f => { UIEngine.rotateGradientTo(f[index] as Gradient, UIEngine.gradientAngle(fill) + 90); });
+            };
+            actions.appendChild(rotateBtn);
+        }
+
+        editor.appendChild(actions);
+        return editor;
     }
 
         renderStrokesList(node: SceneNode) {
