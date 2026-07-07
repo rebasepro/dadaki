@@ -351,8 +351,17 @@ pub enum Effect {
     /// A 4×5 color matrix (row-major, applied to [R G B A 1]), matching SVG
     /// feColorMatrix / Skia ColorFilter.MakeMatrix. Covers grayscale, sepia,
     /// saturate, hue-rotate, luminanceToAlpha, etc.
-    ColorMatrix { matrix: [f32; 20] },
+    ColorMatrix {
+        matrix: [f32; 20],
+        /// When true (the default for SVG), the matrix is applied in linearRGB
+        /// color space (sRGB→linear before, linear→sRGB after). When false the
+        /// matrix is applied directly in sRGB.
+        #[serde(default = "default_true")]
+        linear_rgb: bool,
+    },
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Style {
@@ -722,7 +731,8 @@ pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// v5: text geometry gained font_weight + italic + letter_spacing.
 /// v6: paint type 4 = pattern (image_id + tile w/h + 6-float transform).
 /// v7: effects records are self-describing per kind; added kind 2 = ColorMatrix.
-pub const RENDER_PROTOCOL_VERSION: u32 = 7;
+/// v8: ColorMatrix gains a linear_rgb u32 flag; CMD_BEGIN_MASK gains mask_type u32.
+pub const RENDER_PROTOCOL_VERSION: u32 = 8;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -915,12 +925,16 @@ impl Engine {
         self.render_buffer[count_pos..count_pos + 4].copy_from_slice(&count_bytes);
     }
 
-    /// Emit a payload-free mask bracketing command (BEGIN_MASK /
-    /// BEGIN_MASKED_CONTENT / END_MASK). `id` is advisory (for debugging).
-    fn emit_mask_cmd(&mut self, cmd: u32, id: u32, total_nodes: &mut u32) {
+    /// Emit a mask bracketing command (BEGIN_MASK / BEGIN_MASKED_CONTENT /
+    /// END_MASK). `id` is advisory (for debugging). CMD_BEGIN_MASK carries an
+    /// extra `mask_type` u32 payload (0 = alpha, 1 = luminance).
+    fn emit_mask_cmd(&mut self, cmd: u32, id: u32, mask_type: u8, total_nodes: &mut u32) {
         let rec = begin_record(&mut self.render_buffer);
         self.render_buffer.extend_from_slice(&cmd.to_le_bytes());
         self.render_buffer.extend_from_slice(&id.to_le_bytes());
+        if cmd == CMD_BEGIN_MASK {
+            self.render_buffer.extend_from_slice(&(mask_type as u32).to_le_bytes());
+        }
         end_record(&mut self.render_buffer, rec);
         *total_nodes += 1;
     }
@@ -947,19 +961,20 @@ impl Engine {
             });
 
             if child_is_mask && masks_something {
+                let mt = self.scene.nodes.get(&child_id).map(|c| c.mask_type).unwrap_or(0);
                 if open_mask {
-                    self.emit_mask_cmd(CMD_END_MASK, child_id, total_nodes);
+                    self.emit_mask_cmd(CMD_END_MASK, child_id, 0, total_nodes);
                 }
-                self.emit_mask_cmd(CMD_BEGIN_MASK, child_id, total_nodes);
+                self.emit_mask_cmd(CMD_BEGIN_MASK, child_id, mt, total_nodes);
                 self.write_node_recursive(child_id, visible_set, total_nodes);
-                self.emit_mask_cmd(CMD_BEGIN_MASKED_CONTENT, child_id, total_nodes);
+                self.emit_mask_cmd(CMD_BEGIN_MASKED_CONTENT, child_id, 0, total_nodes);
                 open_mask = true;
             } else {
                 self.write_node_recursive(child_id, visible_set, total_nodes);
             }
         }
         if open_mask {
-            self.emit_mask_cmd(CMD_END_MASK, 0, total_nodes);
+            self.emit_mask_cmd(CMD_END_MASK, 0, 0, total_nodes);
         }
     }
 
@@ -1076,7 +1091,7 @@ impl Engine {
             // [kind u32][payload...] where the payload size is fixed per kind:
             //   0 = Blur:        radius f32                              (4B)
             //   1 = DropShadow:  dx,dy,blur,r,g,b,a  (7 f32)             (28B)
-            //   2 = ColorMatrix: 20 f32 (row-major 4×5)                  (80B)
+            //   2 = ColorMatrix: 20 f32 + 1 u32 (linear_rgb flag)         (84B)
             self.render_buffer.extend_from_slice(&(s.effects.len() as u32).to_le_bytes());
             for eff in &s.effects {
                 match eff {
@@ -1094,11 +1109,12 @@ impl Engine {
                         self.render_buffer.extend_from_slice(&color.b.to_le_bytes());
                         self.render_buffer.extend_from_slice(&color.a.to_le_bytes());
                     }
-                    Effect::ColorMatrix { matrix } => {
+                    Effect::ColorMatrix { matrix, linear_rgb } => {
                         self.render_buffer.extend_from_slice(&2u32.to_le_bytes());
                         for v in matrix {
                             self.render_buffer.extend_from_slice(&v.to_le_bytes());
                         }
+                        self.render_buffer.extend_from_slice(&(if *linear_rgb { 1u32 } else { 0u32 }).to_le_bytes());
                     }
                 }
             }
@@ -4769,7 +4785,7 @@ mod tests {
         let json = r#"[{"ColorMatrix":{"matrix":[0.3,0.6,0.1,0,0, 0.3,0.6,0.1,0,0, 0.3,0.6,0.1,0,0, 0,0,0,1,0]}}]"#;
         engine.set_node_effects(rect, json);
         match &engine.scene.nodes.get(&rect).unwrap().style.effects[0] {
-            Effect::ColorMatrix { matrix } => {
+            Effect::ColorMatrix { matrix, .. } => {
                 assert_eq!(matrix[0], 0.3);
                 assert_eq!(matrix[18], 1.0);
             }
@@ -4780,7 +4796,7 @@ mod tests {
         engine.set_node_effects(rect, "[]");
         assert!(engine.deserialize_scene(&snap), "snapshot decodes");
         match &engine.scene.nodes.get(&rect).unwrap().style.effects[0] {
-            Effect::ColorMatrix { matrix } => assert_eq!(matrix[1], 0.6),
+            Effect::ColorMatrix { matrix, .. } => assert_eq!(matrix[1], 0.6),
             other => panic!("ColorMatrix must survive snapshot, got {:?}", other),
         }
     }

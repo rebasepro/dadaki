@@ -106,8 +106,11 @@ export function buildSVGFromData(input: SVGExportInput): string {
             return `<feDropShadow dx="${d.dx}" dy="${d.dy}" stdDeviation="${d.blur}" flood-color="${flood}" flood-opacity="${d.color.a}" />`;
         }).join('');
         const id = `filter${filterIdCounter++}`;
+        // Check if any ColorMatrix effect uses sRGB (non-default) color space.
+        const hasSrgbCM = effects.some(eff => 'ColorMatrix' in eff && eff.ColorMatrix.linear_rgb === false);
+        const cifAttr = hasSrgbCM ? ' color-interpolation-filters="sRGB"' : '';
         // Generous region so shadows/blur aren't clipped.
-        filterDefs.push(`<filter id="${id}" x="-50%" y="-50%" width="200%" height="200%">${prims}</filter>`);
+        filterDefs.push(`<filter id="${id}" x="-50%" y="-50%" width="200%" height="200%"${cifAttr}>${prims}</filter>`);
         return id;
     };
 
@@ -245,8 +248,11 @@ export function buildSVGFromData(input: SVGExportInput): string {
             }
             if (isMaskChild && hasContentAbove) {
                 const maskId = `mask${maskIdCounter++}`;
+                // Determine mask type from the node's mask_type field.
+                const mt = child.mask_type ?? 0;
+                const maskTypeVal = mt === 1 ? 'luminance' : 'alpha';
                 maskDefs.push(
-                    `<mask id="${maskId}" mask-type="alpha" style="mask-type:alpha">` +
+                    `<mask id="${maskId}" mask-type="${maskTypeVal}" style="mask-type:${maskTypeVal}">` +
                     `${renderNodeToSVG(childId)}</mask>`);
                 // Gather content siblings up to the next mask.
                 let contentSvg = '';

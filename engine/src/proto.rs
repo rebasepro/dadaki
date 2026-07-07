@@ -112,6 +112,9 @@ pub struct ProtoEffect {
     /// 4×5 color matrix (kind 2 = ColorMatrix), row-major 20 floats.
     #[prost(float, repeated, tag = "6")]
     pub matrix: Vec<f32>,
+    /// For ColorMatrix: true if the matrix should be applied in linearRGB space.
+    #[prost(bool, tag = "7")]
+    pub linear_rgb: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -504,13 +507,13 @@ impl From<&ProtoStyle> for Style {
 fn effect_to_proto(e: &crate::Effect) -> ProtoEffect {
     match e {
         crate::Effect::Blur { radius } => ProtoEffect {
-            kind: 0, radius: *radius, dx: 0.0, dy: 0.0, color: None, matrix: Vec::new(),
+            kind: 0, radius: *radius, dx: 0.0, dy: 0.0, color: None, matrix: Vec::new(), linear_rgb: false,
         },
         crate::Effect::DropShadow { dx, dy, blur, color } => ProtoEffect {
-            kind: 1, radius: *blur, dx: *dx, dy: *dy, color: Some(color.into()), matrix: Vec::new(),
+            kind: 1, radius: *blur, dx: *dx, dy: *dy, color: Some(color.into()), matrix: Vec::new(), linear_rgb: false,
         },
-        crate::Effect::ColorMatrix { matrix } => ProtoEffect {
-            kind: 2, radius: 0.0, dx: 0.0, dy: 0.0, color: None, matrix: matrix.to_vec(),
+        crate::Effect::ColorMatrix { matrix, linear_rgb } => ProtoEffect {
+            kind: 2, radius: 0.0, dx: 0.0, dy: 0.0, color: None, matrix: matrix.to_vec(), linear_rgb: *linear_rgb,
         },
     }
 }
@@ -525,7 +528,7 @@ fn proto_to_effect(e: &ProtoEffect) -> Option<crate::Effect> {
         2 => {
             let mut m = [0.0f32; 20];
             if e.matrix.len() == 20 { m.copy_from_slice(&e.matrix); }
-            Some(crate::Effect::ColorMatrix { matrix: m })
+            Some(crate::Effect::ColorMatrix { matrix: m, linear_rgb: e.linear_rgb })
         }
         _ => None,
     }

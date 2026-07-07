@@ -56,7 +56,7 @@ export type ArtboardHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 7; // v7: self-describing effects + ColorMatrix
+const EXPECTED_RENDER_PROTOCOL_VERSION = 8; // v8: ColorMatrix linear_rgb flag + CMD_BEGIN_MASK mask_type
 
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {
@@ -64,6 +64,7 @@ interface EffectRecord {
     radius: number; dx: number; dy: number;
     r: number; g: number; b: number; a: number;
     matrix?: number[]; // 20 floats, for kind 2
+    linearRGB?: boolean; // for kind 2: apply matrix in linearRGB space
 }
 
 export class Renderer {
@@ -150,6 +151,11 @@ export class Renderer {
     private _protocolDesyncWarned = false;
     /** Dedicated SrcIn paint for compositing masked-content layers. */
     private _maskPaint: Paint | null = null;
+    /** Stack of mask_type values (0 = alpha, 1 = luminance) matching the
+     *  CMD_BEGIN_MASK / CMD_END_MASK nesting. */
+    private _maskTypeStack: number[] = [];
+    /** Dedicated paint with luminance→alpha color filter for luminance masks. */
+    private _lumaPaint: Paint | null = null;
     /** True while rendering into an offscreen surface for PNG export. */
     private _exporting = false;
     /** World-space bounds to export (defaults to the primary artboard). */
@@ -246,7 +252,7 @@ export class Renderer {
     /** Build (or fetch a cached) ImageFilter chain for a node's effects.
      *  Effects stack: each filter takes the previous as input. */
     private getEffectFilter(effects: EffectRecord[]): ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null {
-        const key = effects.map(e => `${e.kind}:${e.radius},${e.dx},${e.dy},${e.r},${e.g},${e.b},${e.a},${e.matrix?.join(',') ?? ''}`).join('|');
+        const key = effects.map(e => `${e.kind}:${e.radius},${e.dx},${e.dy},${e.r},${e.g},${e.b},${e.a},${e.matrix?.join(',') ?? ''},${e.linearRGB ? 'L' : 'S'}`).join('|');
         const cached = this._effectFilterCache.get(key);
         if (cached !== undefined) return cached;
         let filter: ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null = null;
@@ -260,7 +266,16 @@ export class Renderer {
                 filter = this.ck.ImageFilter.MakeDropShadow(e.dx, e.dy, s, s, color, filter);
             } else if (e.kind === 2 && e.matrix && e.matrix.length === 20) {
                 const cf = this.ck.ColorFilter.MakeMatrix(e.matrix);
-                filter = this.ck.ImageFilter.MakeColorFilter(cf, filter);
+                if (e.linearRGB) {
+                    // SVG default: apply matrix in linearRGB space.
+                    // Compose: sRGB→linear → matrix → linear→sRGB
+                    const toLinear = this.ck.ColorFilter.MakeSRGBToLinearGamma();
+                    const toSRGB = this.ck.ColorFilter.MakeLinearToSRGBGamma();
+                    const linearMatrix = this.ck.ColorFilter.MakeCompose(toSRGB, this.ck.ColorFilter.MakeCompose(cf, toLinear));
+                    filter = this.ck.ImageFilter.MakeColorFilter(linearMatrix, filter);
+                } else {
+                    filter = this.ck.ImageFilter.MakeColorFilter(cf, filter);
+                }
             }
         }
         this._effectFilterCache.set(key, filter);
@@ -606,18 +621,52 @@ export class Renderer {
             } else if (cmdType === 3) { // CMD_END_GROUP
                 canvas.restore();
             } else if (cmdType === 4) { // CMD_BEGIN_MASK
-                // Isolated layer that will accumulate the mask shape's coverage.
-                canvas.saveLayer();
+                // Read mask_type: 0 = alpha, 1 = luminance (v8+).
+                const maskType = reader.u32();
+                this._maskTypeStack.push(maskType);
+                if (maskType === 1) {
+                    // Luminance mask: 3-layer protocol.
+                    // Layer 0 (outer): collects the final masked result.
+                    canvas.saveLayer();
+                    // Layer 1 (luma): mask shapes are drawn here. On restore,
+                    // the luminance→alpha color filter converts RGB to alpha.
+                    if (!this._lumaPaint) {
+                        this._lumaPaint = new this.ck.Paint();
+                        // SVG luminance mask: A' = 0.2126·R + 0.7152·G + 0.0722·B
+                        // (R,G,B are premultiplied, so we also account for source alpha).
+                        const lumaMatrix = [
+                            0, 0, 0, 0, 0,
+                            0, 0, 0, 0, 0,
+                            0, 0, 0, 0, 0,
+                            0.2126, 0.7152, 0.0722, 0, 0,
+                        ];
+                        this._lumaPaint.setColorFilter(
+                            this.ck.ColorFilter.MakeMatrix(lumaMatrix));
+                    }
+                    canvas.saveLayer(this._lumaPaint);
+                } else {
+                    // Alpha mask: 2-layer protocol (original).
+                    // Isolated layer accumulating the mask shape's coverage.
+                    canvas.saveLayer();
+                }
             } else if (cmdType === 5) { // CMD_BEGIN_MASKED_CONTENT
-                // Content layer: on restore it composites into the mask layer
-                // with SrcIn, so content survives only where the mask is opaque
-                // (alpha mask). Luminance masks (mask_type=1) are not yet
-                // distinguished — treated as alpha for now.
+                const maskType = this._maskTypeStack.length > 0
+                    ? this._maskTypeStack[this._maskTypeStack.length - 1] : 0;
+                if (maskType === 1) {
+                    // Restore the luma layer: mask shapes are composited through
+                    // the luminance→alpha filter into the outer layer.
+                    canvas.restore();
+                }
+                // Content layer: on restore it composites into the mask/outer
+                // layer with SrcIn, so content survives only where the mask has
+                // coverage (alpha for alpha-masks, luminance-derived alpha for
+                // luminance masks).
                 if (!this._maskPaint) this._maskPaint = new this.ck.Paint();
                 this._maskPaint.setBlendMode(this.ck.BlendMode.SrcIn);
                 canvas.saveLayer(this._maskPaint);
             } else if (cmdType === 6) { // CMD_END_MASK
-                canvas.restore(); // content → mask layer (SrcIn): clip to coverage
+                if (this._maskTypeStack.length > 0) this._maskTypeStack.pop();
+                canvas.restore(); // content → mask/outer layer (SrcIn)
                 canvas.restore(); // masked result → canvas
             } else if (cmdType === 2) { // CMD_DRAW_NODE
                 const nodeType = reader.u32();
@@ -728,10 +777,11 @@ export class Renderer {
                     } else if (kind === 1) { // DropShadow: dx,dy,blur,r,g,b,a
                         const dx = reader.f32(), dy = reader.f32(), radius = reader.f32();
                         effects.push({ kind, radius, dx, dy, r: reader.f32(), g: reader.f32(), b: reader.f32(), a: reader.f32() });
-                    } else if (kind === 2) { // ColorMatrix: 20 floats
+                    } else if (kind === 2) { // ColorMatrix: 20 floats + 1 u32 (linearRGB flag)
                         const matrix: number[] = [];
                         for (let i = 0; i < 20; i++) matrix.push(reader.f32());
-                        effects.push({ kind, radius: 0, dx: 0, dy: 0, r: 0, g: 0, b: 0, a: 0, matrix });
+                        const linearRGB = reader.u32() !== 0;
+                        effects.push({ kind, radius: 0, dx: 0, dy: 0, r: 0, g: 0, b: 0, a: 0, matrix, linearRGB });
                     }
                 }
 

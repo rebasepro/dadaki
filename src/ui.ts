@@ -3122,6 +3122,15 @@ export class UIEngine {
                             try { this.scene.engine!.set_node_name(maskNode, 'Mask'); } catch { /* noop */ }
                         }
                         try { this.scene.engine!.set_node_is_mask(maskNode, true); } catch { /* noop */ }
+                        // SVG <mask> defaults to luminance masking unless
+                        // mask-type="alpha" is explicitly set. <clipPath> is
+                        // always alpha (coverage).
+                        if (defTag === 'mask') {
+                            const maskTypeAttr = (defEl.getAttribute('mask-type') ||
+                                defEl.style?.getPropertyValue?.('mask-type') || '').trim().toLowerCase();
+                            const mt = maskTypeAttr === 'alpha' ? 0 : 1; // luminance by default
+                            try { this.scene.engine!.set_node_mask_type(maskNode, mt); } catch { /* noop */ }
+                        }
 
                         const groupId = this.scene.groupNodes([maskNode, ...contentIds]);
                         try {
@@ -3515,6 +3524,11 @@ export class UIEngine {
             const v = parseFloat(s.trim().split(/[\s,]+/)[0]);
             return isNaN(v) ? def : v;
         };
+        // color-interpolation-filters: default is linearRGB per SVG spec.
+        // Check the <filter> element for a blanket override, then each
+        // primitive can override individually.
+        const filterCIF = (filterEl.getAttribute('color-interpolation-filters') || '').trim().toLowerCase();
+        const filterLinearRGB = filterCIF !== 'srgb'; // linearRGB or auto → true
         for (const prim of Array.from(filterEl.children)) {
             const t = prim.tagName.toLowerCase();
             if (t === 'fegaussianblur') {
@@ -3530,7 +3544,10 @@ export class UIEngine {
                     color: { r: c.r, g: c.g, b: c.b, a: fo },
                 } });
             } else if (t === 'fecolormatrix') {
-                effects.push({ ColorMatrix: { matrix: this.feColorMatrix(prim) } });
+                // Per-primitive override of color-interpolation-filters.
+                const primCIF = (prim.getAttribute('color-interpolation-filters') || '').trim().toLowerCase();
+                const linearRGB = primCIF ? primCIF !== 'srgb' : filterLinearRGB;
+                effects.push({ ColorMatrix: { matrix: this.feColorMatrix(prim), linear_rgb: linearRGB } });
             } else {
                 // Unsupported primitive — fall back to rasterizing the element.
                 return 'rasterize';

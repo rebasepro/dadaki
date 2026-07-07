@@ -122,7 +122,7 @@ export interface NodeStyle {
 export type EffectData =
     | { Blur: { radius: number } }
     | { DropShadow: { dx: number; dy: number; blur: number; color: { r: number; g: number; b: number; a: number } } }
-    | { ColorMatrix: { matrix: number[] } };
+    | { ColorMatrix: { matrix: number[]; linear_rgb?: boolean } };
 
 /** A cubic Bézier path point with incoming/outgoing control points. */
 export interface PathPoint {
