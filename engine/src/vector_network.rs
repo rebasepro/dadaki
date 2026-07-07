@@ -724,9 +724,9 @@ pub struct NodeVectorNetwork {
     pub regions: Vec<NetworkRegion>,
 }
 
-// NOTE: these structs are bincode-serialized inside Scene (history/drag
-// snapshots), so fields must never use `skip_serializing_if` — bincode is
-// positional and a conditionally absent field corrupts the whole snapshot.
+// NOTE: these structs are serialized to protobuf inside Scene snapshots
+// (history/drag) and files. New fields need a serde default AND a new proto
+// tag in proto.rs (never renumber existing tags).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NetworkVertex {
     pub position: Vec2,

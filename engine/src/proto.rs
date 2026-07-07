@@ -309,6 +309,20 @@ pub struct ProtoDocument {
     pub document_height: Option<f32>,
 }
 
+/// A history/undo/drag snapshot. Wraps a full document plus the transient
+/// selection (which `ProtoDocument` deliberately omits, since files shouldn't
+/// carry selection but undo must restore it). This is the protobuf replacement
+/// for the old positional-bincode `Scene` snapshot: tagged fields mean adding a
+/// field can never corrupt an existing stream, so the "no skip_serializing_if"
+/// bincode landmine is gone.
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoSnapshot {
+    #[prost(message, optional, tag = "1")]
+    pub document: Option<ProtoDocument>,
+    #[prost(uint32, repeated, tag = "2")]
+    pub selection: Vec<u32>,
+}
+
 // ─── Conversion: Internal → Proto ───────────────────────────────────────────────
 
 impl From<&Color> for ProtoColor {
@@ -695,11 +709,20 @@ fn proto_to_node(pn: &ProtoNode) -> Node {
 impl ProtoDocument {
     /// Convert the current scene to a ProtoDocument.
     pub fn from_scene(scene: &Scene, next_id: u32) -> Self {
-        let nodes: Vec<ProtoNode> = scene.nodes.values().map(node_to_proto).collect();
+        // Deterministic node ordering (HashMap iteration order is not stable).
+        // Undo relies on serialize→deserialize→serialize being a byte-exact
+        // fixed point (see gesture_history.test.ts), which requires this.
+        let mut nodes: Vec<ProtoNode> = scene.nodes.values().map(node_to_proto).collect();
+        nodes.sort_by_key(|n| n.id);
         let root_ids = scene.root_nodes.clone();
 
-        // Preserve face fills from vector network
-        let face_fills: Vec<ProtoFaceFill> = scene.vector_network.faces.values()
+        // Preserve face fills from the vector network as centroids (remapped on
+        // the next rebuild). Include BOTH computed faces and not-yet-applied
+        // `pending_fills` so a snapshot taken before a rebuild re-serializes
+        // identically after a round-trip (deserialize leaves the network dirty
+        // with pending fills; without this the fills would silently drop on
+        // undo of a live-painted scene).
+        let mut face_fills: Vec<ProtoFaceFill> = scene.vector_network.faces.values()
             .filter(|f| f.fill.is_some() && !f.is_outer)
             .map(|f| {
                 let fill = f.fill.as_ref().unwrap();
@@ -711,6 +734,18 @@ impl ProtoDocument {
                 }
             })
             .collect();
+        for (centroid, color) in &scene.vector_network.pending_fills {
+            face_fills.push(ProtoFaceFill {
+                centroid_x: centroid.x,
+                centroid_y: centroid.y,
+                fill: Some(color.into()),
+            });
+        }
+        // Deterministic fill ordering for byte-exact snapshots.
+        face_fills.sort_by(|a, b| {
+            a.centroid_x.partial_cmp(&b.centroid_x).unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.centroid_y.partial_cmp(&b.centroid_y).unwrap_or(std::cmp::Ordering::Equal))
+        });
 
         ProtoDocument {
             format_version: FORMAT_VERSION,
@@ -779,6 +814,27 @@ pub fn deserialize_from_proto(data: &[u8]) -> Option<(Scene, u32)> {
     let mut doc = ProtoDocument::decode(data).ok()?;
     migrate(&mut doc);
     Some(doc.to_scene())
+}
+
+/// Serialize a full history/undo/drag snapshot (document + selection).
+/// This is what `Engine::serialize_scene` stores on the undo stack.
+pub fn serialize_snapshot(scene: &Scene, next_id: u32) -> Vec<u8> {
+    let snap = ProtoSnapshot {
+        document: Some(ProtoDocument::from_scene(scene, next_id)),
+        selection: scene.selection.clone(),
+    };
+    snap.encode_to_vec()
+}
+
+/// Restore a scene + next_id from a snapshot produced by `serialize_snapshot`.
+/// Restores selection (which the plain document path drops).
+pub fn deserialize_snapshot(data: &[u8]) -> Option<(Scene, u32)> {
+    let snap = ProtoSnapshot::decode(data).ok()?;
+    let mut doc = snap.document?;
+    migrate(&mut doc);
+    let (mut scene, next_id) = doc.to_scene();
+    scene.selection = snap.selection;
+    Some((scene, next_id))
 }
 
 /// Serialize a scene to base64-encoded protobuf (for SVG embedding).

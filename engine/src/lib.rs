@@ -68,80 +68,36 @@ pub struct Gradient {
 }
 
 /// A paint can be a solid color or a gradient.
-/// Custom Serialize/Deserialize to support both JSON (from JS) and bincode (snapshots).
+/// Custom Serialize/Deserialize for JSON interchange with JS (`set_node_style`
+/// sends a Style whose fills are bare color/gradient objects). Snapshots and
+/// files go through protobuf (proto.rs), not serde, so there is no longer a
+/// bincode/positional codec to keep in lockstep here.
 #[derive(Clone, Debug)]
 pub enum Paint {
     Gradient(Gradient),
     Solid(Color),
 }
 
-/// Flat intermediate struct for bincode serialization of Paint.
-#[derive(Serialize, Deserialize)]
-struct BincodePaint {
-    tag: u8, // 0 = Solid, 1 = Gradient
-    // Solid fields (always present, zero-filled for gradients)
-    r: f32, g: f32, b: f32, a: f32,
-    // Gradient fields
-    gradient_type: u8, // 0=Linear, 1=Radial
-    stops: Vec<(f32, f32, f32, f32, f32)>, // (offset, r, g, b, a)
-    start_x: f32, start_y: f32, end_x: f32, end_y: f32,
-}
-
 impl serde::Serialize for Paint {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if serializer.is_human_readable() {
-            // JSON: serialize naturally so JS can read it
-            match self {
-                Paint::Solid(c) => c.serialize(serializer),
-                Paint::Gradient(g) => g.serialize(serializer),
-            }
-        } else {
-            // Bincode: flatten into BincodePaint
-            let bp = match self {
-                Paint::Solid(c) => BincodePaint {
-                    tag: 0, r: c.r, g: c.g, b: c.b, a: c.a,
-                    gradient_type: 0, stops: vec![], start_x: 0.0, start_y: 0.0, end_x: 0.0, end_y: 0.0,
-                },
-                Paint::Gradient(g) => BincodePaint {
-                    tag: 1, r: 0.0, g: 0.0, b: 0.0, a: 0.0,
-                    gradient_type: match g.gradient_type { GradientType::Linear => 0, GradientType::Radial => 1 },
-                    stops: g.stops.iter().map(|s| (s.offset, s.color.r, s.color.g, s.color.b, s.color.a)).collect(),
-                    start_x: g.start_x, start_y: g.start_y, end_x: g.end_x, end_y: g.end_y,
-                },
-            };
-            bp.serialize(serializer)
+        // JSON: serialize naturally so JS can read it
+        match self {
+            Paint::Solid(c) => c.serialize(serializer),
+            Paint::Gradient(g) => g.serialize(serializer),
         }
     }
 }
 
 impl<'de> serde::Deserialize<'de> for Paint {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        if deserializer.is_human_readable() {
-            // JSON: try Gradient first (has gradient_type field), fallback to Color
-            let value = serde_json::Value::deserialize(deserializer)?;
-            if value.get("gradient_type").is_some() {
-                let g: Gradient = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                Ok(Paint::Gradient(g))
-            } else {
-                let c: Color = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                Ok(Paint::Solid(c))
-            }
+        // JSON: distinguish Gradient (has a `gradient_type` field) from a bare Color.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("gradient_type").is_some() {
+            let g: Gradient = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            Ok(Paint::Gradient(g))
         } else {
-            // Bincode: read BincodePaint
-            let bp = BincodePaint::deserialize(deserializer)?;
-            if bp.tag == 1 {
-                let grad_type = if bp.gradient_type == 1 { GradientType::Radial } else { GradientType::Linear };
-                let stops = bp.stops.into_iter().map(|(offset, r, g, b, a)| {
-                    GradientStop { offset, color: Color { r, g, b, a } }
-                }).collect();
-                Ok(Paint::Gradient(Gradient {
-                    gradient_type: grad_type, stops,
-                    start_x: bp.start_x, start_y: bp.start_y,
-                    end_x: bp.end_x, end_y: bp.end_y,
-                }))
-            } else {
-                Ok(Paint::Solid(Color { r: bp.r, g: bp.g, b: bp.b, a: bp.a }))
-            }
+            let c: Color = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            Ok(Paint::Solid(c))
         }
     }
 }
@@ -579,8 +535,6 @@ pub enum Geometry {
         subpaths: Vec<Subpath>,
         /// Per-node vector network (graph-based editing source of truth).
         /// When present, editing goes through the network, which recomputes subpaths.
-        /// NOTE: no `skip_serializing_if` here — bincode is positional, so
-        /// conditionally skipped fields corrupt history/drag snapshots.
         #[serde(default)]
         network: Option<NodeVectorNetwork>,
     },
@@ -1408,21 +1362,25 @@ impl Engine {
         }
     }
 
-    /// Restore a scene from a bincode snapshot (history/undo/drag-restore).
+    /// Restore a scene from a protobuf snapshot (history/undo/drag-restore).
     /// Returns false — and leaves the scene untouched — if the bytes don't
     /// decode. A silent failure here breaks undo invisibly, so callers should
     /// surface it.
     pub fn deserialize_scene(&mut self, data: &[u8]) -> bool {
-        match bincode::deserialize::<Scene>(data) {
-            Ok(scene) => {
+        match proto::deserialize_snapshot(data) {
+            Some((scene, next_id)) => {
                 self.scene = scene;
-                self.next_id = self.scene.nodes.keys().max().map(|id| id + 1).unwrap_or(1);
+                // Trust the snapshot's next_id (preserves id-allocation across
+                // undo), falling back to max+1 only if it was never written.
+                self.next_id = next_id.max(
+                    self.scene.nodes.keys().max().map(|id| id + 1).unwrap_or(1)
+                );
                 self.update_all_global_transforms();
                 self.update_all_spatial_indices();
                 true
             }
-            Err(e) => {
-                log_error(&format!("deserialize_scene failed: {}", e));
+            None => {
+                log_error("deserialize_scene failed: snapshot did not decode");
                 false
             }
         }
@@ -1852,7 +1810,7 @@ impl Engine {
     // ─── End Per-Node Getters ───────────────────────────────────────────
 
     pub fn serialize_scene(&self) -> Vec<u8> {
-        bincode::serialize(&self.scene).unwrap_or_default()
+        proto::serialize_snapshot(&self.scene, self.next_id)
     }
 
     /// Returns a pointer to a 9-element f32 array in Skia row-major format.
@@ -3914,9 +3872,9 @@ mod tests {
 
     #[test]
     fn test_snapshot_roundtrip_with_paths_and_fills() {
-        // Regression: `skip_serializing_if` on network fields corrupted the
-        // positional bincode stream, so undo/drag snapshots silently failed
-        // for any scene containing a Path node.
+        // Snapshots (undo/drag) go through protobuf now. A Path node with a
+        // live-painted face must survive serialize → mutate → deserialize with
+        // its geometry and fill intact (fills remap from centroids on rebuild).
         let mut engine = Engine::new();
         let path_id = engine.add_path(
             r#"[{"closed":true,"points":[
@@ -3987,7 +3945,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_roundtrip_transform_components() {
-        // Bincode undo snapshots must carry the decomposed transform components.
+        // Undo snapshots must carry the decomposed transform components.
         let mut engine = Engine::new();
         let id = engine.add_rect(0.0, 0.0, 100.0, 100.0);
         engine.set_node_rotation(id, 30.0);
@@ -4001,6 +3959,52 @@ mod tests {
         let t = engine.scene.nodes.get(&id).unwrap().transform;
         assert!((t.rotation_deg - 30.0).abs() < 1e-3, "rotation restored: {}", t.rotation_deg);
         assert!((t.skew_x_deg - 15.0).abs() < 1e-3, "skew restored: {}", t.skew_x_deg);
+    }
+
+    #[test]
+    fn test_snapshot_is_deterministic() {
+        // Byte-exact determinism is what makes "exactly one undo step" provable
+        // in gesture_history.test.ts. Two serializations of the same scene — and
+        // a serialize→deserialize→serialize round-trip — must be byte-identical,
+        // even with many nodes (HashMap iteration order is not stable) and a
+        // live-painted face (fill centroid ordering).
+        let mut engine = Engine::new();
+        for i in 0..12 {
+            engine.add_rect(i as f32 * 10.0, 0.0, 20.0, 20.0);
+        }
+        let tri = engine.add_path(
+            r#"[{"closed":true,"points":[
+                {"x":500.0,"y":500.0,"cp1":[500.0,500.0],"cp2":[500.0,500.0]},
+                {"x":800.0,"y":500.0,"cp1":[800.0,500.0],"cp2":[800.0,500.0]},
+                {"x":800.0,"y":800.0,"cp1":[800.0,800.0],"cp2":[800.0,800.0]}
+            ]}]"#,
+        );
+        let _ = tri;
+        let face = engine.query_face_at(700.0, 600.0);
+        assert!(face >= 0);
+        engine.set_face_fill(face as u32, 0.2, 0.4, 0.6, 1.0);
+
+        let a = engine.serialize_scene();
+        let b = engine.serialize_scene();
+        assert_eq!(a, b, "two serializations of the same scene must be byte-identical");
+
+        assert!(engine.deserialize_scene(&a), "snapshot must decode");
+        let c = engine.serialize_scene();
+        assert_eq!(a, c, "serialize→deserialize→serialize must be a byte-exact fixed point");
+    }
+
+    #[test]
+    fn test_snapshot_restores_selection() {
+        // Undo snapshots preserve the selection (ProtoDocument alone drops it).
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 10.0, 10.0);
+        let b = engine.add_rect(20.0, 0.0, 10.0, 10.0);
+        engine.scene.selection = vec![a, b];
+
+        let snapshot = engine.serialize_scene();
+        engine.scene.selection.clear();
+        assert!(engine.deserialize_scene(&snapshot), "snapshot must decode");
+        assert_eq!(engine.scene.selection, vec![a, b], "selection must be restored");
     }
 
     #[test]
