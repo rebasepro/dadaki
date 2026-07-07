@@ -46,6 +46,14 @@ class BinaryReader {
 import type { WasmScene } from './wasm_scene';
 import type { InputManager } from './input';
 
+// Render protocol (see engine/src/lib.rs "Render Protocol"). These MUST match
+// the RENDER_PROTOCOL_MAGIC / RENDER_PROTOCOL_VERSION constants the engine emits.
+// Bump EXPECTED_RENDER_PROTOCOL_VERSION here in lockstep with any change to the
+// render-buffer layout on either side; a mismatch means engine/pkg is stale
+// (rebuild wasm) or renderer.ts is out of date.
+const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
+const EXPECTED_RENDER_PROTOCOL_VERSION = 1;
+
 export class Renderer {
     /** Generate a path for a text node (for "Create Outlines"). */
     getTextPath(id: number): any[] | null {
@@ -124,6 +132,8 @@ export class Renderer {
     // ─── Dirty-frame gating ───
     /** When false, the rAF loop skips rendering. Set to true by requestRender(). */
     private _needsRender = true;
+    /** One-shot guard so a render-protocol desync logs once, not every frame. */
+    private _protocolDesyncWarned = false;
 
     // ─── Path object cache (avoid rebuilding CanvasKit paths every frame) ───
     private _pathCache: Map<number, { path: ReturnType<CanvasKit['Path']['prototype']['copy']>; fillRule: number }> = new Map();
@@ -381,7 +391,23 @@ export class Renderer {
         const visibleIds = this.scene.getVisibleNodes(viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
         const view = this.scene.getRenderData(visibleIds);
         const reader = new BinaryReader(view);
-        
+
+        // Validate the protocol header before trusting any offsets. A magic or
+        // version mismatch means the engine wasm is stale/incompatible — fail
+        // loudly rather than parsing garbage.
+        const magic = reader.u32();
+        if (magic !== RENDER_PROTOCOL_MAGIC) {
+            throw new Error(
+                `Render buffer magic 0x${magic.toString(16)} != 0x${RENDER_PROTOCOL_MAGIC.toString(16)}. ` +
+                `engine/pkg is stale or corrupt — rebuild the wasm engine.`);
+        }
+        const protocolVersion = reader.u32();
+        if (protocolVersion !== EXPECTED_RENDER_PROTOCOL_VERSION) {
+            throw new Error(
+                `Render protocol version ${protocolVersion} != expected ${EXPECTED_RENDER_PROTOCOL_VERSION}. ` +
+                `Rebuild the wasm engine after engine/src changes, or update renderer.ts to match.`);
+        }
+
         const commandCount = reader.u32();
         if (!this.paint) this.paint = new this.ck.Paint();
         const p = this.paint;
@@ -392,6 +418,8 @@ export class Renderer {
         const dimTarget = this.inputManager?.getEditingDimTarget() ?? null;
 
         for (let i = 0; i < commandCount; i++) {
+            const recordLen = reader.u32();
+            const recordStart = reader.offset;
             const cmdType = reader.u32();
             const nodeId = reader.u32();
 
@@ -621,6 +649,22 @@ export class Renderer {
                 }
 
                 canvas.restore();
+            }
+
+            // Framing check: every record declared its own byte length. If the
+            // reader didn't consume exactly that, writer/reader layouts have
+            // skewed (usually a stale engine/pkg). Report once, then resync to
+            // the declared record boundary so the rest of the frame still draws.
+            const consumed = reader.offset - recordStart;
+            if (consumed !== recordLen) {
+                if (!this._protocolDesyncWarned) {
+                    console.error(
+                        `Render protocol desync at command ${i} (cmdType=${cmdType}, node=${nodeId}): ` +
+                        `consumed ${consumed} bytes but record declared ${recordLen}. ` +
+                        `Writer/reader layout skew — engine/pkg is likely stale.`);
+                    this._protocolDesyncWarned = true;
+                }
+                reader.offset = recordStart + recordLen;
             }
         }
 

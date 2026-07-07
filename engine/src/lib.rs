@@ -585,6 +585,39 @@ pub struct Node {
 
 use rstar::{RTree, RTreeObject, AABB, PointDistance};
 
+// ─── Render Protocol ─────────────────────────────────────────────────────────────
+//
+// The render buffer is a hand-rolled, u32-aligned byte stream shared with the
+// JS renderer (src/renderer.ts `Renderer.render`). It is framed:
+//
+//   [magic u32][version u32][command_count u32]  then command_count records of:
+//   [record_len u32][cmd u32][node_id u32][payload...]
+//
+// `record_len` is the byte length of `[cmd][node_id][payload]` (excluding the
+// length field itself). The reader asserts it consumed exactly that many bytes
+// per record, so any writer/reader layout skew fails loudly and locally instead
+// of silently garbling the frame. Bump RENDER_PROTOCOL_VERSION (and the matching
+// EXPECTED_RENDER_PROTOCOL_VERSION in renderer.ts) whenever the layout changes.
+
+/// Magic marker: ASCII "VEC1" as a little-endian u32.
+pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
+/// Render-buffer layout version. Writer and renderer.ts reader must agree.
+pub const RENDER_PROTOCOL_VERSION: u32 = 1;
+
+/// Begin a framed record: reserve a u32 length placeholder, return its offset.
+fn begin_record(buf: &mut Vec<u8>) -> usize {
+    let pos = buf.len();
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    pos
+}
+
+/// Close a framed record: backpatch the length placeholder at `len_pos` with the
+/// number of payload bytes written since (excluding the 4-byte length field).
+fn end_record(buf: &mut Vec<u8>, len_pos: usize) {
+    let record_len = (buf.len() - len_pos - 4) as u32;
+    buf[len_pos..len_pos + 4].copy_from_slice(&record_len.to_le_bytes());
+}
+
 /// Write a paint value (solid color or gradient) to a byte buffer.
 fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>) {
     match paint {
@@ -702,14 +735,23 @@ impl Engine {
         self.render_buffer.len()
     }
 
+    /// The render-buffer protocol version the engine emits. Exposed so JS and
+    /// tests can assert the freshly-built wasm matches what the reader expects.
+    pub fn render_protocol_version() -> u32 {
+        RENDER_PROTOCOL_VERSION
+    }
+
     pub fn update_render_buffer(&mut self, visible_ids: Vec<u32>) {
         self.render_buffer.clear();
         let visible_set: HashSet<u32> = visible_ids.into_iter().collect();
-        
-        let mut total_nodes = 0;
-        // Skip first 4 bytes, we'll write total_nodes there at the end
+
+        // Header: magic + version, then a placeholder for the command count.
+        self.render_buffer.extend_from_slice(&RENDER_PROTOCOL_MAGIC.to_le_bytes());
+        self.render_buffer.extend_from_slice(&RENDER_PROTOCOL_VERSION.to_le_bytes());
+        let count_pos = self.render_buffer.len();
         self.render_buffer.extend_from_slice(&[0u8; 4]);
 
+        let mut total_nodes = 0;
         let root_nodes = self.scene.root_nodes.clone();
         for root_id in root_nodes {
             self.write_node_recursive(root_id, &visible_set, &mut total_nodes);
@@ -717,7 +759,7 @@ impl Engine {
 
         // Fill in the total node count (number of "commands")
         let count_bytes = (total_nodes as u32).to_le_bytes();
-        self.render_buffer[0..4].copy_from_slice(&count_bytes);
+        self.render_buffer[count_pos..count_pos + 4].copy_from_slice(&count_bytes);
     }
 
     fn write_node_recursive(
@@ -744,9 +786,11 @@ impl Engine {
             // For now, let's be safe and always process groups if they are visible.
             
             // CMD_START_GROUP = 1
+            let rec = begin_record(&mut self.render_buffer);
             self.render_buffer.extend_from_slice(&1u32.to_le_bytes());
             self.render_buffer.extend_from_slice(&id.to_le_bytes());
             self.render_buffer.extend_from_slice(&node.style.opacity.to_le_bytes());
+            end_record(&mut self.render_buffer, rec);
             *total_nodes += 1;
 
             let children = node.children.clone();
@@ -755,14 +799,17 @@ impl Engine {
             }
 
             // CMD_END_GROUP = 3
+            let rec = begin_record(&mut self.render_buffer);
             self.render_buffer.extend_from_slice(&3u32.to_le_bytes());
             self.render_buffer.extend_from_slice(&id.to_le_bytes());
+            end_record(&mut self.render_buffer, rec);
             *total_nodes += 1;
         } else {
             // Only draw leaf if it's in the visible set
             if !visible_set.contains(&id) { return; }
 
             // CMD_DRAW_NODE = 2
+            let rec = begin_record(&mut self.render_buffer);
             self.render_buffer.extend_from_slice(&2u32.to_le_bytes());
             self.render_buffer.extend_from_slice(&id.to_le_bytes());
             
@@ -894,6 +941,7 @@ impl Engine {
                     self.render_buffer.resize(padded_len, 0);
                 }
             }
+            end_record(&mut self.render_buffer, rec);
             *total_nodes += 1;
         }
     }
@@ -3991,6 +4039,51 @@ mod tests {
         assert!(engine.deserialize_scene(&a), "snapshot must decode");
         let c = engine.serialize_scene();
         assert_eq!(a, c, "serialize→deserialize→serialize must be a byte-exact fixed point");
+    }
+
+    #[test]
+    fn test_render_buffer_header_and_framing() {
+        // The render buffer must start with magic + version, and every command
+        // record's declared length must match the bytes actually written. This
+        // is the guard that turns writer/reader skew into a loud, located error.
+        let mut engine = Engine::new();
+        let r = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let e = engine.add_ellipse(200.0, 50.0, 40.0, 30.0);
+        let t = engine.add_text(0.0, 300.0, "hello", 24.0);
+        let p = engine.add_path(
+            r#"[{"closed":true,"points":[
+                {"x":10.0,"y":10.0,"cp1":[10.0,10.0],"cp2":[10.0,10.0]},
+                {"x":90.0,"y":10.0,"cp1":[90.0,10.0],"cp2":[90.0,10.0]},
+                {"x":90.0,"y":90.0,"cp1":[90.0,90.0],"cp2":[90.0,90.0]}
+            ]}]"#,
+        );
+        let g = engine.group_nodes(&format!("[{},{}]", r, e));
+        let visible = vec![r, e, t, p, g];
+        engine.update_render_buffer(visible);
+
+        let buf = &engine.render_buffer;
+        assert!(buf.len() >= 12, "buffer must have a header");
+        let rd_u32 = |off: usize| -> u32 {
+            u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+        };
+        assert_eq!(rd_u32(0), RENDER_PROTOCOL_MAGIC, "magic");
+        assert_eq!(rd_u32(4), RENDER_PROTOCOL_VERSION, "version");
+        let count = rd_u32(8);
+        assert!(count >= 5, "expected group+children+text+path commands, got {}", count);
+
+        // Walk every record and verify its declared length matches its span.
+        let mut off = 12usize;
+        for i in 0..count {
+            let record_len = rd_u32(off) as usize;
+            let start = off + 4;
+            let end = start + record_len;
+            assert!(end <= buf.len(), "record {} overruns buffer", i);
+            // First field of every record is the command type (1/2/3).
+            let cmd = rd_u32(start);
+            assert!(cmd == 1 || cmd == 2 || cmd == 3, "record {} bad cmd {}", i, cmd);
+            off = end;
+        }
+        assert_eq!(off, buf.len(), "records must tile the whole buffer exactly");
     }
 
     #[test]
