@@ -1214,6 +1214,12 @@ export class UIEngine {
         // Clear only after we know we have data to render
         this.layerList.innerHTML = '';
 
+        // Figma-style mask roles: within each group, a mask marks the siblings
+        // above it (higher paint index, until the next mask) as "masked". The
+        // panel renders front-to-back top-to-bottom, so the masked rows appear
+        // ABOVE the mask row and get a wrapping bracket.
+        const maskRoles = this._computeMaskRoles();
+
         // Recursive helper to render a node and its children
         const renderNode = (id: number, depth: number) => {
             const nodeTypeNum = this.scene.getNodeType(id);
@@ -1237,6 +1243,9 @@ export class UIEngine {
             if (selection.includes(id)) item.classList.add('selected');
             if (nodeVisible === false) item.classList.add('layer-hidden');
             if (nodeLocked === true) item.classList.add('layer-locked');
+            const maskRole = maskRoles.get(id);
+            if (maskRole === 'mask') item.classList.add('layer-mask-node');
+            else if (maskRole === 'masked') item.classList.add('layer-masked');
 
             // Indent based on depth
             const indent = depth * 16;
@@ -1285,6 +1294,23 @@ export class UIEngine {
                 }
                 this.scene.selectNode(id, e.shiftKey);
                 this.syncWithSelection();
+            });
+
+            // Right-click → context menu (same actions as the canvas menu). If the
+            // row isn't already in the selection, select it first so the actions
+            // target the intended node(s).
+            row.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const sel = Array.from(this.scene.getSelection());
+                if (!sel.includes(id)) {
+                    this.scene.selectNode(id, false);
+                    this.syncWithSelection();
+                }
+                const im = this.scene.renderer?.inputManager;
+                if (im) {
+                    this.showContextMenu(e.clientX, e.clientY, (action) => im.handleContextMenuAction(action));
+                }
             });
 
             // Double-click to rename
@@ -1435,6 +1461,36 @@ export class UIEngine {
             item.draggable = false;
             input.addEventListener('blur', () => { item.draggable = true; }, { once: true });
         }
+    }
+
+    /** Compute each node's mask role for the layers panel. Within a group, a
+     *  mask marks the non-mask siblings that follow it (higher paint index,
+     *  until the next mask) as "masked"; the mask itself is "mask". Only applies
+     *  inside groups (root-level masks don't render as masks). */
+    private _computeMaskRoles(): Map<number, 'mask' | 'masked'> {
+        const roles = new Map<number, 'mask' | 'masked'>();
+        const isMask = (id: number): boolean => {
+            try { return this.scene.getNodeIsMask(id); } catch { return false; }
+        };
+        const visit = (parentId: number) => {
+            const children = Array.from(this.scene.getNodeChildren(parentId));
+            if (children.length === 0) return;
+            let active = false;
+            for (let i = 0; i < children.length; i++) {
+                const cid = children[i];
+                if (isMask(cid)) {
+                    // Acts as a mask only if a non-mask sibling follows it.
+                    const masksSomething = children.slice(i + 1).some(c => !isMask(c));
+                    if (masksSomething) { active = true; roles.set(cid, 'mask'); }
+                    else { active = false; }
+                } else if (active) {
+                    roles.set(cid, 'masked');
+                }
+            }
+            for (const cid of children) visit(cid);
+        };
+        for (const rid of Array.from(this.scene.getRootNodes())) visit(rid);
+        return roles;
     }
 
     /** True if `nodeId` is `ancestorId` itself or nested somewhere beneath it. */

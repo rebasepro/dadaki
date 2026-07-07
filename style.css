@@ -1094,6 +1094,25 @@ body.scrubbing * {
     opacity: 0.9;
 }
 
+/* Figma-style mask wrapping: the mask row and the sibling rows it masks (which
+   render above it) share a left bracket bar + a faint tint, so the mask visibly
+   "wraps" its shapes. The mask node is the base of the bracket. */
+.layer-item.layer-masked > .layer-item-row,
+.layer-item.layer-mask-node > .layer-item-row {
+    box-shadow: inset 3px 0 0 var(--accent, #6c8cff);
+    background: color-mix(in srgb, var(--accent, #6c8cff) 9%, transparent);
+}
+.layer-item.layer-masked .layer-name {
+    font-style: italic;
+    opacity: 0.9;
+}
+.layer-item.layer-mask-node .layer-name {
+    font-weight: 600;
+}
+.layer-item.layer-mask-node .layer-mask-badge {
+    opacity: 1;
+}
+
 /* Layer actions (visibility / lock) */
 .layer-actions {
     display: flex;
