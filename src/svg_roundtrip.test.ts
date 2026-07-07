@@ -214,6 +214,51 @@ describe('SVG Export — Masks', () => {
         expect(maskedG!.querySelector('ellipse')).toBeFalsy();
     });
 
+    it('a node with a drop-shadow effect exports a <filter> with feDropShadow', () => {
+        const input: SVGExportInput = {
+            docWidth: 400, docHeight: 400,
+            nodes: {
+                1: makeNode({
+                    geometry: { Rect: { width: 100, height: 100 } },
+                    style: defaultStyle({
+                        effects: [{ DropShadow: { dx: 5, dy: 6, blur: 4, color: { r: 0, g: 0, b: 0, a: 0.5 } } }],
+                    }),
+                }),
+            },
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY },
+        };
+        const doc = parseSVG(buildSVGFromData(input));
+        const filter = queryTag(doc, 'filter');
+        expect(filter, 'a <filter> def is emitted').toBeTruthy();
+        const shadow = doc.querySelector('feDropShadow');
+        expect(shadow).toBeTruthy();
+        expect(shadow!.getAttribute('dx')).toBe('5');
+        expect(shadow!.getAttribute('stdDeviation')).toBe('4');
+        // The node's group references the filter.
+        const fid = filter!.getAttribute('id')!;
+        const g = Array.from(doc.querySelectorAll('g')).find(x => x.getAttribute('filter') === `url(#${fid})`);
+        expect(g, 'node group references the filter').toBeTruthy();
+    });
+
+    it('a node with a blur effect exports feGaussianBlur', () => {
+        const input: SVGExportInput = {
+            docWidth: 400, docHeight: 400,
+            nodes: {
+                1: makeNode({
+                    geometry: { Ellipse: { radius_x: 40, radius_y: 40 } },
+                    style: defaultStyle({ effects: [{ Blur: { radius: 7 } }] }),
+                }),
+            },
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY },
+        };
+        const doc = parseSVG(buildSVGFromData(input));
+        const blur = doc.querySelector('feGaussianBlur');
+        expect(blur).toBeTruthy();
+        expect(blur!.getAttribute('stdDeviation')).toBe('7');
+    });
+
     it('a mask with no content above it renders normally (not wrapped)', () => {
         const input: SVGExportInput = {
             docWidth: 800, docHeight: 600,

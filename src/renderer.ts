@@ -52,7 +52,14 @@ import type { InputManager } from './input';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 3; // v3: Image node type (5)
+const EXPECTED_RENDER_PROTOCOL_VERSION = 4; // v4: per-node effects block
+
+/** One decoded effect record from the render buffer. */
+interface EffectRecord {
+    kind: number; // 0 = blur, 1 = drop shadow
+    radius: number; dx: number; dy: number;
+    r: number; g: number; b: number; a: number;
+}
 
 export class Renderer {
     /** Generate a path for a text node (for "Create Outlines"). */
@@ -150,6 +157,10 @@ export class Renderer {
     // document replacement (clearImageCache), where ids may be reused.
     private _imageCache: Map<number, ReturnType<CanvasKit['MakeImageFromEncoded']> | null> = new Map();
     private _imagePaint: Paint | null = null;
+    // Effect (blur/shadow) ImageFilters, cached by effect signature — built once
+    // and reused across frames (cleared on invalidateRenderCaches).
+    private _effectFilterCache: Map<string, ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null> = new Map();
+    private _effectPaint: Paint | null = null;
 
     // ─── Filled faces cache ───
     private _filledFacesCache: { data: { boundary: number[][]; fill: { r: number; g: number; b: number; a: number } }[] } | null = null;
@@ -206,7 +217,33 @@ export class Renderer {
         // Clear filled faces cache
         this._filledFacesCache = null;
 
+        // Clear effect filter cache
+        for (const f of this._effectFilterCache.values()) {
+            if (f) f.delete();
+        }
+        this._effectFilterCache.clear();
+
         this._needsRender = true;
+    }
+
+    /** Build (or fetch a cached) ImageFilter chain for a node's effects.
+     *  Effects stack: each filter takes the previous as input. */
+    private getEffectFilter(effects: EffectRecord[]): ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null {
+        const key = effects.map(e => `${e.kind}:${e.radius},${e.dx},${e.dy},${e.r},${e.g},${e.b},${e.a}`).join('|');
+        const cached = this._effectFilterCache.get(key);
+        if (cached !== undefined) return cached;
+        let filter: ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null = null;
+        for (const e of effects) {
+            const s = Math.max(0, e.radius);
+            if (e.kind === 0) {
+                filter = this.ck.ImageFilter.MakeBlur(s, s, this.ck.TileMode.Decal, filter);
+            } else {
+                const color = this.ck.Color4f(e.r, e.g, e.b, e.a);
+                filter = this.ck.ImageFilter.MakeDropShadow(e.dx, e.dy, s, s, color, filter);
+            }
+        }
+        this._effectFilterCache.set(key, filter);
+        return filter;
     }
 
     /** Drop all decoded images. Call when a different document is loaded (image
@@ -592,8 +629,34 @@ export class Renderer {
                 const blendMode  = (styleFlags >>> 16) & 0xFF;
                 const fillRule   = (styleFlags >>> 24) & 0xFF;
 
+                // Effects block: count + fixed 32-byte records (kind 0=blur,
+                // 1=drop shadow). Read before geometry so offsets stay aligned.
+                const effectCount = reader.u32();
+                const effects: EffectRecord[] = [];
+                for (let e = 0; e < effectCount; e++) {
+                    const kind = reader.u32();
+                    const radius = reader.f32();
+                    const dx = reader.f32();
+                    const dy = reader.f32();
+                    const r = reader.f32(), g = reader.f32(), b = reader.f32(), a = reader.f32();
+                    effects.push({ kind, radius, dx, dy, r, g, b, a });
+                }
+
                 canvas.save();
                 canvas.concat(matrix);
+
+                // Wrap the node's drawing in a filtered layer so blur/shadow
+                // apply to the composited result (fills + strokes + image).
+                let effectLayerOpen = false;
+                if (effects.length > 0) {
+                    const filter = this.getEffectFilter(effects);
+                    if (filter) {
+                        if (!this._effectPaint) this._effectPaint = new this.ck.Paint();
+                        this._effectPaint.setImageFilter(filter);
+                        canvas.saveLayer(this._effectPaint);
+                        effectLayerOpen = true;
+                    }
+                }
 
                 const startGeoOffset = reader.offset;
                 const geoSize = reader.view.getUint32(startGeoOffset, true);
@@ -734,6 +797,7 @@ export class Renderer {
                     p.setBlendMode(this.ck.BlendMode.SrcOver);
                 }
 
+                if (effectLayerOpen) canvas.restore(); // composite the filtered layer
                 canvas.restore();
             }
 

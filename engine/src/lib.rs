@@ -296,6 +296,15 @@ impl Transform2D {
 }
 
 /// Paint order: index 0 = bottom-most layer.
+/// A post-processing effect applied to a node's rendered pixels.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum Effect {
+    /// Gaussian blur. `radius` is the blur sigma in local units.
+    Blur { radius: f32 },
+    /// Drop shadow offset by (dx, dy), blurred by `blur` (sigma), tinted `color`.
+    DropShadow { dx: f32, dy: f32, blur: f32, color: Color },
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Style {
     pub fills: Vec<Paint>,
@@ -308,6 +317,9 @@ pub struct Style {
     pub fill_rule: u8,
     #[serde(default)]
     pub corner_radius: f32,
+    /// Post-processing effects (blur, drop shadow), applied to the whole node.
+    #[serde(default)]
+    pub effects: Vec<Effect>,
 }
 
 fn default_opacity() -> f32 { 1.0 }
@@ -649,7 +661,8 @@ pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// Render-buffer layout version. Writer and renderer.ts reader must agree.
 /// v2: added mask commands (CMD_BEGIN_MASK/BEGIN_MASKED_CONTENT/END_MASK).
 /// v3: added Image node type (5) with a {width, height, image_id} geometry.
-pub const RENDER_PROTOCOL_VERSION: u32 = 3;
+/// v4: added a per-node effects block (blur / drop shadow) after style_flags.
+pub const RENDER_PROTOCOL_VERSION: u32 = 4;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -959,6 +972,25 @@ impl Engine {
             let style_flags: u32 = ((s.blend_mode as u32) << 16) | ((s.fill_rule as u32) << 24);
             self.render_buffer.extend_from_slice(&style_flags.to_le_bytes());
 
+            // Effects block: count u32, then per effect a fixed 32-byte record
+            // [kind u32][radius f32][dx f32][dy f32][r f32][g f32][b f32][a f32].
+            // kind 0 = blur (radius = sigma), 1 = drop shadow (all fields).
+            self.render_buffer.extend_from_slice(&(s.effects.len() as u32).to_le_bytes());
+            for eff in &s.effects {
+                let (kind, radius, dx, dy, col) = match eff {
+                    Effect::Blur { radius } => (0u32, *radius, 0.0f32, 0.0f32, Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
+                    Effect::DropShadow { dx, dy, blur, color } => (1u32, *blur, *dx, *dy, color.clone()),
+                };
+                self.render_buffer.extend_from_slice(&kind.to_le_bytes());
+                self.render_buffer.extend_from_slice(&radius.to_le_bytes());
+                self.render_buffer.extend_from_slice(&dx.to_le_bytes());
+                self.render_buffer.extend_from_slice(&dy.to_le_bytes());
+                self.render_buffer.extend_from_slice(&col.r.to_le_bytes());
+                self.render_buffer.extend_from_slice(&col.g.to_le_bytes());
+                self.render_buffer.extend_from_slice(&col.b.to_le_bytes());
+                self.render_buffer.extend_from_slice(&col.a.to_le_bytes());
+            }
+
             // (transform effects removed — transforms are now decomposed components)
 
             // Geometry
@@ -1070,6 +1102,7 @@ impl Engine {
                 blend_mode: 0,
                 fill_rule: 0,
                 corner_radius: 0.0,
+                effects: Vec::new(),
             },
             geometry: Geometry::Rect { width: w, height: h },
             children: Vec::new(),
@@ -1105,6 +1138,7 @@ impl Engine {
                 blend_mode: 0,
                 fill_rule: 0,
                 corner_radius: 0.0,
+                effects: Vec::new(),
             },
             geometry: Geometry::Ellipse { radius_x: rx, radius_y: ry },
             children: Vec::new(),
@@ -1172,6 +1206,7 @@ impl Engine {
                 blend_mode: 0,
                 fill_rule: 0,
                 corner_radius: 0.0,
+                effects: Vec::new(),
             },
             geometry: Geometry::Path {
                 network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
@@ -1228,6 +1263,7 @@ impl Engine {
                 blend_mode: 0,
                 fill_rule: 0,
                 corner_radius: 0.0,
+                effects: Vec::new(),
             },
             geometry: Geometry::Path {
                 network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
@@ -1286,6 +1322,7 @@ impl Engine {
                 blend_mode: 0,
                 fill_rule: 0,
                 corner_radius: 0.0,
+                effects: Vec::new(),
             },
             geometry: Geometry::Path {
                 network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
@@ -1365,6 +1402,29 @@ impl Engine {
 
     pub fn get_node_is_mask(&self, id: u32) -> bool {
         self.scene.nodes.get(&id).map(|n| n.is_mask).unwrap_or(false)
+    }
+
+    /// Replace a node's effects from a JSON array of `Effect` (serde-tagged,
+    /// e.g. `[{"Blur":{"radius":6}}, {"DropShadow":{"dx":4,"dy":4,"blur":8,
+    /// "color":{"r":0,"g":0,"b":0,"a":0.5}}}]`).
+    pub fn set_node_effects(&mut self, id: u32, effects_json: &str) {
+        let effects: Vec<Effect> = match serde_json::from_str(effects_json) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            node.style.effects = effects;
+        } else {
+            return;
+        }
+        self.mark_dirty(id);
+    }
+
+    /// A node's effects as a serde-tagged JSON array.
+    pub fn get_node_effects(&self, id: u32) -> String {
+        self.scene.nodes.get(&id)
+            .map(|n| serde_json::to_string(&n.style.effects).unwrap_or_else(|_| "[]".into()))
+            .unwrap_or_else(|| "[]".into())
     }
 
     fn update_spatial_index(&mut self, id: u32) {
@@ -2910,6 +2970,7 @@ impl Engine {
     blend_mode: 0,
     fill_rule: 0,
     corner_radius: 0.0,
+    effects: Vec::new(),
 },
             geometry: Geometry::Rect { width: 0.0, height: 0.0 },
             children: Vec::new(),
@@ -3080,6 +3141,7 @@ impl Engine {
     blend_mode: 0,
     fill_rule: 0,
     corner_radius: 0.0,
+    effects: Vec::new(),
 },
             geometry: Geometry::Text { content: content.to_string(), font_size, font_family: String::new(), text_align: 0, line_height: 1.2 },
             children: Vec::new(),
@@ -3145,6 +3207,7 @@ impl Engine {
                 blend_mode: 0,
                 fill_rule: 0,
                 corner_radius: 0.0,
+                effects: Vec::new(),
             },
             geometry: Geometry::Image { width: w, height: h, image_id },
             children: Vec::new(),

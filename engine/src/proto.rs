@@ -81,6 +81,22 @@ pub struct ProtoTransform {
 }
 
 #[derive(Clone, PartialEq, Message)]
+pub struct ProtoEffect {
+    /// 0 = blur, 1 = drop shadow.
+    #[prost(uint32, tag = "1")]
+    pub kind: u32,
+    /// Blur sigma (kind 0) or shadow blur sigma (kind 1).
+    #[prost(float, tag = "2")]
+    pub radius: f32,
+    #[prost(float, tag = "3")]
+    pub dx: f32,
+    #[prost(float, tag = "4")]
+    pub dy: f32,
+    #[prost(message, optional, tag = "5")]
+    pub color: Option<ProtoColor>,
+}
+
+#[derive(Clone, PartialEq, Message)]
 pub struct ProtoStyle {
     #[prost(message, repeated, tag = "1")]
     pub fills: Vec<ProtoPaint>,
@@ -94,6 +110,8 @@ pub struct ProtoStyle {
     pub blend_mode: u32,
     #[prost(uint32, tag = "6")]
     pub fill_rule: u32,
+    #[prost(message, repeated, tag = "7")]
+    pub effects: Vec<ProtoEffect>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -417,6 +435,7 @@ impl From<&Style> for ProtoStyle {
             corner_radius: s.corner_radius,
             blend_mode: s.blend_mode as u32,
             fill_rule: s.fill_rule as u32,
+            effects: s.effects.iter().map(effect_to_proto).collect(),
         }
     }
 }
@@ -430,7 +449,30 @@ impl From<&ProtoStyle> for Style {
             blend_mode: s.blend_mode as u8,
             fill_rule: s.fill_rule as u8,
             corner_radius: s.corner_radius,
+            effects: s.effects.iter().filter_map(proto_to_effect).collect(),
         }
+    }
+}
+
+fn effect_to_proto(e: &crate::Effect) -> ProtoEffect {
+    match e {
+        crate::Effect::Blur { radius } => ProtoEffect {
+            kind: 0, radius: *radius, dx: 0.0, dy: 0.0, color: None,
+        },
+        crate::Effect::DropShadow { dx, dy, blur, color } => ProtoEffect {
+            kind: 1, radius: *blur, dx: *dx, dy: *dy, color: Some(color.into()),
+        },
+    }
+}
+
+fn proto_to_effect(e: &ProtoEffect) -> Option<crate::Effect> {
+    match e.kind {
+        0 => Some(crate::Effect::Blur { radius: e.radius }),
+        1 => Some(crate::Effect::DropShadow {
+            dx: e.dx, dy: e.dy, blur: e.radius,
+            color: e.color.as_ref().map(Color::from).unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+        }),
+        _ => None,
     }
 }
 
@@ -739,6 +781,7 @@ fn proto_to_node(pn: &ProtoNode) -> Node {
             blend_mode: 0,
             fill_rule: 0,
             corner_radius: 0.0,
+            effects: Vec::new(),
         }),
         geometry: pn.geometry.as_ref().map(proto_to_geometry).unwrap_or(
             Geometry::Rect { width: 100.0, height: 100.0 }
@@ -970,6 +1013,7 @@ mod tests {
             corner_radius: 0.0,
             blend_mode: 0,
             fill_rule: 0,
+            effects: Vec::new(),
         }
     }
 
@@ -1128,6 +1172,7 @@ mod tests {
                 corner_radius: 0.0,
                 blend_mode: 0,
                 fill_rule: 1,
+                effects: Vec::new(),
             },
             geometry: Geometry::Path {
                 subpaths: vec![

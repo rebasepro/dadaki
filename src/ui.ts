@@ -417,6 +417,9 @@ export class UIEngine {
         document.getElementById('export-svg')?.addEventListener('click', () => this.exportSVG());
         document.getElementById('export-png')?.addEventListener('click', () => this.exportPNG());
 
+        // Effects: "+" adds a drop shadow to the selected node.
+        document.getElementById('add-effect-btn')?.addEventListener('click', () => this.addEffectToSelection());
+
         // Import SVG
         document.getElementById('import-svg')?.addEventListener('click', () => {
             const input = document.createElement('input');
@@ -813,6 +816,9 @@ export class UIEngine {
 
         this.opacityInput.value = ((style.opacity !== undefined ? style.opacity : 1) * 100).toFixed(0);
         if (this.blendMode) this.blendMode.value = (style.blend_mode || 0).toString();
+
+        // Effects list (single-selection only)
+        this.renderEffectsList(selection.length === 1 ? selection[0] : null);
 
         // Corner radius: the field is always present (Figma-style); it is
         // disabled/dimmed when the selected geometry doesn't support it.
@@ -1536,6 +1542,100 @@ export class UIEngine {
         a.download = 'export.svg';
         a.click();
         URL.revokeObjectURL(url);
+    }
+
+    /** Read the selected node's effects (parsed JSON array). */
+    private getSelectedEffects(nodeId: number): any[] {
+        try { return JSON.parse(this.scene.getNodeEffects(nodeId)) || []; }
+        catch { return []; }
+    }
+
+    /** Add a default drop shadow to the currently-selected node. */
+    private addEffectToSelection() {
+        const sel = Array.from(this.scene.engine?.get_selection() ?? []);
+        if (sel.length !== 1) return;
+        const effects = this.getSelectedEffects(sel[0]);
+        effects.push({ DropShadow: { dx: 6, dy: 6, blur: 6, color: { r: 0, g: 0, b: 0, a: 0.4 } } });
+        this.scene.setNodeEffects(sel[0], JSON.stringify(effects));
+        this.renderEffectsList(sel[0]);
+    }
+
+    /** Rebuild the effects list UI for a node (or clear it when nodeId is null). */
+    private renderEffectsList(nodeId: number | null) {
+        const list = document.getElementById('effects-list');
+        if (!list) return;
+        list.innerHTML = '';
+        if (nodeId === null) return;
+        const effects = this.getSelectedEffects(nodeId);
+
+        const commit = () => {
+            this.scene.setNodeEffects(nodeId, JSON.stringify(effects));
+            this.scene.renderer?.invalidateRenderCaches();
+            this.scene.renderer?.requestRender();
+        };
+
+        effects.forEach((eff, idx) => {
+            const row = document.createElement('div');
+            row.className = 'effect-row';
+            row.style.cssText = 'display:flex; align-items:center; gap:4px; flex-wrap:wrap;';
+
+            const isShadow = 'DropShadow' in eff;
+            const typeSel = document.createElement('select');
+            typeSel.innerHTML = `<option value="blur">Blur</option><option value="shadow">Drop Shadow</option>`;
+            typeSel.value = isShadow ? 'shadow' : 'blur';
+            typeSel.style.flex = '1';
+            typeSel.addEventListener('change', () => {
+                effects[idx] = typeSel.value === 'shadow'
+                    ? { DropShadow: { dx: 6, dy: 6, blur: 6, color: { r: 0, g: 0, b: 0, a: 0.4 } } }
+                    : { Blur: { radius: 6 } };
+                commit();
+                this.renderEffectsList(nodeId);
+            });
+            row.appendChild(typeSel);
+
+            const numInput = (val: number, on: (v: number) => void, title: string) => {
+                const i = document.createElement('input');
+                i.type = 'number'; i.value = String(val); i.title = title;
+                i.style.cssText = 'width:44px;';
+                i.addEventListener('change', () => { on(parseFloat(i.value) || 0); commit(); });
+                return i;
+            };
+
+            if (isShadow) {
+                const d = eff.DropShadow;
+                row.appendChild(numInput(d.dx, v => d.dx = v, 'Offset X'));
+                row.appendChild(numInput(d.dy, v => d.dy = v, 'Offset Y'));
+                row.appendChild(numInput(d.blur, v => d.blur = v, 'Blur'));
+                const color = document.createElement('input');
+                color.type = 'color';
+                color.value = rgbToHex({ r: d.color.r, g: d.color.g, b: d.color.b });
+                color.title = 'Shadow color';
+                color.style.cssText = 'width:28px; padding:0;';
+                color.addEventListener('change', () => {
+                    const c = hexToRgb(color.value);
+                    d.color.r = c.r; d.color.g = c.g; d.color.b = c.b;
+                    commit();
+                });
+                row.appendChild(color);
+                row.appendChild(numInput(d.color.a, v => d.color.a = Math.max(0, Math.min(1, v)), 'Shadow opacity (0–1)'));
+            } else {
+                const b = eff.Blur;
+                row.appendChild(numInput(b.radius, v => b.radius = v, 'Blur radius'));
+            }
+
+            const del = document.createElement('button');
+            del.textContent = '✕';
+            del.title = 'Remove effect';
+            del.style.cssText = 'margin-left:auto;';
+            del.addEventListener('click', () => {
+                effects.splice(idx, 1);
+                commit();
+                this.renderEffectsList(nodeId);
+            });
+            row.appendChild(del);
+
+            list.appendChild(row);
+        });
     }
 
     /** Export the document as a PNG raster (2× by default) and download it. */
@@ -2300,6 +2400,11 @@ export class UIEngine {
                 if (elName) {
                     try { this.scene.engine!.set_node_name(nodeId, elName); } catch { /* noop */ }
                 }
+                // Effects: resolve a filter="url(#id)" into blur/drop-shadow.
+                const fx = this.parseFilterEffects(el, doc);
+                if (fx && fx.length) {
+                    try { this.scene.engine!.set_node_effects(nodeId, JSON.stringify(fx)); } catch { /* noop */ }
+                }
                 createdIds.push(nodeId);
             }
         };
@@ -2325,6 +2430,48 @@ export class UIEngine {
         this.scene.invalidateCache();
         this.updateLayerList();
         this.syncWithSelection();
+    }
+
+    /**
+     * Resolve an element's `filter="url(#id)"` into an effects array
+     * (feGaussianBlur → Blur, feDropShadow → DropShadow). If the filter
+     * contains any other primitive, the whole filter is skipped (a partial
+     * approximation would look worse than none).
+     */
+    private parseFilterEffects(el: Element, doc: Document): any[] | null {
+        const ref = el.getAttribute('filter');
+        const m = ref && ref.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
+        if (!m) return null;
+        const filterEl = doc.getElementById(m[1]);
+        if (!filterEl || filterEl.tagName.toLowerCase() !== 'filter') return null;
+
+        const effects: any[] = [];
+        const firstNum = (s: string | null, def = 0): number => {
+            if (!s) return def;
+            const v = parseFloat(s.trim().split(/[\s,]+/)[0]);
+            return isNaN(v) ? def : v;
+        };
+        for (const prim of Array.from(filterEl.children)) {
+            const t = prim.tagName.toLowerCase();
+            if (t === 'fegaussianblur') {
+                effects.push({ Blur: { radius: firstNum(prim.getAttribute('stdDeviation')) } });
+            } else if (t === 'fedropshadow') {
+                const flood = prim.getAttribute('flood-color') || '#000000';
+                const fo = firstNum(prim.getAttribute('flood-opacity'), 1);
+                const c = flood.startsWith('#') ? hexToRgb(flood) : { r: 0, g: 0, b: 0 };
+                effects.push({ DropShadow: {
+                    dx: firstNum(prim.getAttribute('dx')),
+                    dy: firstNum(prim.getAttribute('dy')),
+                    blur: firstNum(prim.getAttribute('stdDeviation')),
+                    color: { r: c.r, g: c.g, b: c.b, a: fo },
+                } });
+            } else {
+                // Unsupported primitive — don't half-apply the filter.
+                console.warn(`Skipping <filter> with unsupported primitive <${t}>`);
+                return null;
+            }
+        }
+        return effects.length ? effects : null;
     }
 
     /**

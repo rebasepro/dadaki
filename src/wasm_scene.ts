@@ -148,6 +148,18 @@ export class WasmScene {
         return this.engine!.get_node_is_mask(id);
     }
 
+    /** Replace a node's effects (JSON array of serde-tagged Effect). One undo step. */
+    setNodeEffects(id: number, effectsJson: string) {
+        this.saveHistory();
+        this.engine!.set_node_effects(id, effectsJson);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    getNodeEffects(id: number): string {
+        return this.engine!.get_node_effects(id);
+    }
+
     /** Register encoded image bytes and place an image node centered at (cx,cy)
      *  with the given display size. One undo step. Returns the new node id. */
     placeImage(bytes: Uint8Array, mime: string, cx: number, cy: number, w: number, h: number): number {

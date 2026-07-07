@@ -99,7 +99,14 @@ export interface NodeStyle {
     fill_opacity?: number;
     fills: Paint[];
     strokes: Stroke[];
+    /** Post-processing effects (serde-tagged): {Blur:{radius}} | {DropShadow:{dx,dy,blur,color}}. */
+    effects?: EffectData[];
 }
+
+/** A serde-tagged Effect (matches the engine's `Effect` enum JSON). */
+export type EffectData =
+    | { Blur: { radius: number } }
+    | { DropShadow: { dx: number; dy: number; blur: number; color: { r: number; g: number; b: number; a: number } } };
 
 /** A cubic Bézier path point with incoming/outgoing control points. */
 export interface PathPoint {

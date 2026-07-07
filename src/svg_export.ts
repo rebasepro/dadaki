@@ -68,6 +68,27 @@ export function buildSVGFromData(input: SVGExportInput): string {
     const maskDefs: string[] = [];
     let maskIdCounter = 0;
 
+    // Collect <filter> defs (blur / drop-shadow effects)
+    const filterDefs: string[] = [];
+    let filterIdCounter = 0;
+
+    /** Build a <filter> def for a node's effects, returning its id (or null). */
+    const buildFilterDef = (effects: NonNullable<NodeStyle['effects']>): string | null => {
+        if (!effects || effects.length === 0) return null;
+        const prims = effects.map(eff => {
+            if ('Blur' in eff) {
+                return `<feGaussianBlur stdDeviation="${eff.Blur.radius}" />`;
+            }
+            const d = eff.DropShadow;
+            const flood = `#${[d.color.r, d.color.g, d.color.b].map(c => Math.round(c * 255).toString(16).padStart(2, '0')).join('')}`;
+            return `<feDropShadow dx="${d.dx}" dy="${d.dy}" stdDeviation="${d.blur}" flood-color="${flood}" flood-opacity="${d.color.a}" />`;
+        }).join('');
+        const id = `filter${filterIdCounter++}`;
+        // Generous region so shadows/blur aren't clipped.
+        filterDefs.push(`<filter id="${id}" x="-50%" y="-50%" width="200%" height="200%">${prims}</filter>`);
+        return id;
+    };
+
     /** Convert a Paint to an SVG fill/stroke value. For gradients, adds a def and returns url(#id). */
     const paintToSvgValue = (paint: Paint | null): string => {
         if (!paint) return 'none';
@@ -177,6 +198,10 @@ export function buildSVGFromData(input: SVGExportInput): string {
         // Build <g> attributes: transform + visibility
         let gAttrs = `transform="${matrix}"`;
         if (!node.visible) gAttrs += ' display="none"';
+
+        // Effects → a <filter> referenced on the node's group wrapper.
+        const filterId = buildFilterDef(node.style?.effects ?? []);
+        if (filterId) gAttrs += ` filter="url(#${filterId})"`;
 
         let nodeSvg = `<g ${gAttrs}>`;
 
@@ -300,9 +325,9 @@ export function buildSVGFromData(input: SVGExportInput): string {
         }
     }
 
-    // Insert <defs> (gradients + masks) if any were collected during rendering
-    if (gradientDefs.length > 0 || maskDefs.length > 0) {
-        const defsBlock = `<defs>${gradientDefs.join('')}${maskDefs.join('')}</defs>`;
+    // Insert <defs> (gradients + masks + filters) if any were collected
+    if (gradientDefs.length > 0 || maskDefs.length > 0 || filterDefs.length > 0) {
+        const defsBlock = `<defs>${gradientDefs.join('')}${maskDefs.join('')}${filterDefs.join('')}</defs>`;
         // Insert after the opening <svg ...> tag
         const insertIdx = svg.indexOf('>') + 1;
         svg = svg.slice(0, insertIdx) + defsBlock + svg.slice(insertIdx);
