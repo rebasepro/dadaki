@@ -2963,7 +2963,9 @@ export class UIEngine {
         };
 
         const processElement = (el: Element, parentMat: number[], inherited: InheritedStyles, useRefStack: Set<string> = new Set(), suppressMask = false) => {
-            const tag = el.tagName.toLowerCase();
+            // localName strips any namespace prefix, so `<svg:rect>` (explicit
+            // svg namespace) dispatches the same as `<rect>`.
+            const tag = (el.localName || el.tagName).toLowerCase();
 
             // Skip metadata, defs, style, desc, title, clipPath
             // Note: <symbol> is NOT skipped — it is processed when referenced by <use>

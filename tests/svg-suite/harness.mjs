@@ -66,14 +66,27 @@ console.log(`Discovered ${tests.length} test(s).`);
 
 // ── Parse the SVG viewport (used for doc size + render scale) ───────────────
 function parseViewport(svgText) {
+  // Only read width/height off the <svg> opening tag. A leading \s guard keeps
+  // `stroke-width=` (and child-element width/height) from matching.
+  const svgTag = (svgText.match(/<svg\b[^>]*>/i) || [''])[0];
+  const w = parseFloat((svgTag.match(/(?:^|\s)width\s*=\s*["']([\d.]+)/) || [])[1]);
+  const h = parseFloat((svgTag.match(/(?:^|\s)height\s*=\s*["']([\d.]+)/) || [])[1]);
   const vb = svgText.match(/viewBox\s*=\s*["']([^"']+)["']/);
   if (vb) {
     const p = vb[1].trim().split(/[\s,]+/).map(Number);
-    if (p.length >= 4 && p[2] > 0 && p[3] > 0) return { w: p[2], h: p[3], hasViewBox: true };
+    if (p.length >= 4 && p[2] > 0 && p[3] > 0) {
+      // When explicit width/height define a DIFFERENT aspect ratio than the
+      // viewBox, the SVG viewport is width×height and the viewBox is fitted
+      // into it via preserveAspectRatio — resvg renders at the viewport size.
+      // Keep width/height in that case so the importer applies the fit; the
+      // common (matching-aspect) case keeps geometry in viewBox units.
+      const hasWH = w > 0 && h > 0;
+      const aspectDiffers = hasWH && Math.abs((w / h) - (p[2] / p[3])) > 0.01;
+      if (aspectDiffers) return { w, h, hasViewBox: true, keepWH: true };
+      return { w: p[2], h: p[3], hasViewBox: true, keepWH: false };
+    }
   }
-  const w = parseFloat((svgText.match(/\bwidth\s*=\s*["']([\d.]+)/) || [])[1]);
-  const h = parseFloat((svgText.match(/\bheight\s*=\s*["']([\d.]+)/) || [])[1]);
-  if (w > 0 && h > 0) return { w, h, hasViewBox: false };
+  if (w > 0 && h > 0) return { w, h, hasViewBox: false, keepWH: false };
   return null;
 }
 
@@ -114,7 +127,7 @@ async function runInPage(page, svgText, refB64, vp, wantDiff) {
       // When a viewBox defines the coordinate system, drop width/height so the
       // importer keeps geometry in viewBox units (matching resvg's render).
       let svg = svgText;
-      if (vp.hasViewBox) {
+      if (vp.hasViewBox && !vp.keepWH) {
         svg = svg.replace(/<svg([^>]*)>/, (m, a) =>
           '<svg' + a.replace(/\s(width|height)\s*=\s*["'][^"']*["']/g, '') + '>');
       }
