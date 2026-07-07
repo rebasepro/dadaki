@@ -264,9 +264,14 @@ export function buildSVGFromData(input: SVGExportInput): string {
         let gAttrs = `transform="${matrix}"`;
         if (!node.visible) gAttrs += ' display="none"';
 
-        // Effects → a <filter> referenced on the node's group wrapper.
+        // Effects → a <filter>. Our importer only reads `filter` off leaf
+        // shapes (effects are a leaf-node concept), so for a shape we put it on
+        // the shape element; only groups carry it on the <g> wrapper. Putting a
+        // group filter on the <g> won't round-trip (group effects aren't
+        // supported on import), but leaf effects now do.
         const filterId = buildFilterDef(node.style?.effects ?? []);
-        if (filterId) gAttrs += ` filter="url(#${filterId})"`;
+        const filterAttr = filterId ? ` filter="url(#${filterId})"` : '';
+        if (filterId && node.node_type === 'Group') gAttrs += filterAttr;
 
         let nodeSvg = `<g ${gAttrs}>`;
 
@@ -290,7 +295,8 @@ export function buildSVGFromData(input: SVGExportInput): string {
             // Children are a sibling list — same mask-span semantics as roots.
             nodeSvg += renderSiblingsWithMasks(node.children || []);
         } else {
-            const attrs = buildStyleAttrs(node.style);
+            // Leaf shape: carry any effect filter on the shape element itself.
+            const attrs = buildStyleAttrs(node.style) + filterAttr;
             const geo = node.geometry;
             if (geo.Rect) {
                 const cr = node.style.corner_radius;
@@ -300,7 +306,7 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 const href = imageDataUris?.[geo.Image.image_id] ?? '';
                 const op = node.style.opacity ?? 1.0;
                 const opAttr = op < 1 ? ` opacity="${op}"` : '';
-                nodeSvg += `<image x="0" y="0" width="${geo.Image.width}" height="${geo.Image.height}" href="${href}"${opAttr} preserveAspectRatio="none" />`;
+                nodeSvg += `<image x="0" y="0" width="${geo.Image.width}" height="${geo.Image.height}" href="${href}"${opAttr}${filterAttr} preserveAspectRatio="none" />`;
             } else if (geo.Ellipse) {
                 nodeSvg += `<ellipse cx="0" cy="0" rx="${geo.Ellipse.radius_x}" ry="${geo.Ellipse.radius_y}" ${attrs} />`;
             } else if (geo.Path) {

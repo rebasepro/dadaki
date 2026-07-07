@@ -283,10 +283,11 @@ describe('SVG Export — Masks', () => {
         expect(shadow).toBeTruthy();
         expect(shadow!.getAttribute('dx')).toBe('5');
         expect(shadow!.getAttribute('stdDeviation')).toBe('4');
-        // The node's group references the filter.
+        // A leaf shape carries the filter on the shape element itself (so the
+        // importer, which reads `filter` off leaf shapes, round-trips it).
         const fid = filter!.getAttribute('id')!;
-        const g = Array.from(doc.querySelectorAll('g')).find(x => x.getAttribute('filter') === `url(#${fid})`);
-        expect(g, 'node group references the filter').toBeTruthy();
+        const ref = Array.from(doc.querySelectorAll('rect')).find(x => x.getAttribute('filter') === `url(#${fid})`);
+        expect(ref, 'leaf shape references the filter').toBeTruthy();
     });
 
     it('a node with a color-matrix effect exports feColorMatrix', () => {
