@@ -826,10 +826,14 @@ impl Engine {
         self.render_buffer.extend_from_slice(&[0u8; 4]);
 
         let mut total_nodes = 0;
-        // Root nodes are a sibling list like any group's children: masks work
-        // there identically (a root-level mask masks the roots painted above it).
+        // Masks are GROUP-SCOPED: a mask's reach is bounded by its parent group
+        // (the UI auto-creates that group on "Use as Mask"). Root nodes render
+        // plainly — an is_mask flag on a root node is inert by design, so a
+        // stray flag can never clip the whole document.
         let root_nodes = self.scene.root_nodes.clone();
-        self.write_siblings_with_masks(&root_nodes, &visible_set, &mut total_nodes);
+        for root_id in root_nodes {
+            self.write_node_recursive(root_id, &visible_set, &mut total_nodes);
+        }
 
         // Fill in the total node count (number of "commands")
         let count_bytes = (total_nodes as u32).to_le_bytes();
@@ -846,12 +850,12 @@ impl Engine {
         *total_nodes += 1;
     }
 
-    /// Emit a sibling list (root nodes or a group's children), bracketing any
-    /// mask spans. A visible sibling with is_mask=true masks the following
-    /// siblings (up to the next mask or the end of the list), Figma-style:
-    /// [mask, content...]. A mask with nothing drawable after it renders as a
-    /// normal node so the shape isn't silently lost. This is THE mask semantics
-    /// — identical at every nesting level.
+    /// Emit a group's children, bracketing any mask spans. A visible child with
+    /// is_mask=true masks the following siblings (up to the next mask or the
+    /// end of the group), Figma-style: [mask, content...]. A mask with nothing
+    /// drawable after it renders as a normal node so the shape isn't silently
+    /// lost. Masks are group-scoped: this is only invoked for group children,
+    /// so a mask can never reach outside its parent group.
     fn write_siblings_with_masks(
         &mut self,
         siblings: &[u32],
@@ -4457,9 +4461,11 @@ mod tests {
     }
 
     #[test]
-    fn test_root_level_mask_emission() {
-        // Masks are not group-scoped: a root-level mask must bracket the root
-        // siblings painted above it, exactly like inside a group.
+    fn test_mask_is_group_scoped_root_flag_is_inert() {
+        // Masks are group-scoped: an is_mask flag on a ROOT node must not
+        // bracket anything (otherwise a single mask could clip the entire
+        // document). The node renders as a plain shape; the UI auto-creates a
+        // wrapping group when the user applies a mask.
         let mut engine = Engine::new();
         let mask = engine.add_ellipse(300.0, 300.0, 100.0, 100.0); // bottom root
         let content = engine.add_rect(200.0, 200.0, 200.0, 200.0);  // above it
@@ -4476,8 +4482,7 @@ mod tests {
             cmds.push(rd(off + 4));
             off += 4 + len;
         }
-        // BEGIN_MASK(4), DRAW(mask), BEGIN_CONTENT(5), DRAW(content), END_MASK(6)
-        assert_eq!(cmds, vec![4, 2, 5, 2, 6], "root-level mask bracket, got {:?}", cmds);
+        assert_eq!(cmds, vec![2, 2], "root nodes draw plainly, no mask bracket; got {:?}", cmds);
     }
 
     #[test]

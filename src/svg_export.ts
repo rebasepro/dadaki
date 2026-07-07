@@ -187,12 +187,12 @@ export function buildSVGFromData(input: SVGExportInput): string {
     };
 
     /**
-     * Render a sibling list (root nodes or a group's children), bracketing any
-     * mask spans. A visible sibling with is_mask=true masks the siblings above
-     * it (up to the next mask or the end of the list) — exported as a <mask>
-     * def + a <g mask=...> wrapper. mask-type="alpha" matches our alpha-mask
-     * semantics. Identical at every nesting level (mutually recursive with
-     * renderNodeToSVG).
+     * Render a group's children, bracketing any mask spans. A visible child
+     * with is_mask=true masks the siblings above it (up to the next mask or
+     * the end of the group) — exported as a <mask> def + a <g mask=...>
+     * wrapper. mask-type="alpha" matches our alpha-mask semantics. Masks are
+     * group-scoped: only invoked for group children (mutually recursive with
+     * renderNodeToSVG), matching the renderer.
      */
     const renderSiblingsWithMasks = (siblings: number[]): string => {
         let out = '';
@@ -325,8 +325,10 @@ export function buildSVGFromData(input: SVGExportInput): string {
         return nodeSvg;
     };
 
-    // Root nodes are a sibling list — root-level masks bracket the same way.
-    svg += renderSiblingsWithMasks(rootNodeIds);
+    // Masks are group-scoped — root nodes render plainly (matches the renderer).
+    for (const rootId of rootNodeIds) {
+        svg += renderNodeToSVG(rootId);
+    }
 
     // Append live-paint face fills after the scene tree
     if (filledFaces && filledFaces.length > 0) {

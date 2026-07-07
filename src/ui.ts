@@ -1221,8 +1221,9 @@ export class UIEngine {
         // ABOVE the mask row and get a wrapping bracket.
         const maskRoles = this._computeMaskRoles();
 
-        // Recursive helper to render a node and its children
-        const renderNode = (id: number, depth: number) => {
+        // Recursive helper to render a node and its children into a container
+        // (the flat list, or a .layer-mask-span wrapper for masked spans).
+        const renderNode = (id: number, depth: number, container: HTMLElement) => {
             const nodeTypeNum = this.scene.getNodeType(id);
             if (nodeTypeNum === undefined) return;
 
@@ -1396,21 +1397,39 @@ export class UIEngine {
                 this._performLayerDrop(dragIds, id, zone);
             });
 
-            this.layerList.appendChild(item);
+            container.appendChild(item);
 
             // Render children if group is expanded
             if (hasChildren && !isCollapsed) {
-                // Render in reverse for top-to-bottom visual order
-                for (let i = children.length - 1; i >= 0; i--) {
-                    renderNode(children[i], depth + 1);
+                renderSiblings(Array.from(children!), depth + 1, container);
+            }
+        };
+
+        /**
+         * Render a sibling list top-to-bottom (reverse of paint order),
+         * wrapping each mask span — the masked rows plus the mask row that
+         * bounds them — in a single `.layer-mask-span` container so the whole
+         * span reads as ONE bracketed unit (Figma-style), not per-row bars.
+         */
+        const renderSiblings = (siblingsPaintOrder: number[], depth: number, container: HTMLElement) => {
+            let span: HTMLElement | null = null;
+            for (let i = siblingsPaintOrder.length - 1; i >= 0; i--) {
+                const sid = siblingsPaintOrder[i];
+                const role = maskRoles.get(sid);
+                if (role === 'masked' && !span) {
+                    span = document.createElement('div');
+                    span.className = 'layer-mask-span';
+                    container.appendChild(span);
+                }
+                renderNode(sid, depth, span ?? container);
+                if (role === 'mask' && span) {
+                    span = null; // the mask row closes its span
                 }
             }
         };
 
-        // Iterate through root nodes in reverse order for layer list (top-to-bottom)
-        for (let i = rootNodes.length - 1; i >= 0; i--) {
-            renderNode(rootNodes[i], 0);
-        }
+        // Root nodes, top-to-bottom (roots are not a mask scope).
+        renderSiblings(Array.from(rootNodes), 0, this.layerList);
     }
 
     /** Start inline renaming of a layer item. */
@@ -1464,17 +1483,17 @@ export class UIEngine {
         }
     }
 
-    /** Compute each node's mask role for the layers panel. Within any sibling
-     *  list (root nodes or a group's children), a mask marks the non-mask
-     *  siblings that follow it (higher paint index, until the next mask) as
-     *  "masked"; the mask itself is "mask". Mirrors the engine's
-     *  write_siblings_with_masks — identical at every nesting level. */
+    /** Compute each node's mask role for the layers panel. Masks are
+     *  group-scoped (mirrors the renderer): within a group's children, a mask
+     *  marks the non-mask siblings that follow it (higher paint index, until
+     *  the next mask) as "masked"; the mask itself is "mask". The root list is
+     *  not a mask scope — a root-level is_mask flag is inert. */
     private _computeMaskRoles(): Map<number, 'mask' | 'masked'> {
         const roles = new Map<number, 'mask' | 'masked'>();
         const isMask = (id: number): boolean => {
             try { return this.scene.getNodeIsMask(id); } catch { return false; }
         };
-        const visitList = (siblings: number[]) => {
+        const visitChildren = (siblings: number[]) => {
             let active = false;
             for (let i = 0; i < siblings.length; i++) {
                 const cid = siblings[i];
@@ -1489,10 +1508,14 @@ export class UIEngine {
             }
             for (const cid of siblings) {
                 const children = Array.from(this.scene.getNodeChildren(cid));
-                if (children.length) visitList(children);
+                if (children.length) visitChildren(children);
             }
         };
-        visitList(Array.from(this.scene.getRootNodes()));
+        // Only group children form mask scopes; roots just recurse into groups.
+        for (const rid of Array.from(this.scene.getRootNodes())) {
+            const children = Array.from(this.scene.getNodeChildren(rid));
+            if (children.length) visitChildren(children);
+        }
         return roles;
     }
 

@@ -1094,14 +1094,31 @@ body.scrubbing * {
     opacity: 0.9;
 }
 
-/* Figma-style mask wrapping: the mask row and the sibling rows it masks (which
-   render above it) share a left bracket bar + a faint tint, so the mask visibly
-   "wraps" its shapes. The mask node is the base of the bracket. */
-.layer-item.layer-masked > .layer-item-row,
-.layer-item.layer-mask-node > .layer-item-row {
-    box-shadow: inset 3px 0 0 var(--accent, #6c8cff);
-    background: color-mix(in srgb, var(--accent, #6c8cff) 9%, transparent);
+/* Figma-style mask wrapping: a whole mask span — the masked rows plus the
+   mask row that bounds them at the bottom — is wrapped in ONE container with
+   a single continuous bracket and tint, so the mask visibly encloses its
+   shapes as a unit. */
+.layer-mask-span {
+    position: relative;
+    margin: 1px 0;
+    padding-left: 3px;
+    border-left: 2px solid var(--accent, #6c8cff);
+    border-radius: 8px 0 0 8px;
+    background: color-mix(in srgb, var(--accent, #6c8cff) 6%, transparent);
 }
+/* Bracket ticks at the top and bottom of the span (⌐ and ∟). */
+.layer-mask-span::before,
+.layer-mask-span::after {
+    content: '';
+    position: absolute;
+    left: -2px;
+    width: 8px;
+    height: 2px;
+    background: var(--accent, #6c8cff);
+}
+.layer-mask-span::before { top: 0; border-radius: 0 2px 2px 0; }
+.layer-mask-span::after  { bottom: 0; border-radius: 0 2px 2px 0; }
+
 .layer-item.layer-masked .layer-name {
     font-style: italic;
     opacity: 0.9;

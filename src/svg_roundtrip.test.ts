@@ -214,11 +214,12 @@ describe('SVG Export — Masks', () => {
         expect(maskedG!.querySelector('ellipse')).toBeFalsy();
     });
 
-    it('a ROOT-level mask brackets the root siblings above it (no group required)', () => {
+    it('masks are group-scoped: a root-level is_mask flag exports plainly', () => {
         const input: SVGExportInput = {
             docWidth: 800, docHeight: 600,
             nodes: {
-                // roots: [mask (bottom), content (above)] — no wrapping group
+                // roots: [flagged node (bottom), content (above)] — no group, so
+                // the flag is inert and both shapes export as normal content.
                 1: makeNode({ node_type: 'Shape', is_mask: true,
                     geometry: { Ellipse: { radius_x: 50, radius_y: 50 } } }),
                 2: makeNode({ node_type: 'Shape',
@@ -228,13 +229,9 @@ describe('SVG Export — Masks', () => {
             localTransforms: { 1: IDENTITY, 2: IDENTITY },
         };
         const doc = parseSVG(buildSVGFromData(input));
-        const mask = queryTag(doc, 'mask');
-        expect(mask, 'root-level mask must emit a <mask> def').toBeTruthy();
-        const maskId = mask!.getAttribute('id')!;
-        const maskedG = Array.from(doc.querySelectorAll('g')).find(
-            g => g.getAttribute('mask') === `url(#${maskId})`);
-        expect(maskedG, 'root content wrapped in a masked group').toBeTruthy();
-        expect(maskedG!.querySelector('rect')).toBeTruthy();
+        expect(queryTag(doc, 'mask'), 'no <mask> def outside a group').toBeFalsy();
+        expect(queryTag(doc, 'ellipse'), 'flagged shape still exports').toBeTruthy();
+        expect(queryTag(doc, 'rect'), 'content untouched').toBeTruthy();
     });
 
     it('a node with a drop-shadow effect exports a <filter> with feDropShadow', () => {

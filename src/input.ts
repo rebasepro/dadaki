@@ -1588,9 +1588,14 @@ export class InputManager {
 
     /**
      * Toggle "use as mask" on the selection (Figma-style alpha mask).
-     *  - Any selected node already a mask → release all.
-     *  - A single node → mark it as a mask for the siblings above it.
-     *  - Multiple nodes → group them and make the bottom-most the mask.
+     * Masks are group-scoped — the parent group bounds what gets masked — and
+     * the user never builds that group by hand:
+     *  - Any selected node already a mask → release it.
+     *  - Multiple nodes → auto-group them; the bottom-most becomes the mask.
+     *  - Single node already inside a group → mark it (scoped to that group).
+     *  - Single node at root → auto-group it with the sibling directly above
+     *    it (the thing it should mask) and mark it. Nothing else in the
+     *    document is touched.
      */
     toggleMaskSelection() {
         const selection = Array.from(this.scene.engine!.get_selection());
@@ -1601,16 +1606,36 @@ export class InputManager {
             this.scene.transaction(() => {
                 for (const id of selection) this.scene.setNodeIsMask(id, false);
             });
-        } else if (selection.length === 1) {
-            this.scene.setNodeIsMask(selection[0], true);
-        } else {
+        } else if (selection.length > 1) {
             this.scene.transaction(() => {
                 const groupId = this.scene.groupNodes(selection);
+                try { this.scene.engine!.set_node_name(groupId, 'Mask group'); } catch { /* noop */ }
                 const kids = Array.from(this.scene.getNodeChildren(groupId));
                 if (kids.length > 0) this.scene.setNodeIsMask(kids[0], true);
                 this.scene.engine!.clear_selection();
                 this.scene.selectNode(groupId, false);
             });
+        } else {
+            const id = selection[0];
+            const parent = this.scene.getNodeParent(id);
+            if (parent !== -1) {
+                // Already bounded by a group — just flag it.
+                this.scene.setNodeIsMask(id, true);
+            } else {
+                // Root node: wrap it (plus the sibling directly above, if any)
+                // in a fresh mask group so the mask has a bounded scope.
+                this.scene.transaction(() => {
+                    const roots = Array.from(this.scene.getRootNodes());
+                    const idx = roots.indexOf(id);
+                    const above = idx >= 0 && idx + 1 < roots.length ? roots[idx + 1] : null;
+                    const members = above !== null ? [id, above] : [id];
+                    const groupId = this.scene.groupNodes(members);
+                    try { this.scene.engine!.set_node_name(groupId, 'Mask group'); } catch { /* noop */ }
+                    this.scene.setNodeIsMask(id, true);
+                    this.scene.engine!.clear_selection();
+                    this.scene.selectNode(id, false);
+                });
+            }
         }
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
