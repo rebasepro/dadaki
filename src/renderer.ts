@@ -1192,7 +1192,7 @@ export class Renderer {
         const selection = this.scene.getSelection();
         if (selection.length === 0) return;
 
-        const live = this.inputManager?.liveResizeBounds;
+        const live = this.inputManager?.liveResizeBounds ?? this.inputManager?.liveFrame;
 
         canvas.save();
         canvas.scale(dpr, dpr);
@@ -1245,37 +1245,51 @@ export class Renderer {
             }
         }
 
-        // Use live bounds if dragging a resize handle for zero-lag feedback
-        let hMinX = totalMinX, hMinY = totalMinY, hMaxX = totalMaxX, hMaxY = totalMaxY;
-        if (live) {
-            hMinX = live.x;
-            hMinY = live.y;
-            hMaxX = live.x + live.w;
-            hMaxY = live.y + live.h;
+        // Selection frame: oriented box for a single node (rotates/skews with
+        // the shape), axis-aligned union for multi-selection. During drags the
+        // input manager returns the live frame for zero-lag feedback.
+        let frame = this.inputManager?.getSelectionFrame() ?? null;
+        if (!frame && totalMaxX > totalMinX && totalMaxY > totalMinY) {
+            frame = {
+                w: totalMaxX - totalMinX, h: totalMaxY - totalMinY,
+                m: { a: 1, b: 0, c: 0, d: 1, e: totalMinX, f: totalMinY },
+            };
         }
 
-        // Draw global bounding box and handles (skip in node-editing mode — anchors replace resize handles)
+        // Draw frame box and handles (skip in node-editing mode — anchors replace resize handles)
         const isNodeEditing = this.inputManager?.editingNodeId != null;
-        if (hMaxX > hMinX && hMaxY > hMinY && !isNodeEditing) {
+        if (frame && frame.w > 0 && frame.h > 0 && !isNodeEditing) {
+            const m = frame.m;
+            const pt = (fx: number, fy: number) => ({ x: m.a * fx + m.c * fy + m.e, y: m.b * fx + m.d * fy + m.f });
+            const corners = [pt(0, 0), pt(frame.w, 0), pt(frame.w, frame.h), pt(0, frame.h)];
+
             if (selection.length > 1 || live) {
-                canvas.drawRect(this.ck.LTRBRect(hMinX, hMinY, hMaxX, hMaxY), op.selOutline);
+                const box = new this.ck.Path();
+                box.moveTo(corners[0].x, corners[0].y);
+                for (let i = 1; i < 4; i++) box.lineTo(corners[i].x, corners[i].y);
+                box.close();
+                canvas.drawPath(box, op.selOutline);
+                box.delete();
             }
 
             const hSize = 4 / this.zoom;
-            const midX = (hMinX + hMaxX) / 2;
-            const midY = (hMinY + hMaxY) / 2;
-
+            const midW = frame.w / 2, midH = frame.h / 2;
             const handlePositions = [
-                [hMinX, hMinY], [midX, hMinY], [hMaxX, hMinY],
-                [hMinX, midY],                 [hMaxX, midY],
-                [hMinX, hMaxY], [midX, hMaxY], [hMaxX, hMaxY],
+                pt(0, 0), pt(midW, 0), pt(frame.w, 0),
+                pt(0, midH),           pt(frame.w, midH),
+                pt(0, frame.h), pt(midW, frame.h), pt(frame.w, frame.h),
             ];
+            // Handle squares tilt with the frame
+            const angleDeg = Math.atan2(m.b, m.a) * (180 / Math.PI);
 
             op.selHandleStroke.setStrokeWidth(1.0 / this.zoom);
 
-            for (const [hx, hy] of handlePositions) {
+            for (const { x: hx, y: hy } of handlePositions) {
+                canvas.save();
+                canvas.rotate(angleDeg, hx, hy);
                 canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), op.selHandleFill);
                 canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), op.selHandleStroke);
+                canvas.restore();
             }
         }
 

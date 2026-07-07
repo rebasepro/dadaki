@@ -15,6 +15,15 @@ import {
     type SegmentHitResult,
 } from './path_ops';
 
+/** 2D affine matrix in DOMMatrix convention: x' = a·x + c·y + e, y' = b·x + d·y + f. */
+interface Mat { a: number; b: number; c: number; d: number; e: number; f: number; }
+
+/** Oriented selection frame: the rect (0,0)–(w,h) in frame space, mapped to
+ *  world by `m`. For a single node this is its local bounds under its world
+ *  transform (so it rotates/skews with the shape); for multi-selection it is
+ *  the axis-aligned union (m = pure translation). */
+export interface SelectionFrame { w: number; h: number; m: Mat }
+
 /** Resolved scissors cut target: either an existing anchor or a point on a
  *  segment, on a specific path node. Produced by {@link InputManager.findScissorTarget}. */
 interface ScissorTarget {
@@ -114,9 +123,31 @@ export class InputManager {
     resizeSnapshot: Uint8Array | null = null;
     /** Current calculated bounds during a resize drag, read by Renderer for smooth sticky handles. */
     liveResizeBounds: { x: number; y: number; w: number; h: number } | null = null;
+    /** Non-null while resizing a rotated/skewed frame — switches to the oriented pipeline. */
+    resizeFrame: SelectionFrame | null = null;
+    /** Local bounds of the single oriented-resize target, captured at drag start. */
+    private resizeLocalBounds: { x: number; y: number; w: number; h: number } | null = null;
+    /** Live oriented frame during an oriented resize drag, read by the Renderer. */
+    liveFrame: SelectionFrame | null = null;
 
     // --- Corner radius handle state ---
     cornerRadiusDragging: { nodeId: number; startRadius: number; startPos: { x: number; y: number } } | null = null;
+
+    // --- Rotate handle state ---
+    /** Which corner the rotation drag grabbed ('nw'|'ne'|'se'|'sw'), or null when not rotating. */
+    rotateHandleType: string | null = null;
+    /** Deduped selection ids captured at rotate start (ancestors only, no double-rotation). */
+    rotateTargetIds: number[] = [];
+    /** Snapshot of the scene before rotation started, restored & reapplied each frame. */
+    rotateSnapshot: Uint8Array | null = null;
+    /** World-space pivot the selection rotates about (selection-bounds center). */
+    rotatePivot: { x: number; y: number } | null = null;
+    /** Angle (radians) from pivot to the cursor at drag start, the zero reference. */
+    rotateStartAngle: number = 0;
+    /** Start rotation of a single selected node (deg), used for 15° absolute snapping. */
+    rotateSingleStartDeg: number | null = null;
+    /** Cached angle-oriented cursor data URIs (rotate + resize arrows), keyed by kind:angle. */
+    private cursorCache: Record<string, string> = {};
 
     // --- Arrow key nudge grouping state ---
     /** Timer that fires after 500ms of no nudging, to finalise the grouped nudge undo step. */
@@ -885,14 +916,22 @@ export class InputManager {
 
         if (this.ui.activeTool === 'selection') {
             // Check resize handles first (skip in node-editing mode)
-            const handle = this.editingNodeId === null ? this.checkResizeHandle(this.startPos) : null;
-            if (handle) {
+            const frame = this.editingNodeId === null ? this.getSelectionFrame() : null;
+            const handle = frame ? this.checkResizeHandle(this.startPos, frame) : null;
+            if (handle && frame) {
                 this.resizeHandleType = handle.type;
-                this.resizeStartBounds = this.getSelectionBounds();
                 this.resizeTargetIds = Array.from(this.scene.dedupSelection(this.scene.engine!.get_selection()));
                 // Snapshot scene state so we can restore-then-resize each frame
                 this.resizeSnapshot = this.scene.engine!.serialize_scene();
-                this.snap.begin(this.scene, this.resizeTargetIds);
+                if (this.frameIsAxisAligned(frame)) {
+                    // Legacy world-space pipeline (with snapping)
+                    this.resizeStartBounds = this.getSelectionBounds();
+                    this.snap.begin(this.scene, this.resizeTargetIds);
+                } else {
+                    // Oriented pipeline: drag in the frame's own axes (single node)
+                    this.resizeFrame = frame;
+                    this.resizeLocalBounds = this.getNodeLocalBounds(this.resizeTargetIds[0]);
+                }
                 this.scene.saveMoveHistory();
                 return;
             }
@@ -910,6 +949,22 @@ export class InputManager {
                     this.scene.saveMoveHistory();
                     return;
                 }
+            }
+
+            // Check rotate zone (just outside a corner handle; skip in node-editing mode)
+            const rotateHandle = frame ? this.checkRotateHandle(this.startPos, frame) : null;
+            if (rotateHandle && frame) {
+                this.rotateHandleType = rotateHandle.type;
+                this.rotatePivot = this.framePoint(frame, frame.w / 2, frame.h / 2);
+                this.rotateStartAngle = Math.atan2(this.startPos.y - this.rotatePivot.y, this.startPos.x - this.rotatePivot.x);
+                this.rotateTargetIds = Array.from(this.scene.dedupSelection(this.scene.engine!.get_selection()));
+                this.rotateSingleStartDeg = this.rotateTargetIds.length === 1
+                    ? this.scene.getNodeTransformComponents(this.rotateTargetIds[0]).rotation_deg
+                    : null;
+                this.rotateSnapshot = this.scene.engine!.serialize_scene();
+                this.scene.saveMoveHistory();
+                this.canvas.style.cursor = this.rotateCursorForCorner(rotateHandle.type, frame);
+                return;
             }
 
             const isDeepSelect = e.metaKey || e.ctrlKey;
@@ -1820,16 +1875,15 @@ export class InputManager {
 
         // Hover cursor for resize handles (when not dragging, skip in node-editing mode)
         if (!this.isMouseDown && this.ui.activeTool === 'selection') {
-            const handle = this.editingNodeId === null ? this.checkResizeHandle(this.currentPos) : null;
-            if (handle) {
+            const frame = this.editingNodeId === null ? this.getSelectionFrame() : null;
+            const handle = frame ? this.checkResizeHandle(this.currentPos, frame) : null;
+            const rotHandle = !handle && frame ? this.checkRotateHandle(this.currentPos, frame) : null;
+            if (handle && frame) {
                 this.hoverNodeId = null;
-                const cursorMap: Record<string, string> = {
-                    'nw': 'nwse-resize', 'se': 'nwse-resize',
-                    'ne': 'nesw-resize', 'sw': 'nesw-resize',
-                    'n': 'ns-resize', 's': 'ns-resize',
-                    'e': 'ew-resize', 'w': 'ew-resize',
-                };
-                this.canvas.style.cursor = cursorMap[handle.type] || 'default';
+                this.canvas.style.cursor = this.resizeCursorFor(handle.type, frame);
+            } else if (rotHandle && frame) {
+                this.hoverNodeId = null;
+                this.canvas.style.cursor = this.rotateCursorForCorner(rotHandle.type, frame);
             } else if (this.editingNodeId === null && this.checkCornerRadiusHandle(this.currentPos)) {
                 this.hoverNodeId = null;
                 // Diagonal pointer — corner radius handles sit on the diagonal
@@ -1931,6 +1985,115 @@ export class InputManager {
                     this.ui.syncWithSelection({ interactive: true });
                     return;
                 }
+            }
+
+            // Rotate handle drag (returns early from mouseDown, like resize)
+            if (this.rotateHandleType && this.rotatePivot && this.rotateSnapshot && this.rotateTargetIds.length > 0) {
+                const p = this.rotatePivot;
+                const cur = Math.atan2(this.currentPos.y - p.y, this.currentPos.x - p.x);
+                let deltaDeg = (cur - this.rotateStartAngle) * (180 / Math.PI);
+
+                // Shift snaps to 15° increments — absolute angle for a single
+                // node (so a shape at 0° lands on clean multiples), delta for
+                // multi-selection.
+                if (e.shiftKey) {
+                    if (this.rotateSingleStartDeg !== null) {
+                        const snapped = Math.round((this.rotateSingleStartDeg + deltaDeg) / 15) * 15;
+                        deltaDeg = snapped - this.rotateSingleStartDeg;
+                    } else {
+                        deltaDeg = Math.round(deltaDeg / 15) * 15;
+                    }
+                }
+
+                this.applyRotationDrag(deltaDeg * (Math.PI / 180));
+                // Keep the glyph oriented to the grab point as it orbits the pivot
+                this.canvas.style.cursor = this.rotateCursorForAngle(cur * (180 / Math.PI));
+                return;
+            }
+
+            // Oriented resize drag (rotated/skewed frame): all math happens in
+            // frame space, so the drag follows the shape's own axes.
+            if (this.resizeHandleType && this.resizeFrame && this.resizeSnapshot && this.resizeLocalBounds && this.resizeTargetIds.length > 0) {
+                const F0 = this.resizeFrame;
+                const inv = this.matInv(F0.m);
+                const sp = this.matApply(inv, this.startPos);
+                const cp = this.matApply(inv, this.currentPos);
+                const fdx = cp.x - sp.x, fdy = cp.y - sp.y;
+                const t = this.resizeHandleType;
+                let newW = F0.w, newH = F0.h, moveX = 0, moveY = 0;
+
+                if (t.includes('e')) newW = F0.w + fdx;
+                if (t.includes('w')) { newW = F0.w - fdx; moveX = fdx; }
+                if (t.includes('s')) newH = F0.h + fdy;
+                if (t.includes('n')) { newH = F0.h - fdy; moveY = fdy; }
+
+                // Shift: maintain aspect ratio (corners only, like legacy)
+                if (e.shiftKey && t.length === 2) {
+                    const aspect = F0.w / F0.h;
+                    if (Math.abs(fdx) / F0.w > Math.abs(fdy) / F0.h) {
+                        newH = newW / aspect;
+                    } else {
+                        newW = newH * aspect;
+                    }
+                    if (t.includes('w')) moveX = F0.w - newW;
+                    if (t.includes('n')) moveY = F0.h - newH;
+                }
+
+                // Alt: resize from center
+                if (e.altKey) {
+                    const deltaW = newW - F0.w;
+                    const deltaH = newH - F0.h;
+                    newW = F0.w + deltaW * 2;
+                    newH = F0.h + deltaH * 2;
+                    moveX = -deltaW;
+                    moveY = -deltaH;
+                }
+
+                newW = Math.max(newW, 1);
+                newH = Math.max(newH, 1);
+
+                this.liveFrame = { w: newW, h: newH, m: this.matMul(F0.m, { a: 1, b: 0, c: 0, d: 1, e: moveX, f: moveY }) };
+
+                // Restore pristine state, then apply the resize in local space.
+                this.scene.engine!.deserialize_scene(this.resizeSnapshot);
+                const id = this.resizeTargetIds[0];
+                const kx = newW / F0.w, ky = newH / F0.h;
+                const lb = this.resizeLocalBounds;
+
+                if (this.scene.getNodeType(id) === 3) {
+                    // Group: scale the local transform about the local-bounds
+                    // anchor so the whole subtree scales along the frame axes.
+                    //   L' = L0 · T(lb+move) · S(kx,ky) · T(-lb)
+                    const l = this.scene.getNodeLocalTransform(id);
+                    const L0: Mat = { a: l[0], b: l[1], c: l[3], d: l[4], e: l[6], f: l[7] };
+                    const Lp = this.matMul(L0, this.matMul(
+                        { a: 1, b: 0, c: 0, d: 1, e: lb.x + moveX, f: lb.y + moveY },
+                        this.matMul(
+                            { a: kx, b: 0, c: 0, d: ky, e: 0, f: 0 },
+                            { a: 1, b: 0, c: 0, d: 1, e: -lb.x, f: -lb.y },
+                        )));
+                    this.scene.engine!.set_node_transform_matrix(id, JSON.stringify([Lp.a, Lp.b, 0, Lp.c, Lp.d, 0, Lp.e, Lp.f, 1]));
+                } else {
+                    // Geometry resize (local units), then move so the frame's
+                    // top-left corner lands where the live frame says.
+                    this.scene.engine!.resize_node(id, lb.w * kx, lb.h * ky);
+                    const lb2 = this.getNodeLocalBounds(id);
+                    if (lb2) {
+                        const wt = this.scene.getTransform(id);
+                        const W: Mat = { a: wt[0], b: wt[3], c: wt[1], d: wt[4], e: wt[2], f: wt[5] };
+                        const actual = this.matApply(W, { x: lb2.x, y: lb2.y });
+                        const target = this.framePoint(this.liveFrame, 0, 0);
+                        const ddx = target.x - actual.x, ddy = target.y - actual.y;
+                        if (Math.abs(ddx) > 1e-4 || Math.abs(ddy) > 1e-4) {
+                            const local = this.worldDeltaToLocal(id, ddx, ddy);
+                            this.scene.engine!.move_node(id, local.dx, local.dy);
+                        }
+                    }
+                }
+
+                this.scene.invalidateCache();
+                this.ui.syncWithSelection({ interactive: true });
+                return;
             }
 
             // Resize handle drag (checked before dragMode since resize returns early from mouseDown)
@@ -2326,12 +2489,27 @@ export class InputManager {
 
         this.canvas.style.cursor = 'default';
 
+        if (this.rotateHandleType) {
+            this.rotateHandleType = null;
+            this.rotateSnapshot = null;
+            this.rotateTargetIds = [];
+            this.rotatePivot = null;
+            this.rotateSingleStartDeg = null;
+            this.scene.invalidateCache();
+            this.scene.autosave?.trigger();
+            this.ui.syncWithSelection();
+            return;
+        }
+
         if (this.resizeHandleType) {
             this.resizeHandleType = null;
             this.resizeStartBounds = null;
             this.resizeTargetIds = [];
             this.resizeSnapshot = null;
             this.liveResizeBounds = null;
+            this.resizeFrame = null;
+            this.resizeLocalBounds = null;
+            this.liveFrame = null;
             this.scene.invalidateCache();
             this.scene.autosave?.trigger();
             // Final sync to update layer list
@@ -2431,31 +2609,279 @@ export class InputManager {
         return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
     }
 
-    checkResizeHandle(pos: { x: number; y: number }): { type: string } | null {
-        const bounds = this.getSelectionBounds();
-        if (!bounds) return null;
+    checkResizeHandle(pos: { x: number; y: number }, frame?: SelectionFrame | null): { type: string } | null {
+        const F = frame ?? this.getSelectionFrame();
+        if (!F) return null;
 
-        const minX = bounds.x, minY = bounds.y;
-        const maxX = bounds.x + bounds.w, maxY = bounds.y + bounds.h;
-        const threshold = 6 / this.renderer.zoom;
+        // Nearest handle within reach wins, so tiny shapes stay usable.
+        let best: { type: string } | null = null;
+        let bestDist = 8 / this.renderer.zoom;
+        for (const h of this.frameHandles(F)) {
+            const d = Math.hypot(pos.x - h.x, pos.y - h.y);
+            if (d < bestDist) { bestDist = d; best = { type: h.type }; }
+        }
+        return best;
+    }
 
-        const handles: Array<{ type: string; x: number; y: number }> = [
-            { type: 'nw', x: minX, y: minY },
-            { type: 'n',  x: (minX + maxX) / 2, y: minY },
-            { type: 'ne', x: maxX, y: minY },
-            { type: 'e',  x: maxX, y: (minY + maxY) / 2 },
-            { type: 'se', x: maxX, y: maxY },
-            { type: 's',  x: (minX + maxX) / 2, y: maxY },
-            { type: 'sw', x: minX, y: maxY },
-            { type: 'w',  x: minX, y: (minY + maxY) / 2 },
-        ];
+    // ─── Selection frame (oriented bounding box) ────────────────────────
 
-        for (const h of handles) {
-            if (Math.abs(pos.x - h.x) < threshold && Math.abs(pos.y - h.y) < threshold) {
-                return { type: h.type };
+    /** Map a frame-space point to world space. */
+    private framePoint(F: SelectionFrame, fx: number, fy: number): { x: number; y: number } {
+        return { x: F.m.a * fx + F.m.c * fy + F.m.e, y: F.m.b * fx + F.m.d * fy + F.m.f };
+    }
+
+    /** Apply an affine matrix to a point. */
+    private matApply(M: Mat, p: { x: number; y: number }): { x: number; y: number } {
+        return { x: M.a * p.x + M.c * p.y + M.e, y: M.b * p.x + M.d * p.y + M.f };
+    }
+
+    /** True when the frame's axes are world-axis-aligned with no flip — the
+     *  case the legacy AABB resize pipeline (with snapping) handles. */
+    private frameIsAxisAligned(F: SelectionFrame): boolean {
+        return Math.abs(F.m.b) < 1e-6 && Math.abs(F.m.c) < 1e-6 && F.m.a > 0 && F.m.d > 0;
+    }
+
+    /**
+     * The selection frame the handles live on. Single node → its local bounds
+     * under its world transform, so the frame rotates/skews with the shape.
+     * Multi-selection (or unknown local bounds) → axis-aligned union bounds.
+     * During a drag the live frame is returned so handles track with zero lag.
+     */
+    getSelectionFrame(): SelectionFrame | null {
+        if (this.liveFrame) return this.liveFrame;
+        if (this.liveResizeBounds) {
+            const b = this.liveResizeBounds;
+            return { w: b.w, h: b.h, m: { a: 1, b: 0, c: 0, d: 1, e: b.x, f: b.y } };
+        }
+        const selection = this.scene.engine!.get_selection();
+        if (selection.length === 1) {
+            const id = selection[0];
+            const lb = this.getNodeLocalBounds(id);
+            if (lb && lb.w > 1e-6 && lb.h > 1e-6) {
+                const t = this.scene.getTransform(id); // row-major world [a,b,tx, c,d,ty, …]
+                const W: Mat = { a: t[0], b: t[3], c: t[1], d: t[4], e: t[2], f: t[5] };
+                return { w: lb.w, h: lb.h, m: this.matMul(W, { a: 1, b: 0, c: 0, d: 1, e: lb.x, f: lb.y }) };
             }
         }
+        const b = this.getSelectionBounds();
+        return b ? { w: b.w, h: b.h, m: { a: 1, b: 0, c: 0, d: 1, e: b.x, f: b.y } } : null;
+    }
+
+    /**
+     * A node's bounds in its own local (pre-transform) space, mirroring what
+     * the renderer draws for the selection outline. Groups union their
+     * children's local bounds through the children's local transforms.
+     */
+    getNodeLocalBounds(id: number, depth = 0): { x: number; y: number; w: number; h: number } | null {
+        if (depth > 16) return null;
+        if (this.scene.getNodeType(id) === 3) { // Group
+            const kids = this.scene.getNodeChildren(id);
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const kid of kids) {
+                const lb = this.getNodeLocalBounds(kid, depth + 1);
+                if (!lb) continue;
+                const l = this.scene.getNodeLocalTransform(kid); // column-major
+                const M: Mat = { a: l[0], b: l[1], c: l[3], d: l[4], e: l[6], f: l[7] };
+                for (const [cx, cy] of [[lb.x, lb.y], [lb.x + lb.w, lb.y], [lb.x + lb.w, lb.y + lb.h], [lb.x, lb.y + lb.h]]) {
+                    const p = this.matApply(M, { x: cx, y: cy });
+                    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+                    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+                }
+            }
+            return minX === Infinity ? null : { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+        }
+        const geo = this.scene.getNodeGeometry(id);
+        if (geo.Rect) return { x: 0, y: 0, w: geo.Rect.width, h: geo.Rect.height };
+        if (geo.Image) return { x: 0, y: 0, w: geo.Image.width, h: geo.Image.height };
+        if (geo.Ellipse) {
+            const { radius_x: rx, radius_y: ry } = geo.Ellipse;
+            return { x: -rx, y: -ry, w: 2 * rx, h: 2 * ry };
+        }
+        if (geo.Path) {
+            const b = this.renderer.calculatePathBounds({ subpaths: this.scene.getResolvedSubpaths(id) });
+            return { x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY };
+        }
+        if (geo.Text) {
+            const subpaths = this.renderer.getTextPath(id);
+            if (subpaths && subpaths.length > 0) {
+                const b = this.renderer.calculatePathBounds({ subpaths });
+                return { x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY };
+            }
+            const approxW = geo.Text.content.length * geo.Text.font_size * 0.6;
+            return { x: 0, y: -geo.Text.font_size, w: approxW, h: geo.Text.font_size };
+        }
         return null;
+    }
+
+    /** The 8 resize handle positions of a frame, in world space. */
+    private frameHandles(F: SelectionFrame): Array<{ type: string; x: number; y: number }> {
+        const mw = F.w / 2, mh = F.h / 2;
+        const spots: Array<[string, number, number]> = [
+            ['nw', 0, 0], ['n', mw, 0], ['ne', F.w, 0],
+            ['w', 0, mh], ['e', F.w, mh],
+            ['sw', 0, F.h], ['s', mw, F.h], ['se', F.w, F.h],
+        ];
+        return spots.map(([type, fx, fy]) => ({ type, ...this.framePoint(F, fx, fy) }));
+    }
+
+    /**
+     * Detect the rotate zone: the ring just *outside* a corner of the selection
+     * frame. Returns the nearest corner within reach, or null. Only fires when
+     * the cursor is outside the frame (so it never conflicts with move/resize),
+     * giving the familiar "nudge past the resize handle → rotate" affordance.
+     */
+    checkRotateHandle(pos: { x: number; y: number }, frame?: SelectionFrame | null): { type: string } | null {
+        const F = frame ?? this.getSelectionFrame();
+        if (!F) return null;
+
+        // Must be outside the frame — inside is move/resize territory.
+        const p = this.matApply(this.matInv(F.m), pos);
+        if (p.x >= 0 && p.x <= F.w && p.y >= 0 && p.y <= F.h) return null;
+
+        const outer = 18 / this.renderer.zoom;
+        const corners: Array<[string, number, number]> = [
+            ['nw', 0, 0], ['ne', F.w, 0], ['se', F.w, F.h], ['sw', 0, F.h],
+        ];
+
+        let best: { type: string } | null = null;
+        let bestDist = outer;
+        for (const [type, fx, fy] of corners) {
+            const c = this.framePoint(F, fx, fy);
+            const d = Math.hypot(pos.x - c.x, pos.y - c.y);
+            if (d < bestDist) { bestDist = d; best = { type }; }
+        }
+        return best;
+    }
+
+    /**
+     * Rotate every target about {@link rotatePivot} by `deltaRad` (world space),
+     * starting from the pre-drag snapshot. Uses full matrix composition so it is
+     * correct for any node, nesting, and pivot:
+     *   L' = parentWorld⁻¹ · R(θ, pivot) · parentWorld · L₀
+     */
+    private applyRotationDrag(deltaRad: number) {
+        if (!this.rotateSnapshot || !this.rotatePivot) return;
+        this.scene.engine!.deserialize_scene(this.rotateSnapshot);
+
+        const cos = Math.cos(deltaRad), sin = Math.sin(deltaRad);
+        const px = this.rotatePivot.x, py = this.rotatePivot.y;
+        // World rotation about the pivot, DOMMatrix form {a,b,c,d,e,f}:
+        //   x' = a·x + c·y + e,  y' = b·x + d·y + f
+        const R: Mat = {
+            a: cos, b: sin, c: -sin, d: cos,
+            e: px - px * cos + py * sin,
+            f: py - px * sin - py * cos,
+        };
+
+        for (const id of this.rotateTargetIds) {
+            const parentId = this.scene.engine!.get_node_parent(id);
+            let PW: Mat = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+            if (parentId >= 0) {
+                // getTransform is row-major global [a,b,tx, c,d,ty, …]
+                const t = this.scene.getTransform(parentId);
+                PW = { a: t[0], b: t[3], c: t[1], d: t[4], e: t[2], f: t[5] };
+            }
+            // getNodeLocalTransform is column-major [a,b,0, c,d,0, e,f,1]
+            const l = this.scene.getNodeLocalTransform(id);
+            const L0: Mat = { a: l[0], b: l[1], c: l[3], d: l[4], e: l[6], f: l[7] };
+
+            const Lp = this.matMul(this.matInv(PW), this.matMul(R, this.matMul(PW, L0)));
+            const col = [Lp.a, Lp.b, 0, Lp.c, Lp.d, 0, Lp.e, Lp.f, 1];
+            this.scene.engine!.set_node_transform_matrix(id, JSON.stringify(col));
+        }
+
+        this.scene.invalidateCache();
+        this.ui.syncWithSelection({ interactive: true });
+    }
+
+    /** Compose two affine matrices: result applies B first, then A. */
+    private matMul(A: Mat, B: Mat): Mat {
+        return {
+            a: A.a * B.a + A.c * B.b,
+            b: A.b * B.a + A.d * B.b,
+            c: A.a * B.c + A.c * B.d,
+            d: A.b * B.c + A.d * B.d,
+            e: A.a * B.e + A.c * B.f + A.e,
+            f: A.b * B.e + A.d * B.f + A.f,
+        };
+    }
+
+    /** Invert an affine matrix (falls back to identity-ish on a singular matrix). */
+    private matInv(A: Mat): Mat {
+        const det = A.a * A.d - A.b * A.c;
+        const inv = Math.abs(det) < 1e-12 ? 0 : 1 / det;
+        return {
+            a: A.d * inv, b: -A.b * inv, c: -A.c * inv, d: A.a * inv,
+            e: (A.c * A.f - A.d * A.e) * inv,
+            f: (A.b * A.e - A.a * A.f) * inv,
+        };
+    }
+
+    /** Rotate cursor for a corner of the frame: oriented by the world-space
+     *  direction from the frame center to that corner, so it stays correct on
+     *  rotated frames. */
+    private rotateCursorForCorner(type: string, F: SelectionFrame): string {
+        const fx = type.includes('e') ? F.w : 0;
+        const fy = type.includes('s') ? F.h : 0;
+        const c = this.framePoint(F, fx, fy);
+        const center = this.framePoint(F, F.w / 2, F.h / 2);
+        return this.rotateCursorForAngle(Math.atan2(c.y - center.y, c.x - center.x) * (180 / Math.PI));
+    }
+
+    /** Build (and cache) a small rotate cursor. `deg` is the world direction of
+     *  the corner being grabbed (glyph art is drawn for the SE corner ≈ 45°). */
+    private rotateCursorForAngle(deg: number): string {
+        const r = Math.round((deg - 45) / 15) * 15;
+        const key = `rot:${r}`;
+        if (this.cursorCache[key]) return this.cursorCache[key];
+        const svg =
+            `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">` +
+            `<g transform="rotate(${r} 11 11)">` +
+            `<path d="M11 4.5 A 6.5 6.5 0 1 1 4.5 11" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round"/>` +
+            `<polygon points="11,0.8 11,8.2 15.5,4.5" fill="#fff"/>` +
+            `<path d="M11 4.5 A 6.5 6.5 0 1 1 4.5 11" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round"/>` +
+            `<polygon points="11,1.9 11,7.1 14.2,4.5" fill="#111"/>` +
+            `</g></svg>`;
+        const uri = `url("data:image/svg+xml,${encodeURIComponent(svg)}") 11 11, auto`;
+        this.cursorCache[key] = uri;
+        return uri;
+    }
+
+    /** Resize cursor for a handle: native CSS cursors on axis-aligned frames,
+     *  an angle-oriented double arrow on rotated/skewed frames. */
+    private resizeCursorFor(type: string, F: SelectionFrame): string {
+        if (this.frameIsAxisAligned(F)) {
+            const cursorMap: Record<string, string> = {
+                'nw': 'nwse-resize', 'se': 'nwse-resize',
+                'ne': 'nesw-resize', 'sw': 'nesw-resize',
+                'n': 'ns-resize', 's': 'ns-resize',
+                'e': 'ew-resize', 'w': 'ew-resize',
+            };
+            return cursorMap[type] || 'default';
+        }
+        // Resize direction in frame space → world space via the linear part.
+        const dx = type.includes('e') ? 1 : type.includes('w') ? -1 : 0;
+        const dy = type.includes('s') ? 1 : type.includes('n') ? -1 : 0;
+        const wx = F.m.a * dx + F.m.c * dy;
+        const wy = F.m.b * dx + F.m.d * dy;
+        const deg = Math.atan2(wy, wx) * (180 / Math.PI);
+        // Double arrow is symmetric — fold to [0,180) before caching.
+        const r = ((Math.round(deg / 10) * 10) % 180 + 180) % 180;
+        const key = `arrow:${r}`;
+        if (this.cursorCache[key]) return this.cursorCache[key];
+        const svg =
+            `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">` +
+            `<g transform="rotate(${r} 11 11)">` +
+            `<path d="M5 11 H17" stroke="#fff" stroke-width="4.2" stroke-linecap="round"/>` +
+            `<polygon points="1.5,11 6.8,7.2 6.8,14.8" fill="#fff"/>` +
+            `<polygon points="20.5,11 15.2,7.2 15.2,14.8" fill="#fff"/>` +
+            `<path d="M6 11 H16" stroke="#111" stroke-width="1.6"/>` +
+            `<polygon points="2.8,11 7,8.2 7,13.8" fill="#111"/>` +
+            `<polygon points="19.2,11 15,8.2 15,13.8" fill="#111"/>` +
+            `</g></svg>`;
+        const uri = `url("data:image/svg+xml,${encodeURIComponent(svg)}") 11 11, auto`;
+        this.cursorCache[key] = uri;
+        return uri;
     }
 
     checkCornerRadiusHandle(pos: { x: number; y: number }): { nodeId: number } | null {

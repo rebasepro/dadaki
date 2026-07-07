@@ -5,6 +5,8 @@ import type { Color, NodeStyle, Gradient, SceneNode, Paint, Stroke } from './typ
 import { isGradient, StrokeAlignment } from './types';
 import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix } from './svg_utils';
 import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
+import { parseSvgStylesheet, matchedCssStyles } from './svg_css';
+import type { CssDecl } from './svg_css';
 import type { SVGExportInput, FilledFace } from './svg_export';
 import type { SVGSubpath, SVGGradientData } from './svg_utils';
 import type { ContextBar } from './context_bar';
@@ -1969,85 +1971,18 @@ export class UIEngine {
         // Many SVGs (Illustrator "Style Elements" export, SVGO output, hand-
         // authored files) put fills/strokes in <style> blocks and reference
         // them by class / id / element selector — e.g. `.cls-1{fill:#e00}`,
-        // `#logo{...}`, `path{...}`. We parse every <style> block into rules
-        // and match them against each element using the DOM's own selector
-        // engine (el.matches), so type/id/class/compound/combinator selectors
-        // all work, resolved by the CSS cascade (!important > specificity >
-        // source order). These sit between inline style="" and presentation
-        // attributes in the cascade.
-        interface CSSDecl { value: string; important: boolean; }
-        interface CSSRule { selector: string; spec: number; order: number; decls: Map<string, CSSDecl>; }
+        // `#logo{...}`, `path{...}`. The parse/match logic lives in svg_css.ts
+        // (pure + unit-tested); here we just build the rule list once and
+        // memoize the per-element result. These sit between inline style="" and
+        // presentation attributes in the cascade (see getStyleAttr).
+        const cssRules = parseSvgStylesheet(svg);
+        const cssMatchCache = new Map<Element, Record<string, CssDecl>>();
 
-        /** Single sortable specificity: a*10000 + b*100 + c (ids, classes, types). */
-        const cssSpecificity = (sel: string): number => {
-            const ids = (sel.match(/#[\w-]+/g) || []).length;
-            const cls = (sel.match(/\.[\w-]+/g) || []).length
-                + (sel.match(/\[[^\]]*\]/g) || []).length
-                + (sel.match(/:(?!:)[\w-]+/g) || []).length; // pseudo-classes
-            const types = (sel
-                .replace(/[.#][\w-]+/g, ' ')
-                .replace(/\[[^\]]*\]/g, ' ')
-                .replace(/::?[\w-]+/g, ' ')
-                .match(/[a-zA-Z][\w-]*/g) || []).length;      // type / pseudo-element
-            return Math.min(ids, 9) * 10000 + Math.min(cls, 99) * 100 + Math.min(types, 99);
-        };
-
-        const parseCSSRules = (svgEl: Element): CSSRule[] => {
-            const out: CSSRule[] = [];
-            let order = 0;
-            for (const styleEl of svgEl.querySelectorAll('style')) {
-                // Strip comments; textContent already unwraps CDATA sections.
-                const css = (styleEl.textContent || '').replace(/\/\*[\s\S]*?\*\//g, '');
-                const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
-                let m: RegExpExecArray | null;
-                while ((m = ruleRe.exec(css)) !== null) {
-                    const selectorList = m[1];
-                    const decls = new Map<string, CSSDecl>();
-                    for (const decl of m[2].split(';')) {
-                        const idx = decl.indexOf(':');
-                        if (idx < 0) continue;
-                        const prop = decl.slice(0, idx).trim().toLowerCase();
-                        let value = decl.slice(idx + 1).trim();
-                        if (!prop || !value) continue;
-                        let important = false;
-                        const imp = value.match(/!\s*important\s*$/i);
-                        if (imp) { important = true; value = value.slice(0, imp.index).trim(); }
-                        if (value) decls.set(prop, { value, important });
-                    }
-                    if (decls.size === 0) continue;
-                    for (let sel of selectorList.split(',')) {
-                        sel = sel.trim();
-                        if (!sel || sel.startsWith('@')) continue; // skip at-rules
-                        out.push({ selector: sel, spec: cssSpecificity(sel), order: order++, decls });
-                    }
-                }
-            }
-            return out;
-        };
-
-        const cssRules = parseCSSRules(svg);
-        const cssMatchCache = new Map<Element, Record<string, CSSDecl>>();
-
-        /** Winning CSS declaration per property for an element (cascade-resolved). */
-        const getMatchedCSSStyles = (el: Element): Record<string, CSSDecl> => {
-            if (cssRules.length === 0) return {};
+        /** Winning CSS declaration per property for an element (cascade-resolved, memoized). */
+        const getMatchedCSSStyles = (el: Element): Record<string, CssDecl> => {
             const cached = cssMatchCache.get(el);
             if (cached) return cached;
-            const winners: Record<string, CSSRule> = {};
-            for (const rule of cssRules) {
-                let matches = false;
-                try { matches = el.matches(rule.selector); } catch { matches = false; }
-                if (!matches) continue;
-                for (const prop of rule.decls.keys()) {
-                    const cur = winners[prop];
-                    if (!cur) { winners[prop] = rule; continue; }
-                    const d = rule.decls.get(prop)!, cd = cur.decls.get(prop)!;
-                    if (d.important !== cd.important) { if (d.important) winners[prop] = rule; continue; }
-                    if (rule.spec > cur.spec || (rule.spec === cur.spec && rule.order > cur.order)) winners[prop] = rule;
-                }
-            }
-            const result: Record<string, CSSDecl> = {};
-            for (const prop in winners) result[prop] = winners[prop].decls.get(prop)!;
+            const result = matchedCssStyles(el, cssRules);
             cssMatchCache.set(el, result);
             return result;
         };
