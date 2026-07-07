@@ -24,7 +24,11 @@ export class WasmScene {
         this.ck = ck;
     }
 
+    /** Max undo depth, retained so newDocument() can rebuild the history. */
+    private maxHistorySize: number = 50;
+
     async init(maxHistorySize: number = 50) {
+        this.maxHistorySize = maxHistorySize;
         this.wasm = await init();
         this.engine = new Engine();
         this.history = new History(maxHistorySize);
@@ -32,6 +36,21 @@ export class WasmScene {
         
         // Load persisted state if exists
         await PersistenceManager.loadScene(this.engine!);
+        this.invalidateCache();
+    }
+
+    /**
+     * Reset to a blank document: fresh engine, cleared history, and (optionally)
+     * a set document size. Used by "New Document" and by the SVG conformance
+     * harness to isolate each test.
+     */
+    newDocument(width?: number, height?: number) {
+        this.engine = new Engine();
+        this.history = new History(this.maxHistorySize);
+        if (width !== undefined && height !== undefined) {
+            this.engine.set_document_size(width, height);
+        }
+        this.autosave = new AutosaveManager(this.engine);
         this.invalidateCache();
     }
 
