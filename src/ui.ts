@@ -16,6 +16,10 @@ import type { Toolbar } from './toolbar';
 import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock, iconUnlock, iconFlipH, iconFlipV, iconFlatten, iconRotateCW, iconRotateCCW } from './icons';
 import { GradientEditController, sampleGradientColor } from './gradient_edit';
 
+/** Element tags a <clipPath> may legally contain (basic shapes, text, use).
+ *  image/switch/symbol/etc. are invalid clip children and are ignored. */
+const CLIP_CHILD_TAGS = new Set(['path', 'rect', 'circle', 'ellipse', 'polygon', 'polyline', 'line', 'text', 'use']);
+
 export class UIEngine {
     ck: CanvasKit;
     scene: WasmScene;
@@ -3013,9 +3017,31 @@ export class UIEngine {
                     // Mask shapes live in the element's user space (composedMat).
                     const maskStart = createdIds.length;
                     for (const dc of Array.from(defEl.children)) {
+                        // Skip children that don't contribute to the clip/mask:
+                        // display:none / visibility:hidden never paint, and a
+                        // <clipPath> only accepts basic shapes / text / use
+                        // (image, switch, symbol, … are invalid clip children).
+                        const dcInline = parseInlineStyle(dc);
+                        if ((dc.getAttribute('display') || dcInline['display']) === 'none') continue;
+                        if ((dc.getAttribute('visibility') || dcInline['visibility']) === 'hidden') continue;
+                        if (defTag === 'clippath' &&
+                            !CLIP_CHILD_TAGS.has((dc.localName || dc.tagName).toLowerCase())) continue;
                         processElement(dc, composedMat, inherited, useRefStack, true);
                     }
                     const maskIds = createdIds.slice(maskStart);
+
+                    // An empty/invalid clipPath or mask clips the element away
+                    // entirely (SVG semantics) — remove the content we created.
+                    if (contentIds.length > 0 && maskIds.length === 0) {
+                        for (const id of contentIds) { try { this.scene.removeNode(id); } catch { /* noop */ } }
+                        const dropped = new Set(contentIds);
+                        let w = 0;
+                        for (let r = 0; r < createdIds.length; r++) {
+                            if (!dropped.has(createdIds[r])) createdIds[w++] = createdIds[r];
+                        }
+                        createdIds.length = w;
+                        return;
+                    }
 
                     if (contentIds.length > 0 && maskIds.length > 0) {
                         // Union multiple mask shapes under one group so they mask
