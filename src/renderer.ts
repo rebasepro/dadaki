@@ -52,7 +52,7 @@ import type { InputManager } from './input';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 4; // v4: per-node effects block
+const EXPECTED_RENDER_PROTOCOL_VERSION = 5; // v5: text weight/italic/letter-spacing
 
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {
@@ -993,6 +993,9 @@ export class Renderer {
             reader.f32(); // fontSize
             reader.u32(); // textAlign
             reader.f32(); // lineHeight
+            reader.u32(); // fontWeight
+            reader.u32(); // italic
+            reader.f32(); // letterSpacing
             reader.string(); // fontFamily
             reader.string(); // content
             path.delete();
@@ -1084,6 +1087,9 @@ export class Renderer {
             const fontSize = reader.f32();
             const textAlign = reader.u32();   // 0=Left, 1=Center, 2=Right
             const lineHeight = reader.f32();  // multiplier
+            const fontWeight = reader.u32();  // 100–900
+            const italic = reader.u32() !== 0;
+            const letterSpacing = reader.f32();
             const fontFamily = reader.string();
             const content = reader.string();
 
@@ -1091,6 +1097,15 @@ export class Renderer {
             const ckTextAlign = textAlign === 1 ? this.ck.TextAlign.Center
                 : textAlign === 2 ? this.ck.TextAlign.Right
                 : this.ck.TextAlign.Left;
+
+            // Map font weight/style to CanvasKit enums (falls back gracefully
+            // when the loaded font lacks the requested variant).
+            const ckWeight = fontWeight >= 700 ? this.ck.FontWeight.Bold
+                : fontWeight >= 600 ? this.ck.FontWeight.SemiBold
+                : fontWeight >= 500 ? this.ck.FontWeight.Medium
+                : fontWeight <= 300 ? this.ck.FontWeight.Light
+                : this.ck.FontWeight.Normal;
+            const ckSlant = italic ? this.ck.FontSlant.Italic : this.ck.FontSlant.Upright;
 
             // Extract current fill color from paint for the paragraph text style
             const paintColor = paint.getColor();
@@ -1106,6 +1121,8 @@ export class Renderer {
                         fontSize: fontSize,
                         fontFamilies: fontFamilies,
                         heightMultiplier: lineHeight,
+                        fontStyle: { weight: ckWeight, slant: ckSlant },
+                        letterSpacing: letterSpacing,
                     },
                     textAlign: ckTextAlign,
                 });

@@ -250,6 +250,12 @@ pub struct ProtoText {
     pub text_align: u32,
     #[prost(float, tag = "5")]
     pub line_height: f32,
+    #[prost(uint32, tag = "6")]
+    pub font_weight: u32,
+    #[prost(bool, tag = "7")]
+    pub italic: bool,
+    #[prost(float, tag = "8")]
+    pub letter_spacing: f32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -643,7 +649,7 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
             }),
             text: None, image: None,
         },
-        Geometry::Text { content, font_size, ref font_family, text_align, line_height } => ProtoGeometry {
+        Geometry::Text { content, font_size, ref font_family, text_align, line_height, font_weight, italic, letter_spacing } => ProtoGeometry {
             rect: None, ellipse: None, path: None, image: None,
             text: Some(ProtoText {
                 content: content.clone(),
@@ -651,6 +657,9 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
                 font_family: font_family.clone(),
                 text_align: *text_align as u32,
                 line_height: *line_height,
+                font_weight: *font_weight as u32,
+                italic: *italic,
+                letter_spacing: *letter_spacing,
             }),
         },
         Geometry::Image { width, height, image_id } => ProtoGeometry {
@@ -695,6 +704,9 @@ fn proto_to_geometry(g: &ProtoGeometry) -> Geometry {
             font_family: t.font_family.clone(),
             text_align: t.text_align as u8,
             line_height: if t.line_height > 0.0 { t.line_height } else { 1.2 },
+            font_weight: if t.font_weight > 0 { t.font_weight as u16 } else { 400 },
+            italic: t.italic,
+            letter_spacing: t.letter_spacing,
         }
     } else {
         Geometry::Rect { width: 100.0, height: 100.0 }

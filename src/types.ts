@@ -186,6 +186,9 @@ export interface TextGeometry {
     font_family: string;
     text_align: number;
     line_height: number;
+    font_weight?: number;
+    italic?: boolean;
+    letter_spacing?: number;
 }
 
 export interface ImageGeometry {

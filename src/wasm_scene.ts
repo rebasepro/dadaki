@@ -148,6 +148,14 @@ export class WasmScene {
         return this.engine!.get_node_is_mask(id);
     }
 
+    /** Update a text node's weight/italic/letter-spacing. One undo step. */
+    setTextStyle(id: number, fontWeight: number, italic: boolean, letterSpacing: number) {
+        this.saveHistory();
+        this.engine!.set_text_style(id, fontWeight, italic, letterSpacing);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
     /** Replace a node's effects (JSON array of serde-tagged Effect). One undo step. */
     setNodeEffects(id: number, effectsJson: string) {
         this.saveHistory();

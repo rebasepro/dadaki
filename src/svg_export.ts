@@ -291,13 +291,18 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 const fontFamily = geo.Text.font_family ? ` font-family="${escapeXml(geo.Text.font_family)}"` : '';
                 const textAnchor = geo.Text.text_align ? ` text-anchor="${textAnchorMap[geo.Text.text_align] || 'start'}"` : '';
                 const lineHeightAttr = geo.Text.line_height && geo.Text.line_height !== 1.2 ? ` line-height="${geo.Text.line_height}"` : '';
+                const fw = geo.Text.font_weight ?? 400;
+                const weightAttr = fw !== 400 ? ` font-weight="${fw}"` : '';
+                const styleAttr = geo.Text.italic ? ` font-style="italic"` : '';
+                const ls = geo.Text.letter_spacing ?? 0;
+                const lsAttr = ls ? ` letter-spacing="${ls}"` : '';
                 const content = geo.Text.content;
                 const lines = content.split('\n');
                 if (lines.length <= 1) {
-                    nodeSvg += `<text x="0" y="0" font-size="${geo.Text.font_size}"${fontFamily}${textAnchor}${lineHeightAttr} ${attrs}>${escapeXml(content)}</text>`;
+                    nodeSvg += `<text x="0" y="0" font-size="${geo.Text.font_size}"${fontFamily}${textAnchor}${lineHeightAttr}${weightAttr}${styleAttr}${lsAttr} ${attrs}>${escapeXml(content)}</text>`;
                 } else {
                     const lh = geo.Text.line_height || 1.2;
-                    nodeSvg += `<text x="0" y="0" font-size="${geo.Text.font_size}"${fontFamily}${textAnchor}${lineHeightAttr} ${attrs}>`;
+                    nodeSvg += `<text x="0" y="0" font-size="${geo.Text.font_size}"${fontFamily}${textAnchor}${lineHeightAttr}${weightAttr}${styleAttr}${lsAttr} ${attrs}>`;
                     for (let i = 0; i < lines.length; i++) {
                         const dy = i === 0 ? '0' : `${lh}em`;
                         nodeSvg += `<tspan x="0" dy="${dy}">${escapeXml(lines[i])}</tspan>`;

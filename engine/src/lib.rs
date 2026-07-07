@@ -560,6 +560,14 @@ pub enum Geometry {
         text_align: u8,
         #[serde(default = "default_line_height")]
         line_height: f32,
+        /// CSS font weight (100–900); 400 = normal, 700 = bold.
+        #[serde(default = "default_font_weight")]
+        font_weight: u16,
+        #[serde(default)]
+        italic: bool,
+        /// Extra spacing between glyphs, in local units.
+        #[serde(default)]
+        letter_spacing: f32,
     },
     /// Raster image. `image_id` refers to encoded bytes stored on the Scene
     /// (`Scene.images`); `width`/`height` are the local display size.
@@ -662,7 +670,8 @@ pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// v2: added mask commands (CMD_BEGIN_MASK/BEGIN_MASKED_CONTENT/END_MASK).
 /// v3: added Image node type (5) with a {width, height, image_id} geometry.
 /// v4: added a per-node effects block (blur / drop shadow) after style_flags.
-pub const RENDER_PROTOCOL_VERSION: u32 = 4;
+/// v5: text geometry gained font_weight + italic + letter_spacing.
+pub const RENDER_PROTOCOL_VERSION: u32 = 5;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -765,6 +774,7 @@ pub struct Scene {
 
 fn default_document_size() -> f32 { 1000.0 }
 fn default_line_height() -> f32 { 1.2 }
+fn default_font_weight() -> u16 { 400 }
 
 #[wasm_bindgen]
 impl Engine {
@@ -1040,12 +1050,13 @@ impl Engine {
                     let total_size = (end_len - start_len) as u32;
                     self.render_buffer[size_offset..size_offset+4].copy_from_slice(&total_size.to_le_bytes());
                 }
-                Geometry::Text { content, font_size, ref font_family, text_align, line_height } => {
+                Geometry::Text { content, font_size, ref font_family, text_align, line_height, font_weight, italic, letter_spacing } => {
                     let ff_bytes = font_family.as_bytes();
                     let ff_padding = (4 - (ff_bytes.len() % 4)) % 4;
                     let content_bytes = content.as_bytes();
                     let content_padding = (4 - (content_bytes.len() % 4)) % 4;
                     let total_size = 4 + 4 + 4  // font_size + text_align + line_height
+                        + 4 + 4 + 4              // font_weight + italic + letter_spacing
                         + 4 + ff_bytes.len() as u32 + ff_padding as u32  // ff_len + ff + ff_pad
                         + 4 + content_bytes.len() as u32 + content_padding as u32; // content_len + content + pad
                     self.render_buffer.extend_from_slice(&total_size.to_le_bytes());
@@ -1053,6 +1064,9 @@ impl Engine {
                     self.render_buffer.extend_from_slice(&font_size.to_le_bytes());
                     self.render_buffer.extend_from_slice(&(*text_align as u32).to_le_bytes());
                     self.render_buffer.extend_from_slice(&line_height.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&(*font_weight as u32).to_le_bytes());
+                    self.render_buffer.extend_from_slice(&(if *italic { 1u32 } else { 0u32 }).to_le_bytes());
+                    self.render_buffer.extend_from_slice(&letter_spacing.to_le_bytes());
 
                     // font_family string
                     self.render_buffer.extend_from_slice(&(ff_bytes.len() as u32).to_le_bytes());
@@ -3143,7 +3157,7 @@ impl Engine {
     corner_radius: 0.0,
     effects: Vec::new(),
 },
-            geometry: Geometry::Text { content: content.to_string(), font_size, font_family: String::new(), text_align: 0, line_height: 1.2 },
+            geometry: Geometry::Text { content: content.to_string(), font_size, font_family: String::new(), text_align: 0, line_height: 1.2, font_weight: 400, italic: false, letter_spacing: 0.0 },
             children: Vec::new(),
             parent: None,
             visible: true,
@@ -3264,6 +3278,28 @@ impl Engine {
                 *ff = font_family.to_string();
                 *ta = text_align;
                 *lh = if line_height > 0.0 { line_height } else { 1.2 };
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if updated {
+            self.update_spatial_index(id);
+            self.update_ancestor_group_bounds(id);
+            self.mark_dirty(id);
+        }
+    }
+
+    /// Update a text node's weight/style: font_weight (100–900), italic,
+    /// letter_spacing (local units).
+    pub fn set_text_style(&mut self, id: u32, font_weight: u32, italic: bool, letter_spacing: f32) {
+        let updated = if let Some(node) = self.scene.nodes.get_mut(&id) {
+            if let Geometry::Text { font_weight: fw, italic: it, letter_spacing: ls, .. } = &mut node.geometry {
+                *fw = font_weight.clamp(1, 1000) as u16;
+                *it = italic;
+                *ls = letter_spacing;
                 true
             } else {
                 false

@@ -73,6 +73,9 @@ export class UIEngine {
     textFontSize: HTMLInputElement;
     textLineHeight: HTMLInputElement;
     textAlign: HTMLSelectElement;
+    textWeight!: HTMLSelectElement;
+    textItalic!: HTMLSelectElement;
+    textLetterSpacing!: HTMLInputElement;
     typographySection: HTMLElement;
 
     // Context menu
@@ -128,6 +131,9 @@ export class UIEngine {
         this.textFontSize = document.getElementById('text-font-size') as HTMLInputElement;
         this.textLineHeight = document.getElementById('text-line-height') as HTMLInputElement;
         this.textAlign = document.getElementById('text-align') as HTMLSelectElement;
+        this.textWeight = document.getElementById('text-weight') as HTMLSelectElement;
+        this.textItalic = document.getElementById('text-italic') as HTMLSelectElement;
+        this.textLetterSpacing = document.getElementById('text-letter-spacing') as HTMLInputElement;
         this.typographySection = document.getElementById('typography-section') as HTMLElement;
 
         // Context menu
@@ -271,7 +277,7 @@ export class UIEngine {
         }
 
         // Typography properties
-        const typographyInputs = [this.textFontFamily, this.textFontSize, this.textLineHeight, this.textAlign];
+        const typographyInputs = [this.textFontFamily, this.textFontSize, this.textLineHeight, this.textAlign, this.textWeight, this.textItalic, this.textLetterSpacing];
         for (const el of typographyInputs) {
             if (el) {
                 el.addEventListener('input', () => {
@@ -891,6 +897,9 @@ export class UIEngine {
             if (this.textFontSize) this.textFontSize.value = String(node.geometry.Text.font_size || 32);
             if (this.textLineHeight) this.textLineHeight.value = String(node.geometry.Text.line_height || 1.2);
             if (this.textAlign) this.textAlign.value = String(node.geometry.Text.text_align || 0);
+            if (this.textWeight) this.textWeight.value = String(node.geometry.Text.font_weight || 400);
+            if (this.textItalic) this.textItalic.value = node.geometry.Text.italic ? '1' : '0';
+            if (this.textLetterSpacing) this.textLetterSpacing.value = String(node.geometry.Text.letter_spacing || 0);
         } else {
             if (this.typographySection) this.typographySection.style.display = 'none';
         }
@@ -952,10 +961,15 @@ export class UIEngine {
         // Let's add set_text_properties_no_history to engine if needed, 
         // or just use the current one and assume history was already saved by the listener.
         
+        const fontWeight = parseInt(this.textWeight?.value ?? '400', 10);
+        const italic = (this.textItalic?.value ?? '0') === '1';
+        const letterSpacing = parseFloat(this.textLetterSpacing?.value ?? '0') || 0;
+
         const content = node.geometry.Text.content;
         this.scene.engine!.set_text_content(id, content, fontSize);
         this.scene.engine!.set_text_properties(id, fontFamily, textAlign, lineHeight);
-        
+        this.scene.engine!.set_text_style(id, fontWeight, italic, letterSpacing);
+
         this.scene.invalidateCache();
         this.syncWithSelection({ interactive: true }); // Don't re-focus inputs
     }
@@ -2313,6 +2327,7 @@ export class UIEngine {
                         const tMat = composeMatrices(composedMat, translateMatrix(tx, ty));
                         this.scene.setNodeTransform(tid, tMat);
                         applyStyle(tid, tspan, tspanStyles);
+                        this.applyTextStyleFromEl(tid, tspan, tspanInline, tspanStyles);
                         createdIds.push(tid);
                         tspanIds.push(tid);
                     }
@@ -2334,6 +2349,7 @@ export class UIEngine {
                 nodeId = this.scene.addText(0, 0, content, fontSize);
                 const offsetMat = composeMatrices(composedMat, translateMatrix(textX, textY));
                 this.scene.setNodeTransform(nodeId, offsetMat);
+                this.applyTextStyleFromEl(nodeId, el, inlineStyles, mergedStyles);
             } else if (tag === 'line') {
                 const x1 = parseFloat(el.getAttribute('x1') || '0');
                 const y1 = parseFloat(el.getAttribute('y1') || '0');
@@ -2430,6 +2446,32 @@ export class UIEngine {
         this.scene.invalidateCache();
         this.updateLayerList();
         this.syncWithSelection();
+    }
+
+    /** Apply font-weight / font-style / letter-spacing from an SVG text element
+     *  (or tspan) to a created text node. Resolves attribute → inline style →
+     *  inherited cascade. */
+    private applyTextStyleFromEl(nodeId: number, el: Element, inline: Record<string, string>, inherited: unknown) {
+        const inh = inherited as Record<string, string> | undefined;
+        const get = (name: string): string | null =>
+            el.getAttribute(name) ?? inline[name] ?? inh?.[name] ?? null;
+
+        let weight = 400;
+        const fw = get('font-weight');
+        if (fw) {
+            if (fw === 'bold') weight = 700;
+            else if (fw === 'normal') weight = 400;
+            else { const n = parseInt(fw, 10); if (!isNaN(n)) weight = n; }
+        }
+        const fs = get('font-style');
+        const italic = fs === 'italic' || fs === 'oblique';
+        let ls = 0;
+        const lsRaw = get('letter-spacing');
+        if (lsRaw && lsRaw !== 'normal') { const n = parseFloat(lsRaw); if (!isNaN(n)) ls = n; }
+
+        if (weight !== 400 || italic || ls !== 0) {
+            try { this.scene.engine!.set_text_style(nodeId, weight, italic, ls); } catch { /* noop */ }
+        }
     }
 
     /**
