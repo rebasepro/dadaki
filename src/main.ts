@@ -3,7 +3,6 @@ import { UIEngine } from './ui';
 import { InputManager } from './input';
 import { WasmScene } from './wasm_scene';
 import { ContextBar } from './context_bar';
-import { BreadcrumbBar } from './breadcrumb';
 import { Toolbar } from './toolbar';
 import { Document } from './document';
 import { FileService } from './file_service';
@@ -41,21 +40,14 @@ async function bootstrap() {
     const contextBar = new ContextBar(canvasContainer, ui, input, wasmScene, renderer);
     ui.contextBar = contextBar;
 
-    // Breadcrumb bar — replaces the static header title
-    const headerEl = document.getElementById('header') as HTMLElement;
-    const breadcrumbBar = new BreadcrumbBar(headerEl, ui, input, wasmScene, renderer);
-    ui.breadcrumbBar = breadcrumbBar;
-
     // ─── File / document lifecycle (multi-tab) ──────────────────────────
     const tabStripEl = document.getElementById('tab-strip') as HTMLElement;
 
     // FileService starts with a placeholder doc; DocumentManager reassigns
-    // activeDoc as soon as it activates the restored/first document.
-    const fileService = new FileService(wasmScene, ui, new Document('Untitled'), () => {
-        breadcrumbBar.docName = fileService.activeDoc.name;
-        breadcrumbBar.docDirty = fileService.activeDoc.dirty;
-        breadcrumbBar.refresh();
-    });
+    // activeDoc as soon as it activates the restored/first document. The
+    // document name + dirty state are shown in the tab strip (rendered by the
+    // DocumentManager), so no extra chrome callback is needed here.
+    const fileService = new FileService(wasmScene, ui, new Document('Untitled'));
 
     const tabStrip = new TabStrip(tabStripEl, {
         onSelect: (id) => documentManager.activate(id),

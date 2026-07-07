@@ -11,7 +11,6 @@ import type { CssDecl } from './svg_css';
 import type { SVGExportInput, FilledFace } from './svg_export';
 import type { SVGSubpath, SVGGradientData } from './svg_utils';
 import type { ContextBar } from './context_bar';
-import type { BreadcrumbBar } from './breadcrumb';
 import type { Toolbar } from './toolbar';
 import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock, iconUnlock, iconFlipH, iconFlipV, iconFlatten, iconRotateCW, iconRotateCCW } from './icons';
 import { GradientEditController, sampleGradientColor } from './gradient_edit';
@@ -27,7 +26,6 @@ export class UIEngine {
     /** Shared gradient-editing state (panel ramp + on-canvas handles). */
     gradientEdit: GradientEditController;
     contextBar: ContextBar | null = null;
-    breadcrumbBar: BreadcrumbBar | null = null;
     toolbar: Toolbar | null = null;
 
     /** Tracks whether we've already taken a history snapshot for the current
@@ -466,7 +464,7 @@ export class UIEngine {
         }
         document.getElementById('ab-name')?.addEventListener('change', (e) => {
             const ab = current();
-            if (ab) { this.scene.setArtboardName(ab.id, (e.target as HTMLInputElement).value); this.breadcrumbBar?.refresh(); }
+            if (ab) this.scene.setArtboardName(ab.id, (e.target as HTMLInputElement).value);
         });
         document.getElementById('ab-bg')?.addEventListener('input', (e) => {
             const ab = current();
@@ -559,7 +557,6 @@ export class UIEngine {
         }
 
         this.contextBar?.refresh();
-        this.breadcrumbBar?.refresh();
     }
 
     /** Get the current fill color from the UI as {r, g, b, a} in 0-1 range. */
@@ -892,7 +889,6 @@ export class UIEngine {
             if (!interactive) {
                 this.updateLayerList();
                 this.contextBar?.refresh();
-                this.breadcrumbBar?.refresh();
             }
             return;
         }
@@ -903,7 +899,6 @@ export class UIEngine {
             if (!interactive) {
                 this.updateLayerList();
                 this.contextBar?.refresh();
-                this.breadcrumbBar?.refresh();
             }
             return;
         }
@@ -977,7 +972,6 @@ export class UIEngine {
         if (!interactive) {
             this.updateLayerList();
             this.contextBar?.refresh();
-            this.breadcrumbBar?.refresh();
         }
         
         if (node.geometry.Text) {
@@ -2173,7 +2167,6 @@ export class UIEngine {
         this.zoomText.innerText = `${Math.round(level * 100)}%`;
         // Keep the context bar's zoom label in sync
         this.contextBar?.refresh();
-        this.breadcrumbBar?.refresh();
     }
 
     exportSVG(bounds?: { x: number; y: number; w: number; h: number }, background?: Color) {
