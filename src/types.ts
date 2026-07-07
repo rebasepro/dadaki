@@ -27,17 +27,32 @@ export interface Gradient {
     end_y: number;
 }
 
+/** A tiled-image pattern fill (matches the engine's Pattern struct). */
+export interface Pattern {
+    image_id: number;
+    width: number;
+    height: number;
+    /** Pattern→local affine, 6 floats [a,b,c,d,e,f]. */
+    transform?: number[];
+}
+
 /**
- * A paint can be either a solid color or a gradient.
- * Matches the Rust engine's `#[serde(untagged)]` Paint enum:
- * - Solid: `{ r, g, b, a }`
+ * A paint can be a solid color, a gradient, or a tiled-image pattern.
+ * Matches the Rust engine's Paint enum (distinguished by a marker field):
+ * - Solid:    `{ r, g, b, a }`
  * - Gradient: `{ gradient_type, stops, start_x, start_y, end_x, end_y }`
+ * - Pattern:  `{ image_id, width, height, transform }`
  */
-export type Paint = Color | Gradient;
+export type Paint = Color | Gradient | Pattern;
 
 /** Type guard: check if a Paint is a Gradient. */
 export function isGradient(paint: Paint): paint is Gradient {
     return 'gradient_type' in paint;
+}
+
+/** Type guard: check if a Paint is a Pattern. */
+export function isPattern(paint: Paint): paint is Pattern {
+    return 'image_id' in paint;
 }
 
 /** Stroke Alignment */

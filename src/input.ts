@@ -216,13 +216,10 @@ export class InputManager {
             const name = file.name.toLowerCase();
             if (name.endsWith('.svg')) {
                 const text = await file.text();
-                // One transaction → the whole drop is a single undo step
-                this.scene.transaction(() => {
-                    const rootsBefore = new Set(this.scene.getRootNodes());
-                    this.ui.parseSVG(text);
-
+                // parseSVG rasterizes patterns (async) then runs the import as ONE
+                // undo step; the afterImport callback runs inside that transaction.
+                await this.ui.parseSVG(text, (newRoots) => {
                     // Center the imported nodes at the drop point and select them
-                    const newRoots = Array.from(this.scene.getRootNodes()).filter(id => !rootsBefore.has(id));
                     if (newRoots.length === 0) return;
                     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
                     for (const id of newRoots) {

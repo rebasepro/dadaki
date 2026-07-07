@@ -4,7 +4,7 @@
  * This separation enables testing without WASM and reuse in other contexts.
  */
 import type { SceneNode, NodeStyle, Paint } from './types';
-import { isGradient } from './types';
+import { isGradient, isPattern } from './types';
 import { rgbToHex, escapeXml, matrixToSVGTransform } from './svg_utils';
 
 // ─── Lookup Tables ──────────────────────────────────────────────────────────
@@ -72,6 +72,10 @@ export function buildSVGFromData(input: SVGExportInput): string {
     const filterDefs: string[] = [];
     let filterIdCounter = 0;
 
+    // Collect <pattern> defs (tiled-image pattern fills)
+    const patternDefs: string[] = [];
+    let patternIdCounter = 0;
+
     /** Build a <filter> def for a node's effects, returning its id (or null). */
     const buildFilterDef = (effects: NonNullable<NodeStyle['effects']>): string | null => {
         if (!effects || effects.length === 0) return null;
@@ -89,9 +93,22 @@ export function buildSVGFromData(input: SVGExportInput): string {
         return id;
     };
 
-    /** Convert a Paint to an SVG fill/stroke value. For gradients, adds a def and returns url(#id). */
+    /** Convert a Paint to an SVG fill/stroke value. Gradients and patterns add a
+     *  <defs> entry and return url(#id); solids return a hex color. */
     const paintToSvgValue = (paint: Paint | null): string => {
         if (!paint) return 'none';
+        if (isPattern(paint)) {
+            const href = imageDataUris?.[paint.image_id];
+            if (!href) return 'none';
+            const id = `pat${patternIdCounter++}`;
+            const t = paint.transform && paint.transform.length === 6
+                ? ` patternTransform="matrix(${paint.transform.join(' ')})"` : '';
+            patternDefs.push(
+                `<pattern id="${id}" patternUnits="userSpaceOnUse" width="${paint.width}" height="${paint.height}"${t}>` +
+                `<image href="${href}" x="0" y="0" width="${paint.width}" height="${paint.height}" preserveAspectRatio="none" />` +
+                `</pattern>`);
+            return `url(#${id})`;
+        }
         if (!isGradient(paint)) {
             return escapeXml(rgbToHex(paint));
         }
@@ -173,13 +190,13 @@ export function buildSVGFromData(input: SVGExportInput): string {
         }
 
         // Fill opacity — extract from fill paint alpha (solid fills only;
-        // gradient stops carry their own stop-opacity).
-        if (fillPaint && !isGradient(fillPaint) && fillPaint.a < 1) {
+        // gradient stops carry their own stop-opacity, patterns have none).
+        if (fillPaint && !isGradient(fillPaint) && !isPattern(fillPaint) && fillPaint.a < 1) {
             attrs += ` fill-opacity="${fillPaint.a}"`;
         }
 
         // Stroke opacity — extract from stroke paint alpha
-        if (sk?.paint && !isGradient(sk.paint) && sk.paint.a < 1) {
+        if (sk?.paint && !isGradient(sk.paint) && !isPattern(sk.paint) && sk.paint.a < 1) {
             attrs += ` stroke-opacity="${sk.paint.a}"`;
         }
 
@@ -341,9 +358,9 @@ export function buildSVGFromData(input: SVGExportInput): string {
         }
     }
 
-    // Insert <defs> (gradients + masks + filters) if any were collected
-    if (gradientDefs.length > 0 || maskDefs.length > 0 || filterDefs.length > 0) {
-        const defsBlock = `<defs>${gradientDefs.join('')}${maskDefs.join('')}${filterDefs.join('')}</defs>`;
+    // Insert <defs> (gradients + masks + filters + patterns) if any were collected
+    if (gradientDefs.length > 0 || maskDefs.length > 0 || filterDefs.length > 0 || patternDefs.length > 0) {
+        const defsBlock = `<defs>${gradientDefs.join('')}${maskDefs.join('')}${filterDefs.join('')}${patternDefs.join('')}</defs>`;
         // Insert after the opening <svg ...> tag
         const insertIdx = svg.indexOf('>') + 1;
         svg = svg.slice(0, insertIdx) + defsBlock + svg.slice(insertIdx);

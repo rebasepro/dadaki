@@ -38,6 +38,21 @@ pub struct ProtoPaint {
     pub solid: Option<ProtoColor>,
     #[prost(message, optional, tag = "2")]
     pub gradient: Option<ProtoGradient>,
+    #[prost(message, optional, tag = "3")]
+    pub pattern: Option<ProtoPattern>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoPattern {
+    #[prost(uint32, tag = "1")]
+    pub image_id: u32,
+    #[prost(float, tag = "2")]
+    pub width: f32,
+    #[prost(float, tag = "3")]
+    pub height: f32,
+    /// Pattern→local affine, 6 floats [a,b,c,d,e,f].
+    #[prost(float, repeated, tag = "4")]
+    pub transform: Vec<f32>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -511,15 +526,32 @@ impl From<&ProtoTransform> for crate::Transform2D {
 impl From<&Paint> for ProtoPaint {
     fn from(p: &Paint) -> Self {
         match p {
-            Paint::Solid(c) => ProtoPaint { solid: Some(c.into()), gradient: None },
-            Paint::Gradient(g) => ProtoPaint { solid: None, gradient: Some(g.into()) },
+            Paint::Solid(c) => ProtoPaint { solid: Some(c.into()), gradient: None, pattern: None },
+            Paint::Gradient(g) => ProtoPaint { solid: None, gradient: Some(g.into()), pattern: None },
+            Paint::Pattern(pat) => ProtoPaint {
+                solid: None, gradient: None,
+                pattern: Some(ProtoPattern {
+                    image_id: pat.image_id,
+                    width: pat.width,
+                    height: pat.height,
+                    transform: pat.transform.to_vec(),
+                }),
+            },
         }
     }
 }
 
 impl From<&ProtoPaint> for Paint {
     fn from(p: &ProtoPaint) -> Self {
-        if let Some(g) = &p.gradient {
+        if let Some(pat) = &p.pattern {
+            let t = &pat.transform;
+            let transform = if t.len() == 6 {
+                [t[0], t[1], t[2], t[3], t[4], t[5]]
+            } else {
+                [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+            };
+            Paint::Pattern(crate::Pattern { image_id: pat.image_id, width: pat.width, height: pat.height, transform })
+        } else if let Some(g) = &p.gradient {
             Paint::Gradient(g.into())
         } else if let Some(c) = &p.solid {
             Paint::Solid(c.into())
@@ -1019,6 +1051,7 @@ mod tests {
             fills: vec![ProtoPaint {
                 solid: Some(ProtoColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
                 gradient: None,
+                pattern: None,
             }],
             strokes: Vec::new(),
             opacity: Some(1.0),

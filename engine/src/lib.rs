@@ -68,15 +68,32 @@ pub struct Gradient {
     pub end_y: f32,
 }
 
-/// A paint can be a solid color or a gradient.
+/// A tiled-image pattern fill. The tile is an encoded image in `Scene.images`;
+/// `width`/`height` are one repeat in node-local units. `transform` is a
+/// pattern→local affine (SVG/Skia 2x3 as [a,b,c,d,e,f]); identity by default.
+/// Vector `<pattern>` content is rasterized to the tile image at import time,
+/// so the engine only ever deals with image tiles.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Pattern {
+    pub image_id: u32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default = "default_pattern_transform")]
+    pub transform: [f32; 6],
+}
+
+fn default_pattern_transform() -> [f32; 6] { [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] }
+
+/// A paint can be a solid color, a gradient, or a tiled-image pattern.
 /// Custom Serialize/Deserialize for JSON interchange with JS (`set_node_style`
-/// sends a Style whose fills are bare color/gradient objects). Snapshots and
-/// files go through protobuf (proto.rs), not serde, so there is no longer a
-/// bincode/positional codec to keep in lockstep here.
+/// sends a Style whose fills are bare color/gradient/pattern objects). Snapshots
+/// and files go through protobuf (proto.rs), not serde, so there is no
+/// positional codec to keep in lockstep here.
 #[derive(Clone, Debug)]
 pub enum Paint {
     Gradient(Gradient),
     Solid(Color),
+    Pattern(Pattern),
 }
 
 impl serde::Serialize for Paint {
@@ -85,17 +102,22 @@ impl serde::Serialize for Paint {
         match self {
             Paint::Solid(c) => c.serialize(serializer),
             Paint::Gradient(g) => g.serialize(serializer),
+            Paint::Pattern(p) => p.serialize(serializer),
         }
     }
 }
 
 impl<'de> serde::Deserialize<'de> for Paint {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // JSON: distinguish Gradient (has a `gradient_type` field) from a bare Color.
+        // JSON: distinguish by a discriminating field — Gradient has
+        // `gradient_type`, Pattern has `image_id`, otherwise it's a bare Color.
         let value = serde_json::Value::deserialize(deserializer)?;
         if value.get("gradient_type").is_some() {
             let g: Gradient = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
             Ok(Paint::Gradient(g))
+        } else if value.get("image_id").is_some() {
+            let p: Pattern = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            Ok(Paint::Pattern(p))
         } else {
             let c: Color = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
             Ok(Paint::Solid(c))
@@ -104,21 +126,24 @@ impl<'de> serde::Deserialize<'de> for Paint {
 }
 
 impl Paint {
-    /// Extract solid color if this paint is solid, or the first gradient stop color.
+    /// Extract solid color if this paint is solid, or the first gradient stop
+    /// color, or a neutral gray for patterns.
     pub fn solid_color(&self) -> Color {
         match self {
             Paint::Solid(c) => c.clone(),
             Paint::Gradient(g) => g.stops.first()
                 .map(|s| s.color.clone())
                 .unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+            Paint::Pattern(_) => Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 },
         }
     }
-    
+
     /// Check if this paint has any visible content (non-zero alpha).
     pub fn is_visible(&self) -> bool {
         match self {
             Paint::Solid(c) => c.a > 0.0,
             Paint::Gradient(g) => g.stops.iter().any(|s| s.color.a > 0.0),
+            Paint::Pattern(_) => true,
         }
     }
 }
@@ -671,7 +696,8 @@ pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// v3: added Image node type (5) with a {width, height, image_id} geometry.
 /// v4: added a per-node effects block (blur / drop shadow) after style_flags.
 /// v5: text geometry gained font_weight + italic + letter_spacing.
-pub const RENDER_PROTOCOL_VERSION: u32 = 5;
+/// v6: paint type 4 = pattern (image_id + tile w/h + 6-float transform).
+pub const RENDER_PROTOCOL_VERSION: u32 = 6;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -687,11 +713,21 @@ fn end_record(buf: &mut Vec<u8>, len_pos: usize) {
     buf[len_pos..len_pos + 4].copy_from_slice(&record_len.to_le_bytes());
 }
 
-/// Write a paint value (solid color or gradient) to a byte buffer.
+/// Write a paint value (solid color, gradient, or pattern) to a byte buffer.
+/// Type tags: 0=none, 1=solid, 2=linear, 3=radial, 4=pattern.
 fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>) {
     match paint {
         None => {
             buf.extend_from_slice(&0u32.to_le_bytes()); // type: none
+        }
+        Some(Paint::Pattern(p)) => {
+            buf.extend_from_slice(&4u32.to_le_bytes()); // type: pattern
+            buf.extend_from_slice(&p.image_id.to_le_bytes());
+            buf.extend_from_slice(&p.width.to_le_bytes());
+            buf.extend_from_slice(&p.height.to_le_bytes());
+            for v in p.transform {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
         }
         Some(Paint::Solid(c)) => {
             buf.extend_from_slice(&1u32.to_le_bytes()); // type: solid
@@ -4535,6 +4571,36 @@ mod tests {
         assert_eq!(engine.get_image_mime(img1), "image/png");
         let b2 = engine.get_node_bounds(node);
         assert!((b2[0] - 10.0).abs() < 0.5, "node position restored, got {:?}", b2);
+    }
+
+    #[test]
+    fn test_pattern_fill_json_and_snapshot_roundtrip() {
+        let mut engine = Engine::new();
+        let img = engine.register_image(&[1, 2, 3, 4], "image/png");
+        let rect = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        // Set a pattern fill via the JSON style path (as the UI/import would).
+        let style = format!(
+            r#"{{"fills":[{{"image_id":{},"width":20.0,"height":20.0,"transform":[1,0,0,1,5,5]}}],"strokes":[],"opacity":1.0,"blend_mode":0,"fill_rule":0,"corner_radius":0.0}}"#,
+            img
+        );
+        engine.set_node_style(rect, &style);
+        match &engine.scene.nodes.get(&rect).unwrap().style.fills[0] {
+            Paint::Pattern(p) => {
+                assert_eq!(p.image_id, img);
+                assert_eq!(p.width, 20.0);
+                assert_eq!(p.transform, [1.0, 0.0, 0.0, 1.0, 5.0, 5.0]);
+            }
+            other => panic!("expected pattern fill, got {:?}", other),
+        }
+
+        // Snapshot round-trip must preserve the pattern.
+        let snap = engine.serialize_scene();
+        engine.set_node_style(rect, r#"{"fills":[{"r":1,"g":0,"b":0,"a":1}],"strokes":[],"opacity":1.0,"blend_mode":0,"fill_rule":0,"corner_radius":0.0}"#);
+        assert!(engine.deserialize_scene(&snap), "snapshot decodes");
+        match &engine.scene.nodes.get(&rect).unwrap().style.fills[0] {
+            Paint::Pattern(p) => { assert_eq!(p.image_id, img); assert_eq!(p.transform[4], 5.0); }
+            other => panic!("pattern must survive snapshot, got {:?}", other),
+        }
     }
 
     #[test]

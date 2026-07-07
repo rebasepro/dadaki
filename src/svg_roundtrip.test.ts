@@ -234,6 +234,34 @@ describe('SVG Export — Masks', () => {
         expect(queryTag(doc, 'rect'), 'content untouched').toBeTruthy();
     });
 
+    it('a pattern-filled node exports a <pattern> with an <image> tile', () => {
+        const input: SVGExportInput = {
+            docWidth: 400, docHeight: 400,
+            nodes: {
+                1: makeNode({
+                    geometry: { Rect: { width: 100, height: 100 } },
+                    style: defaultStyle({ fills: [{ image_id: 7, width: 20, height: 20, transform: [1, 0, 0, 1, 3, 4] }] as never }),
+                }),
+            },
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY },
+            imageDataUris: { 7: 'data:image/png;base64,AAAA' },
+        };
+        const doc = parseSVG(buildSVGFromData(input));
+        const pat = queryTag(doc, 'pattern');
+        expect(pat, 'a <pattern> def is emitted').toBeTruthy();
+        expect(pat!.getAttribute('width')).toBe('20');
+        expect(pat!.getAttribute('patternUnits')).toBe('userSpaceOnUse');
+        expect(pat!.getAttribute('patterntransform') || pat!.getAttribute('patternTransform')).toContain('matrix(1 0 0 1 3 4)');
+        const image = pat!.querySelector('image');
+        expect(image, 'tile <image> inside the pattern').toBeTruthy();
+        expect(image!.getAttribute('href')).toBe('data:image/png;base64,AAAA');
+        // The rect references the pattern.
+        const pid = pat!.getAttribute('id')!;
+        const rect = queryTag(doc, 'rect')!;
+        expect(rect.getAttribute('fill')).toBe(`url(#${pid})`);
+    });
+
     it('a node with a drop-shadow effect exports a <filter> with feDropShadow', () => {
         const input: SVGExportInput = {
             docWidth: 400, docHeight: 400,

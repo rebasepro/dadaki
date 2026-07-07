@@ -2,7 +2,7 @@ import type { CanvasKit } from 'canvaskit-wasm';
 import type { WasmScene } from './wasm_scene';
 import { FileIO } from './file_io';
 import type { Color, NodeStyle, Gradient, GradientStop, SceneNode, Paint, Stroke } from './types';
-import { isGradient, StrokeAlignment } from './types';
+import { isGradient, isPattern, StrokeAlignment } from './types';
 import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix, parseSvgLength } from './svg_utils';
 import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
 import { parseSvgStylesheet, matchedCssStyles } from './svg_css';
@@ -996,6 +996,26 @@ export class UIEngine {
         return node.style.strokes || [];
     }
 
+        /** Cache of data-URI previews for pattern tile images, keyed by image id. */
+        private _patternPreviewCache = new Map<number, string | null>();
+
+        /** A data-URI preview for a pattern's tile image (from the engine's bytes). */
+        private _patternPreviewUri(imageId: number): string | null {
+        if (this._patternPreviewCache.has(imageId)) return this._patternPreviewCache.get(imageId)!;
+        let uri: string | null = null;
+        try {
+            const bytes = this.scene.engine?.get_image_bytes(imageId);
+            const mime = this.scene.engine?.get_image_mime(imageId) || 'image/png';
+            if (bytes && bytes.length > 0) {
+                let bin = '';
+                for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+                uri = `data:${mime};base64,${btoa(bin)}`;
+            }
+        } catch { /* noop */ }
+        this._patternPreviewCache.set(imageId, uri);
+        return uri;
+    }
+
         /** Local-space bounding box of a node's geometry, used to place default
          *  gradient endpoints so a new gradient spans the shape. */
         private nodeLocalExtent(node: SceneNode): { minX: number; minY: number; maxX: number; maxY: number } {
@@ -1074,13 +1094,17 @@ export class UIEngine {
             const row = document.createElement('div');
             row.className = 'fill-stroke-row';
 
-            // Fill-type selector: Solid / Linear / Radial.
+            // Fill-type selector: Solid / Linear / Radial (+ Pattern for imported
+            // pattern fills — patterns can only be created via SVG import).
             const typeSel = document.createElement('select');
             typeSel.className = 'prop-select fill-type-select';
-            typeSel.innerHTML = `<option value="solid">Solid</option><option value="linear">Linear</option><option value="radial">Radial</option>`;
-            typeSel.value = isGradient(fill) ? (fill.gradient_type === 'Radial' ? 'radial' : 'linear') : 'solid';
+            typeSel.innerHTML = `<option value="solid">Solid</option><option value="linear">Linear</option><option value="radial">Radial</option>`
+                + (isPattern(fill) ? `<option value="pattern">Pattern</option>` : '');
+            typeSel.value = isPattern(fill) ? 'pattern' : isGradient(fill) ? (fill.gradient_type === 'Radial' ? 'radial' : 'linear') : 'solid';
             typeSel.addEventListener('change', () => {
-                const seed: Color = isGradient(fill) ? (fill.stops[0]?.color ?? { r: 0.5, g: 0.5, b: 0.5, a: 1 }) : fill as Color;
+                if (typeSel.value === 'pattern') return; // can't switch TO pattern from the UI
+                const seed: Color = isGradient(fill) ? (fill.stops[0]?.color ?? { r: 0.5, g: 0.5, b: 0.5, a: 1 })
+                    : isPattern(fill) ? { r: 0.5, g: 0.5, b: 0.5, a: 1 } : fill as Color;
                 // Switching to a gradient type puts this fill into gradient-edit
                 // mode (canvas handles + panel ramp). syncSelection validates
                 // this after the commit lands.
@@ -1119,7 +1143,20 @@ export class UIEngine {
             });
             row.appendChild(typeSel);
 
-            if (!isGradient(fill)) {
+            if (isPattern(fill)) {
+                // ── Pattern: a tile preview (image fill from import) ──
+                const preview = document.createElement('div');
+                preview.className = 'gradient-preview';
+                preview.title = 'Pattern fill (imported)';
+                const uri = this._patternPreviewUri(fill.image_id);
+                if (uri) {
+                    preview.style.backgroundImage = `url(${uri})`;
+                    preview.style.backgroundSize = 'cover';
+                } else {
+                    preview.style.background = '#888';
+                }
+                row.appendChild(preview);
+            } else if (!isGradient(fill)) {
                 // ── Solid: color swatch + hex ──
                 const colorInput = document.createElement('input');
                 colorInput.type = 'color';
@@ -2202,6 +2239,9 @@ export class UIEngine {
             nodes[id] = node;
             localTransforms[id] = Array.from(this.scene.getNodeLocalTransform(id));
             if (node.geometry?.Image) imageIds.add(node.geometry.Image.image_id);
+            // Pattern fills/strokes reference a tile image that must be exported too.
+            for (const p of node.style?.fills ?? []) if (p && (p as { image_id?: number }).image_id != null) imageIds.add((p as { image_id: number }).image_id);
+            for (const st of node.style?.strokes ?? []) { const p = st?.paint as { image_id?: number } | undefined; if (p?.image_id != null) imageIds.add(p.image_id); }
             if (node.node_type === 'Group') {
                 const children = this.scene.getNodeChildren(id);
                 for (const childId of Array.from(children)) {
@@ -2264,12 +2304,77 @@ export class UIEngine {
         return rgbToHex(color);
     }
 
-    /** Import an SVG document as ONE undo step. */
-    parseSVG(svgText: string) {
-        this.scene.transaction(() => this.parseSVGInternal(svgText));
+    /** Type of a rasterized `<pattern>` tile, keyed by pattern element id. */
+    // (map value shape is inlined; see rasterizePatterns)
+
+    /**
+     * Import an SVG document as ONE undo step. `<pattern>` fills are rasterized
+     * to tile images first (async), then the rest of the import runs
+     * synchronously so post-processing (`afterImport`, e.g. drop-centering)
+     * still happens inside the same transaction.
+     */
+    async parseSVG(svgText: string, afterImport?: (newRootIds: number[]) => void) {
+        const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
+        const patternImages = await this.rasterizePatterns(doc);
+        this.scene.transaction(() => {
+            const before = new Set(this.scene.getRootNodes());
+            this.parseSVGInternal(svgText, patternImages);
+            if (afterImport) {
+                const newRoots = Array.from(this.scene.getRootNodes()).filter(id => !before.has(id));
+                afterImport(newRoots);
+            }
+        });
     }
 
-    private parseSVGInternal(svgText: string) {
+    /** Rasterize every `<pattern>` in the doc to a tile image (via the browser's
+     *  SVG renderer), registering each and returning id → tile descriptor. */
+    private async rasterizePatterns(doc: Document): Promise<Map<string, { image_id: number; width: number; height: number; transform: number[] }>> {
+        const map = new Map<string, { image_id: number; width: number; height: number; transform: number[] }>();
+        const defsHtml = Array.from(doc.querySelectorAll('defs')).map(d => d.innerHTML).join('');
+        for (const pat of Array.from(doc.querySelectorAll('pattern'))) {
+            const id = pat.getAttribute('id');
+            if (!id) continue;
+            const w = parseSvgLength(pat.getAttribute('width'), 0);
+            const h = parseSvgLength(pat.getAttribute('height'), 0);
+            // Only userSpaceOnUse-style pixel tiles are supported in v1;
+            // objectBoundingBox fractions (<=2) can't be sized without the shape.
+            if (!(w > 2 && h > 2)) continue;
+            const scale = 2; // rasterize at 2× for crispness
+            const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
+                `width="${w * scale}" height="${h * scale}" viewBox="0 0 ${w} ${h}"><defs>${defsHtml}</defs>${pat.innerHTML}</svg>`;
+            const bytes = await this.rasterizeSvgToPng(svg, Math.round(w * scale), Math.round(h * scale));
+            if (!bytes) continue;
+            let imageId = 0;
+            try { imageId = this.scene.engine!.register_image(bytes, 'image/png'); } catch { continue; }
+            // patternTransform (3×3 col-major) → SVG 2×3 [a,b,c,d,e,f].
+            const pt = pat.getAttribute('patternTransform');
+            let transform = [1, 0, 0, 1, 0, 0];
+            if (pt) { const m = parseSVGTransform(pt); transform = [m[0], m[1], m[3], m[4], m[6], m[7]]; }
+            map.set(id, { image_id: imageId, width: w, height: h, transform });
+        }
+        return map;
+    }
+
+    /** Render an SVG string to PNG bytes at the given pixel size (async). */
+    private rasterizeSvgToPng(svgString: string, pxW: number, pxH: number): Promise<Uint8Array | null> {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+                try {
+                    const c = document.createElement('canvas');
+                    c.width = pxW; c.height = pxH;
+                    const ctx = c.getContext('2d');
+                    if (!ctx) { resolve(null); return; }
+                    ctx.drawImage(img, 0, 0, pxW, pxH);
+                    c.toBlob(async (b) => resolve(b ? new Uint8Array(await b.arrayBuffer()) : null), 'image/png');
+                } catch { resolve(null); }
+            };
+            img.onerror = () => resolve(null);
+            img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgString)));
+        });
+    }
+
+    private parseSVGInternal(svgText: string, patternImages?: Map<string, { image_id: number; width: number; height: number; transform: number[] }>) {
         const parser = new DOMParser();
         const doc = parser.parseFromString(svgText, 'image/svg+xml');
         const svg = doc.querySelector('svg');
@@ -2398,13 +2503,25 @@ export class UIEngine {
         };
 
         /** Result of parsing a fill/stroke attribute: either a solid hex (with alpha) or a gradient. */
-        type ParsedPaint = { type: 'solid'; hex: string; alpha: number } | { type: 'gradient'; data: SVGGradientData };
+        type ParsedPaint =
+            | { type: 'solid'; hex: string; alpha: number }
+            | { type: 'gradient'; data: SVGGradientData }
+            | { type: 'pattern'; pattern: { image_id: number; width: number; height: number; transform: number[] } };
+
+        /** If `paintUrl` is url(#id) referencing a rasterized <pattern>, return it. */
+        const resolvePatternRef = (paintUrl: string): ParsedPaint | null => {
+            const m = paintUrl.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
+            const p = m && patternImages?.get(m[1]);
+            return p ? { type: 'pattern', pattern: p } : null;
+        };
 
         const parseFill = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles): ParsedPaint | null => {
             const fill = resolveAttr(el, 'fill', inlineStyles, inherited, '#000000');
             if (fill === 'none' || fill === 'transparent') return null;
-            // Check for gradient url(#...)
+            // Paint-server url(#...): pattern (rasterized tile) or gradient.
             if (fill && fill.match(/url\s*\(/)) {
+                const pat = resolvePatternRef(fill);
+                if (pat) return pat;
                 const grad = resolveGradient(doc, fill);
                 if (grad) return { type: 'gradient', data: grad };
                 return null;
@@ -2417,6 +2534,8 @@ export class UIEngine {
             const stroke = resolveAttr(el, 'stroke', inlineStyles, inherited, null);
             if (!stroke || stroke === 'none' || stroke === 'transparent') return null;
             if (stroke.match(/url\s*\(/)) {
+                const pat = resolvePatternRef(stroke);
+                if (pat) return pat;
                 const grad = resolveGradient(doc, stroke);
                 if (grad) return { type: 'gradient', data: grad };
                 return null;
@@ -2435,6 +2554,10 @@ export class UIEngine {
                 // Multiply CSS color alpha and the SVG fill-opacity / stroke-opacity
                 c.a = paint.alpha * opacityMul;
                 return { ...c };
+            }
+            if (paint.type === 'pattern') {
+                // Matches the engine's Pattern struct (image_id discriminates it).
+                return { ...paint.pattern };
             }
             // Gradient: matches Rust's Gradient struct for serde(untagged) deserialization
             return {

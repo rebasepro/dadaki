@@ -52,7 +52,7 @@ import type { InputManager } from './input';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 5; // v5: text weight/italic/letter-spacing
+const EXPECTED_RENDER_PROTOCOL_VERSION = 6; // v6: pattern paint (type 4)
 
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {
@@ -157,6 +157,8 @@ export class Renderer {
     // document replacement (clearImageCache), where ids may be reused.
     private _imageCache: Map<number, ReturnType<CanvasKit['MakeImageFromEncoded']> | null> = new Map();
     private _imagePaint: Paint | null = null;
+    // Repeating image shaders for pattern fills, keyed by pattern signature.
+    private _patternShaderCache: Map<string, ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null> = new Map();
     // Effect (blur/shadow) ImageFilters, cached by effect signature — built once
     // and reused across frames (cleared on invalidateRenderCaches).
     private _effectFilterCache: Map<string, ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null> = new Map();
@@ -223,6 +225,10 @@ export class Renderer {
         }
         this._effectFilterCache.clear();
 
+        // Clear pattern shaders (cheap to rebuild from the cached tile image).
+        for (const sh of this._patternShaderCache.values()) if (sh) sh.delete();
+        this._patternShaderCache.clear();
+
         this._needsRender = true;
     }
 
@@ -253,17 +259,48 @@ export class Renderer {
             if (img) img.delete();
         }
         this._imageCache.clear();
+        for (const sh of this._patternShaderCache.values()) if (sh) sh.delete();
+        this._patternShaderCache.clear();
         this._needsRender = true;
     }
 
-    /** Draw a raster image node at (0,0,w,h) in the current (local) space. */
-    private drawImageNode(canvas: Canvas, imageId: number, w: number, h: number, alpha: number) {
+    /** Decode (and cache) an engine image id into a CanvasKit Image, or null. */
+    private getImage(imageId: number): ReturnType<CanvasKit['MakeImageFromEncoded']> | null {
         let img = this._imageCache.get(imageId);
         if (img === undefined) {
             const bytes = this.scene.engine?.get_image_bytes(imageId);
             img = (bytes && bytes.length > 0) ? this.ck.MakeImageFromEncoded(bytes) : null;
             this._imageCache.set(imageId, img ?? null);
         }
+        return img;
+    }
+
+    /** Repeating image shader for a pattern fill: tiles the image over
+     *  `width`×`height` local units, then applies the pattern transform
+     *  ([a,b,c,d,e,f]) as the shader's local matrix. Cached by signature. */
+    private getPatternShader(imageId: number, width: number, height: number, transform: number[]): ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null {
+        const key = `${imageId}|${width}|${height}|${transform.join(',')}`;
+        const cached = this._patternShaderCache.get(key);
+        if (cached !== undefined) return cached;
+        const img = this.getImage(imageId);
+        let shader: ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null = null;
+        if (img && img.width() > 0 && img.height() > 0 && width > 0 && height > 0) {
+            const sx = width / img.width(), sy = height / img.height();
+            const [a, b, c, d, e, f] = transform;
+            // localMatrix = patternTransform · scale(image px → tile units), row-major 3x3.
+            const m = [a * sx, c * sy, e, b * sx, d * sy, f, 0, 0, 1];
+            shader = img.makeShaderOptions(
+                this.ck.TileMode.Repeat, this.ck.TileMode.Repeat,
+                this.ck.FilterMode.Linear, this.ck.MipmapMode.None, m,
+            );
+        }
+        this._patternShaderCache.set(key, shader);
+        return shader;
+    }
+
+    /** Draw a raster image node at (0,0,w,h) in the current (local) space. */
+    private drawImageNode(canvas: Canvas, imageId: number, w: number, h: number, alpha: number) {
+        const img = this.getImage(imageId);
         if (!this._imagePaint) this._imagePaint = new this.ck.Paint();
         const ip = this._imagePaint;
         ip.setShader(null);
@@ -579,6 +616,14 @@ export class Renderer {
                             start: [reader.f32(), reader.f32()],
                             end: [reader.f32(), reader.f32()]
                         });
+                    } else if (fillType === 4) { // Pattern
+                        fills.push({
+                            type: 4,
+                            imageId: reader.u32(),
+                            width: reader.f32(),
+                            height: reader.f32(),
+                            transform: [reader.f32(), reader.f32(), reader.f32(), reader.f32(), reader.f32(), reader.f32()],
+                        });
                     } else {
                         fills.push({ type: 0 });
                     }
@@ -609,6 +654,14 @@ export class Renderer {
                             stops,
                             start: [reader.f32(), reader.f32()],
                             end: [reader.f32(), reader.f32()]
+                        };
+                    } else if (strokeType === 4) { // Pattern
+                        paint = {
+                            type: 4,
+                            imageId: reader.u32(),
+                            width: reader.f32(),
+                            height: reader.f32(),
+                            transform: [reader.f32(), reader.f32(), reader.f32(), reader.f32(), reader.f32(), reader.f32()],
                         };
                     }
                     strokes.push({
@@ -709,6 +762,9 @@ export class Renderer {
                                 fill.type, fill.stops, fill.start, fill.end, nodeAlpha
                             );
                             p.setShader(fillShader);
+                        } else if (fill.type === 4) {
+                            p.setColor(this.ck.Color4f(1, 1, 1, nodeAlpha)); // alpha via color
+                            p.setShader(this.getPatternShader(fill.imageId, fill.width, fill.height, fill.transform));
                         }
                         p.setStyle(this.ck.PaintStyle.Fill);
                         this.drawBinaryGeometry(canvas, nodeType, reader, p, cornerRadius, fillRule, nodeId);
@@ -735,8 +791,11 @@ export class Renderer {
                                 st.paint.type, st.paint.stops, st.paint.start, st.paint.end, nodeAlpha
                             );
                             p.setShader(strokeShader);
+                        } else if (st.paint.type === 4) {
+                            p.setColor(this.ck.Color4f(1, 1, 1, nodeAlpha));
+                            p.setShader(this.getPatternShader(st.paint.imageId, st.paint.width, st.paint.height, st.paint.transform));
                         }
-                        
+
                         p.setStyle(this.ck.PaintStyle.Stroke);
                         
                         // 0: Center, 1: Inner, 2: Outer
