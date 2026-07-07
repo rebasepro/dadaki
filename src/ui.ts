@@ -1966,61 +1966,90 @@ export class UIEngine {
         };
 
         // ─── CSS <style> block parsing ─────────────────────────────────
-        // Many SVGs (Figma, Illustrator, Inkscape exports) define styles
-        // via CSS class selectors inside <style> blocks. We parse these
-        // into a lookup map so class-based styles participate in the cascade.
-        //
-        // Cascade priority: inline style="..." > CSS class rule > presentation attribute
-        type CSSRuleMap = Map<string, Record<string, string>>;
+        // Many SVGs (Illustrator "Style Elements" export, SVGO output, hand-
+        // authored files) put fills/strokes in <style> blocks and reference
+        // them by class / id / element selector — e.g. `.cls-1{fill:#e00}`,
+        // `#logo{...}`, `path{...}`. We parse every <style> block into rules
+        // and match them against each element using the DOM's own selector
+        // engine (el.matches), so type/id/class/compound/combinator selectors
+        // all work, resolved by the CSS cascade (!important > specificity >
+        // source order). These sit between inline style="" and presentation
+        // attributes in the cascade.
+        interface CSSDecl { value: string; important: boolean; }
+        interface CSSRule { selector: string; spec: number; order: number; decls: Map<string, CSSDecl>; }
 
-        const parseCSSBlocks = (svgEl: Element): CSSRuleMap => {
-            const rules: CSSRuleMap = new Map();
-            const styleEls = svgEl.querySelectorAll('style');
-            for (const styleEl of styleEls) {
-                const css = styleEl.textContent || '';
-                // Match simple rules: .className { prop: value; ... }
-                // Also handles multi-class selectors like .cls-1, .cls-2 { ... }
-                const ruleRegex = /([^{}]+)\{([^}]*)\}/g;
-                let match;
-                while ((match = ruleRegex.exec(css)) !== null) {
-                    const selectors = match[1];
-                    const body = match[2];
-                    // Parse declarations
-                    const props: Record<string, string> = {};
-                    for (const decl of body.split(';')) {
-                        const colonIdx = decl.indexOf(':');
-                        if (colonIdx < 0) continue;
-                        const key = decl.slice(0, colonIdx).trim();
-                        const val = decl.slice(colonIdx + 1).trim();
-                        if (key && val) props[key] = val;
+        /** Single sortable specificity: a*10000 + b*100 + c (ids, classes, types). */
+        const cssSpecificity = (sel: string): number => {
+            const ids = (sel.match(/#[\w-]+/g) || []).length;
+            const cls = (sel.match(/\.[\w-]+/g) || []).length
+                + (sel.match(/\[[^\]]*\]/g) || []).length
+                + (sel.match(/:(?!:)[\w-]+/g) || []).length; // pseudo-classes
+            const types = (sel
+                .replace(/[.#][\w-]+/g, ' ')
+                .replace(/\[[^\]]*\]/g, ' ')
+                .replace(/::?[\w-]+/g, ' ')
+                .match(/[a-zA-Z][\w-]*/g) || []).length;      // type / pseudo-element
+            return Math.min(ids, 9) * 10000 + Math.min(cls, 99) * 100 + Math.min(types, 99);
+        };
+
+        const parseCSSRules = (svgEl: Element): CSSRule[] => {
+            const out: CSSRule[] = [];
+            let order = 0;
+            for (const styleEl of svgEl.querySelectorAll('style')) {
+                // Strip comments; textContent already unwraps CDATA sections.
+                const css = (styleEl.textContent || '').replace(/\/\*[\s\S]*?\*\//g, '');
+                const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
+                let m: RegExpExecArray | null;
+                while ((m = ruleRe.exec(css)) !== null) {
+                    const selectorList = m[1];
+                    const decls = new Map<string, CSSDecl>();
+                    for (const decl of m[2].split(';')) {
+                        const idx = decl.indexOf(':');
+                        if (idx < 0) continue;
+                        const prop = decl.slice(0, idx).trim().toLowerCase();
+                        let value = decl.slice(idx + 1).trim();
+                        if (!prop || !value) continue;
+                        let important = false;
+                        const imp = value.match(/!\s*important\s*$/i);
+                        if (imp) { important = true; value = value.slice(0, imp.index).trim(); }
+                        if (value) decls.set(prop, { value, important });
                     }
-                    // Apply to each selector (handles ".cls-1, .cls-2" comma-separated)
-                    for (const sel of selectors.split(',')) {
-                        const trimmed = sel.trim();
-                        // Support simple class selectors: .className
-                        if (trimmed.startsWith('.')) {
-                            const className = trimmed.slice(1);
-                            const existing = rules.get(className);
-                            rules.set(className, existing ? { ...existing, ...props } : props);
-                        }
+                    if (decls.size === 0) continue;
+                    for (let sel of selectorList.split(',')) {
+                        sel = sel.trim();
+                        if (!sel || sel.startsWith('@')) continue; // skip at-rules
+                        out.push({ selector: sel, spec: cssSpecificity(sel), order: order++, decls });
                     }
                 }
             }
-            return rules;
+            return out;
         };
 
-        const cssRules = parseCSSBlocks(svg);
+        const cssRules = parseCSSRules(svg);
+        const cssMatchCache = new Map<Element, Record<string, CSSDecl>>();
 
-        /** Get CSS class styles for an element (merged from all its classes). */
-        const getCSSClassStyles = (el: Element): Record<string, string> => {
-            const classAttr = el.getAttribute('class');
-            if (!classAttr || cssRules.size === 0) return {};
-            const merged: Record<string, string> = {};
-            for (const cls of classAttr.trim().split(/\s+/)) {
-                const rule = cssRules.get(cls);
-                if (rule) Object.assign(merged, rule);
+        /** Winning CSS declaration per property for an element (cascade-resolved). */
+        const getMatchedCSSStyles = (el: Element): Record<string, CSSDecl> => {
+            if (cssRules.length === 0) return {};
+            const cached = cssMatchCache.get(el);
+            if (cached) return cached;
+            const winners: Record<string, CSSRule> = {};
+            for (const rule of cssRules) {
+                let matches = false;
+                try { matches = el.matches(rule.selector); } catch { matches = false; }
+                if (!matches) continue;
+                for (const prop of rule.decls.keys()) {
+                    const cur = winners[prop];
+                    if (!cur) { winners[prop] = rule; continue; }
+                    const d = rule.decls.get(prop)!, cd = cur.decls.get(prop)!;
+                    if (d.important !== cd.important) { if (d.important) winners[prop] = rule; continue; }
+                    if (rule.spec > cur.spec || (rule.spec === cur.spec && rule.order > cur.order)) winners[prop] = rule;
+                }
             }
-            return merged;
+            const result: Record<string, CSSDecl> = {};
+            for (const prop in winners) result[prop] = winners[prop].decls.get(prop)!;
+            cssMatchCache.set(el, result);
+            return result;
         };
 
         // Parse inline style attribute to get style properties
@@ -2035,11 +2064,14 @@ export class UIEngine {
             return props;
         };
 
-        // Get attribute with cascade: inline style > CSS class > presentation attribute
-        const getStyleAttr = (el: Element, attr: string, inlineStyles: Record<string, string>, classStyles?: Record<string, string>): string | null => {
+        // Get attribute with cascade:
+        //   !important CSS rule > inline style="" > normal CSS rule > presentation attribute
+        // (inline !important is not distinguished — a rare simplification.)
+        const getStyleAttr = (el: Element, attr: string, inlineStyles: Record<string, string>): string | null => {
+            const css = getMatchedCSSStyles(el)[attr];
+            if (css && css.important) return css.value;
             if (inlineStyles[attr]) return inlineStyles[attr];
-            const cs = classStyles ?? getCSSClassStyles(el);
-            if (cs[attr]) return cs[attr];
+            if (css) return css.value;
             return el.getAttribute(attr);
         };
 
@@ -2142,8 +2174,14 @@ export class UIEngine {
             const fillOpacity = parseFloat(resolveAttr(el, 'fill-opacity', inlineStyles, inherited, '1') || '1');
             const strokeOpacity = parseFloat(resolveAttr(el, 'stroke-opacity', inlineStyles, inherited, '1') || '1');
 
+            // Paint objects (solid {r,g,b,a} or gradient) for the engine's
+            // multi-fill/multi-stroke Style. NOTE: the engine's Style requires
+            // `fills`/`strokes` ARRAYS — emitting the legacy singular
+            // `fill`/`stroke` keys makes set_node_style silently drop the whole
+            // style (missing required `fills`), so imported shapes fall back to
+            // the default gray. Always emit the array shape.
             const fill = paintToJson(fillPaint, fillOpacity);
-            const stroke = paintToJson(strokePaint, strokeOpacity);
+            const strokePaintJson = paintToJson(strokePaint, strokeOpacity);
 
             // Parse stroke-linecap
             const capStr = resolveAttr(el, 'stroke-linecap', inlineStyles, inherited, 'butt') || 'butt';
@@ -2163,44 +2201,46 @@ export class UIEngine {
             // Parse miter limit
             const miterLimit = parseFloat(resolveAttr(el, 'stroke-miterlimit', inlineStyles, inherited, '4') || '4');
 
-
-            const style = {
-                fill, stroke,
-                stroke_width: sw,
-                opacity: op,
-                stroke_cap: strokeCap,
-                stroke_join: strokeJoin,
-                dash_array: [] as number[],
-                dash_offset: 0,
-                corner_radius: 0,
-                blend_mode: 0 as number,
-                fill_rule: fillRule,
-                miter_limit: miterLimit,
-                fill_opacity: fillOpacity,
-            };
-
-            // Parse stroke-dasharray
+            // Parse stroke-dasharray / -dashoffset
+            let dashArray: number[] = [];
             const dashArr = resolveAttr(el, 'stroke-dasharray', inlineStyles, inherited, null);
             if (dashArr && dashArr !== 'none') {
-                style.dash_array = dashArr.split(/[,\s]+/).map(Number).filter(n => !isNaN(n));
+                dashArray = dashArr.split(/[,\s]+/).map(Number).filter(n => !isNaN(n));
             }
-
-            // Parse stroke-dashoffset
+            let dashOffset = 0;
             const dashOff = resolveAttr(el, 'stroke-dashoffset', inlineStyles, inherited, null);
-            if (dashOff) {
-                style.dash_offset = parseFloat(dashOff);
-            }
+            if (dashOff) dashOffset = parseFloat(dashOff) || 0;
 
-            // Parse rx for corner radius (rects)
+            // Corner radius (rects)
+            let cornerRadius = 0;
             const rx = el.getAttribute('rx');
-            if (rx) style.corner_radius = parseFloat(rx);
+            if (rx) cornerRadius = parseFloat(rx) || 0;
 
-            // Parse mix-blend-mode from inline style
+            // mix-blend-mode from inline style
+            let blendMode = 0;
             const blendStr = inlineStyles['mix-blend-mode'];
             if (blendStr) {
                 const bmIdx = BLEND_MODE_MAP.indexOf(blendStr.trim() as typeof BLEND_MODE_MAP[number]);
-                if (bmIdx > 0) style.blend_mode = bmIdx;
+                if (bmIdx > 0) blendMode = bmIdx;
             }
+
+            const style = {
+                fills: fill ? [fill] : [],
+                strokes: strokePaintJson ? [{
+                    paint: strokePaintJson,
+                    width: sw,
+                    cap: strokeCap,
+                    join: strokeJoin,
+                    dash_array: dashArray,
+                    dash_offset: dashOffset,
+                    miter_limit: miterLimit,
+                    alignment: 'Center',
+                }] : [],
+                opacity: op,
+                blend_mode: blendMode,
+                fill_rule: fillRule,
+                corner_radius: cornerRadius,
+            };
 
             this.scene.setNodeStyle(id, JSON.stringify(style));
 
