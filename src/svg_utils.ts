@@ -824,56 +824,76 @@ export function resolveGradient(
 
     if (stops.length === 0) return null;
 
-    // Check gradientUnits (default: objectBoundingBox)
-    const units = el.getAttribute('gradientUnits') || 'objectBoundingBox';
-    const isOBB = units === 'objectBoundingBox';
+    // Resolve an attribute through the href/xlink:href template chain — coords,
+    // gradientUnits and gradientTransform (like stops) commonly live on a
+    // referenced template gradient in Illustrator/Figma exports.
+    const resolveAttr = (name: string): string | null => {
+        let cur: Element | null = el;
+        for (let hops = 0; cur && hops < 5; hops++) {
+            const v = cur.getAttribute(name);
+            if (v !== null && v !== '') return v;
+            const href: string | null | undefined = cur.getAttribute('href') ?? cur.getAttribute('xlink:href');
+            cur = href?.startsWith('#') ? svgDoc.getElementById(href.slice(1)) : null;
+        }
+        return null;
+    };
+
+    // Parse a coordinate attribute, honoring a trailing % (→ 0–1 fraction).
+    const num = (name: string, def: number): number => {
+        const raw = resolveAttr(name);
+        if (raw === null) return def;
+        const v = parseFloat(raw);
+        if (isNaN(v)) return def;
+        return raw.trim().endsWith('%') ? v / 100 : v;
+    };
+
+    const isOBB = (resolveAttr('gradientUnits') || 'objectBoundingBox') === 'objectBoundingBox';
+
+    // gradientTransform is applied in the gradient's own coordinate space,
+    // BEFORE the objectBoundingBox→local scaling. Rotated/skewed gradients are
+    // common in real exports; without this they import axis-aligned and wrong.
+    const gtAttr = resolveAttr('gradientTransform');
+    const gt = gtAttr ? parseSVGTransform(gtAttr) : null;
+    const applyGt = (x: number, y: number): [number, number] => gt ? transformPoint(gt, x, y) : [x, y];
+
+    // spreadMethod repeat/reflect can't be represented by our 2-point clamp
+    // gradient model — we approximate them as `pad` (clamp). Read it anyway so
+    // the intent is visible and future work has a hook.
+    // const spread = resolveAttr('spreadMethod') || 'pad';
 
     let start_x: number, start_y: number, end_x: number, end_y: number;
 
     if (tag === 'lineargradient') {
         // Default: x1=0, y1=0, x2=1, y2=0 (left to right)
-        let x1 = parseFloat(el.getAttribute('x1') || '0');
-        let y1 = parseFloat(el.getAttribute('y1') || '0');
-        let x2 = parseFloat(el.getAttribute('x2') || '1');
-        let y2 = parseFloat(el.getAttribute('y2') || '0');
-
-        // Handle percentage values
-        if (el.getAttribute('x1')?.endsWith('%')) x1 /= 100;
-        if (el.getAttribute('y1')?.endsWith('%')) y1 /= 100;
-        if (el.getAttribute('x2')?.endsWith('%')) x2 /= 100;
-        if (el.getAttribute('y2')?.endsWith('%')) y2 /= 100;
+        const [x1, y1] = applyGt(num('x1', 0), num('y1', 0));
+        const [x2, y2] = applyGt(num('x2', 1), num('y2', 0));
 
         if (isOBB) {
-            start_x = x1 * bboxWidth;
-            start_y = y1 * bboxHeight;
-            end_x = x2 * bboxWidth;
-            end_y = y2 * bboxHeight;
+            start_x = x1 * bboxWidth;  start_y = y1 * bboxHeight;
+            end_x   = x2 * bboxWidth;  end_y   = y2 * bboxHeight;
         } else {
-            start_x = x1; start_y = y1;
-            end_x = x2; end_y = y2;
+            start_x = x1; start_y = y1; end_x = x2; end_y = y2;
         }
 
         return { gradient_type: 'Linear', stops, start_x, start_y, end_x, end_y };
     } else {
-        // radialGradient
-        // Default: cx=0.5, cy=0.5, r=0.5
-        let cx = parseFloat(el.getAttribute('cx') || '0.5');
-        let cy = parseFloat(el.getAttribute('cy') || '0.5');
-        let r = parseFloat(el.getAttribute('r') || '0.5');
+        // radialGradient — default cx=0.5, cy=0.5, r=0.5.
+        // Focal point (fx/fy) can't be represented by our 2-point radial model,
+        // so it's ignored (approximated by the geometric center).
+        const cx = num('cx', 0.5), cy = num('cy', 0.5), r = num('r', 0.5);
 
-        if (el.getAttribute('cx')?.endsWith('%')) cx /= 100;
-        if (el.getAttribute('cy')?.endsWith('%')) cy /= 100;
-        if (el.getAttribute('r')?.endsWith('%')) r /= 100;
+        // Transform the center and a +x radius-edge point together, so the
+        // gradientTransform's rotation/scale affects the radius. A non-uniform
+        // transform yields an ellipse we can't represent — we collapse it to
+        // the transformed major-axis radius (an approximation).
+        const [c0x, c0y] = applyGt(cx, cy);
+        const [e0x, e0y] = applyGt(cx + r, cy);
 
         if (isOBB) {
-            start_x = cx * bboxWidth;
-            start_y = cy * bboxHeight;
-            // End point defines the radius edge
-            end_x = start_x + r * bboxWidth;
-            end_y = start_y;
+            start_x = c0x * bboxWidth;  start_y = c0y * bboxHeight;
+            end_x   = e0x * bboxWidth;  end_y   = e0y * bboxHeight;
         } else {
-            start_x = cx; start_y = cy;
-            end_x = cx + r; end_y = cy;
+            start_x = c0x; start_y = c0y; end_x = e0x; end_y = e0y;
         }
 
         return { gradient_type: 'Radial', stops, start_x, start_y, end_x, end_y };

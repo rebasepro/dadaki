@@ -13,6 +13,7 @@ import {
     escapeXml,
     resolveGradientColor,
     parseCssColor,
+    resolveGradient,
 } from './svg_utils';
 
 // ─── Color Conversion ───────────────────────────────────────────────────────
@@ -425,5 +426,75 @@ describe('parseCssColor', () => {
         expect(parseCssColor('var(--brand)')).toBeNull();
         expect(parseCssColor('url(#grad)')).toBeNull();
         expect(parseCssColor('#zzz')).toBeNull();
+    });
+});
+
+// ─── Gradient Resolution ──────────────────────────────────────────────────────
+
+describe('resolveGradient', () => {
+    const parse = (svg: string): Document =>
+        new DOMParser().parseFromString(svg, 'image/svg+xml');
+
+    it('resolves a userSpaceOnUse linear gradient coords verbatim', () => {
+        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
+            <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="10" y1="20" x2="110" y2="20">
+              <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
+            </linearGradient></defs></svg>`);
+        const g = resolveGradient(doc, 'url(#g)', 200, 200)!;
+        expect(g.gradient_type).toBe('Linear');
+        expect(g.start_x).toBeCloseTo(10);
+        expect(g.end_x).toBeCloseTo(110);
+        expect(g.stops.length).toBe(2);
+    });
+
+    it('applies gradientTransform (90° rotation) to a userSpaceOnUse linear gradient', () => {
+        // A horizontal gradient (0,0)->(100,0) rotated 90° about the origin
+        // becomes vertical (0,0)->(0,100).
+        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
+            <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="100" y2="0"
+                gradientTransform="rotate(90)">
+              <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
+            </linearGradient></defs></svg>`);
+        const g = resolveGradient(doc, 'url(#g)', 100, 100)!;
+        expect(g.start_x).toBeCloseTo(0);
+        expect(g.start_y).toBeCloseTo(0);
+        expect(g.end_x).toBeCloseTo(0);
+        expect(g.end_y).toBeCloseTo(100);
+    });
+
+    it('applies gradientTransform translate to a radial gradient center', () => {
+        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
+            <radialGradient id="g" gradientUnits="userSpaceOnUse" cx="50" cy="50" r="25"
+                gradientTransform="translate(10, 20)">
+              <stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/>
+            </radialGradient></defs></svg>`);
+        const g = resolveGradient(doc, 'url(#g)', 100, 100)!;
+        expect(g.gradient_type).toBe('Radial');
+        expect(g.start_x).toBeCloseTo(60); // 50 + 10
+        expect(g.start_y).toBeCloseTo(70); // 50 + 20
+        // radius edge stays r=25 away on +x (translate doesn't scale)
+        expect(Math.hypot(g.end_x - g.start_x, g.end_y - g.start_y)).toBeCloseTo(25);
+    });
+
+    it('inherits coords and stops through xlink:href template chain', () => {
+        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><defs>
+            <linearGradient id="base" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="80" y2="0">
+              <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
+            </linearGradient>
+            <linearGradient id="g" xlink:href="#base"/>
+            </defs></svg>`);
+        const g = resolveGradient(doc, 'url(#g)', 100, 100)!;
+        expect(g.stops.length).toBe(2);
+        expect(g.end_x).toBeCloseTo(80); // inherited x2
+    });
+
+    it('imports a repeat spreadMethod gradient without crashing (approximated as pad)', () => {
+        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
+            <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="50" y2="0" spreadMethod="repeat">
+              <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
+            </linearGradient></defs></svg>`);
+        const g = resolveGradient(doc, 'url(#g)', 100, 100);
+        expect(g).not.toBeNull();
+        expect(g!.gradient_type).toBe('Linear');
     });
 });
