@@ -43,6 +43,9 @@ const flagVal = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] 
 
 const UPDATE = hasFlag('--update');
 const WRITE_DIFF = hasFlag('--diff');
+// Round-trip mode: import → export SVG → re-import → render. Compared against
+// the normal import baseline, so any drop reveals an EXPORT fidelity loss.
+const ROUNDTRIP = hasFlag('--roundtrip');
 const FILTER = flagVal('--filter');
 const EXTERNAL_URL = flagVal('--url');
 const LIMIT = flagVal('--limit') ? parseInt(flagVal('--limit'), 10) : Infinity;
@@ -119,8 +122,8 @@ async function startServer() {
 
 // ── In-page: import + rasterise + pixel-diff (runs inside the browser) ───────
 // Returns { status, similarity, rmse, refW, refH, outW, outH, scale, error?, diffB64? }.
-async function runInPage(page, svgText, refB64, vp, wantDiff) {
-  return page.evaluate(async (svgText, refB64, vp, wantDiff) => {
+async function runInPage(page, svgText, refB64, vp, wantDiff, roundtrip) {
+  return page.evaluate(async (svgText, refB64, vp, wantDiff, roundtrip) => {
     const app = window.app, ck = app.ck;
     try {
       app.scene.newDocument(vp.w, vp.h);
@@ -132,6 +135,14 @@ async function runInPage(page, svgText, refB64, vp, wantDiff) {
           '<svg' + a.replace(/\s(width|height)\s*=\s*["'][^"']*["']/g, '') + '>');
       }
       await app.ui.parseSVG(svg);
+
+      // Round-trip: export what we just imported, then re-import it. The render
+      // below then reflects EXPORT fidelity (vs the import-only baseline).
+      if (roundtrip) {
+        const exported = app.ui.buildSVGString();
+        app.scene.newDocument(vp.w, vp.h);
+        await app.ui.parseSVG(exported);
+      }
 
       const refBytes = Uint8Array.from(atob(refB64), (c) => c.charCodeAt(0));
       const refImg = ck.MakeImageFromEncoded(refBytes);
@@ -201,7 +212,7 @@ async function runInPage(page, svgText, refB64, vp, wantDiff) {
     } catch (e) {
       return { status: 'error', error: String(e && e.message || e) };
     }
-  }, svgText, refB64, vp, wantDiff);
+  }, svgText, refB64, vp, wantDiff, roundtrip);
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -234,7 +245,7 @@ for (const svgPath of tests) {
   let res;
   try {
     res = await Promise.race([
-      runInPage(page, svgText, refB64, vp, WRITE_DIFF),
+      runInPage(page, svgText, refB64, vp, WRITE_DIFF, ROUNDTRIP),
       new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000)),
     ]);
   } catch (e) {
@@ -291,6 +302,29 @@ for (const [cat, c] of Object.entries(cats).sort()) {
 }
 
 // ── Baseline: update or gate on regressions ────────────────────────────────
+if (UPDATE && ROUNDTRIP) {
+  console.log('\n⚠ Refusing to --update the baseline in --roundtrip mode (it holds import scores).');
+  process.exit(1);
+}
+if (ROUNDTRIP) {
+  // Compare round-trip scores to the import baseline: any drop is an export bug.
+  const baseline = existsSync(BASELINE_PATH) ? JSON.parse(readFileSync(BASELINE_PATH, 'utf8')) : {};
+  const drops = [];
+  for (const [rel, r] of Object.entries(results)) {
+    const base = baseline[rel];
+    if (base == null || r.status !== 'ok') continue;
+    const delta = base - r.similarity;
+    if (delta > REGRESSION_EPS) drops.push({ rel, base, got: r.similarity, delta });
+  }
+  drops.sort((a, b) => b.delta - a.delta);
+  console.log(`\n── Export round-trip fidelity ──`);
+  console.log(`  ${drops.length} test(s) lose >${REGRESSION_EPS} fidelity on export (import → export → re-import):`);
+  for (const d of drops.slice(0, 40)) {
+    console.log(`    ${d.base.toFixed(3)} → ${d.got.toFixed(3)}  (−${d.delta.toFixed(3)})  ${d.rel}`);
+  }
+  if (drops.length > 40) console.log(`    …and ${drops.length - 40} more`);
+  process.exit(0);
+}
 if (UPDATE) {
   const baseline = {};
   for (const [rel, r] of Object.entries(results)) baseline[rel] = r.status === 'ok' ? +r.similarity.toFixed(4) : null;

@@ -1282,7 +1282,7 @@
 "structure/transform/zeroed-matrix.svg":0.6424,
 "structure/use/cSS-rules.svg":1,
 "structure/use/complex-style-resolving-order.svg":1,
-"structure/use/display-inheritance.svg":0.36,
+"structure/use/display-inheritance.svg":1,
 "structure/use/duplicated-IDs.svg":1,
 "structure/use/fill-opacity-inheritance.svg":1,
 "structure/use/from-defs.svg":1,

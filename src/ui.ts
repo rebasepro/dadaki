@@ -2978,6 +2978,14 @@ export class UIEngine {
             // <symbol> is only renderable when referenced by <use>, not as a top-level element
             if (tag === 'symbol') return;
 
+            // display:none removes the element AND its subtree (unlike
+            // visibility, display is not inherited, so groups must be handled
+            // here — the child-visibility path only covers leaf shapes). Our own
+            // exporter also wraps every hidden node in `<g display="none">`, so
+            // honoring this is what makes hidden state survive a round-trip.
+            const _ownInline = parseInlineStyle(el);
+            if ((el.getAttribute('display') || _ownInline['display']) === 'none') return;
+
             // Parse this element's transform and compose with parent
             const transformAttr = el.getAttribute('transform');
             const localMat = transformAttr ? parseSVGTransform(transformAttr) : identityMatrix();
