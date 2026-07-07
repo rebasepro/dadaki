@@ -51,6 +51,10 @@ export class WasmScene {
             this.engine.set_document_size(width, height);
         }
         this.autosave = new AutosaveManager(this.engine);
+        // The fresh engine restarts image-id numbering, so previously-decoded
+        // images/pattern shaders in the renderer would be returned for the new
+        // document's colliding ids. Drop them (same reason as the .vec drop path).
+        this.renderer?.clearImageCache();
         this.invalidateCache();
     }
 
@@ -62,10 +66,15 @@ export class WasmScene {
         
         const ptr = this.engine.get_render_buffer();
         const size = this.engine.get_render_buffer_size();
-        
-        // Note: the pointer can change if the vector reallocates, 
-        // so we must fetch it every frame.
-        return new DataView(this.wasm.memory.buffer, ptr, size);
+
+        // Copy the buffer OUT of WASM linear memory into a JS-owned ArrayBuffer.
+        // The renderer decodes images mid-iteration (get_image_bytes), which
+        // allocates in WASM memory and can grow it — that would detach a view
+        // held over `wasm.memory.buffer` and crash the reader ("detached
+        // ArrayBuffer"). A view into our own copy can never be detached. The
+        // render buffer is geometry-only (image/font bytes stay in the engine,
+        // referenced by id), so it stays small and this copy is cheap.
+        return new DataView(this.wasm.memory.buffer.slice(ptr, ptr + size));
     }
 
     invalidateCache() {

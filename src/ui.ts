@@ -2392,8 +2392,8 @@ export class UIEngine {
                 const scale = 2;
                 const tile = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
                     `width="${bw * scale}" height="${bh * scale}" viewBox="${bx} ${by} ${bw} ${bh}"><defs>${defsHtml}</defs>${el.outerHTML}</svg>`;
-                const bytes = await this.rasterizeSvgToPng(tile, Math.round(bw * scale), Math.round(bh * scale));
-                if (!bytes) continue;
+                const bytes = await this.rasterizeSvgToPng(tile, Math.round(bw * scale), Math.round(bh * scale), true);
+                if (!bytes) continue; // blank tile → fall back to normal element rendering
                 let imageId = 0;
                 try { imageId = this.scene.engine!.register_image(bytes, 'image/png'); } catch { continue; }
                 (el as unknown as { __rasterFilter?: unknown }).__rasterFilter = { imageId, x: bx, y: by, w: bw, h: bh };
@@ -2433,7 +2433,7 @@ export class UIEngine {
     }
 
     /** Render an SVG string to PNG bytes at the given pixel size (async). */
-    private rasterizeSvgToPng(svgString: string, pxW: number, pxH: number): Promise<Uint8Array | null> {
+    private rasterizeSvgToPng(svgString: string, pxW: number, pxH: number, requireContent = false): Promise<Uint8Array | null> {
         return new Promise((resolve) => {
             const img = new Image();
             img.onload = () => {
@@ -2443,12 +2443,32 @@ export class UIEngine {
                     const ctx = c.getContext('2d');
                     if (!ctx) { resolve(null); return; }
                     ctx.drawImage(img, 0, 0, pxW, pxH);
+                    // When rasterizing a filtered element, a fully-transparent tile
+                    // means the browser couldn't render the filter (e.g. feComposite
+                    // with no in2, or degenerate no-op filters Chrome drops). In that
+                    // case the fallback would be strictly worse than just rendering
+                    // the element normally, so bail and let normal processing run.
+                    if (requireContent && this.canvasIsBlank(ctx, pxW, pxH)) { resolve(null); return; }
                     c.toBlob(async (b) => resolve(b ? new Uint8Array(await b.arrayBuffer()) : null), 'image/png');
                 } catch { resolve(null); }
             };
             img.onerror = () => resolve(null);
             img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgString)));
         });
+    }
+
+    /** True when every pixel of the canvas is (near-)transparent. Sampled on a
+     *  grid so large tiles stay cheap. */
+    private canvasIsBlank(ctx: CanvasRenderingContext2D, w: number, h: number): boolean {
+        if (w <= 0 || h <= 0) return true;
+        try {
+            const data = ctx.getImageData(0, 0, w, h).data;
+            const stride = Math.max(1, Math.floor((w * h) / 40000)); // cap samples
+            for (let i = 3; i < data.length; i += 4 * stride) {
+                if (data[i] > 2) return false;
+            }
+            return true;
+        } catch { return false; } // tainted/oversized → assume content, keep tile
     }
 
     private parseSVGInternal(svgText: string, patternImages?: Map<string, { image_id: number; width: number; height: number; transform: number[] }>, docIn?: Document) {
