@@ -219,16 +219,27 @@ async function runInPage(page, svgText, refB64, vp, wantDiff, roundtrip) {
 const server = await startServer();
 console.log(`Dev server: ${server.url}`);
 const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
-const page = await browser.newPage();
-page.on('pageerror', (e) => { /* swallow: per-test try/catch reports real errors */ });
 
+const APP_READY = () => window.app && window.app.scene && window.app.scene.engine
+  && window.app.ui && window.app.renderer && window.app.ck;
+
+let page;
 async function loadApp() {
-  await page.goto(server.url, { waitUntil: 'networkidle0' });
-  await page.evaluate(() => localStorage.clear());
-  await page.reload({ waitUntil: 'networkidle0' });
-  await page.waitForFunction(
-    () => window.app && window.app.scene && window.app.scene.engine && window.app.ui && window.app.renderer && window.app.ck,
-    { timeout: 30000 });
+  // Use a FRESH page each time (not reload): it fully resets the JS/WASM heap
+  // and sidesteps two flakiness sources in the newer app — long-lived
+  // connections (HMR, autosave/version-history) that keep the network from ever
+  // idling, and vite's cold dep-optimization forcing a mid-load reload that
+  // aborts navigation. Navigation is best-effort; the real readiness gate is
+  // `window.app` appearing. The old page is only closed once the new one is
+  // healthy, so a failed refresh leaves the previous page usable.
+  const fresh = await browser.newPage();
+  fresh.on('pageerror', () => { /* swallow: per-test try/catch reports real errors */ });
+  try { await fresh.goto(server.url, { waitUntil: 'domcontentloaded', timeout: 30000 }); } catch { /* nav aborted; app may still load */ }
+  await fresh.evaluate(() => localStorage.clear()).catch(() => {});
+  try { await fresh.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }); } catch { /* same */ }
+  await fresh.waitForFunction(APP_READY, { timeout: 120000 });
+  if (page) await page.close().catch(() => {});
+  page = fresh;
 }
 await loadApp();
 
@@ -268,8 +279,13 @@ for (const svgPath of tests) {
     const pct = ((done / tests.length) * 100).toFixed(0);
     process.stdout.write(`\r  ${done}/${tests.length} (${pct}%)   `);
   }
-  // Periodic page reload to keep WASM heap from growing unbounded.
-  if (done % 400 === 0) await loadApp();
+  // Periodic page reload to keep the WASM heap from growing unbounded. Best
+  // effort: if a reload fails to re-init the app in time, keep going on the
+  // current page rather than aborting the whole run (per-test newDocument +
+  // the render-buffer copy already bound heap growth).
+  if (done % 400 === 0) {
+    try { await loadApp(); } catch { /* refresh failed; keep the previous page */ }
+  }
 }
 process.stdout.write('\n');
 await browser.close();
