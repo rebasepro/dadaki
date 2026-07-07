@@ -32,6 +32,10 @@ export class BreadcrumbBar {
     /** Cache key for the last render — avoids redundant DOM rebuilds. */
     private _lastSignature: string = '';
 
+    /** Active document name + dirty flag, shown as the breadcrumb root. */
+    public docName: string = 'Untitled';
+    public docDirty: boolean = false;
+
     constructor(
         headerEl: HTMLElement,
         ui: UIEngine,
@@ -73,17 +77,18 @@ export class BreadcrumbBar {
     /** Build a cache key that captures everything affecting the breadcrumb's rendered output. */
     private buildSignature(info: ContextInfo): string {
         const crumbSig = info.breadcrumb.map(c => `${c.id}:${c.name}:${c.nodeType}`).join('/');
-        return `${info.context}|${crumbSig}|${info.selectedIds.length}|${info.pointCount}|${info.editingNodeId}`;
+        return `${this.docName}|${this.docDirty}|${info.context}|${crumbSig}|${info.selectedIds.length}|${info.pointCount}|${info.editingNodeId}`;
     }
 
     /** Rebuild the breadcrumb DOM based on context info. */
     private render(info: ContextInfo) {
         this.el.innerHTML = '';
 
-        // 1. Home / Canvas item — always present
+        // 1. Home / document root item — always present. Label is the active
+        // document name (with a dirty marker), replacing the old static 'Canvas'.
         this.addItem({
             icon: iconHome(13),
-            label: 'Canvas',
+            label: (this.docDirty ? '● ' : '') + this.docName,
             isActive: info.context === 'empty' || info.context === 'tool' || info.context === 'pen-drawing',
             onClick: () => this.navigateToCanvas(),
         });

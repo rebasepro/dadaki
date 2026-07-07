@@ -44,6 +44,26 @@ pub struct Color {
     pub a: f32,
 }
 
+/// A named, resizable artboard (frame) placed on the infinite canvas.
+///
+/// Artboards are a scene-level list, NOT nodes — they never enter the render
+/// buffer or hit-testing; the renderer draws them from `get_artboards_json`.
+/// Their ids live in a separate space from node ids (they are only ever looked
+/// up within `Scene.artboards`).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Artboard {
+    pub id: u32,
+    pub name: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    #[serde(default = "default_artboard_bg")]
+    pub background: Color,
+}
+
+fn default_artboard_bg() -> Color { Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GradientStop {
     pub offset: f32,
@@ -811,6 +831,11 @@ pub struct Scene {
     /// Encoded raster images, keyed by image id (referenced by Geometry::Image).
     #[serde(default)]
     pub images: HashMap<u32, ImageData>,
+    /// Named artboards on the canvas. The source of truth for the drawable
+    /// page(s); `document_width/height` above are kept as a legacy mirror of
+    /// `artboards[0]` for back-compat with pre-artboard readers.
+    #[serde(default)]
+    pub artboards: Vec<Artboard>,
 }
 
 fn default_document_size() -> f32 { 1000.0 }
@@ -831,6 +856,15 @@ impl Engine {
                 document_width: 1000.0,
                 document_height: 1000.0,
                 images: HashMap::new(),
+                artboards: vec![Artboard {
+                    id: 1,
+                    name: "Artboard 1".to_string(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1000.0,
+                    h: 1000.0,
+                    background: default_artboard_bg(),
+                }],
             },
             next_id: 1,
             global_transforms: HashMap::new(),
@@ -3705,17 +3739,124 @@ impl Engine {
     }
 
     pub fn get_document_width(&self) -> f32 {
-        self.scene.document_width
+        // Legacy shim: the primary artboard is the source of truth.
+        self.scene.artboards.first().map(|a| a.w).unwrap_or(self.scene.document_width)
     }
 
     pub fn get_document_height(&self) -> f32 {
-        self.scene.document_height
+        self.scene.artboards.first().map(|a| a.h).unwrap_or(self.scene.document_height)
     }
 
     pub fn set_document_size(&mut self, w: f32, h: f32) {
         self.scene.document_width = w;
         self.scene.document_height = h;
+        // Keep the primary artboard in sync (used by the SVG conformance harness).
+        if let Some(a) = self.scene.artboards.first_mut() {
+            a.w = w;
+            a.h = h;
+        }
     }
+
+    // ─── Artboards ──────────────────────────────────────────────────────────
+
+    /// Add a new artboard; returns its id. Auto-named "Artboard N".
+    pub fn add_artboard(&mut self, x: f32, y: f32, w: f32, h: f32) -> u32 {
+        let id = self.scene.artboards.iter().map(|a| a.id).max().unwrap_or(0) + 1;
+        let n = self.scene.artboards.len() + 1;
+        self.scene.artboards.push(Artboard {
+            id,
+            name: format!("Artboard {}", n),
+            x,
+            y,
+            w: w.max(1.0),
+            h: h.max(1.0),
+            background: default_artboard_bg(),
+        });
+        id
+    }
+
+    /// Remove an artboard. Refuses to remove the last one (there is always at
+    /// least one artboard). Returns true if removed.
+    pub fn remove_artboard(&mut self, id: u32) -> bool {
+        if self.scene.artboards.len() <= 1 {
+            return false;
+        }
+        let before = self.scene.artboards.len();
+        self.scene.artboards.retain(|a| a.id != id);
+        self.scene.artboards.len() != before
+    }
+
+    /// Resize/move an artboard. Rejects non-positive dimensions. Returns true on success.
+    pub fn set_artboard_bounds(&mut self, id: u32, x: f32, y: f32, w: f32, h: f32) -> bool {
+        if w <= 0.0 || h <= 0.0 {
+            return false;
+        }
+        let is_primary = self.scene.artboards.first().map(|a| a.id == id).unwrap_or(false);
+        if let Some(a) = self.scene.artboards.iter_mut().find(|a| a.id == id) {
+            a.x = x;
+            a.y = y;
+            a.w = w;
+            a.h = h;
+            if is_primary {
+                self.scene.document_width = w;
+                self.scene.document_height = h;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_artboard_name(&mut self, id: u32, name: String) -> bool {
+        if let Some(a) = self.scene.artboards.iter_mut().find(|a| a.id == id) {
+            a.name = name;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_artboard_background(&mut self, id: u32, r: f32, g: f32, b: f32, a_: f32) -> bool {
+        if let Some(a) = self.scene.artboards.iter_mut().find(|a| a.id == id) {
+            a.background = Color { r, g, b, a: a_ };
+            true
+        } else {
+            false
+        }
+    }
+
+    /// All artboards as JSON: `[{id,name,x,y,w,h,background:{r,g,b,a}}, …]`.
+    pub fn get_artboards_json(&self) -> String {
+        let items: Vec<String> = self.scene.artboards.iter().map(|a| {
+            format!(
+                "{{\"id\":{},\"name\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"background\":{{\"r\":{},\"g\":{},\"b\":{},\"a\":{}}}}}",
+                a.id,
+                json_string(&a.name),
+                a.x, a.y, a.w, a.h,
+                a.background.r, a.background.g, a.background.b, a.background.a,
+            )
+        }).collect();
+        format!("[{}]", items.join(","))
+    }
+}
+
+/// Minimal JSON string escaper for artboard names.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]

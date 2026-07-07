@@ -439,27 +439,94 @@ export class UIEngine {
             this.updateLayerList();
         });
 
-        // Export
-        document.getElementById('export-svg')?.addEventListener('click', () => this.exportSVG());
-        document.getElementById('export-png')?.addEventListener('click', () => this.exportPNG());
-
         // Effects: "+" adds a drop shadow to the selected node.
         document.getElementById('add-effect-btn')?.addEventListener('click', () => this.addEffectToSelection());
 
-        // Import SVG
-        document.getElementById('import-svg')?.addEventListener('click', () => {
-            const input = document.createElement('input');
-            input.type = 'file';
-            input.accept = '.svg,image/svg+xml';
-            input.onchange = () => {
-                const file = input.files?.[0];
-                if (!file) return;
-                const reader = new FileReader();
-                reader.onload = () => this.parseSVG(reader.result as string);
-                reader.readAsText(file);
-            };
-            input.click();
+        // Artboard properties panel inputs.
+        this.bindArtboardPanel();
+    }
+
+    /** Wire the artboard properties panel inputs (once, from bindEvents). */
+    private bindArtboardPanel() {
+        const selectedId = () => this.scene.renderer?.selectedArtboardId ?? null;
+        const current = () => this.scene.getArtboards().find(a => a.id === selectedId());
+
+        const applyBounds = () => {
+            const ab = current();
+            if (!ab) return;
+            const x = parseFloat((document.getElementById('ab-x') as HTMLInputElement).value) || 0;
+            const y = parseFloat((document.getElementById('ab-y') as HTMLInputElement).value) || 0;
+            const w = Math.max(1, parseFloat((document.getElementById('ab-w') as HTMLInputElement).value) || 1);
+            const h = Math.max(1, parseFloat((document.getElementById('ab-h') as HTMLInputElement).value) || 1);
+            this.scene.setArtboardBounds(ab.id, x, y, w, h);
+            this.scene.renderer?.requestRender();
+        };
+        for (const id of ['ab-x', 'ab-y', 'ab-w', 'ab-h']) {
+            document.getElementById(id)?.addEventListener('change', applyBounds);
+        }
+        document.getElementById('ab-name')?.addEventListener('change', (e) => {
+            const ab = current();
+            if (ab) { this.scene.setArtboardName(ab.id, (e.target as HTMLInputElement).value); this.breadcrumbBar?.refresh(); }
         });
+        document.getElementById('ab-bg')?.addEventListener('input', (e) => {
+            const ab = current();
+            if (!ab) return;
+            const c = hexToRgb((e.target as HTMLInputElement).value);
+            this.scene.setArtboardBackground(ab.id, c.r, c.g, c.b, 1);
+            this.scene.renderer?.requestRender();
+        });
+        document.getElementById('ab-delete')?.addEventListener('click', () => {
+            const ab = current();
+            if (!ab) return;
+            if (this.scene.removeArtboard(ab.id)) {
+                if (this.scene.renderer) this.scene.renderer.selectedArtboardId = null;
+                this.refreshArtboardPanel();
+                this.scene.renderer?.fitToArtboard();
+            }
+        });
+    }
+
+    /** Show/populate the artboard section when an artboard is selected. */
+    refreshArtboardPanel() {
+        const section = document.getElementById('artboard-section');
+        if (!section) return;
+        const id = this.scene.renderer?.selectedArtboardId ?? null;
+        const ab = id !== null ? this.scene.getArtboards().find(a => a.id === id) : undefined;
+        if (!ab) { section.style.display = 'none'; return; }
+        section.style.display = '';
+        (document.getElementById('ab-name') as HTMLInputElement).value = ab.name;
+        (document.getElementById('ab-x') as HTMLInputElement).value = String(Math.round(ab.x));
+        (document.getElementById('ab-y') as HTMLInputElement).value = String(Math.round(ab.y));
+        (document.getElementById('ab-w') as HTMLInputElement).value = String(Math.round(ab.w));
+        (document.getElementById('ab-h') as HTMLInputElement).value = String(Math.round(ab.h));
+        (document.getElementById('ab-bg') as HTMLInputElement).value = this.rgbToHex(ab.background);
+    }
+
+    /** Add a new artboard to the right of the existing ones and select it. */
+    addArtboard() {
+        const arts = this.scene.getArtboards();
+        const maxRight = arts.reduce((m, a) => Math.max(m, a.x + a.w), 0);
+        const gap = 100;
+        const id = this.scene.addArtboard(maxRight + gap, 0, 1000, 1000);
+        if (this.scene.renderer) this.scene.renderer.selectedArtboardId = id;
+        this.refreshArtboardPanel();
+        this.scene.renderer?.fitToArtboard();
+        this.scene.renderer?.requestRender();
+    }
+
+    /** Open a file picker and import the chosen SVG. Invoked from the app menu. */
+    importSVGViaPicker() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.svg,image/svg+xml';
+        input.onchange = () => {
+            const file = input.files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => this.parseSVG(reader.result as string);
+            reader.readAsText(file);
+        };
+        input.click();
     }
 
     setActiveTool(toolId: string) {
@@ -2109,8 +2176,8 @@ export class UIEngine {
         this.breadcrumbBar?.refresh();
     }
 
-    exportSVG() {
-        const svg = this.buildSVGString();
+    exportSVG(bounds?: { x: number; y: number; w: number; h: number }, background?: Color) {
+        const svg = this.buildSVGString(bounds, background);
         const blob = new Blob([svg], { type: 'image/svg+xml' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -2233,8 +2300,8 @@ export class UIEngine {
     }
 
     /** Export the document as a PNG raster (2× by default) and download it. */
-    exportPNG(scale = 2) {
-        const blob = this.scene.renderer?.exportPNG(scale);
+    exportPNG(scale = 2, bounds?: { x: number; y: number; w: number; h: number }, background?: Color) {
+        const blob = this.scene.renderer?.exportPNG(scale, bounds, background);
         if (!blob) {
             console.error('PNG export failed (no renderer or surface unavailable)');
             return;
@@ -2248,7 +2315,7 @@ export class UIEngine {
     }
 
     /** Build the full SVG document string (with embedded .vec payload). */
-    buildSVGString(): string {
+    buildSVGString(bounds?: { x: number; y: number; w: number; h: number }, background?: Color): string {
         const docW = this.scene.engine?.get_document_width() ?? 1000;
         const docH = this.scene.engine?.get_document_height() ?? 1000;
 
@@ -2317,6 +2384,8 @@ export class UIEngine {
             localTransforms,
             filledFaces,
             imageDataUris,
+            viewBox: bounds,
+            background,
         });
 
         // Embed the binary .vec payload for round-tripping

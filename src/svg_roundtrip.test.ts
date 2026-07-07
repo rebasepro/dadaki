@@ -1279,3 +1279,59 @@ describe('SVG Round-Trip — Scene with Multiple Shapes', () => {
         expect(hiddenCount).toBe(1);
     });
 });
+
+// ─── Export: Artboard viewBox + background ───────────────────────────────────
+
+describe('SVG Export — viewBox and background', () => {
+    const baseNode = () => ({
+        1: makeNode({
+            geometry: { Rect: { width: 100, height: 100 } },
+            style: defaultStyle({ fill: { r: 0, g: 0, b: 1, a: 1 } }),
+        }),
+    });
+
+    it('defaults the viewBox to the document size', () => {
+        const svg = buildSVGFromData({
+            docWidth: 800, docHeight: 600, nodes: baseNode(), rootNodeIds: [1], localTransforms: { 1: IDENTITY },
+        });
+        expect(svg).toContain('viewBox="0 0 800 600"');
+        expect(svg).toContain('width="800"');
+        expect(svg).toContain('height="600"');
+    });
+
+    it('uses an explicit artboard viewBox with a non-zero origin', () => {
+        const svg = buildSVGFromData({
+            docWidth: 800, docHeight: 600, nodes: baseNode(), rootNodeIds: [1], localTransforms: { 1: IDENTITY },
+            viewBox: { x: 1200, y: 50, w: 400, h: 300 },
+        });
+        expect(svg).toContain('viewBox="1200 50 400 300"');
+        expect(svg).toContain('width="400"');
+        expect(svg).toContain('height="300"');
+    });
+
+    it('emits a background rect covering the viewBox when given', () => {
+        const svg = buildSVGFromData({
+            docWidth: 400, docHeight: 300, nodes: baseNode(), rootNodeIds: [1], localTransforms: { 1: IDENTITY },
+            viewBox: { x: 0, y: 0, w: 400, h: 300 },
+            background: { r: 1, g: 1, b: 1, a: 1 },
+        });
+        const doc = parseSVG(svg);
+        const rects = queryAllTags(doc, 'rect');
+        // First rect is the background (full-viewBox, white).
+        const bg = rects[0];
+        expect(bg.getAttribute('width')).toBe('400');
+        expect(bg.getAttribute('height')).toBe('300');
+        expect(bg.getAttribute('fill')).toContain('rgba(255,255,255');
+    });
+
+    it('omits the background rect when none is given', () => {
+        const svg = buildSVGFromData({
+            docWidth: 400, docHeight: 300, nodes: baseNode(), rootNodeIds: [1], localTransforms: { 1: IDENTITY },
+        });
+        const doc = parseSVG(svg);
+        // Only the content rect (100×100), no full-size background.
+        const rects = queryAllTags(doc, 'rect');
+        expect(rects.length).toBe(1);
+        expect(rects[0].getAttribute('width')).toBe('100');
+    });
+});

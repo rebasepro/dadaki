@@ -359,6 +359,25 @@ pub struct ProtoFaceFill {
     pub fill: Option<ProtoColor>,
 }
 
+/// A named artboard (frame). See `crate::Artboard`.
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoArtboard {
+    #[prost(uint32, tag = "1")]
+    pub id: u32,
+    #[prost(string, tag = "2")]
+    pub name: String,
+    #[prost(float, tag = "3")]
+    pub x: f32,
+    #[prost(float, tag = "4")]
+    pub y: f32,
+    #[prost(float, tag = "5")]
+    pub w: f32,
+    #[prost(float, tag = "6")]
+    pub h: f32,
+    #[prost(message, optional, tag = "7")]
+    pub background: Option<ProtoColor>,
+}
+
 /// The top-level document message.
 #[derive(Clone, PartialEq, Message)]
 pub struct ProtoDocument {
@@ -384,6 +403,10 @@ pub struct ProtoDocument {
     /// Encoded raster images referenced by Geometry::Image nodes.
     #[prost(message, repeated, tag = "9")]
     pub images: Vec<ProtoImageData>,
+    /// Artboards (frames). Empty in pre-artboard files/snapshots — `to_scene`
+    /// synthesizes a single "Artboard 1" from document_width/height in that case.
+    #[prost(message, repeated, tag = "10")]
+    pub artboards: Vec<ProtoArtboard>,
 }
 
 /// A history/undo/drag snapshot. Wraps a full document plus the transient
@@ -904,6 +927,23 @@ impl ProtoDocument {
             .collect();
         images.sort_by_key(|i| i.id);
 
+        // Artboards, in declared order (already deterministic).
+        let artboards: Vec<ProtoArtboard> = scene.artboards.iter().map(|a| ProtoArtboard {
+            id: a.id,
+            name: a.name.clone(),
+            x: a.x,
+            y: a.y,
+            w: a.w,
+            h: a.h,
+            background: Some((&a.background).into()),
+        }).collect();
+
+        // Legacy document dims mirror the primary artboard so pre-artboard
+        // readers still open the file with a sensible page size.
+        let (doc_w, doc_h) = scene.artboards.first()
+            .map(|a| (a.w, a.h))
+            .unwrap_or((scene.document_width, scene.document_height));
+
         ProtoDocument {
             format_version: FORMAT_VERSION,
             nodes,
@@ -911,9 +951,10 @@ impl ProtoDocument {
             next_id,
             face_fills,
             gap_tolerance: scene.vector_network.gap_tolerance,
-            document_width: Some(scene.document_width),
-            document_height: Some(scene.document_height),
+            document_width: Some(doc_w),
+            document_height: Some(doc_h),
             images,
+            artboards,
         }
     }
 
@@ -943,14 +984,47 @@ impl ProtoDocument {
             .map(|img| (img.id, crate::ImageData { bytes: img.bytes.clone(), mime: img.mime.clone() }))
             .collect();
 
+        let doc_w = self.document_width.unwrap_or(1000.0);
+        let doc_h = self.document_height.unwrap_or(1000.0);
+
+        // Artboards: use the stored list, or synthesize one from the legacy
+        // document dims for pre-artboard files/snapshots. This single rule
+        // migrates old .vec files, old IndexedDB autosaves, and old SVG payloads.
+        let artboards: Vec<crate::Artboard> = if self.artboards.is_empty() {
+            vec![crate::Artboard {
+                id: 1,
+                name: "Artboard 1".to_string(),
+                x: 0.0,
+                y: 0.0,
+                w: doc_w,
+                h: doc_h,
+                background: crate::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            }]
+        } else {
+            self.artboards.iter().map(|a| crate::Artboard {
+                id: a.id,
+                name: a.name.clone(),
+                x: a.x,
+                y: a.y,
+                w: a.w,
+                h: a.h,
+                background: a.background.as_ref().map(Color::from)
+                    .unwrap_or(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+            }).collect()
+        };
+
+        // Keep the legacy mirror in sync with the primary artboard.
+        let (mirror_w, mirror_h) = artboards.first().map(|a| (a.w, a.h)).unwrap_or((doc_w, doc_h));
+
         let scene = Scene {
             nodes,
             root_nodes: self.root_ids.clone(),
             selection: Vec::new(),
             vector_network: vn,
-            document_width: self.document_width.unwrap_or(1000.0),
-            document_height: self.document_height.unwrap_or(1000.0),
+            document_width: mirror_w,
+            document_height: mirror_h,
             images,
+            artboards,
         };
 
         let next_id = if self.next_id > 0 {
@@ -1131,6 +1205,7 @@ mod tests {
             document_width: None,
             document_height: None,
             images: Vec::new(),
+            artboards: Vec::new(),
         };
 
         let bytes = v1_doc.encode_to_vec();
@@ -1164,6 +1239,7 @@ mod tests {
             document_width: None,
             document_height: None,
             images: Vec::new(),
+            artboards: Vec::new(),
         };
         doc.nodes.push(ProtoNode {
             id: 1,
@@ -1267,6 +1343,7 @@ mod tests {
             document_width: 800.0,
             document_height: 600.0,
             images: Default::default(),
+            artboards: Vec::new(),
         };
 
         let bytes = serialize_to_proto(&scene, 8);
@@ -1274,6 +1351,10 @@ mod tests {
         assert_eq!(next_id, 8);
         assert_eq!(scene2.document_width, 800.0);
         assert_eq!(scene2.document_height, 600.0);
+        // An empty artboards list synthesizes a single Artboard 1 sized to the doc.
+        assert_eq!(scene2.artboards.len(), 1);
+        assert_eq!(scene2.artboards[0].w, 800.0);
+        assert_eq!(scene2.artboards[0].h, 600.0);
 
         let node = scene2.nodes.get(&7).unwrap();
         assert_eq!(node.style.opacity, 0.5);
@@ -1295,5 +1376,97 @@ mod tests {
             }
             other => panic!("expected Path geometry, got {:?}", other),
         }
+    }
+
+    // ─── Artboards ──────────────────────────────────────────────────────────
+
+    fn scene_with_artboards(artboards: Vec<crate::Artboard>) -> Scene {
+        Scene {
+            nodes: HashMap::new(),
+            root_nodes: Vec::new(),
+            selection: Vec::new(),
+            vector_network: VectorNetwork::default(),
+            document_width: 1000.0,
+            document_height: 1000.0,
+            images: Default::default(),
+            artboards,
+        }
+    }
+
+    fn ab(id: u32, name: &str, x: f32, y: f32, w: f32, h: f32) -> crate::Artboard {
+        crate::Artboard {
+            id, name: name.to_string(), x, y, w, h,
+            background: Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 },
+        }
+    }
+
+    #[test]
+    fn test_artboards_round_trip() {
+        let scene = scene_with_artboards(vec![
+            ab(1, "Artboard 1", 0.0, 0.0, 800.0, 600.0),
+            ab(2, "Hero", 900.0, 0.0, 1200.0, 400.0),
+        ]);
+        let bytes = serialize_to_proto(&scene, 3);
+        let (scene2, _) = deserialize_from_proto(&bytes).unwrap();
+        assert_eq!(scene2.artboards.len(), 2);
+        assert_eq!(scene2.artboards[1].name, "Hero");
+        assert_eq!(scene2.artboards[1].x, 900.0);
+        assert_eq!(scene2.artboards[1].w, 1200.0);
+        assert_eq!(scene2.artboards[0].background.b, 0.6);
+        // Legacy dims mirror the primary artboard.
+        assert_eq!(scene2.document_width, 800.0);
+        assert_eq!(scene2.document_height, 600.0);
+    }
+
+    #[test]
+    fn test_old_bytes_without_artboards_synthesize_one() {
+        // A document encoded WITHOUT tag 10 (pre-artboard writer): only doc dims.
+        let old = ProtoDocument {
+            format_version: FORMAT_VERSION,
+            nodes: Vec::new(),
+            root_ids: Vec::new(),
+            next_id: 1,
+            face_fills: Vec::new(),
+            gap_tolerance: 2.0,
+            document_width: Some(1920.0),
+            document_height: Some(1080.0),
+            images: Vec::new(),
+            artboards: Vec::new(),
+        };
+        let bytes = old.encode_to_vec();
+        let (scene, _) = deserialize_from_proto(&bytes).unwrap();
+        assert_eq!(scene.artboards.len(), 1);
+        assert_eq!(scene.artboards[0].name, "Artboard 1");
+        assert_eq!(scene.artboards[0].w, 1920.0);
+        assert_eq!(scene.artboards[0].h, 1080.0);
+        assert_eq!(scene.artboards[0].x, 0.0);
+    }
+
+    #[test]
+    fn test_artboards_survive_snapshot_round_trip() {
+        // Undo snapshots must carry artboards (they wrap ProtoDocument).
+        let scene = scene_with_artboards(vec![
+            ab(1, "A", 0.0, 0.0, 500.0, 500.0),
+            ab(2, "B", 600.0, 0.0, 300.0, 700.0),
+        ]);
+        let snap = serialize_snapshot(&scene, 3);
+        let (scene2, next_id) = deserialize_snapshot(&snap).unwrap();
+        assert_eq!(next_id, 3);
+        assert_eq!(scene2.artboards.len(), 2);
+        assert_eq!(scene2.artboards[1].h, 700.0);
+    }
+
+    #[test]
+    fn test_snapshot_is_byte_exact_fixed_point_with_artboards() {
+        // The gesture/undo contract: serialize → deserialize → serialize is a
+        // byte-exact fixed point (artboards must not perturb determinism).
+        let scene = scene_with_artboards(vec![
+            ab(2, "Two", 10.0, 20.0, 640.0, 480.0),
+            ab(5, "Five", 700.0, 0.0, 100.0, 100.0),
+        ]);
+        let snap1 = serialize_snapshot(&scene, 6);
+        let (scene2, next_id) = deserialize_snapshot(&snap1).unwrap();
+        let snap2 = serialize_snapshot(&scene2, next_id);
+        assert_eq!(snap1, snap2);
     }
 }

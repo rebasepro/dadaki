@@ -44,11 +44,19 @@ export class SnapEngine {
             excludedRoots.add(root);
         }
 
-        // Artboard edges and center
-        const docW = scene.engine?.get_document_width() ?? 1000;
-        const docH = scene.engine?.get_document_height() ?? 1000;
-        this.xTargets.push(0, docW / 2, docW);
-        this.yTargets.push(0, docH / 2, docH);
+        // Artboard edges and centers — every artboard on the canvas.
+        const artboards = scene.getArtboards();
+        if (artboards.length > 0) {
+            for (const a of artboards) {
+                this.xTargets.push(a.x, a.x + a.w / 2, a.x + a.w);
+                this.yTargets.push(a.y, a.y + a.h / 2, a.y + a.h);
+            }
+        } else {
+            const docW = scene.engine?.get_document_width() ?? 1000;
+            const docH = scene.engine?.get_document_height() ?? 1000;
+            this.xTargets.push(0, docW / 2, docW);
+            this.yTargets.push(0, docH / 2, docH);
+        }
 
         // Top-level nodes: edges and centers of their world AABBs
         for (const rootId of scene.getRootNodes()) {

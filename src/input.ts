@@ -1,6 +1,7 @@
 import { UIEngine } from './ui';
-import { Renderer } from './renderer';
-import { FileIO } from './file_io';
+import { Renderer, type ArtboardHandle } from './renderer';
+import type { FileService } from './file_service';
+import type { DocumentManager } from './document_manager';
 import { SnapEngine, type SnapGuide } from './snapping';
 import type { WasmScene } from './wasm_scene';
 import type { PenPathPoint, Subpath } from './types';
@@ -45,11 +46,25 @@ export class InputManager {
     scene: WasmScene;
     ui: UIEngine;
     renderer: Renderer;
+    /** Assigned by main.ts after construction; routes ⌘S/⌘⇧S. */
+    fileService: FileService | null = null;
+    /** Assigned by main.ts; owns open/new/close/cycle across tabs. */
+    documentManager: DocumentManager | null = null;
+    /** Assigned by main.ts; opens the export dialog (⇧⌘E). */
+    openExportDialog: (() => void) | null = null;
     isMouseDown: boolean;
     startPos: { x: number; y: number };
     currentPos: { x: number; y: number };
 
     dragMode: 'move' | 'marquee' | 'none' = 'none';
+    /** Active artboard move/resize drag (UI-level; engine nodes untouched). */
+    private artboardDrag: {
+        id: number;
+        mode: 'move' | 'resize';
+        handle: ArtboardHandle | null;
+        start: { x: number; y: number; w: number; h: number };
+        startWorld: { x: number; y: number };
+    } | null = null;
     /** Whether any actual movement happened during a drag. */
     didMove: boolean = false;
     /** Live preview rect in world coords, read by Renderer each frame. */
@@ -575,17 +590,13 @@ export class InputManager {
         // Save: Cmd+S / Ctrl+S
         if ((e.metaKey || e.ctrlKey) && e.key === 's' && !e.shiftKey) {
             e.preventDefault();
-            if (this.scene.engine) {
-                FileIO.saveVec(this.scene.engine).catch(console.error);
-            }
+            this.fileService?.saveActive().catch(console.error);
         }
 
         // Save As: Cmd+Shift+S / Ctrl+Shift+S
         if ((e.metaKey || e.ctrlKey) && e.key === 's' && e.shiftKey) {
             e.preventDefault();
-            if (this.scene.engine) {
-                FileIO.saveVecAs(this.scene.engine).catch(console.error);
-            }
+            this.fileService?.saveActiveAs().catch(console.error);
         }
 
         // Create Outlines: Cmd+Shift+O / Ctrl+Shift+O (selected text nodes → paths)
@@ -597,24 +608,37 @@ export class InputManager {
             }
         }
 
-        // Open: Cmd+O / Ctrl+O
+        // Open (in a new tab): Cmd+O / Ctrl+O
         if ((e.metaKey || e.ctrlKey) && e.key === 'o' && !e.shiftKey) {
             e.preventDefault();
-            if (this.scene.engine) {
-                FileIO.openFile(this.scene.engine, (svgText) => this.ui.parseSVG(svgText)).then((loaded) => {
-                    if (loaded) {
-                        this.scene.invalidateCache();
-                        this.ui.updateLayerList();
-                        this.ui.syncWithSelection();
-                    }
-                }).catch(console.error);
-            }
+            if (this.documentManager) this.documentManager.openFromPicker().catch(console.error);
+            else this.fileService?.openIntoActive().catch(console.error);
         }
 
-        // Export SVG: Cmd+Shift+E / Ctrl+Shift+E
+        // New document: Cmd+Alt+N / Ctrl+Alt+N (Cmd+N is browser-reserved)
+        if ((e.metaKey || e.ctrlKey) && e.altKey && (e.key === 'n' || e.key === 'ñ' || e.code === 'KeyN')) {
+            e.preventDefault();
+            this.documentManager?.create();
+        }
+
+        // Close tab: Cmd+Alt+W / Ctrl+Alt+W (Cmd+W is browser-reserved)
+        if ((e.metaKey || e.ctrlKey) && e.altKey && e.code === 'KeyW') {
+            e.preventDefault();
+            const active = this.documentManager?.active();
+            if (active) this.documentManager!.close(active.id);
+        }
+
+        // Cycle tabs: Cmd+Alt+←/→
+        if ((e.metaKey || e.ctrlKey) && e.altKey && (e.code === 'ArrowRight' || e.code === 'ArrowLeft')) {
+            e.preventDefault();
+            this.documentManager?.cycle(e.code === 'ArrowRight' ? 1 : -1);
+        }
+
+        // Export: Cmd+Shift+E / Ctrl+Shift+E — opens the export dialog.
         if ((e.metaKey || e.ctrlKey) && e.key === 'e' && e.shiftKey) {
             e.preventDefault();
-            this.ui.exportSVG();
+            if (this.openExportDialog) this.openExportDialog();
+            else this.ui.exportSVG();
         }
 
         // Escape: cancel in-flight drag → unfocus gradient stop → exit path edit → exit group → deselect
@@ -937,6 +961,63 @@ export class InputManager {
         }
     }
 
+    // ─── Artboard interaction (UI-level; engine node selection untouched) ────
+
+    /** Select an artboard: clear node selection, highlight it, refresh panel. */
+    selectArtboard(id: number) {
+        if (this.editingNodeId !== null) this.exitEditMode();
+        this.scene.engine!.clear_selection();
+        this.renderer.selectedArtboardId = id;
+        this.ui.syncWithSelection();
+        this.ui.refreshArtboardPanel();
+        this.renderer.requestRender();
+    }
+
+    deselectArtboard() {
+        this.renderer.selectedArtboardId = null;
+        this.ui.refreshArtboardPanel();
+        this.renderer.requestRender();
+    }
+
+    private beginArtboardDrag(id: number, mode: 'move' | 'resize', handle: ArtboardHandle | null) {
+        const ab = this.scene.getArtboards().find(a => a.id === id);
+        if (!ab) return;
+        this.artboardDrag = {
+            id, mode, handle,
+            start: { x: ab.x, y: ab.y, w: ab.w, h: ab.h },
+            startWorld: { ...this.startPos },
+        };
+        this.scene.beginGesture(); // coalesce the whole drag into one undo step
+    }
+
+    private updateArtboardDrag() {
+        const d = this.artboardDrag;
+        if (!d) return;
+        const dx = this.currentPos.x - d.startWorld.x;
+        const dy = this.currentPos.y - d.startWorld.y;
+        let { x, y, w, h } = d.start;
+        const MIN = 1;
+
+        if (d.mode === 'move') {
+            x += dx; y += dy;
+        } else {
+            const hnd = d.handle!;
+            if (hnd.includes('e')) w = Math.max(MIN, d.start.w + dx);
+            if (hnd.includes('s')) h = Math.max(MIN, d.start.h + dy);
+            if (hnd.includes('w')) { w = Math.max(MIN, d.start.w - dx); x = d.start.x + (d.start.w - w); }
+            if (hnd.includes('n')) { h = Math.max(MIN, d.start.h - dy); y = d.start.y + (d.start.h - h); }
+        }
+        this.scene.setArtboardBounds(d.id, x, y, w, h);
+        this.ui.refreshArtboardPanel();
+    }
+
+    private endArtboardDrag() {
+        if (!this.artboardDrag) return;
+        this.artboardDrag = null;
+        this.scene.endGesture();
+        this.ui.refreshArtboardPanel();
+    }
+
     onMouseDown(e: MouseEvent) {
         // Ignore right-click — handled by onContextMenu
         if (e.button === 2) return;
@@ -959,6 +1040,26 @@ export class InputManager {
         }
 
         if (this.ui.activeTool === 'selection') {
+            // Artboard chrome (resize handles + name labels). UI-level only —
+            // engine node selection is untouched. Only when not path-editing.
+            if (this.editingNodeId === null) {
+                const abResize = this.renderer.selectedArtboardId !== null
+                    ? this.renderer.artboardHandleHitTest(this.startPos.x, this.startPos.y)
+                    : null;
+                if (abResize) {
+                    this.beginArtboardDrag(abResize.id, 'resize', abResize.handle);
+                    return;
+                }
+                const abLabel = this.renderer.artboardLabelHitTest(this.startPos.x, this.startPos.y);
+                if (abLabel !== null) {
+                    this.selectArtboard(abLabel);
+                    this.beginArtboardDrag(abLabel, 'move', null);
+                    return;
+                }
+                // Clicked outside any artboard chrome — clear artboard selection.
+                if (this.renderer.selectedArtboardId !== null) this.deselectArtboard();
+            }
+
             // Gradient handles take priority over resize/rotate while a
             // gradient fill is being edited (skip in node-editing mode)
             if (this.editingNodeId === null && this.ui.gradientEdit.isActive()) {
@@ -1963,6 +2064,13 @@ export class InputManager {
         this.shiftKey = e.shiftKey;
         this.altKey = e.altKey;
 
+        // Artboard move/resize drag in progress.
+        if (this.artboardDrag && this.isMouseDown) {
+            this.didMove = true;
+            this.updateArtboardDrag();
+            return;
+        }
+
         // Viewport pan drag (space or middle mouse held)
         if (this.panDrag && this.isMouseDown) {
             this.renderer.pan.x = this.panDrag.panX + (e.clientX - this.panDrag.screenX);
@@ -2572,6 +2680,12 @@ export class InputManager {
         this.isDraggingHandle = false;
         this.snap.end();
         this.activeSnapGuides = [];
+
+        // End artboard move/resize drag
+        if (this.artboardDrag) {
+            this.endArtboardDrag();
+            return;
+        }
 
         // End viewport pan drag
         if (this.panDrag) {

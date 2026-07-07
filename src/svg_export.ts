@@ -47,6 +47,14 @@ export interface SVGExportInput {
     filledFaces?: FilledFace[];
     /** Optional data-URI per image id (for exporting Image nodes as <image>). */
     imageDataUris?: Record<number, string>;
+    /**
+     * Optional export bounds (a specific artboard, or the whole canvas). When
+     * given, the SVG viewBox is `x y w h` and width/height are `w×h`; content is
+     * emitted in the same world coordinates and cropped by the viewBox.
+     */
+    viewBox?: { x: number; y: number; w: number; h: number };
+    /** Optional solid background rect drawn behind all content. */
+    background?: { r: number; g: number; b: number; a: number };
 }
 
 // ─── SVG Generation ─────────────────────────────────────────────────────────
@@ -56,9 +64,16 @@ export interface SVGExportInput {
  * Gradient defs are collected during rendering and prepended into a <defs> block.
  */
 export function buildSVGFromData(input: SVGExportInput): string {
-    const { docWidth, docHeight, nodes, rootNodeIds, localTransforms, filledFaces, imageDataUris } = input;
+    const { docWidth, docHeight, nodes, rootNodeIds, localTransforms, filledFaces, imageDataUris, viewBox, background } = input;
 
-    let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${docWidth}" height="${docHeight}" viewBox="0 0 ${docWidth} ${docHeight}">`;
+    const vb = viewBox ?? { x: 0, y: 0, w: docWidth, h: docHeight };
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${vb.w}" height="${vb.h}" viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}">`;
+
+    // Optional solid background rect (covers the viewBox).
+    if (background && background.a > 0) {
+        const c = `rgba(${Math.round(background.r * 255)},${Math.round(background.g * 255)},${Math.round(background.b * 255)},${background.a})`;
+        svg += `<rect x="${vb.x}" y="${vb.y}" width="${vb.w}" height="${vb.h}" fill="${c}"/>`;
+    }
 
     // Collect gradient <defs> during rendering
     const gradientDefs: string[] = [];

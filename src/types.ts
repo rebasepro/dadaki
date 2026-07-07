@@ -249,6 +249,17 @@ export interface SceneData {
     root_nodes: number[];
 }
 
+/** A named, resizable artboard (frame) on the canvas. Mirrors engine Artboard. */
+export interface Artboard {
+    id: number;
+    name: string;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    background: Color;
+}
+
 /** Pen-tool path point with flat control-point fields. */
 export interface PenPathPoint {
     x: number;

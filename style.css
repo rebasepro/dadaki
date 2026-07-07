@@ -215,6 +215,316 @@ body, html {
     height: 14px;
 }
 
+/* ─── App menu button ─── */
+
+.app-menu-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: 4px;
+    cursor: pointer;
+    padding: 0;
+    margin-right: 6px;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s;
+}
+
+.app-menu-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-main);
+}
+
+.app-menu-dropdown {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    min-width: 200px;
+    background: rgba(43, 43, 43, 0.97);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+    padding: 4px 0;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.25);
+    font-size: 12px;
+    color: var(--text-main);
+    user-select: none;
+}
+
+/* ─── Document tabs ─── */
+
+.tab-strip {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 100%;
+    flex-shrink: 0;
+    overflow-x: auto;
+    max-width: 45%;
+    margin-right: 6px;
+}
+
+.tab-strip::-webkit-scrollbar { height: 0; }
+
+.doc-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 8px 0 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    color: var(--text-dim);
+    background: transparent;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+    max-width: 180px;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s;
+}
+
+.doc-tab:hover {
+    background: var(--bg-hover);
+    color: var(--text-main);
+}
+
+.doc-tab.active {
+    background: var(--bg-dark);
+    color: var(--text-main);
+    box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.doc-tab-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+}
+
+.doc-tab-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: transparent;
+}
+
+.doc-tab-dot.dirty {
+    background: var(--accent);
+}
+
+.doc-tab-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+.doc-tab-close:hover {
+    background: var(--bg-hover);
+    color: var(--text-main);
+}
+
+.doc-tab-add {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s;
+}
+
+.doc-tab-add:hover {
+    background: var(--bg-hover);
+    color: var(--text-main);
+}
+
+.doc-tab-rename {
+    width: 110px;
+    background: var(--bg-input);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    color: var(--text-main);
+    font-size: 11px;
+    font-family: inherit;
+    padding: 1px 4px;
+    outline: none;
+}
+
+/* ─── Modal dialog (export, etc.) ─── */
+
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.modal-card {
+    min-width: 320px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+    color: var(--text-main);
+}
+
+.modal-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 16px;
+}
+
+.modal-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.modal-label {
+    font-size: 12px;
+    color: var(--text-label);
+}
+
+.modal-segment {
+    display: flex;
+    gap: 2px;
+    background: var(--bg-input);
+    border-radius: 5px;
+    padding: 2px;
+}
+
+.modal-seg-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-family: inherit;
+    padding: 4px 14px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.modal-seg-btn.active {
+    background: var(--accent);
+    color: #fff;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 20px;
+}
+
+.modal-actions .header-btn {
+    margin: 0;
+}
+
+/* ─── Version history (backups) dialog ─── */
+
+.backup-card {
+    min-width: 380px;
+    max-width: 460px;
+}
+
+.backup-list {
+    max-height: 360px;
+    overflow-y: auto;
+    margin: 4px 0 8px;
+}
+
+.backup-empty {
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 16px 4px;
+    text-align: center;
+}
+
+.backup-group-header {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-label);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 10px 2px 4px;
+}
+
+.backup-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 6px;
+    border-radius: 5px;
+    font-size: 12px;
+}
+
+.backup-row:hover {
+    background: var(--bg-hover);
+}
+
+.backup-when {
+    color: var(--text-main);
+}
+
+.backup-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.backup-btn {
+    border: 1px solid var(--border);
+    background: var(--bg-input);
+    color: var(--text-main);
+    font-size: 11px;
+    font-family: inherit;
+    padding: 3px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.backup-btn:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.backup-btn-danger:hover {
+    background: #b3261e;
+    border-color: #b3261e;
+}
+
 #main-layout {
     display: flex;
     flex: 1;

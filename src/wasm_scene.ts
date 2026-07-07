@@ -1,7 +1,8 @@
 import init, { Engine, History } from '../engine/pkg/engine';
-import { PersistenceManager, AutosaveManager } from './persistence';
-import type { SceneData, Transform2D } from './types';
+import type { AutosaveManager } from './persistence';
+import type { SceneData, Transform2D, Artboard } from './types';
 import type { CanvasKit } from 'canvaskit-wasm';
+import type { Document } from './document';
 
 import type { Renderer } from './renderer';
 
@@ -20,6 +21,16 @@ export class WasmScene {
     /** Back-reference to the renderer for cache invalidation. */
     renderer: Renderer | null = null;
 
+    /**
+     * Mutation counter — bumped by every mutation via invalidateCache().
+     * The active Document compares this against its savedCounter for dirty
+     * state. Selection-only changes do NOT flow through invalidateCache(), so
+     * they correctly leave this untouched.
+     */
+    changeCounter = 0;
+    /** Notified on every mutation; pointed at the active document's markMutated. */
+    onMutate: (() => void) | null = null;
+
     constructor(ck: CanvasKit) {
         this.ck = ck;
     }
@@ -30,19 +41,19 @@ export class WasmScene {
     async init(maxHistorySize: number = 50) {
         this.maxHistorySize = maxHistorySize;
         this.wasm = await init();
+        // A default engine so the scene is usable before the DocumentManager
+        // attaches the first document. Session restore (per-document engines +
+        // autosave) is owned by the DocumentManager, not here.
         this.engine = new Engine();
         this.history = new History(maxHistorySize);
-        this.autosave = new AutosaveManager(this.engine!);
-        
-        // Load persisted state if exists
-        await PersistenceManager.loadScene(this.engine!);
-        this.invalidateCache();
+        this.autosave = null;
+        this.invalidateCache(false);
     }
 
     /**
      * Reset to a blank document: fresh engine, cleared history, and (optionally)
      * a set document size. Used by "New Document" and by the SVG conformance
-     * harness to isolate each test.
+     * harness to isolate each test. Autosave is managed per-document elsewhere.
      */
     newDocument(width?: number, height?: number) {
         this.engine = new Engine();
@@ -50,12 +61,86 @@ export class WasmScene {
         if (width !== undefined && height !== undefined) {
             this.engine.set_document_size(width, height);
         }
-        this.autosave = new AutosaveManager(this.engine);
+        this.autosave = null;
         // The fresh engine restarts image-id numbering, so previously-decoded
         // images/pattern shaders in the renderer would be returned for the new
         // document's colliding ids. Drop them (same reason as the .vec drop path).
         this.renderer?.clearImageCache();
+        this.invalidateCache(false);
+    }
+
+    /**
+     * Point the scene at a document's live engine/history/autosave. This is a
+     * pointer swap, not a content change, so it does NOT bump the mutation
+     * counter (invalidateCache(false)). The caller must have instantiated the
+     * document's engine first.
+     */
+    attachDocument(doc: Document) {
+        this.engine = doc.engine;
+        this.history = doc.history;
+        this.autosave = doc.autosave;
+        // Different document → different engine with its own image-id space;
+        // drop cached image/pattern shaders keyed by the previous doc's ids.
+        this.renderer?.clearImageCache();
+        this.invalidateCache(false);
+    }
+
+    // ─── Artboards ──────────────────────────────────────────────────────────
+    // Undo-disciplined wrappers (saveHistory before the mutation) + a cached
+    // getter parsing get_artboards_json, invalidated in invalidateCache().
+
+    private _cachedArtboards: Artboard[] | null = null;
+
+    getArtboards(): Artboard[] {
+        if (this._cachedArtboards) return this._cachedArtboards;
+        if (!this.engine) return [];
+        try {
+            this._cachedArtboards = JSON.parse(this.engine.get_artboards_json()) as Artboard[];
+        } catch {
+            this._cachedArtboards = [];
+        }
+        return this._cachedArtboards;
+    }
+
+    addArtboard(x: number, y: number, w: number, h: number): number {
+        this.saveHistory();
+        const id = this.engine!.add_artboard(x, y, w, h);
         this.invalidateCache();
+        this.autosave?.trigger();
+        return id;
+    }
+
+    removeArtboard(id: number): boolean {
+        this.saveHistory();
+        const ok = this.engine!.remove_artboard(id);
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return ok;
+    }
+
+    /** Resize/move an artboard. Wrap drag gestures in beginGesture/endGesture. */
+    setArtboardBounds(id: number, x: number, y: number, w: number, h: number): boolean {
+        this.saveHistory();
+        const ok = this.engine!.set_artboard_bounds(id, x, y, w, h);
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return ok;
+    }
+
+    setArtboardName(id: number, name: string): boolean {
+        this.saveHistory();
+        const ok = this.engine!.set_artboard_name(id, name);
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return ok;
+    }
+
+    setArtboardBackground(id: number, r: number, g: number, b: number, a: number): boolean {
+        this.saveHistory();
+        const ok = this.engine!.set_artboard_background(id, r, g, b, a);
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return ok;
     }
 
     getRenderData(visibleIds: Uint32Array): DataView {
@@ -77,9 +162,19 @@ export class WasmScene {
         return new DataView(this.wasm.memory.buffer.slice(ptr, ptr + size));
     }
 
-    invalidateCache() {
+    /**
+     * @param isMutation when true (default) this invalidation reflects a scene
+     *   content change, so the dirty counter advances and the active document is
+     *   notified. Structural swaps (attach/newDocument/init) pass false.
+     */
+    invalidateCache(isMutation = true) {
         this._sceneDataDirty = true;
         this._cachedSceneData = null;
+        this._cachedArtboards = null;
+        if (isMutation) {
+            this.changeCounter++;
+            this.onMutate?.();
+        }
         // Invalidate renderer caches (paths, gradients, filled faces) and request a new frame
         if (this.renderer) {
             this.renderer.invalidateRenderCaches();

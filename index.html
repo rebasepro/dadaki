@@ -19,16 +19,20 @@
 <body>
     <div id="app-container">
         <header id="header">
-            <div id="breadcrumb-bar" class="breadcrumb-bar">
-                <!-- Breadcrumb items injected by JS -->
+            <button id="app-menu-btn" class="app-menu-btn" title="Menu">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
+            </button>
+            <div id="tab-strip" class="tab-strip">
+                <!-- Document tabs injected by JS -->
             </div>
             <div class="history-controls">
                 <button id="undo-btn" class="zoom-btn" title="Undo (⌘Z)"><i data-lucide="undo-2"></i></button>
                 <button id="redo-btn" class="zoom-btn" title="Redo (⌘⇧Z)"><i data-lucide="redo-2"></i></button>
             </div>
-            <button id="import-svg" class="header-btn header-btn-secondary">Import SVG</button>
-            <button id="export-png" class="header-btn header-btn-secondary">Export PNG</button>
-            <button id="export-svg" class="header-btn header-btn-primary">Export SVG</button>
+            <div id="breadcrumb-bar" class="breadcrumb-bar">
+                <!-- Breadcrumb items injected by JS -->
+            </div>
+            <button id="export-btn" class="header-btn header-btn-primary">Export</button>
             <div class="zoom-controls">
                 <button id="zoom-out" class="zoom-btn" title="Zoom Out (−)">−</button>
                 <div id="zoom-level" class="zoom-display">100%</div>
@@ -60,6 +64,33 @@
 
             <aside id="side-panel">
                 <div class="properties-scroll">
+                <!-- ARTBOARD (shown only when an artboard is selected) -->
+                <div class="panel-section" id="artboard-section" style="display:none;">
+                    <div class="panel-section-header">
+                        <span class="section-title">Artboard</span>
+                    </div>
+                    <div class="panel-section-body">
+                        <div class="prop-row">
+                            <span class="label">Name</span>
+                            <input type="text" id="ab-name" class="prop-input" style="flex:1;">
+                        </div>
+                        <div class="dim-grid">
+                            <div class="dim-input"><span class="dim-label">X</span><input type="number" id="ab-x" value="0" step="1"></div>
+                            <div class="dim-input"><span class="dim-label">Y</span><input type="number" id="ab-y" value="0" step="1"></div>
+                            <span></span>
+                            <div class="dim-input"><span class="dim-label">W</span><input type="number" id="ab-w" value="0" step="1" min="1"></div>
+                            <div class="dim-input"><span class="dim-label">H</span><input type="number" id="ab-h" value="0" step="1" min="1"></div>
+                            <span></span>
+                        </div>
+                        <div class="prop-row">
+                            <span class="label">Background</span>
+                            <input type="color" id="ab-bg" class="prop-color" value="#ffffff">
+                            <span class="header-spacer"></span>
+                            <button id="ab-delete" class="header-btn header-btn-secondary" style="margin:0;">Delete</button>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- TRANSFORM -->
                 <div class="panel-section">
                     <div class="panel-section-header" data-section="transform">

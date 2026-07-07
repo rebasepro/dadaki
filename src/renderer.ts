@@ -45,6 +45,10 @@ class BinaryReader {
 
 import type { WasmScene } from './wasm_scene';
 import type { InputManager } from './input';
+import type { Artboard } from './types';
+
+/** Resize-handle direction for an artboard. */
+export type ArtboardHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
 // Render protocol (see engine/src/lib.rs "Render Protocol"). These MUST match
 // the RENDER_PROTOCOL_MAGIC / RENDER_PROTOCOL_VERSION constants the engine emits.
@@ -133,6 +137,8 @@ export class Renderer {
     inputManager: InputManager | null = null;
     /** Face ID currently being hovered by the paint bucket tool (or -1). */
     hoverFaceId: number = -1;
+    /** UI-level selected artboard (drawn highlighted with resize handles). */
+    selectedArtboardId: number | null = null;
 
     // ─── Cached Resources (avoid per-frame allocation) ───
     private paint: Paint | null = null;
@@ -146,6 +152,10 @@ export class Renderer {
     private _maskPaint: Paint | null = null;
     /** True while rendering into an offscreen surface for PNG export. */
     private _exporting = false;
+    /** World-space bounds to export (defaults to the primary artboard). */
+    private _exportBounds: { x: number; y: number; w: number; h: number } | null = null;
+    /** Solid background to fill behind exported content (null = transparent). */
+    private _exportBackground: { r: number; g: number; b: number; a: number } | null = null;
 
     // ─── Path object cache (avoid rebuilding CanvasKit paths every frame) ───
     private _pathCache: Map<number, { path: ReturnType<CanvasKit['Path']['prototype']['copy']>; fillRule: number }> = new Map();
@@ -427,7 +437,7 @@ export class Renderer {
         }
     }
 
-    zoomToFit(docW: number, docH: number) {
+    zoomToFit(docW: number, docH: number, originX = 0, originY = 0) {
         const viewW = this.canvas.clientWidth;
         const viewH = this.canvas.clientHeight;
         if (viewW <= 0 || viewH <= 0) return;
@@ -438,8 +448,10 @@ export class Renderer {
             (viewH - margin * 2) / docH,
         );
         this.zoom = Math.max(0.02, Math.min(4, scale));
-        this.pan.x = (viewW - docW * this.zoom) / 2;
-        this.pan.y = (viewH - docH * this.zoom) / 2;
+        // Center the content bounds (which may start at a non-zero origin when
+        // there are multiple artboards) in the viewport.
+        this.pan.x = (viewW - docW * this.zoom) / 2 - originX * this.zoom;
+        this.pan.y = (viewH - docH * this.zoom) / 2 - originY * this.zoom;
     }
 
     /** Fit the given world-space bounds in the viewport (zoom to selection). */
@@ -483,9 +495,14 @@ export class Renderer {
     }
 
     fitToArtboard(docW?: number, docH?: number) {
-        const w = docW ?? this.scene.engine?.get_document_width() ?? 1000;
-        const h = docH ?? this.scene.engine?.get_document_height() ?? 1000;
-        this.zoomToFit(w, h);
+        // Fit the union of all artboards (name kept for API stability). Explicit
+        // dims still override (used by callers that know the page size).
+        if (docW !== undefined && docH !== undefined) {
+            this.zoomToFit(docW, docH);
+        } else {
+            const b = this.getArtboardsBounds();
+            this.zoomToFit(b.w, b.h, b.x, b.y);
+        }
         this.render();
     }
 
@@ -510,16 +527,29 @@ export class Renderer {
         canvas.translate(this.pan.x, this.pan.y);
         canvas.scale(this.zoom, this.zoom);
 
-        if (!exporting) this.drawArtboard(canvas);
+        if (exporting && this._exportBackground && this._exportBounds) {
+            const bg = this._exportBackground;
+            const eb = this._exportBounds;
+            const p = new this.ck.Paint();
+            p.setColor(this.ck.Color(
+                Math.round(bg.r * 255), Math.round(bg.g * 255), Math.round(bg.b * 255), bg.a,
+            ));
+            p.setStyle(this.ck.PaintStyle.Fill);
+            canvas.drawRect(this.ck.LTRBRect(eb.x, eb.y, eb.x + eb.w, eb.y + eb.h), p);
+            p.delete();
+        }
+        if (!exporting) this.drawArtboards(canvas);
 
         // Compute viewport in document space for culling. Export culls to the
-        // document rect so the whole artboard renders regardless of screen size.
+        // export bounds (a specific artboard, or the whole canvas) so content
+        // renders regardless of screen size or artboard origin.
         let viewportMinX: number, viewportMinY: number, viewportMaxX: number, viewportMaxY: number;
         if (exporting) {
-            viewportMinX = 0;
-            viewportMinY = 0;
-            viewportMaxX = this.scene.engine.get_document_width();
-            viewportMaxY = this.scene.engine.get_document_height();
+            const b = this._exportBounds ?? { x: 0, y: 0, w: this.scene.engine.get_document_width(), h: this.scene.engine.get_document_height() };
+            viewportMinX = b.x;
+            viewportMinY = b.y;
+            viewportMaxX = b.x + b.w;
+            viewportMaxY = b.y + b.h;
         } else {
             viewportMinX = -this.pan.x / this.zoom;
             viewportMinY = -this.pan.y / this.zoom;
@@ -929,24 +959,30 @@ export class Renderer {
      * `_exporting` flag. Returns a PNG Blob (or null if the surface can't be
      * created).
      */
-    exportPNG(scale = 2): Blob | null {
+    exportPNG(
+        scale = 2,
+        bounds?: { x: number; y: number; w: number; h: number },
+        background?: { r: number; g: number; b: number; a: number },
+    ): Blob | null {
         if (!this.scene.engine || !this.surface) return null;
-        const docW = this.scene.engine.get_document_width();
-        const docH = this.scene.engine.get_document_height();
-        const W = Math.max(1, Math.round(docW * scale));
-        const H = Math.max(1, Math.round(docH * scale));
+        const b = bounds ?? { x: 0, y: 0, w: this.scene.engine.get_document_width(), h: this.scene.engine.get_document_height() };
+        const W = Math.max(1, Math.round(b.w * scale));
+        const H = Math.max(1, Math.round(b.h * scale));
 
         const surface = this.ck.MakeSurface(W, H);
         if (!surface) return null;
 
-        // Swap in export state and reuse render(), then restore.
+        // Swap in export state and reuse render(), then restore. The pan offsets
+        // the export origin so an off-origin artboard is cropped correctly.
         const savedSurface = this.surface;
         const savedZoom = this.zoom;
         const savedPan = { x: this.pan.x, y: this.pan.y };
         this.surface = surface as unknown as Surface;
         this.zoom = scale;
-        this.pan = { x: 0, y: 0 };
+        this.pan = { x: -b.x * scale, y: -b.y * scale };
         this._exporting = true;
+        this._exportBounds = b;
+        this._exportBackground = background ?? null;
 
         let blob: Blob | null = null;
         try {
@@ -959,6 +995,8 @@ export class Renderer {
             if (bytes) blob = new Blob([bytes as unknown as BlobPart], { type: 'image/png' });
         } finally {
             this._exporting = false;
+            this._exportBounds = null;
+            this._exportBackground = null;
             this.surface = savedSurface;
             this.zoom = savedZoom;
             this.pan = savedPan;
@@ -1610,19 +1648,123 @@ export class Renderer {
         canvas.restore();
     }
 
-    drawArtboard(canvas: Canvas) {
+    /** Screen-constant size (world units) for artboard resize handles. */
+    private artboardHandleWorld(): number { return 4 / this.zoom; }
+
+    drawArtboards(canvas: Canvas) {
         const op = this.ensureOverlayPaints();
+        const artboards = this.scene.getArtboards();
 
-        // Use dynamic document size from engine
-        const w = this.scene.engine?.get_document_width() ?? 1000;
-        const h = this.scene.engine?.get_document_height() ?? 1000;
+        for (const ab of artboards) {
+            // Background fill (per-artboard color).
+            op.artboardFill.setColor(this.ck.Color(
+                Math.round(ab.background.r * 255),
+                Math.round(ab.background.g * 255),
+                Math.round(ab.background.b * 255),
+                ab.background.a,
+            ));
+            canvas.drawRect(this.ck.LTRBRect(ab.x, ab.y, ab.x + ab.w, ab.y + ab.h), op.artboardFill);
 
-        // Artboard is at world origin (0,0)
-        canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), op.artboardFill);
-        
-        // Artboard border
-        op.artboardStroke.setStrokeWidth(1 / this.zoom);
-        canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), op.artboardStroke);
+            // Border — accent when selected, gray otherwise.
+            const selected = ab.id === this.selectedArtboardId;
+            const border = selected ? op.selOutline : op.artboardStroke;
+            border.setStrokeWidth(1 / this.zoom);
+            canvas.drawRect(this.ck.LTRBRect(ab.x, ab.y, ab.x + ab.w, ab.y + ab.h), border);
+
+            // Name label above the top-left corner, at screen-constant size.
+            this.drawArtboardLabel(canvas, ab, selected);
+
+            // Resize handles when selected.
+            if (selected) this.drawArtboardHandles(canvas, ab);
+        }
+    }
+
+    private drawArtboardLabel(canvas: Canvas, ab: Artboard, selected: boolean) {
+        const px = 11;
+        const size = px / this.zoom;
+        const font = new this.ck.Font(null, size);
+        const paint = new this.ck.Paint();
+        paint.setColor(selected ? this.ck.Color(0, 162, 255, 1.0) : this.ck.Color(150, 150, 150, 1.0));
+        paint.setAntiAlias(true);
+        const blob = this.ck.TextBlob.MakeFromText(ab.name, font);
+        if (blob) {
+            canvas.drawTextBlob(blob, ab.x, ab.y - 5 / this.zoom, paint);
+            blob.delete();
+        }
+        font.delete();
+        paint.delete();
+    }
+
+    private drawArtboardHandles(canvas: Canvas, ab: Artboard) {
+        const op = this.ensureOverlayPaints();
+        const s = this.artboardHandleWorld();
+        op.selHandleStroke.setStrokeWidth(1 / this.zoom);
+        for (const [hx, hy] of this.artboardHandlePositions(ab)) {
+            const r = this.ck.LTRBRect(hx - s, hy - s, hx + s, hy + s);
+            canvas.drawRect(r, op.selHandleFill);
+            canvas.drawRect(r, op.selHandleStroke);
+        }
+    }
+
+    /** The 8 resize-handle centers (world space): NW,N,NE,E,SE,S,SW,W. */
+    private artboardHandlePositions(ab: Artboard): [number, number][] {
+        const { x, y, w, h } = ab;
+        const cx = x + w / 2, cy = y + h / 2;
+        return [
+            [x, y], [cx, y], [x + w, y],
+            [x + w, cy], [x + w, y + h], [cx, y + h],
+            [x, y + h], [x, cy],
+        ];
+    }
+
+    private static HANDLE_DIRS: ArtboardHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+
+    /** Hit-test the resize handles of the selected artboard. */
+    artboardHandleHitTest(wx: number, wy: number): { id: number; handle: ArtboardHandle } | null {
+        if (this.selectedArtboardId === null) return null;
+        const ab = this.scene.getArtboards().find(a => a.id === this.selectedArtboardId);
+        if (!ab) return null;
+        const s = this.artboardHandleWorld() * 1.8; // a bit more forgiving than the visual
+        const pos = this.artboardHandlePositions(ab);
+        for (let i = 0; i < pos.length; i++) {
+            if (Math.abs(wx - pos[i][0]) <= s && Math.abs(wy - pos[i][1]) <= s) {
+                return { id: ab.id, handle: Renderer.HANDLE_DIRS[i] };
+            }
+        }
+        return null;
+    }
+
+    /** Hit-test artboard name labels; returns the artboard id or null. */
+    artboardLabelHitTest(wx: number, wy: number): number | null {
+        const px = 11;
+        const size = px / this.zoom;
+        const font = new this.ck.Font(null, size);
+        let hit: number | null = null;
+        for (const ab of this.scene.getArtboards()) {
+            const blob = this.ck.TextBlob.MakeFromText(ab.name, font);
+            // Approximate label width; MakeFromText has no measure, so estimate.
+            const wApprox = ab.name.length * size * 0.6;
+            if (blob) blob.delete();
+            const labelTop = ab.y - 5 / this.zoom - size;
+            const labelBottom = ab.y - 5 / this.zoom + size * 0.25;
+            if (wx >= ab.x && wx <= ab.x + wApprox && wy >= labelTop && wy <= labelBottom) {
+                hit = ab.id; // last (topmost) wins
+            }
+        }
+        font.delete();
+        return hit;
+    }
+
+    /** Union AABB of all artboards, or a default page if none. */
+    getArtboardsBounds(): { x: number; y: number; w: number; h: number } {
+        const arts = this.scene.getArtboards();
+        if (arts.length === 0) return { x: 0, y: 0, w: 1000, h: 1000 };
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const a of arts) {
+            minX = Math.min(minX, a.x); minY = Math.min(minY, a.y);
+            maxX = Math.max(maxX, a.x + a.w); maxY = Math.max(maxY, a.y + a.h);
+        }
+        return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
     }
 
     private drawDirectEditHandles(canvas: Canvas, dpr: number) {

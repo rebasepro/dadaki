@@ -1,63 +1,91 @@
 /**
  * File I/O for .vec (protobuf) and .svg formats.
- * Uses the File System Access API for native save/open dialogs.
+ * Uses the File System Access API for native save/open dialogs, with a
+ * blob-download / <input type=file> fallback for browsers that lack it
+ * (Firefox, Safari).
+ *
+ * This module is intentionally stateless: file handles and document identity
+ * live on the Document / DocumentManager, not here. Callers pass the handle to
+ * reuse (or null to force a picker) and receive back the handle that was
+ * actually used so they can persist it.
  */
 import type { Engine } from '../engine/pkg/engine';
 
-export class FileIO {
-    /** Currently open file handle (for Cmd+S "save in place"). */
-    private static fileHandle: FileSystemFileHandle | null = null;
+/** Outcome of a save. `handle` is null when the download fallback was used. */
+export interface SaveResult {
+    handle: FileSystemFileHandle | null;
+}
 
+/** Outcome of an open. `handle` is null when the <input> fallback was used. */
+export interface OpenResult {
+    handle: FileSystemFileHandle | null;
+    name: string;
+}
+
+/** True when the native File System Access API is available. */
+export function hasFileSystemAccess(): boolean {
+    return 'showSaveFilePicker' in window && 'showOpenFilePicker' in window;
+}
+
+export class FileIO {
     /**
-     * Save the current scene as a .vec file.
-     * If a file is already open, overwrites it. Otherwise shows Save As dialog.
+     * Save the current scene to `handle` if given (save-in-place); otherwise
+     * show a Save As dialog. Returns the handle used, or `null` on user-abort
+     * so the caller can leave dirty state untouched.
      */
-    static async saveVec(engine: Engine): Promise<void> {
+    static async saveVec(
+        engine: Engine,
+        handle: FileSystemFileHandle | null,
+        suggestedName = 'untitled.vec',
+    ): Promise<SaveResult | null> {
         const bytes = engine.serialize_proto();
 
-        if (this.fileHandle) {
-            await this.writeToHandle(this.fileHandle, bytes);
-            return;
+        if (handle) {
+            await this.writeToHandle(handle, bytes);
+            return { handle };
         }
-
-        // Show Save As dialog
-        await this.saveVecAs(engine);
+        return this.saveVecAs(engine, suggestedName);
     }
 
     /**
-     * Save As — always shows dialog.
+     * Save As — always shows the picker (or downloads on fallback).
+     * Returns null on user-abort.
      */
-    static async saveVecAs(engine: Engine): Promise<void> {
+    static async saveVecAs(
+        engine: Engine,
+        suggestedName = 'untitled.vec',
+    ): Promise<SaveResult | null> {
         const bytes = engine.serialize_proto();
 
         if ('showSaveFilePicker' in window) {
             try {
                 const handle = await (window as any).showSaveFilePicker({
-                    suggestedName: 'untitled.vec',
+                    suggestedName,
                     types: [{
                         description: 'Vector Document',
                         accept: { 'application/octet-stream': ['.vec'] },
                     }],
                 });
                 await this.writeToHandle(handle, bytes);
-                this.fileHandle = handle;
-                document.title = handle.name + ' — Vector Editor';
-                return;
+                return { handle };
             } catch (e: unknown) {
-                if (e instanceof DOMException && e.name === 'AbortError') return;
+                if (e instanceof DOMException && e.name === 'AbortError') return null;
                 // Fall through to download fallback
             }
         }
 
-        // Fallback: download via blob
-        this.downloadBlob(new Uint8Array(bytes), 'untitled.vec', 'application/octet-stream');
+        this.downloadBlob(new Uint8Array(bytes), suggestedName, 'application/octet-stream');
+        return { handle: null };
     }
 
     /**
-     * Open a .vec or .svg file.
-     * Returns true if a file was loaded.
+     * Show an open dialog for .vec / .svg. Loads the picked file into `engine`
+     * and returns its handle + name, or null on abort / load failure.
      */
-    static async openFile(engine: Engine, fallbackParser?: (svgText: string) => void): Promise<boolean> {
+    static async openFile(
+        engine: Engine,
+        fallbackParser?: (svgText: string) => void,
+    ): Promise<OpenResult | null> {
         if ('showOpenFilePicker' in window) {
             try {
                 const [handle] = await (window as any).showOpenFilePicker({
@@ -73,18 +101,53 @@ export class FileIO {
 
                 const file = await handle.getFile();
                 const loaded = await this.loadFile(engine, file, fallbackParser);
-                if (loaded && file.name.endsWith('.vec')) {
-                    this.fileHandle = handle;
-                    document.title = file.name + ' — Vector Editor';
-                }
-                return loaded;
+                if (!loaded) return null;
+                // Only .vec files get a reusable save-in-place handle; an
+                // imported .svg should save to a new .vec via Save As.
+                return { handle: file.name.endsWith('.vec') ? handle : null, name: file.name };
             } catch (e: unknown) {
-                if (e instanceof DOMException && e.name === 'AbortError') return false;
+                if (e instanceof DOMException && e.name === 'AbortError') return null;
             }
         }
 
-        // Fallback: file input
         return this.openViaInput(engine, fallbackParser);
+    }
+
+    /**
+     * Show an open dialog and return the picked file + handle WITHOUT loading
+     * it. Lets the caller create/activate the target document first, so an SVG
+     * import (which parses into the active engine) lands in the new tab.
+     */
+    static async pickFile(): Promise<{ file: File; handle: FileSystemFileHandle | null } | null> {
+        if ('showOpenFilePicker' in window) {
+            try {
+                const [handle] = await (window as any).showOpenFilePicker({
+                    types: [{
+                        description: 'Vector or SVG files',
+                        accept: {
+                            'application/octet-stream': ['.vec'],
+                            'image/svg+xml': ['.svg'],
+                        },
+                    }],
+                    multiple: false,
+                });
+                const file = await handle.getFile();
+                return { file, handle };
+            } catch (e: unknown) {
+                if (e instanceof DOMException && e.name === 'AbortError') return null;
+            }
+        }
+
+        return new Promise((resolve) => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.vec,.svg';
+            input.onchange = () => {
+                const file = input.files?.[0];
+                resolve(file ? { file, handle: null } : null);
+            };
+            input.click();
+        });
     }
 
     /**
@@ -168,7 +231,7 @@ export class FileIO {
         URL.revokeObjectURL(url);
     }
 
-    private static openViaInput(engine: Engine, fallbackParser?: (svgText: string) => void): Promise<boolean> {
+    private static openViaInput(engine: Engine, fallbackParser?: (svgText: string) => void): Promise<OpenResult | null> {
         return new Promise((resolve) => {
             const input = document.createElement('input');
             input.type = 'file';
@@ -176,11 +239,11 @@ export class FileIO {
             input.onchange = async () => {
                 const file = input.files?.[0];
                 if (!file) {
-                    resolve(false);
+                    resolve(null);
                     return;
                 }
                 const loaded = await this.loadFile(engine, file, fallbackParser);
-                resolve(loaded);
+                resolve(loaded ? { handle: null, name: file.name } : null);
             };
             input.click();
         });

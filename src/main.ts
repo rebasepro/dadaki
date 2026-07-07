@@ -5,6 +5,14 @@ import { WasmScene } from './wasm_scene';
 import { ContextBar } from './context_bar';
 import { BreadcrumbBar } from './breadcrumb';
 import { Toolbar } from './toolbar';
+import { Document } from './document';
+import { FileService } from './file_service';
+import { AppMenu } from './app_menu';
+import { ExportDialog, type ExportOptions } from './export_dialog';
+import { TabStrip } from './tab_strip';
+import { DocumentManager } from './document_manager';
+import { BackupDialog } from './backup_dialog';
+import { PersistenceManager } from './persistence';
 
 async function bootstrap() {
     // @ts-ignore - Loaded from script tag in index.html
@@ -38,9 +46,83 @@ async function bootstrap() {
     const breadcrumbBar = new BreadcrumbBar(headerEl, ui, input, wasmScene, renderer);
     ui.breadcrumbBar = breadcrumbBar;
 
-    // Start with the artboard centered and fitted in the viewport
-    renderer.fitToArtboard();
-    ui.setZoom(renderer.zoom);
+    // ─── File / document lifecycle (multi-tab) ──────────────────────────
+    const tabStripEl = document.getElementById('tab-strip') as HTMLElement;
+
+    // FileService starts with a placeholder doc; DocumentManager reassigns
+    // activeDoc as soon as it activates the restored/first document.
+    const fileService = new FileService(wasmScene, ui, new Document('Untitled'), () => {
+        breadcrumbBar.docName = fileService.activeDoc.name;
+        breadcrumbBar.docDirty = fileService.activeDoc.dirty;
+        breadcrumbBar.refresh();
+    });
+
+    const tabStrip = new TabStrip(tabStripEl, {
+        onSelect: (id) => documentManager.activate(id),
+        onClose: (id) => documentManager.close(id),
+        onNew: () => documentManager.create(),
+        onRename: (id, name) => documentManager.rename(id, name),
+    });
+
+    const documentManager = new DocumentManager(
+        wasmScene, ui, input, renderer, fileService, tabStrip,
+        () => fileService.refreshChrome(),
+    );
+    input.fileService = fileService;
+    input.documentManager = documentManager;
+
+    // Export dialog + button. Resolves the chosen artboard (or whole canvas)
+    // into export bounds + optional background.
+    const exportDialog = new ExportDialog((opts: ExportOptions) => {
+        const arts = wasmScene.getArtboards();
+        let bounds: { x: number; y: number; w: number; h: number } | undefined;
+        let background: { r: number; g: number; b: number; a: number } | undefined;
+        if (opts.artboardId === 'all') {
+            bounds = renderer.getArtboardsBounds();
+        } else {
+            const ab = arts.find(a => a.id === opts.artboardId) ?? arts[0];
+            if (ab) {
+                bounds = { x: ab.x, y: ab.y, w: ab.w, h: ab.h };
+                if (!opts.transparent) background = ab.background;
+            }
+        }
+        if (opts.format === 'png') ui.exportPNG(opts.scale, bounds, background);
+        else ui.exportSVG(bounds, background);
+    }, () => wasmScene.getArtboards().map(a => ({ id: a.id, name: a.name })));
+    input.openExportDialog = () => exportDialog.open();
+    document.getElementById('export-btn')?.addEventListener('click', () => exportDialog.open());
+
+    // Version history (backups) dialog.
+    const backupDialog = new BackupDialog({
+        list: () => PersistenceManager.listBackups(),
+        restore: (entry) => documentManager.openBackup(entry),
+        remove: (id) => PersistenceManager.deleteBackup(id),
+    });
+
+    // App menu (top-left)
+    const appMenuBtn = document.getElementById('app-menu-btn') as HTMLButtonElement;
+    new AppMenu(appMenuBtn, {
+        onNew: () => documentManager.create(),
+        onOpen: () => documentManager.openFromPicker().catch(console.error),
+        onSave: () => fileService.saveActive().catch(console.error),
+        onSaveAs: () => fileService.saveActiveAs().catch(console.error),
+        onImportSVG: () => ui.importSVGViaPicker(),
+        onExport: () => exportDialog.open(),
+        onAddArtboard: () => ui.addArtboard(),
+        onBackups: () => backupDialog.open().catch(console.error),
+    });
+
+    // Warn before leaving if any open document has unsaved changes.
+    window.addEventListener('beforeunload', (e) => {
+        if (documentManager.all().some(d => d.dirty)) {
+            e.preventDefault();
+            e.returnValue = '';
+        }
+    });
+
+    // Restore the previous session (open tabs + active) — this activates the
+    // first document, which fits the artboard and paints the chrome.
+    await documentManager.restoreSession();
 
     // Populate layers & property panel with any restored session data
     ui.updateLayerList();
@@ -65,6 +147,9 @@ async function bootstrap() {
     if (import.meta.env.DEV) {
         (window as unknown as Record<string, unknown>).__editor = {
             scene: wasmScene, ui, input, renderer, contextBar,
+            fileService, documentManager, backupDialog,
+            persistence: PersistenceManager,
+            get doc() { return documentManager.active(); },
         };
     }
 
