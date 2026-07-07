@@ -1614,12 +1614,55 @@ export class UIEngine {
             index = zone === 'above' ? tIdx + 1 : tIdx;
         }
 
-        if (this.scene.reorderNodes(ordered, newParent, index) > 0) {
+        // A mask belongs to its group. Remember the parent group of every
+        // dragged mask BEFORE the move so we can dissolve a group that its mask
+        // leaves (a mask group without its mask is a pointless wrapper).
+        const maskOldParents = new Map<number, number>();
+        for (const d of deduped) {
+            if (this._safeIsMask(d)) {
+                const p = this.scene.getNodeParent(d);
+                if (p !== -1) maskOldParents.set(d, p);
+            }
+        }
+
+        let moved = 0;
+        // reorder + dissolve + flag-clear collapse into ONE undo step.
+        this.scene.transaction(() => {
+            moved = this.scene.reorderNodes(ordered, newParent, index);
+            if (moved <= 0) return;
+
+            const dissolved = new Set<number>();
+            for (const [maskId, oldParent] of maskOldParents) {
+                const nowParent = this.scene.getNodeParent(maskId);
+                if (nowParent === oldParent) continue; // stayed in its group
+
+                // Landing at root makes a mask inert (masks are group-scoped),
+                // so it's no longer a mask — drop the flag to avoid a dangling
+                // badge. Inside another group it becomes that group's mask.
+                if (nowParent === -1) this.scene.setNodeIsMask(maskId, false);
+
+                // Dissolve the vacated group once it no longer holds a mask.
+                if (dissolved.has(oldParent)) continue;
+                const stillHasMask = Array.from(this.scene.getNodeChildren(oldParent))
+                    .some(k => this._safeIsMask(k));
+                if (!stillHasMask) {
+                    this.scene.ungroupNode(oldParent);
+                    dissolved.add(oldParent);
+                }
+            }
+        });
+
+        if (moved > 0) {
             // Reveal the result when dropping into a collapsed group.
             if (zone === 'into') this._collapsedGroups.delete(targetId);
             this.updateLayerList();
             this.syncWithSelection();
         }
+    }
+
+    /** is_mask flag, guarded against transient missing-node errors. */
+    private _safeIsMask(id: number): boolean {
+        try { return this.scene.getNodeIsMask(id); } catch { return false; }
     }
 
     /**
