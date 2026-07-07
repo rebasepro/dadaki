@@ -33,6 +33,7 @@ pub enum NodeType {
     Ellipse,
     Group,
     Text,
+    Image,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -548,6 +549,22 @@ pub enum Geometry {
         #[serde(default = "default_line_height")]
         line_height: f32,
     },
+    /// Raster image. `image_id` refers to encoded bytes stored on the Scene
+    /// (`Scene.images`); `width`/`height` are the local display size.
+    Image {
+        width: f32,
+        height: f32,
+        image_id: u32,
+    },
+}
+
+/// Encoded raster image bytes stored on the Scene, referenced by
+/// `Geometry::Image.image_id`. Kept encoded (PNG/JPEG) and content-addressed so
+/// documents stay self-contained without bloating memory.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ImageData {
+    pub bytes: Vec<u8>,
+    pub mime: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -631,7 +648,8 @@ const CMD_END_MASK: u32 = 6;
 pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// Render-buffer layout version. Writer and renderer.ts reader must agree.
 /// v2: added mask commands (CMD_BEGIN_MASK/BEGIN_MASKED_CONTENT/END_MASK).
-pub const RENDER_PROTOCOL_VERSION: u32 = 2;
+/// v3: added Image node type (5) with a {width, height, image_id} geometry.
+pub const RENDER_PROTOCOL_VERSION: u32 = 3;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -727,6 +745,9 @@ pub struct Scene {
     pub document_width: f32,
     #[serde(default = "default_document_size")]
     pub document_height: f32,
+    /// Encoded raster images, keyed by image id (referenced by Geometry::Image).
+    #[serde(default)]
+    pub images: HashMap<u32, ImageData>,
 }
 
 fn default_document_size() -> f32 { 1000.0 }
@@ -745,6 +766,7 @@ impl Engine {
                 vector_network: VectorNetwork::default(),
                 document_width: 1000.0,
                 document_height: 1000.0,
+                images: HashMap::new(),
             },
             next_id: 1,
             global_transforms: HashMap::new(),
@@ -878,13 +900,14 @@ impl Engine {
             self.render_buffer.extend_from_slice(&2u32.to_le_bytes());
             self.render_buffer.extend_from_slice(&id.to_le_bytes());
             
-            // NodeType: Path=0, Rect=1, Ellipse=2, Text=4
+            // NodeType: Path=0, Rect=1, Ellipse=2, Text=4, Image=5
             let type_u8 = match node.node_type {
                 NodeType::Path => 0u8,
                 NodeType::Rect => 1u8,
                 NodeType::Ellipse => 2u8,
                 NodeType::Group => 3u8, // should not happen here
                 NodeType::Text => 4u8,
+                NodeType::Image => 5u8,
             };
             self.render_buffer.extend_from_slice(&(type_u8 as u32).to_le_bytes());
 
@@ -944,6 +967,12 @@ impl Engine {
                     self.render_buffer.extend_from_slice(&8u32.to_le_bytes()); // Size: 2 * f32
                     self.render_buffer.extend_from_slice(&width.to_le_bytes());
                     self.render_buffer.extend_from_slice(&height.to_le_bytes());
+                }
+                Geometry::Image { width, height, image_id } => {
+                    self.render_buffer.extend_from_slice(&12u32.to_le_bytes()); // Size: 2*f32 + u32
+                    self.render_buffer.extend_from_slice(&width.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&height.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&image_id.to_le_bytes());
                 }
                 Geometry::Ellipse { radius_x, radius_y } => {
                     self.render_buffer.extend_from_slice(&8u32.to_le_bytes()); // Size: 2 * f32
@@ -1381,7 +1410,7 @@ impl Engine {
         if let (Some(node), Some(transform_bytes)) = (self.scene.nodes.get(&id), self.global_transforms.get(&id)) {
             let transform = Mat3::from_cols_array(transform_bytes);
             let aabb = match node.geometry {
-                Geometry::Rect { width, height } => {
+                Geometry::Rect { width, height } | Geometry::Image { width, height, .. } => {
                     let p1 = transform.transform_point2(Vec2::new(0.0, 0.0));
                     let p2 = transform.transform_point2(Vec2::new(width, 0.0));
                     let p3 = transform.transform_point2(Vec2::new(0.0, height));
@@ -2017,7 +2046,7 @@ impl Engine {
                 let local_point = inv_transform.transform_point2(Vec2::new(x, y));
 
                 let is_hit = match node.geometry {
-                    Geometry::Rect { width, height } => {
+                    Geometry::Rect { width, height } | Geometry::Image { width, height, .. } => {
                         local_point.x >= 0.0 && local_point.x <= width &&
                         local_point.y >= 0.0 && local_point.y <= height
                     },
@@ -2081,7 +2110,7 @@ impl Engine {
         topmost_group
     }
 
-    /// Get the node type as u32: 0=Path, 1=Rect, 2=Ellipse, 3=Group, 4=Text
+    /// Get the node type as u32: 0=Path, 1=Rect, 2=Ellipse, 3=Group, 4=Text, 5=Image
     pub fn get_node_type(&self, id: u32) -> Option<u32> {
         self.scene.nodes.get(&id).map(|n| match n.node_type {
             NodeType::Path => 0,
@@ -2089,6 +2118,7 @@ impl Engine {
             NodeType::Ellipse => 2,
             NodeType::Group => 3,
             NodeType::Text => 4,
+            NodeType::Image => 5,
         })
     }
 
@@ -2243,6 +2273,7 @@ impl Engine {
                 }
                 Geometry::Path { .. } => None, // Already a path
                 Geometry::Text { .. } => None, // Can't convert text
+                Geometry::Image { .. } => None, // Can't convert an image
             }
         } else {
             None
@@ -2302,6 +2333,10 @@ impl Engine {
         if let Some(node) = self.scene.nodes.get_mut(&id) {
             match &mut node.geometry {
                 Geometry::Rect { width, height } => {
+                    *width = new_w.max(1.0);
+                    *height = new_h.max(1.0);
+                }
+                Geometry::Image { width, height, .. } => {
                     *width = new_w.max(1.0);
                     *height = new_h.max(1.0);
                 }
@@ -2552,6 +2587,7 @@ impl Engine {
             }
             _ => match &node.geometry {
                 Geometry::Rect { width, height } => (*width / 2.0, *height / 2.0),
+                Geometry::Image { width, height, .. } => (*width / 2.0, *height / 2.0),
                 Geometry::Ellipse { .. } => (0.0, 0.0),
                 Geometry::Path { subpaths, .. } => {
                     let mut min_x = f32::MAX;
@@ -2688,6 +2724,7 @@ impl Engine {
                 true
             }
             NodeType::Text => false,
+            NodeType::Image => false, // images can't bake a transform into geometry
         }
     }
 
@@ -3068,6 +3105,73 @@ impl Engine {
         self.node_to_spatial.insert(id, spatial_node);
         self.mark_dirty(id);
         id
+    }
+
+    /// Register encoded image bytes (PNG/JPEG/…), returning an image id.
+    /// Content-addressed: identical bytes reuse the same id (dedup).
+    pub fn register_image(&mut self, bytes: &[u8], mime: &str) -> u32 {
+        // Cheap content hash for dedup (FNV-1a over the bytes).
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for &b in bytes {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        // Reuse an existing image with identical bytes.
+        for (&id, data) in &self.scene.images {
+            if data.bytes.len() == bytes.len() && data.bytes == bytes {
+                let _ = hash;
+                return id;
+            }
+        }
+        let id = self.scene.images.keys().copied().max().unwrap_or(0) + 1;
+        self.scene.images.insert(id, ImageData { bytes: bytes.to_vec(), mime: mime.to_string() });
+        id
+    }
+
+    /// Add a raster image node referencing a previously-registered image id.
+    pub fn add_image(&mut self, x: f32, y: f32, w: f32, h: f32, image_id: u32) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let node = Node {
+            id,
+            name: format!("Image {}", id),
+            node_type: NodeType::Image,
+            transform: Transform2D::from_translation(x, y),
+            style: Style {
+                fills: vec![],
+                strokes: vec![],
+                opacity: 1.0,
+                blend_mode: 0,
+                fill_rule: 0,
+                corner_radius: 0.0,
+            },
+            geometry: Geometry::Image { width: w, height: h, image_id },
+            children: Vec::new(),
+            parent: None,
+            visible: true,
+            locked: false,
+            is_mask: false,
+            mask_type: 0,
+            clip_content: false,
+        };
+
+        self.scene.nodes.insert(id, node);
+        self.scene.root_nodes.push(id);
+        self.update_node_global_transform(id);
+        self.update_spatial_index(id);
+        self.mark_dirty(id);
+        id
+    }
+
+    /// Encoded bytes for a registered image (for the renderer to decode).
+    pub fn get_image_bytes(&self, image_id: u32) -> Vec<u8> {
+        self.scene.images.get(&image_id).map(|d| d.bytes.clone()).unwrap_or_default()
+    }
+
+    /// MIME type for a registered image.
+    pub fn get_image_mime(&self, image_id: u32) -> String {
+        self.scene.images.get(&image_id).map(|d| d.mime.clone()).unwrap_or_default()
     }
 
     /// Update a text node's content and font size.
@@ -4266,6 +4370,32 @@ mod tests {
         // No BEGIN_MASK(4) — both nodes draw plainly inside the group.
         assert!(!cmds.contains(&4), "mask with no content above must not bracket, got {:?}", cmds);
         assert_eq!(cmds, vec![1, 2, 2, 3], "got {:?}", cmds);
+    }
+
+    #[test]
+    fn test_image_register_dedup_and_snapshot_roundtrip() {
+        let mut engine = Engine::new();
+        // Tiny fake PNG-ish bytes.
+        let bytes = vec![0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4];
+        let img1 = engine.register_image(&bytes, "image/png");
+        let img2 = engine.register_image(&bytes, "image/png");
+        assert_eq!(img1, img2, "identical bytes must dedup to the same id");
+        let img3 = engine.register_image(&[9, 9, 9], "image/png");
+        assert_ne!(img1, img3, "different bytes get a new id");
+
+        let node = engine.add_image(10.0, 20.0, 200.0, 150.0, img1);
+        assert_eq!(engine.get_node_type(node), Some(5), "image node type");
+        let b = engine.get_node_bounds(node);
+        assert!((b[0] - 10.0).abs() < 0.5 && (b[2] - 210.0).abs() < 0.5, "image bounds, got {:?}", b);
+
+        // Snapshot round-trip preserves the image bytes and the node.
+        let snap = engine.serialize_scene();
+        engine.move_node(node, 100.0, 0.0);
+        assert!(engine.deserialize_scene(&snap), "snapshot decodes");
+        assert_eq!(engine.get_image_bytes(img1), bytes, "image bytes survive snapshot");
+        assert_eq!(engine.get_image_mime(img1), "image/png");
+        let b2 = engine.get_node_bounds(node);
+        assert!((b2[0] - 10.0).abs() < 0.5, "node position restored, got {:?}", b2);
     }
 
     #[test]

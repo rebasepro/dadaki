@@ -697,6 +697,7 @@ impl Engine {
                     segments.extend(ellipse_to_segments(*radius_x, *radius_y, &transform, id));
                 }
                 Geometry::Text { .. } => {} // Skip text
+                Geometry::Image { .. } => {} // Skip images (no vector segments)
             }
         }
         segments

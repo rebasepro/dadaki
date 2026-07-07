@@ -52,7 +52,7 @@ import type { InputManager } from './input';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 2; // v2: mask commands (4/5/6)
+const EXPECTED_RENDER_PROTOCOL_VERSION = 3; // v3: Image node type (5)
 
 export class Renderer {
     /** Generate a path for a text node (for "Create Outlines"). */
@@ -144,6 +144,12 @@ export class Renderer {
 
     // ─── Gradient shader cache ───
     private _gradientCache: Map<string, ReturnType<CanvasKit['Shader']['MakeLinearGradient']>> = new Map();
+    // Decoded images keyed by engine image id. Images are immutable and
+    // content-addressed, so an id maps to stable bytes for the life of a
+    // document — the cache survives edits/undo and is only cleared on a full
+    // document replacement (clearImageCache), where ids may be reused.
+    private _imageCache: Map<number, ReturnType<CanvasKit['MakeImageFromEncoded']> | null> = new Map();
+    private _imagePaint: Paint | null = null;
 
     // ─── Filled faces cache ───
     private _filledFacesCache: { data: { boundary: number[][]; fill: { r: number; g: number; b: number; a: number } }[] } | null = null;
@@ -201,6 +207,41 @@ export class Renderer {
         this._filledFacesCache = null;
 
         this._needsRender = true;
+    }
+
+    /** Drop all decoded images. Call when a different document is loaded (image
+     *  ids may be reused for different bytes). Not called on ordinary edits. */
+    clearImageCache() {
+        for (const img of this._imageCache.values()) {
+            if (img) img.delete();
+        }
+        this._imageCache.clear();
+        this._needsRender = true;
+    }
+
+    /** Draw a raster image node at (0,0,w,h) in the current (local) space. */
+    private drawImageNode(canvas: Canvas, imageId: number, w: number, h: number, alpha: number) {
+        let img = this._imageCache.get(imageId);
+        if (img === undefined) {
+            const bytes = this.scene.engine?.get_image_bytes(imageId);
+            img = (bytes && bytes.length > 0) ? this.ck.MakeImageFromEncoded(bytes) : null;
+            this._imageCache.set(imageId, img ?? null);
+        }
+        if (!this._imagePaint) this._imagePaint = new this.ck.Paint();
+        const ip = this._imagePaint;
+        ip.setShader(null);
+        ip.setStyle(this.ck.PaintStyle.Fill);
+        const dst = this.ck.XYWHRect(0, 0, w, h);
+        if (img) {
+            ip.setColor(this.ck.Color4f(1, 1, 1, 1));
+            ip.setAlphaf(alpha);
+            const src = this.ck.XYWHRect(0, 0, img.width(), img.height());
+            canvas.drawImageRect(img, src, dst, ip);
+        } else {
+            // Decode failed / missing bytes — draw a magenta placeholder.
+            ip.setColor(this.ck.Color4f(1, 0, 1, 0.6 * alpha));
+            canvas.drawRect(dst, ip);
+        }
     }
 
     /** Ensure the reusable overlay Paint objects exist. */
@@ -580,6 +621,16 @@ export class Renderer {
                     p.setBlendMode(ckBlendModes[blendMode]);
                 }
 
+                // Image nodes (type 5) carry no fills/strokes — draw the raster
+                // and skip the fill/stroke passes.
+                if (nodeType === 5) {
+                    reader.offset = startGeoOffset + 4; // skip the geometry size u32
+                    const iw = reader.f32();
+                    const ih = reader.f32();
+                    const imageId = reader.u32();
+                    this.drawImageNode(canvas, imageId, iw, ih, nodeAlpha);
+                    reader.offset = startGeoOffset + 4 + geoSize;
+                } else
                 // Fill Pass(es)
                 if (fills.length === 0 && strokes.length === 0) {
                     reader.offset += 4 + geoSize; // Skip geometry if totally invisible

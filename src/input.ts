@@ -207,6 +207,22 @@ export class InputManager {
                 const bytes = new Uint8Array(await file.arrayBuffer());
                 this.scene.saveMoveHistory(); // snapshot current doc so the drop is undoable
                 this.scene.engine.deserialize_proto(bytes);
+                this.scene.renderer?.clearImageCache(); // ids may map to new bytes
+            } else if (file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/.test(name)) {
+                const bytes = new Uint8Array(await file.arrayBuffer());
+                // Natural pixel size (fallback to a square if decode fails).
+                const bmp = await createImageBitmap(file).catch(() => null);
+                let w = bmp?.width ?? 200;
+                let h = bmp?.height ?? 200;
+                bmp?.close?.();
+                // Cap to 50% of the document so huge photos don't fill the canvas.
+                const docW = this.scene.engine.get_document_width();
+                const docH = this.scene.engine.get_document_height();
+                const scale = Math.min(1, (docW * 0.5) / w, (docH * 0.5) / h);
+                w *= scale; h *= scale;
+                const id = this.scene.placeImage(bytes, file.type || 'image/png', dropWorld.x, dropWorld.y, w, h);
+                this.scene.engine.clear_selection();
+                this.scene.selectNode(id, false);
             }
         }
 

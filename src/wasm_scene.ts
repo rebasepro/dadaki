@@ -148,6 +148,19 @@ export class WasmScene {
         return this.engine!.get_node_is_mask(id);
     }
 
+    /** Register encoded image bytes and place an image node centered at (cx,cy)
+     *  with the given display size. One undo step. Returns the new node id. */
+    placeImage(bytes: Uint8Array, mime: string, cx: number, cy: number, w: number, h: number): number {
+        let id = 0;
+        this.transaction(() => {
+            const imageId = this.engine!.register_image(bytes, mime);
+            id = this.engine!.add_image(cx - w / 2, cy - h / 2, w, h, imageId);
+        });
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return id;
+    }
+
     moveNode(id: number, dx: number, dy: number) {
         this.engine!.move_node(id, dx, dy);
         this.invalidateCache();

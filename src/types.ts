@@ -181,6 +181,12 @@ export interface TextGeometry {
     line_height: number;
 }
 
+export interface ImageGeometry {
+    width: number;
+    height: number;
+    image_id: number;
+}
+
 /**
  * Discriminated geometry union.
  * Exactly one of the keys will be present.
@@ -190,6 +196,7 @@ export interface NodeGeometry {
     Ellipse?: EllipseGeometry;
     Path?: PathGeometry;
     Text?: TextGeometry;
+    Image?: ImageGeometry;
 }
 
 export interface SceneNode {

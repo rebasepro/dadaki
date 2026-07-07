@@ -45,6 +45,8 @@ export interface SVGExportInput {
     localTransforms: Record<number, number[]>;
     /** Optional filled faces from the vector network. */
     filledFaces?: FilledFace[];
+    /** Optional data-URI per image id (for exporting Image nodes as <image>). */
+    imageDataUris?: Record<number, string>;
 }
 
 // ─── SVG Generation ─────────────────────────────────────────────────────────
@@ -54,7 +56,7 @@ export interface SVGExportInput {
  * Gradient defs are collected during rendering and prepended into a <defs> block.
  */
 export function buildSVGFromData(input: SVGExportInput): string {
-    const { docWidth, docHeight, nodes, rootNodeIds, localTransforms, filledFaces } = input;
+    const { docWidth, docHeight, nodes, rootNodeIds, localTransforms, filledFaces, imageDataUris } = input;
 
     let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${docWidth}" height="${docHeight}" viewBox="0 0 ${docWidth} ${docHeight}">`;
 
@@ -239,6 +241,11 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 const cr = node.style.corner_radius;
                 const rxAttr = cr ? ` rx="${cr}" ry="${cr}"` : '';
                 nodeSvg += `<rect x="0" y="0" width="${geo.Rect.width}" height="${geo.Rect.height}"${rxAttr} ${attrs} />`;
+            } else if (geo.Image) {
+                const href = imageDataUris?.[geo.Image.image_id] ?? '';
+                const op = node.style.opacity ?? 1.0;
+                const opAttr = op < 1 ? ` opacity="${op}"` : '';
+                nodeSvg += `<image x="0" y="0" width="${geo.Image.width}" height="${geo.Image.height}" href="${href}"${opAttr} preserveAspectRatio="none" />`;
             } else if (geo.Ellipse) {
                 nodeSvg += `<ellipse cx="0" cy="0" rx="${geo.Ellipse.radius_x}" ry="${geo.Ellipse.radius_y}" ${attrs} />`;
             } else if (geo.Path) {

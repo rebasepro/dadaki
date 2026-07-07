@@ -35,6 +35,7 @@ export class UIEngine {
         'Ellipse': () => iconCircle(14),
         'Path': () => iconPenTool(14),
         'Text': () => iconType(14),
+        'Image': () => iconSquare(14),
     };
     
     // DOM Elements — basic
@@ -955,7 +956,7 @@ export class UIEngine {
 
     /** Map from numeric node type (engine enum) to string key for icon lookup.
      *  0=Path, 1=Rect, 2=Ellipse, 3=Group, 4=Text */
-    private static readonly NODE_TYPE_KEY: readonly string[] = ['Path', 'Rect', 'Ellipse', 'Group', 'Text'];
+    private static readonly NODE_TYPE_KEY: readonly string[] = ['Path', 'Rect', 'Ellipse', 'Group', 'Text', 'Image'];
 
 
     private getFills(node: SceneNode): Paint[] {
@@ -1574,6 +1575,7 @@ export class UIEngine {
             }
             nodes[id] = node;
             localTransforms[id] = Array.from(this.scene.getNodeLocalTransform(id));
+            if (node.geometry?.Image) imageIds.add(node.geometry.Image.image_id);
             if (node.node_type === 'Group') {
                 const children = this.scene.getNodeChildren(id);
                 for (const childId of Array.from(children)) {
@@ -1581,8 +1583,23 @@ export class UIEngine {
                 }
             }
         };
+        const imageIds = new Set<number>();
         for (const rootId of rootNodeIds) {
             collectNodeData(rootId);
+        }
+
+        // Encode referenced images as base64 data URIs for <image href>.
+        let imageDataUris: Record<number, string> | undefined;
+        if (imageIds.size > 0 && this.scene.engine) {
+            imageDataUris = {};
+            for (const imgId of imageIds) {
+                const bytes = this.scene.engine.get_image_bytes(imgId);
+                if (!bytes || bytes.length === 0) continue;
+                const mime = this.scene.engine.get_image_mime(imgId) || 'image/png';
+                let bin = '';
+                for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+                imageDataUris[imgId] = `data:${mime};base64,${btoa(bin)}`;
+            }
         }
 
         // Collect live-paint face fills
@@ -1602,6 +1619,7 @@ export class UIEngine {
             rootNodeIds,
             localTransforms,
             filledFaces,
+            imageDataUris,
         });
 
         // Embed the binary .vec payload for round-tripping
@@ -2249,6 +2267,29 @@ export class UIEngine {
                 const subpaths = this.parseSVGPathDWithMatrix(d, composedMat);
                 if (subpaths.length > 0) {
                     nodeId = this.scene.addPath(JSON.stringify(subpaths));
+                }
+            } else if (tag === 'image') {
+                const href = el.getAttribute('href') || el.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '';
+                const ix = parseFloat(el.getAttribute('x') || '0');
+                const iy = parseFloat(el.getAttribute('y') || '0');
+                const iw = parseFloat(el.getAttribute('width') || '0') || 100;
+                const ih = parseFloat(el.getAttribute('height') || '0') || 100;
+                const m = href.match(/^data:([^;,]*)(;base64)?,(.*)$/s);
+                if (m && m[2]) {
+                    // base64 data URI → decode and register the bytes
+                    const mime = m[1] || 'image/png';
+                    try {
+                        const binStr = atob(m[3]);
+                        const bytes = new Uint8Array(binStr.length);
+                        for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+                        const imageId = this.scene.engine!.register_image(bytes, mime);
+                        nodeId = this.scene.engine!.add_image(0, 0, iw, ih, imageId);
+                        const offsetMat = composeMatrices(composedMat, translateMatrix(ix, iy));
+                        this.scene.setNodeTransform(nodeId, offsetMat);
+                    } catch (err) { console.warn('Failed to import <image>:', err); }
+                } else if (href) {
+                    // External URL — not fetched in v1.
+                    console.warn('Skipping external <image> href (unsupported):', href.slice(0, 64));
                 }
             }
 

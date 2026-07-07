@@ -235,6 +235,16 @@ pub struct ProtoText {
 }
 
 #[derive(Clone, PartialEq, Message)]
+pub struct ProtoImage {
+    #[prost(float, tag = "1")]
+    pub width: f32,
+    #[prost(float, tag = "2")]
+    pub height: f32,
+    #[prost(uint32, tag = "3")]
+    pub image_id: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
 pub struct ProtoGeometry {
     /// Only one of these will be set (simulated oneof).
     #[prost(message, optional, tag = "1")]
@@ -245,6 +255,19 @@ pub struct ProtoGeometry {
     pub path: Option<ProtoPath>,
     #[prost(message, optional, tag = "4")]
     pub text: Option<ProtoText>,
+    #[prost(message, optional, tag = "5")]
+    pub image: Option<ProtoImage>,
+}
+
+/// Encoded raster image bytes stored at the document level.
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoImageData {
+    #[prost(uint32, tag = "1")]
+    pub id: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub bytes: Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub mime: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -316,6 +339,9 @@ pub struct ProtoDocument {
     pub document_width: Option<f32>,
     #[prost(float, optional, tag = "8")]
     pub document_height: Option<f32>,
+    /// Encoded raster images referenced by Geometry::Image nodes.
+    #[prost(message, repeated, tag = "9")]
+    pub images: Vec<ProtoImageData>,
 }
 
 /// A history/undo/drag snapshot. Wraps a full document plus the transient
@@ -536,6 +562,7 @@ fn node_type_to_u32(nt: NodeType) -> u32 {
         NodeType::Ellipse => 2,
         NodeType::Group => 3,
         NodeType::Text => 4,
+        NodeType::Image => 5,
     }
 }
 
@@ -546,6 +573,7 @@ fn u32_to_node_type(v: u32) -> NodeType {
         2 => NodeType::Ellipse,
         3 => NodeType::Group,
         4 => NodeType::Text,
+        5 => NodeType::Image,
         _ => NodeType::Rect,
     }
 }
@@ -554,12 +582,12 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
     match g {
         Geometry::Rect { width, height } => ProtoGeometry {
             rect: Some(ProtoRect { width: *width, height: *height }),
-            ellipse: None, path: None, text: None,
+            ellipse: None, path: None, text: None, image: None,
         },
         Geometry::Ellipse { radius_x, radius_y } => ProtoGeometry {
             rect: None,
             ellipse: Some(ProtoEllipse { radius_x: *radius_x, radius_y: *radius_y }),
-            path: None, text: None,
+            path: None, text: None, image: None,
         },
         Geometry::Path { ref subpaths, ref network } => ProtoGeometry {
             rect: None, ellipse: None,
@@ -571,10 +599,10 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
                 }).collect(),
                 network: network.as_ref().map(|n| network_to_proto(n)),
             }),
-            text: None,
+            text: None, image: None,
         },
         Geometry::Text { content, font_size, ref font_family, text_align, line_height } => ProtoGeometry {
-            rect: None, ellipse: None, path: None,
+            rect: None, ellipse: None, path: None, image: None,
             text: Some(ProtoText {
                 content: content.clone(),
                 font_size: *font_size,
@@ -583,11 +611,17 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
                 line_height: *line_height,
             }),
         },
+        Geometry::Image { width, height, image_id } => ProtoGeometry {
+            rect: None, ellipse: None, path: None, text: None,
+            image: Some(ProtoImage { width: *width, height: *height, image_id: *image_id }),
+        },
     }
 }
 
 fn proto_to_geometry(g: &ProtoGeometry) -> Geometry {
-    if let Some(r) = &g.rect {
+    if let Some(img) = &g.image {
+        Geometry::Image { width: img.width, height: img.height, image_id: img.image_id }
+    } else if let Some(r) = &g.rect {
         Geometry::Rect { width: r.width, height: r.height }
     } else if let Some(e) = &g.ellipse {
         Geometry::Ellipse { radius_x: e.radius_x, radius_y: e.radius_y }
@@ -762,6 +796,16 @@ impl ProtoDocument {
                 .then(a.centroid_y.partial_cmp(&b.centroid_y).unwrap_or(std::cmp::Ordering::Equal))
         });
 
+        // Images, in deterministic id order (byte-exact snapshots).
+        let mut images: Vec<ProtoImageData> = scene.images.iter()
+            .map(|(&id, data)| ProtoImageData {
+                id,
+                bytes: data.bytes.clone(),
+                mime: data.mime.clone(),
+            })
+            .collect();
+        images.sort_by_key(|i| i.id);
+
         ProtoDocument {
             format_version: FORMAT_VERSION,
             nodes,
@@ -771,6 +815,7 @@ impl ProtoDocument {
             gap_tolerance: scene.vector_network.gap_tolerance,
             document_width: Some(scene.document_width),
             document_height: Some(scene.document_height),
+            images,
         }
     }
 
@@ -796,6 +841,10 @@ impl ProtoDocument {
             })
         }).collect();
 
+        let images = self.images.iter()
+            .map(|img| (img.id, crate::ImageData { bytes: img.bytes.clone(), mime: img.mime.clone() }))
+            .collect();
+
         let scene = Scene {
             nodes,
             root_nodes: self.root_ids.clone(),
@@ -803,6 +852,7 @@ impl ProtoDocument {
             vector_network: vn,
             document_width: self.document_width.unwrap_or(1000.0),
             document_height: self.document_height.unwrap_or(1000.0),
+            images,
         };
 
         let next_id = if self.next_id > 0 {
@@ -964,6 +1014,7 @@ mod tests {
                         network: None,
                     }),
                     text: None,
+                    image: None,
                 }),
                 children: Vec::new(),
                 parent: None,
@@ -979,6 +1030,7 @@ mod tests {
             gap_tolerance: 2.0,
             document_width: None,
             document_height: None,
+            images: Vec::new(),
         };
 
         let bytes = v1_doc.encode_to_vec();
@@ -1011,6 +1063,7 @@ mod tests {
             gap_tolerance: 2.0,
             document_width: None,
             document_height: None,
+            images: Vec::new(),
         };
         doc.nodes.push(ProtoNode {
             id: 1,
@@ -1027,6 +1080,7 @@ mod tests {
                     network: None,
                 }),
                 text: None,
+                image: None,
             }),
             children: Vec::new(),
             parent: None,
@@ -1111,6 +1165,7 @@ mod tests {
             vector_network: VectorNetwork::default(),
             document_width: 800.0,
             document_height: 600.0,
+            images: Default::default(),
         };
 
         let bytes = serialize_to_proto(&scene, 8);
