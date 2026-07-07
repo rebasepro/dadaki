@@ -4,6 +4,7 @@ import { FileIO } from './file_io';
 import type { Color, NodeStyle, Gradient, GradientStop, SceneNode, Paint, Stroke } from './types';
 import { isGradient, isPattern, StrokeAlignment } from './types';
 import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix, scaleMatrix, parseSvgLength } from './svg_utils';
+import type { GradientGeo } from './svg_utils';
 import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
 import { parseSvgStylesheet, matchedCssStyles } from './svg_css';
 import type { CssDecl } from './svg_css';
@@ -2613,14 +2614,14 @@ export class UIEngine {
             return p ? { type: 'pattern', pattern: p } : null;
         };
 
-        const parseFill = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles): ParsedPaint | null => {
+        const parseFill = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles, geo?: GradientGeo): ParsedPaint | null => {
             const fill = resolveAttr(el, 'fill', inlineStyles, inherited, '#000000');
             if (fill === 'none' || fill === 'transparent') return null;
             // Paint-server url(#...): pattern (rasterized tile) or gradient.
             if (fill && fill.match(/url\s*\(/)) {
                 const pat = resolvePatternRef(fill);
                 if (pat) return pat;
-                const grad = resolveGradient(doc, fill);
+                const grad = resolveGradient(doc, fill, geo);
                 if (grad) return { type: 'gradient', data: grad };
                 return null;
             }
@@ -2628,13 +2629,13 @@ export class UIEngine {
             return parsed ? { type: 'solid', hex: parsed.hex, alpha: parsed.alpha } : null;
         };
 
-        const parseStroke = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles): ParsedPaint | null => {
+        const parseStroke = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles, geo?: GradientGeo): ParsedPaint | null => {
             const stroke = resolveAttr(el, 'stroke', inlineStyles, inherited, null);
             if (!stroke || stroke === 'none' || stroke === 'transparent') return null;
             if (stroke.match(/url\s*\(/)) {
                 const pat = resolvePatternRef(stroke);
                 if (pat) return pat;
-                const grad = resolveGradient(doc, stroke);
+                const grad = resolveGradient(doc, stroke, geo);
                 if (grad) return { type: 'gradient', data: grad };
                 return null;
             }
@@ -2671,10 +2672,10 @@ export class UIEngine {
             };
         };
 
-        const applyStyle = (id: number, el: Element, inherited: InheritedStyles) => {
+        const applyStyle = (id: number, el: Element, inherited: InheritedStyles, geo?: GradientGeo) => {
             const inlineStyles = parseInlineStyle(el);
-            const fillPaint = parseFill(el, inlineStyles, inherited);
-            const strokePaint = parseStroke(el, inlineStyles, inherited);
+            const fillPaint = parseFill(el, inlineStyles, inherited, geo);
+            const strokePaint = parseStroke(el, inlineStyles, inherited, geo);
             const sw = parseSvgLength(resolveAttr(el, 'stroke-width', inlineStyles, inherited, '1'), 1);
             const op = parseFloat(resolveAttr(el, 'opacity', inlineStyles, inherited, '1') || '1');
 
@@ -2932,6 +2933,19 @@ export class UIEngine {
          * @param inherited    Cascaded presentation attributes from ancestor elements
          * @param useRefStack  Set of href IDs currently being resolved (cycle detection)
          */
+        // Build a GradientGeo for a baked shape (path/line/poly): its geometry
+        // lives in the composed space (node transform is identity), so the OBB
+        // box is the baked bbox and userSpaceOnUse coords map via composedMat.
+        const bakedGradientGeo = (subpaths: { points: { x: number; y: number }[] }[], mat: number[]): GradientGeo => {
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const sp of subpaths) for (const p of sp.points) {
+                if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+                if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+            }
+            if (!isFinite(minX)) { minX = 0; minY = 0; maxX = 0; maxY = 0; }
+            return { bx: minX, by: minY, bw: maxX - minX, bh: maxY - minY, userToLocal: mat };
+        };
+
         const processElement = (el: Element, parentMat: number[], inherited: InheritedStyles, useRefStack: Set<string> = new Set(), suppressMask = false) => {
             const tag = el.tagName.toLowerCase();
 
@@ -3107,6 +3121,13 @@ export class UIEngine {
 
             // Process shape elements
             let nodeId: number | null = null;
+            // Geometry descriptor for mapping url(#gradient) fills into this
+            // node's LOCAL space. rect/ellipse keep geometry at the origin with
+            // x/y baked into the transform, so userSpaceOnUse coords convert via
+            // translate(-offset); baked shapes (path/line/poly) live in the
+            // composed space, so userToLocal = composedMat and the bbox is the
+            // baked bbox. See resolveGradient / GradientGeo.
+            let gradientGeo: GradientGeo | undefined;
 
             if (tag === 'rect') {
                 const x = parseSvgLength(el.getAttribute('x'), 0);
@@ -3117,6 +3138,7 @@ export class UIEngine {
                 nodeId = this.scene.addRect(0, 0, w, h);
                 const offsetMat = composeMatrices(composedMat, translateMatrix(x, y));
                 this.scene.setNodeTransform(nodeId, offsetMat);
+                gradientGeo = { bx: 0, by: 0, bw: w, bh: h, userToLocal: translateMatrix(-x, -y) };
             } else if (tag === 'ellipse') {
                 const cx = parseSvgLength(el.getAttribute('cx'), 0);
                 const cy = parseSvgLength(el.getAttribute('cy'), 0);
@@ -3126,6 +3148,7 @@ export class UIEngine {
                 nodeId = this.scene.addEllipse(0, 0, rx, ry);
                 const offsetMat = composeMatrices(composedMat, translateMatrix(cx, cy));
                 this.scene.setNodeTransform(nodeId, offsetMat);
+                gradientGeo = { bx: -rx, by: -ry, bw: 2 * rx, bh: 2 * ry, userToLocal: translateMatrix(-cx, -cy) };
             } else if (tag === 'circle') {
                 const cx = parseSvgLength(el.getAttribute('cx'), 0);
                 const cy = parseSvgLength(el.getAttribute('cy'), 0);
@@ -3133,6 +3156,7 @@ export class UIEngine {
                 nodeId = this.scene.addEllipse(0, 0, r, r);
                 const offsetMat = composeMatrices(composedMat, translateMatrix(cx, cy));
                 this.scene.setNodeTransform(nodeId, offsetMat);
+                gradientGeo = { bx: -r, by: -r, bw: 2 * r, bh: 2 * r, userToLocal: translateMatrix(-cx, -cy) };
             } else if (tag === 'text') {
                 // Resolve font-size through the CSS cascade. em/% are relative to
                 // the inherited (parent) font-size; absolute units (pt, mm, …)
@@ -3199,6 +3223,7 @@ export class UIEngine {
                 ];
                 const subpaths = [{ points, closed: false }];
                 nodeId = this.scene.addPath(JSON.stringify(subpaths));
+                gradientGeo = bakedGradientGeo(subpaths, composedMat);
             } else if (tag === 'polygon' || tag === 'polyline') {
                 const pointsStr = el.getAttribute('points') || '';
                 const coords = pointsStr.trim().split(/[\s,]+/).map(Number);
@@ -3211,6 +3236,7 @@ export class UIEngine {
                 if (pts.length >= 2) {
                     const subpaths = [{ points: pts, closed: tag === 'polygon' }];
                     nodeId = this.scene.addPath(JSON.stringify(subpaths));
+                    gradientGeo = bakedGradientGeo(subpaths, composedMat);
                 }
             } else if (tag === 'path') {
                 const d = el.getAttribute('d') || '';
@@ -3218,6 +3244,7 @@ export class UIEngine {
                 const subpaths = this.parseSVGPathDWithMatrix(d, composedMat);
                 if (subpaths.length > 0) {
                     nodeId = this.scene.addPath(JSON.stringify(subpaths));
+                    gradientGeo = bakedGradientGeo(subpaths, composedMat);
                 }
             } else if (tag === 'image') {
                 const href = el.getAttribute('href') || el.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '';
@@ -3245,7 +3272,7 @@ export class UIEngine {
             }
 
             if (nodeId !== null) {
-                applyStyle(nodeId, el, mergedStyles);
+                applyStyle(nodeId, el, mergedStyles, gradientGeo);
                 // Set name from id attribute if present
                 const elName = el.getAttribute('id') || el.getAttribute('class');
                 if (elName) {

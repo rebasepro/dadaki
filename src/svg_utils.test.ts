@@ -6,6 +6,7 @@ import {
     parseSVGPathD,
     arcToCubicBeziers,
     identityMatrix,
+    translateMatrix,
     composeMatrices,
     transformPoint,
     parseSVGTransform,
@@ -441,7 +442,7 @@ describe('resolveGradient', () => {
             <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="10" y1="20" x2="110" y2="20">
               <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
             </linearGradient></defs></svg>`);
-        const g = resolveGradient(doc, 'url(#g)', 200, 200)!;
+        const g = resolveGradient(doc, 'url(#g)')!;
         expect(g.gradient_type).toBe('Linear');
         expect(g.start_x).toBeCloseTo(10);
         expect(g.end_x).toBeCloseTo(110);
@@ -456,7 +457,7 @@ describe('resolveGradient', () => {
                 gradientTransform="rotate(90)">
               <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
             </linearGradient></defs></svg>`);
-        const g = resolveGradient(doc, 'url(#g)', 100, 100)!;
+        const g = resolveGradient(doc, 'url(#g)')!;
         expect(g.start_x).toBeCloseTo(0);
         expect(g.start_y).toBeCloseTo(0);
         expect(g.end_x).toBeCloseTo(0);
@@ -469,7 +470,7 @@ describe('resolveGradient', () => {
                 gradientTransform="translate(10, 20)">
               <stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/>
             </radialGradient></defs></svg>`);
-        const g = resolveGradient(doc, 'url(#g)', 100, 100)!;
+        const g = resolveGradient(doc, 'url(#g)')!;
         expect(g.gradient_type).toBe('Radial');
         expect(g.start_x).toBeCloseTo(60); // 50 + 10
         expect(g.start_y).toBeCloseTo(70); // 50 + 20
@@ -484,7 +485,7 @@ describe('resolveGradient', () => {
             </linearGradient>
             <linearGradient id="g" xlink:href="#base"/>
             </defs></svg>`);
-        const g = resolveGradient(doc, 'url(#g)', 100, 100)!;
+        const g = resolveGradient(doc, 'url(#g)')!;
         expect(g.stops.length).toBe(2);
         expect(g.end_x).toBeCloseTo(80); // inherited x2
     });
@@ -494,9 +495,47 @@ describe('resolveGradient', () => {
             <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="50" y2="0" spreadMethod="repeat">
               <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
             </linearGradient></defs></svg>`);
-        const g = resolveGradient(doc, 'url(#g)', 100, 100);
+        const g = resolveGradient(doc, 'url(#g)');
         expect(g).not.toBeNull();
         expect(g!.gradient_type).toBe('Linear');
+    });
+
+    it('maps a default objectBoundingBox linear gradient onto the geometry bbox', () => {
+        // No coords → default OBB x1=0,y1=0,x2=1,y2=0. On a 160×160 box at the
+        // origin the endpoints must span the full width, not a hardcoded 100.
+        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
+            <linearGradient id="g">
+              <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
+            </linearGradient></defs></svg>`);
+        const g = resolveGradient(doc, 'url(#g)', { bx: 0, by: 0, bw: 160, bh: 160, userToLocal: identityMatrix() })!;
+        expect(g.start_x).toBeCloseTo(0);
+        expect(g.end_x).toBeCloseTo(160);
+        expect(g.end_y).toBeCloseTo(0);
+    });
+
+    it('offsets an objectBoundingBox gradient by the bbox origin (centered ellipse)', () => {
+        // An ellipse's geometry is centered at the origin: bbox top-left is
+        // (-rx,-ry). OBB fraction 0 must map there, not to (0,0).
+        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
+            <linearGradient id="g">
+              <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
+            </linearGradient></defs></svg>`);
+        const g = resolveGradient(doc, 'url(#g)', { bx: -40, by: -40, bw: 80, bh: 80, userToLocal: identityMatrix() })!;
+        expect(g.start_x).toBeCloseTo(-40);
+        expect(g.end_x).toBeCloseTo(40);
+    });
+
+    it('maps a userSpaceOnUse gradient through userToLocal (element offset)', () => {
+        // A rect at x=20 keeps geometry at the origin with x baked into the
+        // transform, so a USOU coord of 20 must become 0 in local space.
+        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
+            <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="20" y1="20" x2="180" y2="20">
+              <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
+            </linearGradient></defs></svg>`);
+        const g = resolveGradient(doc, 'url(#g)', { bx: 0, by: 0, bw: 160, bh: 160, userToLocal: translateMatrix(-20, -20) })!;
+        expect(g.start_x).toBeCloseTo(0);
+        expect(g.start_y).toBeCloseTo(0);
+        expect(g.end_x).toBeCloseTo(160);
     });
 });
 

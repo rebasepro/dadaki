@@ -800,19 +800,31 @@ export interface SVGGradientData {
 }
 
 /**
+ * Geometry context for mapping gradient coordinates into a node's LOCAL space
+ * (the space its path is drawn in). SVG gradients come in two unit systems:
+ *  - objectBoundingBox (the default): fraction f maps to `b{x,y} + f * b{w,h}`.
+ *  - userSpaceOnUse: coordinates are in the element's user space and are mapped
+ *    into node-local space by `userToLocal` (a column-major mat3).
+ * The importer supplies the right descriptor per shape (rect/ellipse/path…).
+ */
+export interface GradientGeo {
+    bx: number; by: number; bw: number; bh: number;
+    userToLocal: number[];
+}
+
+/**
  * Resolve a `fill="url(#id)"` to full gradient data.
  * Parses <linearGradient> and <radialGradient> with their stops and coordinates.
  * Coordinates use objectBoundingBox by default (0–1 space), converted to local
- * coords using the provided bounding box dimensions.
+ * coords using the provided geometry descriptor (defaults to a 100×100 box at
+ * the origin when omitted, for legacy callers).
  */
 export function resolveGradient(
     svgDoc: Document,
     fillUrl: string,
-    /** Node's local bounding box width (for objectBoundingBox→local conversion) */
-    bboxWidth = 100,
-    /** Node's local bounding box height */
-    bboxHeight = 100,
+    geo?: GradientGeo,
 ): SVGGradientData | null {
+    const g: GradientGeo = geo ?? { bx: 0, by: 0, bw: 100, bh: 100, userToLocal: identityMatrix() };
     // Accept quoted references too: url('#id') / url("#id") (Illustrator output)
     const idMatch = fillUrl.match(/url\(\s*['"]?#([^'")]+)['"]?\s*\)/);
     if (!idMatch) return null;
@@ -913,10 +925,11 @@ export function resolveGradient(
         const [x2, y2] = applyGt(num('x2', 1), num('y2', 0));
 
         if (isOBB) {
-            start_x = x1 * bboxWidth;  start_y = y1 * bboxHeight;
-            end_x   = x2 * bboxWidth;  end_y   = y2 * bboxHeight;
+            start_x = g.bx + x1 * g.bw;  start_y = g.by + y1 * g.bh;
+            end_x   = g.bx + x2 * g.bw;  end_y   = g.by + y2 * g.bh;
         } else {
-            start_x = x1; start_y = y1; end_x = x2; end_y = y2;
+            [start_x, start_y] = transformPoint(g.userToLocal, x1, y1);
+            [end_x, end_y]     = transformPoint(g.userToLocal, x2, y2);
         }
 
         return { gradient_type: 'Linear', stops, start_x, start_y, end_x, end_y };
@@ -934,10 +947,11 @@ export function resolveGradient(
         const [e0x, e0y] = applyGt(cx + r, cy);
 
         if (isOBB) {
-            start_x = c0x * bboxWidth;  start_y = c0y * bboxHeight;
-            end_x   = e0x * bboxWidth;  end_y   = e0y * bboxHeight;
+            start_x = g.bx + c0x * g.bw;  start_y = g.by + c0y * g.bh;
+            end_x   = g.bx + e0x * g.bw;  end_y   = g.by + e0y * g.bh;
         } else {
-            start_x = c0x; start_y = c0y; end_x = e0x; end_y = e0y;
+            [start_x, start_y] = transformPoint(g.userToLocal, c0x, c0y);
+            [end_x, end_y]     = transformPoint(g.userToLocal, e0x, e0y);
         }
 
         return { gradient_type: 'Radial', stops, start_x, start_y, end_x, end_y };
