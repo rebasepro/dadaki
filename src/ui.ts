@@ -414,6 +414,7 @@ export class UIEngine {
 
         // Export
         document.getElementById('export-svg')?.addEventListener('click', () => this.exportSVG());
+        document.getElementById('export-png')?.addEventListener('click', () => this.exportPNG());
 
         // Import SVG
         document.getElementById('import-svg')?.addEventListener('click', () => {
@@ -1532,6 +1533,21 @@ export class UIEngine {
         const a = document.createElement('a');
         a.href = url;
         a.download = 'export.svg';
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    /** Export the document as a PNG raster (2× by default) and download it. */
+    exportPNG(scale = 2) {
+        const blob = this.scene.renderer?.exportPNG(scale);
+        if (!blob) {
+            console.error('PNG export failed (no renderer or surface unavailable)');
+            return;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'export.png';
         a.click();
         URL.revokeObjectURL(url);
     }

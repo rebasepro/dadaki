@@ -136,6 +136,8 @@ export class Renderer {
     private _protocolDesyncWarned = false;
     /** Dedicated SrcIn paint for compositing masked-content layers. */
     private _maskPaint: Paint | null = null;
+    /** True while rendering into an offscreen surface for PNG export. */
+    private _exporting = false;
 
     // ─── Path object cache (avoid rebuilding CanvasKit paths every frame) ───
     private _pathCache: Map<number, { path: ReturnType<CanvasKit['Path']['prototype']['copy']>; fillRule: number }> = new Map();
@@ -370,24 +372,40 @@ export class Renderer {
     render() {
         if (!this.surface || !this.scene.engine) return;
         const canvas = this.surface.getCanvas();
-        const dpr = window.devicePixelRatio || 1;
+        // In export mode we render into an offscreen surface at 1:1 (the export
+        // scale is folded into this.zoom) with a transparent background and no
+        // editor chrome (grid, artboard, selection, guides).
+        const exporting = this._exporting;
+        const dpr = exporting ? 1 : (window.devicePixelRatio || 1);
 
-        canvas.clear(this.ck.Color(43, 43, 43, 1.0));
+        if (exporting) {
+            canvas.clear(this.ck.TRANSPARENT);
+        } else {
+            canvas.clear(this.ck.Color(43, 43, 43, 1.0));
+            this.drawGrid(canvas, dpr);
+        }
 
-        this.drawGrid(canvas, dpr);
-        
         canvas.save();
         canvas.scale(dpr, dpr);
         canvas.translate(this.pan.x, this.pan.y);
         canvas.scale(this.zoom, this.zoom);
 
-        this.drawArtboard(canvas);
+        if (!exporting) this.drawArtboard(canvas);
 
-        // Compute viewport in document space for culling
-        const viewportMinX = -this.pan.x / this.zoom;
-        const viewportMinY = -this.pan.y / this.zoom;
-        const viewportMaxX = (this.canvas.width / dpr - this.pan.x) / this.zoom;
-        const viewportMaxY = (this.canvas.height / dpr - this.pan.y) / this.zoom;
+        // Compute viewport in document space for culling. Export culls to the
+        // document rect so the whole artboard renders regardless of screen size.
+        let viewportMinX: number, viewportMinY: number, viewportMaxX: number, viewportMaxY: number;
+        if (exporting) {
+            viewportMinX = 0;
+            viewportMinY = 0;
+            viewportMaxX = this.scene.engine.get_document_width();
+            viewportMaxY = this.scene.engine.get_document_height();
+        } else {
+            viewportMinX = -this.pan.x / this.zoom;
+            viewportMinY = -this.pan.y / this.zoom;
+            viewportMaxX = (this.canvas.width / dpr - this.pan.x) / this.zoom;
+            viewportMaxY = (this.canvas.height / dpr - this.pan.y) / this.zoom;
+        }
 
         // Draw Scene Objects via binary command stream (Phase 3: No JSON Tax)
         const visibleIds = this.scene.getVisibleNodes(viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
@@ -417,7 +435,8 @@ export class Renderer {
 
         // Compute the dim target once per frame. getEditingDimTarget self-heals a
         // stale id (edited node removed by undo/delete), so dimming can never stick.
-        const dimTarget = this.inputManager?.getEditingDimTarget() ?? null;
+        // No dimming in export output.
+        const dimTarget = exporting ? null : (this.inputManager?.getEditingDimTarget() ?? null);
 
         for (let i = 0; i < commandCount; i++) {
             const recordLen = reader.u32();
@@ -687,36 +706,80 @@ export class Renderer {
         // Draw filled faces (Live Paint)
         this.drawFilledFaces(canvas);
 
-        // Draw live preview shape (while user is dragging to create)
-        this.drawPreview(canvas);
-
-        // Draw pen tool in-progress path
-        this.drawPenPreview(canvas);
-
-        // Draw paint bucket hover preview
-        this.drawPaintBucketHover(canvas);
-
-        // Draw marquee selection rectangle
-        this.drawMarquee(canvas);
-
-        // Draw snapping alignment guides
-        this.drawSnapGuides(canvas, viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
+        // Editor overlays — never part of exported output.
+        if (!exporting) {
+            // Draw live preview shape (while user is dragging to create)
+            this.drawPreview(canvas);
+            // Draw pen tool in-progress path
+            this.drawPenPreview(canvas);
+            // Draw paint bucket hover preview
+            this.drawPaintBucketHover(canvas);
+            // Draw marquee selection rectangle
+            this.drawMarquee(canvas);
+            // Draw snapping alignment guides
+            this.drawSnapGuides(canvas, viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
+        }
 
         canvas.restore();
 
-        // Draw hover outline (shape under cursor, selection tool)
-        this.drawHoverOutline(canvas, dpr);
-
-        // Draw selection overlay
-        this.renderSelectionOverlay(canvas, dpr);
-
-        // Draw direct selection edit handles
-        this.drawDirectEditHandles(canvas, dpr);
-
-        // Draw scissors / add-point hover dot
-        this.drawScissorsPreview(canvas, dpr);
+        if (!exporting) {
+            // Draw hover outline (shape under cursor, selection tool)
+            this.drawHoverOutline(canvas, dpr);
+            // Draw selection overlay
+            this.renderSelectionOverlay(canvas, dpr);
+            // Draw direct selection edit handles
+            this.drawDirectEditHandles(canvas, dpr);
+            // Draw scissors / add-point hover dot
+            this.drawScissorsPreview(canvas, dpr);
+        }
 
         this.surface.flush();
+    }
+
+    /**
+     * Render the whole document to a PNG at `scale`× (1 world unit → `scale`
+     * pixels). Renders into an offscreen raster surface with a transparent
+     * background and no editor chrome, reusing the normal draw path via the
+     * `_exporting` flag. Returns a PNG Blob (or null if the surface can't be
+     * created).
+     */
+    exportPNG(scale = 2): Blob | null {
+        if (!this.scene.engine || !this.surface) return null;
+        const docW = this.scene.engine.get_document_width();
+        const docH = this.scene.engine.get_document_height();
+        const W = Math.max(1, Math.round(docW * scale));
+        const H = Math.max(1, Math.round(docH * scale));
+
+        const surface = this.ck.MakeSurface(W, H);
+        if (!surface) return null;
+
+        // Swap in export state and reuse render(), then restore.
+        const savedSurface = this.surface;
+        const savedZoom = this.zoom;
+        const savedPan = { x: this.pan.x, y: this.pan.y };
+        this.surface = surface as unknown as Surface;
+        this.zoom = scale;
+        this.pan = { x: 0, y: 0 };
+        this._exporting = true;
+
+        let blob: Blob | null = null;
+        try {
+            this.render();
+            const img = surface.makeImageSnapshot();
+            const bytes = img.encodeToBytes(); // defaults to PNG
+            img.delete();
+            // Cast: CanvasKit's Uint8Array<ArrayBufferLike> isn't inferred as a
+            // BlobPart under newer TS libs, but it is a valid one at runtime.
+            if (bytes) blob = new Blob([bytes as unknown as BlobPart], { type: 'image/png' });
+        } finally {
+            this._exporting = false;
+            this.surface = savedSurface;
+            this.zoom = savedZoom;
+            this.pan = savedPan;
+            surface.delete();
+            this.requestRender(); // repaint the on-screen surface
+        }
+        return blob;
     }
 
     /** Build a cache key for a gradient and return a cached or newly created shader. */
