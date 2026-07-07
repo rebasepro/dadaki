@@ -2357,6 +2357,22 @@ export class UIEngine {
         });
     }
 
+    /** Gather all referenced definitions (for a standalone rasterize tile) as an
+     *  HTML string. Filters/gradients/patterns are frequently declared as DIRECT
+     *  children of <svg>, not inside <defs> — collecting only <defs> leaves the
+     *  reference unresolved, so the element rasterizes raw (unfiltered). This
+     *  collects <defs> contents PLUS any definition element declared outside a
+     *  <defs>. */
+    private collectDefsHtml(doc: Document): string {
+        const parts: string[] = [];
+        for (const d of Array.from(doc.querySelectorAll('defs'))) parts.push(d.innerHTML);
+        for (const def of Array.from(doc.querySelectorAll(
+            'filter, linearGradient, radialGradient, pattern, clipPath, mask, symbol, marker, style'))) {
+            if (!def.closest('defs')) parts.push(def.outerHTML);
+        }
+        return parts.join('');
+    }
+
     /** For each element whose filter can't be mapped to native effects,
      *  rasterize element+filter to an image and tag it with `__rasterFilter`. */
     private async rasterizeFilteredElements(doc: Document): Promise<void> {
@@ -2375,7 +2391,7 @@ export class UIEngine {
         const liveSvg = svg.cloneNode(true) as SVGSVGElement;
         host.appendChild(liveSvg);
         document.body.appendChild(host);
-        const defsHtml = Array.from(doc.querySelectorAll('defs')).map(d => d.innerHTML).join('');
+        const defsHtml = this.collectDefsHtml(doc);
         try {
             for (const el of candidates) {
                 const id = el.getAttribute('id');
@@ -2408,7 +2424,7 @@ export class UIEngine {
      *  SVG renderer), registering each and returning id → tile descriptor. */
     private async rasterizePatterns(doc: Document): Promise<Map<string, { image_id: number; width: number; height: number; transform: number[] }>> {
         const map = new Map<string, { image_id: number; width: number; height: number; transform: number[] }>();
-        const defsHtml = Array.from(doc.querySelectorAll('defs')).map(d => d.innerHTML).join('');
+        const defsHtml = this.collectDefsHtml(doc);
         for (const pat of Array.from(doc.querySelectorAll('pattern'))) {
             const id = pat.getAttribute('id');
             if (!id) continue;
