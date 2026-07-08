@@ -48,12 +48,12 @@ const TOOL_HINTS: Record<string, string> = {
     star: 'Drag to draw a star — Shift: constrain',
     text: 'Click on the canvas to place text',
     scissors: 'Click a path segment or anchor point to cut the path there',
-    'paint-bucket': 'Click an enclosed region to fill it with the active color',
+    'paint-bucket': 'Click a region to fill it, or a line to paint the edge',
 };
 
 /** Tools whose next action applies the default style — they get style swatches. */
 const TOOLS_WITH_FILL = new Set(['pen', 'rect', 'ellipse', 'polygon', 'star', 'paint-bucket']);
-const TOOLS_WITH_STROKE = new Set(['pen', 'rect', 'ellipse', 'polygon', 'star']);
+const TOOLS_WITH_STROKE = new Set(['pen', 'rect', 'ellipse', 'polygon', 'star', 'paint-bucket']);
 
 /** Node types the boolean operations can combine. */
 const BOOLEAN_COMPATIBLE = new Set(['Path', 'Rect', 'Ellipse']);
@@ -114,8 +114,12 @@ export class ContextBar {
         // part of the signature; selection contexts don't show any properties.
         const styleSig = info.context === 'tool'
             ? `|${this.ui.rgbToHex(this.ui.getActiveFillColor())}|${this.ui.rgbToHex(this.ui.getActiveStrokeColor())}`
-            : '';
-        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}`;
+            : info.context === 'live-paint'
+                ? `|${this.ui.rgbToHex(this.ui.getLivePaintFill())}|${this.ui.rgbToHex(this.ui.getLivePaintStroke())}`
+                : '';
+        // Live Paint bar depends on whether a group is active.
+        const lpSig = info.context === 'live-paint' ? `|lp${this.scene.getLivePaintGroup()}` : '';
+        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}`;
     }
 
     /** Rebuild the bar DOM based on context info. */
@@ -139,6 +143,12 @@ export class ContextBar {
                 break;
             case 'multi-select':
                 this.renderMultiSelect(info);
+                break;
+            case 'live-paint':
+                this.renderLivePaint(info);
+                break;
+            case 'live-paint-object':
+                this.renderLivePaintObject(info);
                 break;
             case 'pen-drawing':
                 this.renderPenDrawing(info);
@@ -165,7 +175,112 @@ export class ContextBar {
             this.el.appendChild(this.createSeparator());
         }
 
+        // Live Paint gap closing: bridge small openings so not-quite-closed
+        // regions become fillable (Illustrator's Gap Options).
+        if (tool === 'paint-bucket') {
+            this.el.appendChild(this.createGapControl());
+            this.el.appendChild(this.createSeparator());
+        }
+
         this.el.appendChild(this.createHint(TOOL_HINTS[tool] || `${tool} tool`));
+    }
+
+    /** A Live Paint group selected with the Selection tool: it's a special
+     *  object, so it gets Edit/Release instead of Enter Group/Ungroup. */
+    private renderLivePaintObject(info: ContextInfo) {
+        const id = info.selectedIds[0];
+        this.el.appendChild(this.createBadge(this.scene.getNodeName(id) || 'Live Paint'));
+        this.el.appendChild(this.createSeparator());
+
+        this.el.appendChild(this.createButton('Edit', iconPencil(14), () => {
+            this.input.enterLivePaintGroup(id);
+        }, false, '⏎'));
+
+        // Expand bakes the painted faces/edges into real, editable shapes.
+        this.el.appendChild(this.createButton('Expand', iconCreateOutlines(14), () => {
+            this.input.expandLivePaintGroup(id);
+        }));
+
+        this.appendTransformActions(info, { flatten: false });
+        this.appendLifecycleActions();
+    }
+
+    /** Gap-closing preset selector for the Live Paint tool. */
+    private createGapControl(): HTMLElement {
+        const presets: Array<[string, number]> = [
+            ['No gaps', 0],
+            ['Small gaps', 4],
+            ['Medium gaps', 12],
+            ['Large gaps', 32],
+        ];
+        const wrapper = document.createElement('div');
+        wrapper.className = 'cb-swatch-wrapper';
+        wrapper.setAttribute('data-tooltip', 'Close gaps up to this size before filling');
+
+        const select = document.createElement('select');
+        select.className = 'cb-select';
+        const current = this.scene.getGapBridgeDistance();
+        for (const [label, px] of presets) {
+            const opt = document.createElement('option');
+            opt.value = String(px);
+            opt.textContent = label;
+            // Nearest preset reflects the stored distance.
+            if (px === current) opt.selected = true;
+            select.appendChild(opt);
+        }
+        // If the stored value matches no preset, prepend a custom entry.
+        if (!presets.some(([, px]) => px === current)) {
+            const opt = document.createElement('option');
+            opt.value = String(current);
+            opt.textContent = `Custom (${current})`;
+            opt.selected = true;
+            select.insertBefore(opt, select.firstChild);
+        }
+        select.addEventListener('change', () => {
+            this.scene.setGapBridgeDistance(parseFloat(select.value));
+            this.input.renderer.requestRender();
+        });
+
+        const labelSpan = document.createElement('span');
+        labelSpan.className = 'cb-swatch-label';
+        labelSpan.textContent = 'Gaps';
+
+        wrapper.appendChild(select);
+        wrapper.appendChild(labelSpan);
+        return wrapper;
+    }
+
+    /** Live Paint tool bar: colors, gaps, and Make/Release group. */
+    private renderLivePaint(info: ContextInfo) {
+        // Fill (regions) and Stroke (edges) colors. These set only the Live Paint
+        // paint color — they do NOT modify the selected shapes.
+        this.el.appendChild(this.createColorSwatch('fill',
+            this.ui.rgbToHex(this.ui.getLivePaintFill()),
+            (color) => { this.ui.setLivePaintFill(color); }));
+        this.el.appendChild(this.createColorSwatch('stroke',
+            this.ui.rgbToHex(this.ui.getLivePaintStroke()),
+            (color) => { this.ui.setLivePaintStroke(color); }));
+        this.el.appendChild(this.createSeparator());
+        this.el.appendChild(this.createGapControl());
+        this.el.appendChild(this.createSeparator());
+
+        const group = this.scene.getLivePaintGroup();
+        if (group >= 0) {
+            this.el.appendChild(this.createBadge('Editing Live Paint'));
+            this.el.appendChild(this.createHint('Click a region to fill · ⌥-click a line to paint its edge'));
+            this.el.appendChild(this.createSeparator());
+            this.el.appendChild(this.createButton('Done', '✓', () => {
+                this.input.exitLivePaintGroup();
+            }, false, '⏎'));
+        } else if (info.selectedIds.length > 0) {
+            this.el.appendChild(this.createButton('Make Live Paint Group', iconGroup(14), () => {
+                this.input.makeLivePaintGroup();
+            }));
+            this.el.appendChild(this.createSeparator());
+            this.el.appendChild(this.createHint('Groups the selected shapes so you can paint inside them'));
+        } else {
+            this.el.appendChild(this.createHint('Select shapes and click Live Paint to make a group, then fill its regions'));
+        }
     }
 
     /** One Rect/Ellipse/Path selected. */
@@ -194,7 +309,7 @@ export class ContextBar {
         }, false, '⏎'));
 
         this.el.appendChild(this.createButton('Create Outlines', iconCreateOutlines(14), () => {
-            this.input.createOutlines(nodeId);
+            void this.input.createOutlines(nodeId);
         }, false, '⌘⇧O'));
 
         this.appendTransformActions(info, { flatten: false });

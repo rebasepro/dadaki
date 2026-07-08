@@ -25,7 +25,36 @@ export const BLEND_MODE_MAP = [
 export interface FilledFace {
     id: number;
     boundary: [number, number][];
+    /** Exact-bézier outline (anchor + handles); preferred over `boundary`. */
+    outline?: { x: number; y: number; cp1: number[]; cp2: number[] }[];
     fill: { r: number; g: number; b: number; a: number };
+}
+
+type OutlinePt = { x: number; y: number; cp1: number[]; cp2: number[] };
+type RGBA = { r: number; g: number; b: number; a: number };
+
+/** A Live Paint face tagged with its owning group, drawn UNDER the group's
+ *  member strokes (effective color = painted or inherited). */
+export interface LivePaintFace {
+    group: number;
+    outline?: OutlinePt[];
+    boundary?: [number, number][];
+    fill: RGBA;
+}
+
+/** A painted Live Paint edge, drawn ON TOP of its group's members. */
+export interface LivePaintEdge {
+    group: number;
+    outline: OutlinePt[];
+    color: RGBA;
+    width: number;
+}
+
+/** Per-group Live Paint render data (mirrors the in-app compositing). */
+export interface LivePaintRenderData {
+    groups: number[];
+    faces: LivePaintFace[];
+    edges: LivePaintEdge[];
 }
 
 /** Input data for the pure SVG export function. */
@@ -43,8 +72,16 @@ export interface SVGExportInput {
      * If missing for a node, identity is assumed.
      */
     localTransforms: Record<number, number[]>;
-    /** Optional filled faces from the vector network. */
+    /** Optional filled faces from the vector network. Legacy: drawn on TOP of the
+     *  whole scene. Superseded by `livePaint` when that is present. */
     filledFaces?: FilledFace[];
+    /**
+     * Optional per-group Live Paint render data. When present, faces render
+     * UNDER each group's member strokes (at the group's z), member fills are
+     * suppressed, and painted edges render on top — mirroring the in-app
+     * compositing. Takes precedence over `filledFaces`.
+     */
+    livePaint?: LivePaintRenderData;
     /** Optional data-URI per image id (for exporting Image nodes as <image>). */
     imageDataUris?: Record<number, string>;
     /**
@@ -64,7 +101,71 @@ export interface SVGExportInput {
  * Gradient defs are collected during rendering and prepended into a <defs> block.
  */
 export function buildSVGFromData(input: SVGExportInput): string {
-    const { docWidth, docHeight, nodes, rootNodeIds, localTransforms, filledFaces, imageDataUris, viewBox, background } = input;
+    const { docWidth, docHeight, nodes, rootNodeIds, localTransforms, filledFaces, livePaint, imageDataUris, viewBox, background } = input;
+
+    // ─── Live Paint compositing (mirrors the render writer) ──────────────────
+    // When per-group render data is present, faces draw under each group's
+    // members (member fills suppressed) and painted edges draw on top.
+    const lpGroupSet = new Set<number>(livePaint?.groups ?? []);
+    const useLivePaintCompositing = lpGroupSet.size > 0;
+    const facesByGroup = new Map<number, LivePaintFace[]>();
+    const edgesByGroup = new Map<number, LivePaintEdge[]>();
+    if (livePaint) {
+        for (const f of livePaint.faces) {
+            (facesByGroup.get(f.group) ?? facesByGroup.set(f.group, []).get(f.group)!).push(f);
+        }
+        for (const e of livePaint.edges) {
+            (edgesByGroup.get(e.group) ?? edgesByGroup.set(e.group, []).get(e.group)!).push(e);
+        }
+    }
+
+    /** Build a closed `d` from an exact-bézier outline, else the polygon. */
+    const faceToPathD = (outline: OutlinePt[] | undefined, boundary: [number, number][] | undefined): string => {
+        if (outline && outline.length >= 2) {
+            const o = outline;
+            let d = `M ${o[0].x} ${o[0].y}`;
+            for (let i = 0; i < o.length - 1; i++) {
+                const a = o[i], b = o[i + 1];
+                d += ` C ${a.cp2[0]} ${a.cp2[1]} ${b.cp1[0]} ${b.cp1[1]} ${b.x} ${b.y}`;
+            }
+            const a = o[o.length - 1], b = o[0];
+            d += ` C ${a.cp2[0]} ${a.cp2[1]} ${b.cp1[0]} ${b.cp1[1]} ${b.x} ${b.y} Z`;
+            return d;
+        }
+        return (boundary ?? []).map((p, i) => (i === 0 ? 'M' : 'L') + ` ${p[0]} ${p[1]}`).join(' ') + ' Z';
+    };
+
+    /** Build an OPEN `d` from an outline (painted edges are strokes, not filled). */
+    const edgeToPathD = (o: OutlinePt[]): string => {
+        if (o.length < 2) return '';
+        let d = `M ${o[0].x} ${o[0].y}`;
+        for (let i = 0; i < o.length - 1; i++) {
+            const a = o[i], b = o[i + 1];
+            d += ` C ${a.cp2[0]} ${a.cp2[1]} ${b.cp1[0]} ${b.cp1[1]} ${b.x} ${b.y}`;
+        }
+        return d;
+    };
+
+    const lpFacesSvg = (groupId: number): string => {
+        const faces = facesByGroup.get(groupId);
+        if (!faces || faces.length === 0) return '';
+        return faces.map(f =>
+            `<path d="${faceToPathD(f.outline, f.boundary)}" fill="${rgbToHex(f.fill)}" ` +
+            `fill-opacity="${f.fill.a}" stroke="none" />`
+        ).join('');
+    };
+
+    const lpEdgesSvg = (groupId: number): string => {
+        const edges = edgesByGroup.get(groupId);
+        if (!edges || edges.length === 0) return '';
+        return edges.map(e => {
+            const d = edgeToPathD(e.outline);
+            if (!d) return '';
+            return `<path d="${d}" fill="none" stroke="${rgbToHex(e.color)}" ` +
+                `stroke-opacity="${e.color.a}" stroke-width="${e.width}" ` +
+                `stroke-linecap="round" stroke-linejoin="round" />`;
+        }).join('');
+    };
 
     const vb = viewBox ?? { x: 0, y: 0, w: docWidth, h: docHeight };
     let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${vb.w}" height="${vb.h}" viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}">`;
@@ -179,9 +280,9 @@ export function buildSVGFromData(input: SVGExportInput): string {
     /** Build SVG style attributes string for a shape node.
      *  Reads from the canonical `fills[]` / `strokes[]` arrays, with
      *  fallback to legacy scalar fields for older documents. */
-    const buildStyleAttrs = (style: NodeStyle): string => {
+    const buildStyleAttrs = (style: NodeStyle, suppressFill = false): string => {
         // Resolve canonical fill/stroke from arrays, falling back to legacy fields
-        const fills = style.fills && style.fills.length > 0 ? style.fills : (style.fill ? [style.fill] : []);
+        const fills = suppressFill ? [] : (style.fills && style.fills.length > 0 ? style.fills : (style.fill ? [style.fill] : []));
         const strokeEntries = style.strokes && style.strokes.length > 0 ? style.strokes : (style.stroke ? [{
             paint: style.stroke, width: style.stroke_width ?? 0,
             cap: style.stroke_cap ?? 0, join: style.stroke_join ?? 0,
@@ -246,7 +347,7 @@ export function buildSVGFromData(input: SVGExportInput): string {
      * group-scoped: only invoked for group children (mutually recursive with
      * renderNodeToSVG), matching the renderer.
      */
-    const renderSiblingsWithMasks = (siblings: number[]): string => {
+    const renderSiblingsWithMasks = (siblings: number[], suppressFill: boolean): string => {
         let out = '';
         let ci = 0;
         while (ci < siblings.length) {
@@ -267,27 +368,29 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 const maskTypeVal = mt === 1 ? 'luminance' : 'alpha';
                 maskDefs.push(
                     `<mask id="${maskId}" mask-type="${maskTypeVal}" style="mask-type:${maskTypeVal}">` +
-                    `${renderNodeToSVG(childId)}</mask>`);
+                    `${renderNodeToSVG(childId, suppressFill)}</mask>`);
                 // Gather content siblings up to the next mask.
                 let contentSvg = '';
                 let j = ci + 1;
                 for (; j < siblings.length; j++) {
                     const c = nodes[siblings[j]];
                     if (c && c.is_mask && c.visible) break;
-                    contentSvg += renderNodeToSVG(siblings[j]);
+                    contentSvg += renderNodeToSVG(siblings[j], suppressFill);
                 }
                 out += `<g mask="url(#${maskId})">${contentSvg}</g>`;
                 ci = j;
             } else {
-                out += renderNodeToSVG(childId);
+                out += renderNodeToSVG(childId, suppressFill);
                 ci++;
             }
         }
         return out;
     };
 
-    /** Recursively render a node and its children to SVG elements. */
-    const renderNodeToSVG = (id: number): string => {
+    /** Recursively render a node and its children to SVG elements.
+     *  `suppressFill` is true inside a Live Paint group — member fills are
+     *  provided by the face pass, so shapes emit strokes only. */
+    const renderNodeToSVG = (id: number, suppressFill = false): string => {
         const node = nodes[id];
         if (!node) return '';
 
@@ -327,11 +430,17 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 }
             }
 
+            // A Live Paint group brackets its faces (bottom, under the members'
+            // strokes) and painted edges (top) — and suppresses member fills.
+            const isLP = useLivePaintCompositing && lpGroupSet.has(id);
+            const childSuppress = suppressFill || isLP;
+            if (isLP) nodeSvg += lpFacesSvg(id);
             // Children are a sibling list — same mask-span semantics as roots.
-            nodeSvg += renderSiblingsWithMasks(node.children || []);
+            nodeSvg += renderSiblingsWithMasks(node.children || [], childSuppress);
+            if (isLP) nodeSvg += lpEdgesSvg(id);
         } else {
             // Leaf shape: carry any effect filter on the shape element itself.
-            const attrs = buildStyleAttrs(node.style) + filterAttr;
+            const attrs = buildStyleAttrs(node.style, suppressFill) + filterAttr;
             const geo = node.geometry;
             if (geo.Rect) {
                 const cr = node.style.corner_radius;
@@ -388,15 +497,29 @@ export function buildSVGFromData(input: SVGExportInput): string {
 
     // Masks are group-scoped — root nodes render plainly (matches the renderer).
     for (const rootId of rootNodeIds) {
-        svg += renderNodeToSVG(rootId);
+        svg += renderNodeToSVG(rootId, false);
     }
 
-    // Append live-paint face fills after the scene tree
-    if (filledFaces && filledFaces.length > 0) {
+    // Legacy fallback: when there's no per-group render data, append live-paint
+    // face fills on TOP of the scene tree. Prefer the exact-bézier outline
+    // (M…C…Z); fall back to the flattened polygon (M…L…Z).
+    if (!useLivePaintCompositing && filledFaces && filledFaces.length > 0) {
         for (const face of filledFaces) {
-            const d = face.boundary.map((p: [number, number], i: number) =>
-                (i === 0 ? 'M' : 'L') + ` ${p[0]} ${p[1]}`
-            ).join(' ') + ' Z';
+            let d: string;
+            if (face.outline && face.outline.length >= 2) {
+                const o = face.outline;
+                d = `M ${o[0].x} ${o[0].y}`;
+                for (let i = 0; i < o.length - 1; i++) {
+                    const a = o[i], b = o[i + 1];
+                    d += ` C ${a.cp2[0]} ${a.cp2[1]} ${b.cp1[0]} ${b.cp1[1]} ${b.x} ${b.y}`;
+                }
+                const a = o[o.length - 1], b = o[0];
+                d += ` C ${a.cp2[0]} ${a.cp2[1]} ${b.cp1[0]} ${b.cp1[1]} ${b.x} ${b.y} Z`;
+            } else {
+                d = face.boundary.map((p: [number, number], i: number) =>
+                    (i === 0 ? 'M' : 'L') + ` ${p[0]} ${p[1]}`
+                ).join(' ') + ' Z';
+            }
             const hex = rgbToHex(face.fill);
             svg += `<path d="${d}" fill="${hex}" fill-opacity="${face.fill.a}" stroke="none" data-face-id="${face.id}" />`;
         }

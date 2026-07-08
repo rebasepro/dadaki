@@ -16,6 +16,7 @@ use crate::{
 /// v3: per-node vector network.
 /// v4: Live Paint face fills.
 /// v5: Multiple strokes and non-destructive transforms.
+/// v6: Live Paint face-fill signatures (source_nodes) + gap-bridge distance.
 pub const FORMAT_VERSION: u32 = 6;
 
 // ─── Proto Message Types ────────────────────────────────────────────────────────
@@ -358,6 +359,9 @@ pub struct ProtoNode {
     /// Reserved: clip descendants to this node's bounds (frames — not yet wired).
     #[prost(bool, tag = "13")]
     pub clip_content: bool,
+    /// This Group is a Live Paint group (special object).
+    #[prost(bool, tag = "14")]
+    pub live_paint: bool,
 }
 
 /// A preserved face fill from the vector network.
@@ -370,6 +374,32 @@ pub struct ProtoFaceFill {
     pub centroid_y: f32,
     #[prost(message, optional, tag = "3")]
     pub fill: Option<ProtoColor>,
+    /// Sorted set of source-node ids bounding this face (the "signature").
+    /// Lets fills re-attach to the same region after shapes move/reshape,
+    /// independent of centroid drift. Empty in pre-v5 files (centroid-only).
+    #[prost(uint32, repeated, tag = "4")]
+    pub source_nodes: Vec<u32>,
+}
+
+/// A preserved painted edge from the vector network. Anchor is in the source
+/// node's local space so it survives moves/transforms.
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoPaintedEdge {
+    #[prost(uint32, tag = "1")]
+    pub source_node: u32,
+    #[prost(float, tag = "2")]
+    pub local_x: f32,
+    #[prost(float, tag = "3")]
+    pub local_y: f32,
+    #[prost(message, optional, tag = "4")]
+    pub color: Option<ProtoColor>,
+    #[prost(float, tag = "5")]
+    pub width: f32,
+    /// Structural identity: source-segment ordinal (+1; 0 = none/legacy) + t.
+    #[prost(uint32, tag = "6")]
+    pub seg_plus1: u32,
+    #[prost(float, tag = "7")]
+    pub t: f32,
 }
 
 /// A named artboard (frame). See `crate::Artboard`.
@@ -420,6 +450,15 @@ pub struct ProtoDocument {
     /// synthesizes a single "Artboard 1" from document_width/height in that case.
     #[prost(message, repeated, tag = "10")]
     pub artboards: Vec<ProtoArtboard>,
+    /// Live Paint gap-closing distance in world units (0 = off).
+    #[prost(float, tag = "11")]
+    pub gap_bridge_distance: f32,
+    /// Live Paint painted edge strokes.
+    #[prost(message, repeated, tag = "12")]
+    pub painted_edges: Vec<ProtoPaintedEdge>,
+    /// Node id of the active Live Paint group (0 = none).
+    #[prost(uint32, tag = "13")]
+    pub live_paint_group: u32,
 }
 
 /// A history/undo/drag snapshot. Wraps a full document plus the transient
@@ -865,6 +904,7 @@ fn node_to_proto(node: &Node) -> ProtoNode {
         is_mask: node.is_mask,
         mask_type: node.mask_type as u32,
         clip_content: node.clip_content,
+        live_paint: node.live_paint,
     }
 }
 
@@ -895,6 +935,7 @@ fn proto_to_node(pn: &ProtoNode) -> Node {
         is_mask: pn.is_mask,
         mask_type: pn.mask_type as u8,
         clip_content: pn.clip_content,
+        live_paint: pn.live_paint,
     }
 }
 
@@ -925,20 +966,23 @@ impl ProtoDocument {
                     centroid_x: centroid.x,
                     centroid_y: centroid.y,
                     fill: Some(fill.into()),
+                    source_nodes: f.signature.clone(),
                 }
             })
             .collect();
-        for (centroid, color) in &scene.vector_network.pending_fills {
+        for pf in &scene.vector_network.pending_fills {
             face_fills.push(ProtoFaceFill {
-                centroid_x: centroid.x,
-                centroid_y: centroid.y,
-                fill: Some(color.into()),
+                centroid_x: pf.centroid.x,
+                centroid_y: pf.centroid.y,
+                fill: Some((&pf.color).into()),
+                source_nodes: pf.signature.clone(),
             });
         }
         // Deterministic fill ordering for byte-exact snapshots.
         face_fills.sort_by(|a, b| {
             a.centroid_x.partial_cmp(&b.centroid_x).unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.centroid_y.partial_cmp(&b.centroid_y).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| a.source_nodes.cmp(&b.source_nodes))
         });
 
         // Images, in deterministic id order (byte-exact snapshots).
@@ -979,6 +1023,26 @@ impl ProtoDocument {
             document_height: Some(doc_h),
             images,
             artboards,
+            gap_bridge_distance: scene.vector_network.gap_bridge_distance,
+            painted_edges: {
+                let mut pe: Vec<ProtoPaintedEdge> = scene.vector_network.painted_edges.iter()
+                    .map(|p| ProtoPaintedEdge {
+                        source_node: p.source_node,
+                        local_x: p.local.x,
+                        local_y: p.local.y,
+                        color: Some((&p.color).into()),
+                        width: p.width,
+                        seg_plus1: (p.seg + 1).max(0) as u32,
+                        t: p.t,
+                    })
+                    .collect();
+                // Deterministic order for byte-exact snapshots.
+                pe.sort_by(|a, b| a.source_node.cmp(&b.source_node)
+                    .then(a.local_x.partial_cmp(&b.local_x).unwrap_or(std::cmp::Ordering::Equal))
+                    .then(a.local_y.partial_cmp(&b.local_y).unwrap_or(std::cmp::Ordering::Equal)));
+                pe
+            },
+            live_paint_group: scene.live_paint_group.unwrap_or(0),
         }
     }
 
@@ -996,11 +1060,25 @@ impl ProtoDocument {
         } else {
             2.0
         };
-        // Face fills will be re-mapped after the first network rebuild
-        // Store them as pending via a field on VectorNetwork
+        vn.gap_bridge_distance = self.gap_bridge_distance.max(0.0);
+        // Face fills will be re-mapped after the first network rebuild. Stored as
+        // pending on the network; signature (source_nodes) lets them re-attach to
+        // the right region even if shapes moved between save and load.
         vn.pending_fills = self.face_fills.iter().filter_map(|ff| {
-            ff.fill.as_ref().map(|c| {
-                (Vec2::new(ff.centroid_x, ff.centroid_y), Color::from(c))
+            ff.fill.as_ref().map(|c| crate::vector_network::PendingFill {
+                centroid: Vec2::new(ff.centroid_x, ff.centroid_y),
+                signature: ff.source_nodes.clone(),
+                color: Color::from(c),
+            })
+        }).collect();
+        vn.painted_edges = self.painted_edges.iter().filter_map(|pe| {
+            pe.color.as_ref().map(|c| crate::vector_network::PaintedEdge {
+                source_node: pe.source_node,
+                local: Vec2::new(pe.local_x, pe.local_y),
+                color: Color::from(c),
+                width: pe.width,
+                seg: pe.seg_plus1 as i32 - 1,
+                t: pe.t,
             })
         }).collect();
 
@@ -1049,6 +1127,7 @@ impl ProtoDocument {
             document_height: mirror_h,
             images,
             artboards,
+            live_paint_group: if self.live_paint_group != 0 { Some(self.live_paint_group) } else { None },
         };
 
         let next_id = if self.next_id > 0 {
@@ -1221,6 +1300,7 @@ mod tests {
                 is_mask: false,
                 mask_type: 0,
                 clip_content: false,
+                live_paint: false,
             }],
             root_ids: vec![1],
             next_id: 2,
@@ -1230,6 +1310,9 @@ mod tests {
             document_height: None,
             images: Vec::new(),
             artboards: Vec::new(),
+            gap_bridge_distance: 0.0,
+            painted_edges: Vec::new(),
+            live_paint_group: 0,
         };
 
         let bytes = v1_doc.encode_to_vec();
@@ -1264,6 +1347,9 @@ mod tests {
             document_height: None,
             images: Vec::new(),
             artboards: Vec::new(),
+            gap_bridge_distance: 0.0,
+            painted_edges: Vec::new(),
+            live_paint_group: 0,
         };
         doc.nodes.push(ProtoNode {
             id: 1,
@@ -1289,6 +1375,7 @@ mod tests {
             is_mask: false,
             mask_type: 0,
             clip_content: false,
+            live_paint: false,
         });
 
         let bytes = doc.encode_to_vec();
@@ -1357,6 +1444,7 @@ mod tests {
             is_mask: false,
             mask_type: 0,
             clip_content: false,
+            live_paint: false,
         });
 
         let scene = Scene {
@@ -1368,6 +1456,7 @@ mod tests {
             document_height: 600.0,
             images: Default::default(),
             artboards: Vec::new(),
+            live_paint_group: None,
         };
 
         let bytes = serialize_to_proto(&scene, 8);
@@ -1414,6 +1503,7 @@ mod tests {
             document_height: 1000.0,
             images: Default::default(),
             artboards,
+            live_paint_group: None,
         }
     }
 
@@ -1456,6 +1546,9 @@ mod tests {
             document_height: Some(1080.0),
             images: Vec::new(),
             artboards: Vec::new(),
+            gap_bridge_distance: 0.0,
+            painted_edges: Vec::new(),
+            live_paint_group: 0,
         };
         let bytes = old.encode_to_vec();
         let (scene, _) = deserialize_from_proto(&bytes).unwrap();

@@ -115,13 +115,16 @@ async function bootstrap() {
         onBackups: () => backupDialog.open().catch(console.error),
     });
 
-    // Warn before leaving if any open document has unsaved changes.
-    window.addEventListener('beforeunload', (e) => {
-        if (documentManager.all().some(d => d.dirty)) {
-            e.preventDefault();
-            e.returnValue = '';
-        }
-    });
+    // Warn before leaving if any open document has unsaved changes. Skipped in
+    // dev — HMR reloads constantly and the prompt is just noise there.
+    if (!import.meta.env.DEV) {
+        window.addEventListener('beforeunload', (e) => {
+            if (documentManager.all().some(d => d.dirty)) {
+                e.preventDefault();
+                e.returnValue = '';
+            }
+        });
+    }
 
     // Restore the previous session (open tabs + active) — this activates the
     // first document, which fits the artboard and paints the chrome.

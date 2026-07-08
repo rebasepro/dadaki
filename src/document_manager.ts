@@ -171,6 +171,7 @@ export class DocumentManager {
 
         // 1. Exit any editing / gesture on the outgoing document first, while
         //    the scene still points at its engine.
+        this.input.commitActiveTextEdit(); // close any open inline text overlay
         this.input.exitEditMode();
         this.input.currentPathPoints = [];
         this.scene.endGesture(); // no-op unless a gesture is mid-flight
@@ -199,6 +200,7 @@ export class DocumentManager {
         if (doc.viewport) {
             this.renderer.zoom = doc.viewport.zoom;
             this.renderer.pan = { x: doc.viewport.panX, y: doc.viewport.panY };
+            this.renderer.notifyViewChange();
         } else {
             this.renderer.fitToArtboard();
         }

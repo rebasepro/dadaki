@@ -1360,3 +1360,98 @@ describe('SVG Export — viewBox and background', () => {
         expect(rects[0].getAttribute('width')).toBe('100');
     });
 });
+
+// ─── Export: Live Paint compositing ──────────────────────────────────────────
+
+describe('SVG Export — Live Paint compositing', () => {
+    /** A group (id 1) with one rect member (id 2), flagged as Live Paint. */
+    const lpScene = (): SVGExportInput => ({
+        docWidth: 400, docHeight: 400,
+        nodes: {
+            1: makeNode({ node_type: 'Group', children: [2] }),
+            2: makeNode({
+                geometry: { Rect: { width: 100, height: 100 } },
+                style: defaultStyle({
+                    fills: [{ r: 1, g: 0, b: 0, a: 1 }],
+                    strokes: [{ paint: { r: 0, g: 0, b: 0, a: 1 }, width: 4, cap: 0, join: 0, dash_array: [], dash_offset: 0, miter_limit: 4 }],
+                }),
+            }),
+        },
+        rootNodeIds: [1],
+        localTransforms: { 1: IDENTITY, 2: IDENTITY },
+    });
+
+    it('draws faces under member strokes and suppresses member fills', () => {
+        const input = lpScene();
+        input.livePaint = {
+            groups: [1],
+            faces: [{ group: 1, boundary: [[0, 0], [100, 0], [100, 100], [0, 100]], fill: { r: 0, g: 1, b: 0, a: 1 } }],
+            edges: [],
+        };
+        const svg = buildSVGFromData(input);
+        const doc = parseSVG(svg);
+
+        // The member rect keeps its stroke but its fill is suppressed.
+        const rect = queryTag(doc, 'rect')!;
+        expect(rect.getAttribute('fill')).toBe('none');
+        expect(rect.getAttribute('stroke')).toBe('#000000');
+
+        // The face path is emitted (green), and it comes BEFORE the member rect
+        // in document order (drawn under it).
+        const facePath = queryTag(doc, 'path')!;
+        expect(facePath.getAttribute('fill')).toBe('#00ff00');
+        expect(svg.indexOf('#00ff00')).toBeLessThan(svg.indexOf('<rect'));
+    });
+
+    it('draws painted edges on top of members as open strokes', () => {
+        const input = lpScene();
+        input.livePaint = {
+            groups: [1],
+            faces: [],
+            edges: [{
+                group: 1, width: 6, color: { r: 0, g: 0, b: 1, a: 1 },
+                outline: [
+                    { x: 0, y: 0, cp1: [0, 0], cp2: [0, 0] },
+                    { x: 100, y: 0, cp1: [100, 0], cp2: [100, 0] },
+                ],
+            }],
+        };
+        const svg = buildSVGFromData(input);
+        const doc = parseSVG(svg);
+        const edge = Array.from(queryAllTags(doc, 'path')).find(p => p.getAttribute('stroke') === '#0000ff')!;
+        expect(edge).toBeTruthy();
+        expect(edge.getAttribute('fill')).toBe('none');       // open stroke, not filled
+        expect(edge.getAttribute('stroke-width')).toBe('6');
+        expect(edge.getAttribute('d')).not.toContain('Z');    // open path
+    });
+
+    it('renders two Live Paint groups independently', () => {
+        const input: SVGExportInput = {
+            docWidth: 400, docHeight: 400,
+            nodes: {
+                1: makeNode({ node_type: 'Group', children: [2] }),
+                2: makeNode({ geometry: { Rect: { width: 100, height: 100 } }, style: defaultStyle({ fills: [{ r: 1, g: 0, b: 0, a: 1 }] }) }),
+                3: makeNode({ node_type: 'Group', children: [4] }),
+                4: makeNode({ geometry: { Rect: { width: 100, height: 100 } }, style: defaultStyle({ fills: [{ r: 0, g: 0, b: 1, a: 1 }] }) }),
+            },
+            rootNodeIds: [1, 3],
+            localTransforms: { 1: IDENTITY, 2: IDENTITY, 3: IDENTITY, 4: IDENTITY },
+            livePaint: {
+                groups: [1, 3],
+                faces: [
+                    { group: 1, boundary: [[0, 0], [100, 0], [100, 100]], fill: { r: 0, g: 1, b: 0, a: 1 } },
+                    { group: 3, boundary: [[0, 0], [100, 0], [100, 100]], fill: { r: 1, g: 1, b: 0, a: 1 } },
+                ],
+                edges: [],
+            },
+        };
+        const svg = buildSVGFromData(input);
+        const doc = parseSVG(svg);
+        const fills = Array.from(queryAllTags(doc, 'path')).map(p => p.getAttribute('fill'));
+        expect(fills).toContain('#00ff00'); // group 1's face
+        expect(fills).toContain('#ffff00'); // group 3's face
+        // Both member rects have suppressed fills.
+        const rectFills = Array.from(queryAllTags(doc, 'rect')).map(r => r.getAttribute('fill'));
+        expect(rectFills.every(f => f === 'none')).toBe(true);
+    });
+});

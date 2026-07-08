@@ -6,6 +6,8 @@ import { SnapEngine, type SnapGuide } from './snapping';
 import type { WasmScene } from './wasm_scene';
 import type { PenPathPoint, Subpath } from './types';
 import { outlineStroke } from './outline_stroke';
+import { ensureFontCSS } from './fonts';
+import { textNodeToSubpaths } from './text_outlines';
 import {
     addAnchorPoint,
     findNearestSegment,
@@ -18,6 +20,33 @@ import {
 
 /** 2D affine matrix in DOMMatrix convention: x' = a·x + c·y + e, y' = b·x + d·y + f. */
 interface Mat { a: number; b: number; c: number; d: number; e: number; f: number; }
+
+/** Cache of measured CSS first-line baseline offsets (em), keyed by font style. */
+const _cssBaselineCache = new Map<string, number>();
+/**
+ * Measure where CSS puts a font's first-line baseline, as a fraction of the font
+ * size below the line box's top. Used to align the inline text overlay's glyphs
+ * with the rendered ones. Cached per font signature (a hidden-DOM measure).
+ */
+function measureCssBaselineEm(fontFamily: string, fontWeight: string, fontStyle: string, lineHeight: number): number {
+    const key = `${fontFamily}|${fontWeight}|${fontStyle}|${lineHeight}`;
+    const cached = _cssBaselineCache.get(key);
+    if (cached !== undefined) return cached;
+    const size = 100; // measure at a large size for precision
+    const probe = document.createElement('div');
+    probe.style.cssText = `position:absolute;visibility:hidden;left:-9999px;top:-9999px;white-space:pre;`
+        + `font-family:${fontFamily};font-weight:${fontWeight};font-style:${fontStyle};`
+        + `font-size:${size}px;line-height:${lineHeight};`;
+    probe.textContent = 'Hg';
+    const marker = document.createElement('span');
+    marker.style.cssText = 'display:inline-block;width:0;height:0;vertical-align:baseline;';
+    probe.appendChild(marker);
+    document.body.appendChild(probe);
+    const em = (marker.getBoundingClientRect().top - probe.getBoundingClientRect().top) / size;
+    document.body.removeChild(probe);
+    _cssBaselineCache.set(key, em);
+    return em;
+}
 
 /** Oriented selection frame: the rect (0,0)–(w,h) in frame space, mapped to
  *  world by `m`. For a single node this is its local bounds under its world
@@ -55,6 +84,11 @@ export class InputManager {
     isMouseDown: boolean;
     startPos: { x: number; y: number };
     currentPos: { x: number; y: number };
+
+    /** The currently-open inline text overlay (edit or create), or null. */
+    private activeTextOverlay: { commit: () => void } | null = null;
+    /** Recomputes the active overlay's screen position/size; called on view change. */
+    private repositionOverlay: (() => void) | null = null;
 
     dragMode: 'move' | 'marquee' | 'none' = 'none';
     /** Active artboard move/resize drag (UI-level; engine nodes untouched). */
@@ -186,6 +220,9 @@ export class InputManager {
         this.startPos = { x: 0, y: 0 };
         this.currentPos = { x: 0, y: 0 };
 
+        // Keep an open inline text overlay glued over the glyphs when the view
+        // transform changes (zoom/pan while editing).
+        this.renderer.onViewChange(() => this.repositionOverlay?.());
 
         this.init();
     }
@@ -330,8 +367,14 @@ export class InputManager {
             case 'ungroup':
                 this.ungroupSelection();
                 break;
+            case 'make-live-paint':
+                this.makeLivePaintGroup();
+                break;
+            case 'expand-live-paint':
+                this.expandLivePaintGroup(selection[0]);
+                break;
             case 'flatten':
-                this.flattenSelection();
+                void this.flattenSelection();
                 break;
             case 'toggle-mask':
                 this.toggleMaskSelection();
@@ -351,6 +394,14 @@ export class InputManager {
                 this.exitEditMode();
                 this.ui.setActiveTool('selection');
             }
+            return;
+        }
+
+        // Double-click into a Live Paint group → enter paint mode on it, rather
+        // than drilling into the group's children.
+        const lpGroup = this.findLivePaintAncestor(hitId);
+        if (lpGroup !== null) {
+            this.enterLivePaintGroup(lpGroup);
             return;
         }
 
@@ -607,10 +658,9 @@ export class InputManager {
         // Create Outlines: Cmd+Shift+O / Ctrl+Shift+O (selected text nodes → paths)
         if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'o' || e.key === 'O')) {
             e.preventDefault();
-            for (const id of this.scene.engine!.get_selection()) {
-                const node = this.scene.getNode(id);
-                if (node?.node_type === 'Text') this.createOutlines(id);
-            }
+            const textIds = Array.from(this.scene.engine!.get_selection())
+                .filter(id => this.scene.getNode(id)?.node_type === 'Text');
+            for (const id of textIds) void this.createOutlines(id);
         }
 
         // Open (in a new tab): Cmd+O / Ctrl+O
@@ -742,7 +792,7 @@ export class InputManager {
         // Cmd+E / Ctrl+E: flatten selection
         if ((e.metaKey || e.ctrlKey) && e.key === 'e' && !e.shiftKey) {
             e.preventDefault();
-            this.flattenSelection();
+            void this.flattenSelection();
         }
 
         // Arrow key nudging — consecutive presses within 500ms are grouped
@@ -813,99 +863,127 @@ export class InputManager {
             e.preventDefault();
             this.ungroupSelection();
         }
+
+        // Cmd+Alt+X: Make Live Paint (Illustrator's Object › Live Paint › Make).
+        // Uses e.code because Alt+X emits a special glyph on macOS.
+        if ((e.metaKey || e.ctrlKey) && e.altKey && e.code === 'KeyX') {
+            if (this.scene.engine!.get_selection().length > 0) {
+                e.preventDefault();
+                this.makeLivePaintGroup();
+            }
+        }
     }
 
-    /** Open an inline editor over an existing text node (double-click). */
-    editTextNode(id: number) {
-        const geo = this.scene.getNodeGeometry(id);
-        if (!geo?.Text) return;
+    /** Commit (close) the active inline text overlay, if one is open. Safe to
+     *  call unconditionally — a no-op when nothing is being edited. Used to
+     *  tear the overlay down on tool switch, document load, etc. */
+    commitActiveTextEdit() {
+        this.activeTextOverlay?.commit();
+    }
+
+    /**
+     * Spawn an inline `<textarea>` overlay for editing text on the canvas,
+     * shared by double-click edit and text-tool creation. The box is kept glued
+     * over the glyphs: `reposition()` recomputes screen position, font size and
+     * letter-spacing from the *current* view transform, and is re-run on every
+     * view change (see the onViewChange subscription in the constructor) and on
+     * every keystroke (auto-size). Only one overlay is open at a time.
+     */
+    private spawnTextOverlay(opts: {
+        /** World-space top-left of the text box (maps to the overlay's left/top). */
+        world: { x: number; y: number };
+        fontSize: number;           // world units
+        fontFamily: string;         // CSS font-family stack
+        fontWeight?: string;        // CSS
+        fontStyle?: string;         // 'normal' | 'italic'
+        letterSpacing?: number;     // world units
+        lineHeight: number;
+        color: string;
+        value: string;
+        placeholder?: string;
+        /** Content (trailing newlines stripped) on Enter/blur. */
+        onCommit: (content: string) => void;
+        onCancel?: () => void;
+        /** Always runs when the overlay closes (commit or cancel). */
+        onTeardown?: () => void;
+    }) {
         const container = document.getElementById('canvas-container');
         if (!container) return;
+        // Only one overlay at a time — commit any previous one first.
+        this.commitActiveTextEdit();
 
-        const t = this.scene.getTransform(id); // row-major: t[2]/t[5] = translation
-        const zoom = this.renderer.zoom;
-        const fontSize = geo.Text.font_size;
-        const lineHeight = geo.Text.line_height || 1.2;
-        const originalContent = geo.Text.content;
-        // The paragraph renders with its top at (tx, ty - fontSize); place the
-        // overlay's text box there so it sits exactly over the rendered glyphs.
-        const screenX = t[2] * zoom + this.renderer.pan.x;
-        const screenY = (t[5] - fontSize) * zoom + this.renderer.pan.y;
-        const fam = geo.Text.font_family ? `${geo.Text.font_family}, sans-serif` : 'sans-serif';
-        // Match the node's typographic style so the overlay looks like the real
-        // text (weight/italic/letter-spacing, not just size/family).
-        const fontWeight = String(geo.Text.font_weight || 400);
-        const fontStyleCss = geo.Text.italic ? 'italic' : 'normal';
-        const letterSpacing = `${(geo.Text.letter_spacing || 0) * zoom}px`;
-        // Match the node's fill colour so the overlay looks like the real text.
-        const node = this.scene.getNode(id);
-        const f = node?.style?.fills?.[0] as { r: number; g: number; b: number; a?: number } | undefined;
-        const color = f && 'r' in f
-            ? `rgba(${Math.round(f.r * 255)},${Math.round(f.g * 255)},${Math.round(f.b * 255)},${f.a ?? 1})`
-            : '#000';
-
-        // Hide the underlying node while its overlay stands in (no more doubling).
-        this.renderer.editingTextId = id;
-        this.renderer.requestRender();
+        const fam = opts.fontFamily;
+        const fontWeight = opts.fontWeight ?? '400';
+        const fontStyleCss = opts.fontStyle ?? 'normal';
+        const lsWorld = opts.letterSpacing ?? 0;
 
         const input = document.createElement('textarea');
         input.className = 'text-input-overlay';
-        input.value = originalContent;
+        input.value = opts.value;
+        if (opts.placeholder) input.placeholder = opts.placeholder;
         input.spellcheck = false;
         input.rows = 1; // so scrollHeight reflects content, not the 2-row default
         Object.assign(input.style, {
-            left: `${screenX}px`, top: `${screenY}px`,
-            fontSize: `${fontSize * zoom}px`,
             fontFamily: fam,
             fontWeight,
             fontStyle: fontStyleCss,
-            letterSpacing,
-            lineHeight: String(lineHeight),
-            color,
+            lineHeight: String(opts.lineHeight),
+            color: opts.color,
             padding: '0', border: 'none', margin: '0', background: 'transparent',
             resize: 'none', overflow: 'hidden', whiteSpace: 'pre',
             minWidth: '0', minHeight: '0',
             outline: '1px solid var(--accent)',
         } as Partial<CSSStyleDeclaration>);
-        if (geo.Text.font_family) {
-            const linkId = `gfont-${geo.Text.font_family.replace(/\s+/g, '-')}`;
-            if (!document.getElementById(linkId)) {
-                const link = document.createElement('link');
-                link.id = linkId; link.rel = 'stylesheet';
-                link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(geo.Text.font_family)}:wght@400;700&display=swap`;
-                document.head.appendChild(link);
-            }
-        }
-        // Auto-size the box to the content (widest line × line count).
+
+        // Baseline correction: the renderer draws the glyphs with their baseline
+        // one em below the box top (drawTextBlob at the local origin), but CSS
+        // places the first-line baseline higher (ascent + half-leading). Measure
+        // the CSS offset for this exact font and nudge the text down so the
+        // overlay glyphs sit on the same baseline as the rendered ones.
+        const cssBaselineEm = measureCssBaselineEm(fam, fontWeight, fontStyleCss, opts.lineHeight);
+        const baselineCorrectionEm = Math.max(0, 1 - cssBaselineEm);
+
         const measureCtx = document.createElement('canvas').getContext('2d')!;
-        const autoSize = () => {
-            measureCtx.font = `${fontStyleCss} ${fontWeight} ${fontSize * zoom}px ${fam}`;
+        // Recompute screen position, font size, letter-spacing and box size from
+        // the current view transform. Runs on open, on every view change, and on
+        // every keystroke, so the box stays glued over the glyphs at any zoom/pan.
+        const reposition = () => {
+            const zoom = this.renderer.zoom;
+            input.style.left = `${opts.world.x * zoom + this.renderer.pan.x}px`;
+            input.style.top = `${opts.world.y * zoom + this.renderer.pan.y}px`;
+            input.style.fontSize = `${opts.fontSize * zoom}px`;
+            input.style.letterSpacing = `${lsWorld * zoom}px`;
+            input.style.paddingTop = `${baselineCorrectionEm * opts.fontSize * zoom}px`;
+            // Auto-size to the widest line × line count at the current zoom.
+            measureCtx.font = `${fontStyleCss} ${fontWeight} ${opts.fontSize * zoom}px ${fam}`;
+            const text = input.value || input.placeholder || '';
             let w = 0;
-            for (const line of input.value.split('\n')) w = Math.max(w, measureCtx.measureText(line).width);
+            for (const line of text.split('\n')) w = Math.max(w, measureCtx.measureText(line).width);
             input.style.width = `${Math.ceil(w) + 2}px`;
             input.style.height = 'auto';
             input.style.height = `${input.scrollHeight}px`;
         };
-        input.addEventListener('input', autoSize);
+        input.addEventListener('input', reposition);
 
         let done = false;
-        const finish = () => { this.renderer.editingTextId = null; this.renderer.requestRender(); };
+        const teardown = () => {
+            this.activeTextOverlay = null;
+            this.repositionOverlay = null;
+            input.remove();
+            opts.onTeardown?.();
+        };
         const commit = () => {
             if (done) return;
             done = true;
             const content = input.value.replace(/\n+$/, '');
-            input.remove();
-            finish();
-            if (content && content !== originalContent) {
-                this.scene.setTextContent(id, content, fontSize);
-                this.ui.syncWithSelection();
-            }
+            teardown();
+            opts.onCommit(content);
         };
         const cancel = () => {
             if (done) return;
             done = true;
-            input.remove();
-            finish();
+            teardown();
+            opts.onCancel?.();
         };
 
         input.addEventListener('keydown', (ev: KeyboardEvent) => {
@@ -921,10 +999,61 @@ export class InputManager {
         });
         input.addEventListener('blur', commit);
 
+        this.activeTextOverlay = { commit };
+        this.repositionOverlay = reposition;
+
         container.appendChild(input);
-        autoSize();
+        reposition();
         input.focus();
         input.select();
+    }
+
+    /** Open an inline editor over an existing text node (double-click). */
+    editTextNode(id: number) {
+        const geo = this.scene.getNodeGeometry(id);
+        if (!geo?.Text) return;
+
+        const t = this.scene.getTransform(id); // row-major: t[2]/t[5] = translation
+        const fontSize = geo.Text.font_size;
+        const originalContent = geo.Text.content;
+        const fam = geo.Text.font_family ? `${geo.Text.font_family}, sans-serif` : 'sans-serif';
+        // Match the node's fill colour so the overlay looks like the real text.
+        const node = this.scene.getNode(id);
+        const f = node?.style?.fills?.[0] as { r: number; g: number; b: number; a?: number } | undefined;
+        const color = f && 'r' in f
+            ? `rgba(${Math.round(f.r * 255)},${Math.round(f.g * 255)},${Math.round(f.b * 255)},${f.a ?? 1})`
+            : '#000';
+        if (geo.Text.font_family) ensureFontCSS(geo.Text.font_family);
+
+        // Hide the underlying node while its overlay stands in (no more doubling).
+        this.renderer.editingTextId = id;
+        this.renderer.requestRender();
+
+        this.spawnTextOverlay({
+            // The paragraph renders with its top at (tx, ty - fontSize); place the
+            // overlay's box there so it sits exactly over the rendered glyphs.
+            world: { x: t[2], y: t[5] - fontSize },
+            fontSize,
+            fontFamily: fam,
+            fontWeight: String(geo.Text.font_weight || 400),
+            fontStyle: geo.Text.italic ? 'italic' : 'normal',
+            letterSpacing: geo.Text.letter_spacing || 0,
+            lineHeight: geo.Text.line_height || 1.2,
+            color,
+            value: originalContent,
+            onCommit: (content) => {
+                if (!content) {
+                    // Emptied → delete the node (Figma behaviour), single undo step.
+                    this.scene.removeNode(id);
+                    this.ui.updateLayerList();
+                    this.ui.syncWithSelection();
+                } else if (content !== originalContent) {
+                    this.scene.setTextContent(id, content, fontSize);
+                    this.ui.syncWithSelection();
+                }
+            },
+            onTeardown: () => { this.renderer.editingTextId = null; this.renderer.requestRender(); },
+        });
     }
 
     /** Abort the current drag (Esc): restore the pre-drag scene state and
@@ -1001,6 +1130,7 @@ export class InputManager {
             this.renderer.pan.x -= e.deltaX;
             this.renderer.pan.y -= e.deltaY;
         }
+        this.renderer.notifyViewChange();
     }
 
     // ─── Artboard interaction (UI-level; engine node selection untouched) ────
@@ -1247,76 +1377,39 @@ export class InputManager {
             }
             this.handlePenDown(this.startPos);
         } else if (this.ui.activeTool === 'text') {
-            // Create inline text input at click position
-            const container = document.getElementById('canvas-container');
-            if (!container) return;
-
-            const screenX = this.startPos.x * this.renderer.zoom + this.renderer.pan.x;
-            const screenY = this.startPos.y * this.renderer.zoom + this.renderer.pan.y;
-
-            const input = document.createElement('textarea');
-            input.className = 'text-input-overlay';
-            input.value = '';
-            input.placeholder = 'Type text…';
-            input.style.left = `${screenX}px`;
-            input.style.top = `${screenY}px`;
-            input.style.fontSize = `${32 * this.renderer.zoom}px`;
-            input.style.fontFamily = 'sans-serif';
-            input.rows = 1;
-            input.style.whiteSpace = 'pre-wrap';
-            input.style.overflow = 'hidden';
-            // Grow to fit content so the box tracks what you type.
-            const autoGrow = () => { input.style.height = 'auto'; input.style.height = `${input.scrollHeight}px`; };
-            input.addEventListener('input', autoGrow);
-
-            // `done` guards against the double-commit that happens when Enter
-            // removes the textarea, which fires blur → commit again.
-            let done = false;
-            const commit = () => {
-                if (done) return;
-                done = true;
-                const content = input.value.replace(/\n+$/, ''); // drop trailing blank lines
-                input.remove();
-                if (!content.trim()) return; // empty → don't create a node
-                this.scene.saveMoveHistory();
-                const id = this.scene.addText(this.startPos.x, this.startPos.y, content, 32);
-                // Text defaults to a solid black fill and no stroke. The active
-                // fill (often a light shape color) or the engine default (white)
-                // would be invisible against a white artboard; black is the
-                // expected, readable default for text.
-                const style = JSON.parse(this.ui.getCurrentStyle());
-                style.fills = [{ r: 0, g: 0, b: 0, a: 1 }];
-                style.strokes = [];
-                this.scene.setNodeStyleNoHistory(id, JSON.stringify(style));
-                this.scene.engine!.clear_selection();
-                this.scene.selectNode(id, false);
-                this.ui.updateLayerList();
-                this.ui.syncWithSelection();
-            };
-
-            const cancel = () => {
-                if (done) return;
-                done = true;
-                input.remove();
-            };
-
-            input.addEventListener('keydown', (ev: KeyboardEvent) => {
-                // Enter commits; Shift+Enter (or Cmd/Ctrl+Enter) inserts a newline.
-                if (ev.key === 'Enter' && !ev.shiftKey && !ev.metaKey && !ev.ctrlKey) {
-                    ev.preventDefault();
-                    commit();
-                } else if (ev.key === 'Escape') {
-                    ev.preventDefault();
-                    cancel();
-                }
-                ev.stopPropagation();
+            // Create an inline text overlay at the click point, using the same
+            // glued/auto-sizing overlay as double-click editing.
+            const worldX = this.startPos.x;
+            const worldY = this.startPos.y; // overlay box top = click point
+            const fontSize = 32;
+            this.spawnTextOverlay({
+                world: { x: worldX, y: worldY },
+                fontSize,
+                fontFamily: 'sans-serif',
+                lineHeight: 1.2,
+                color: '#000',
+                value: '',
+                placeholder: 'Type text…',
+                onCommit: (content) => {
+                    if (!content.trim()) return; // empty → don't create a node
+                    this.scene.saveMoveHistory();
+                    // The paragraph renders with its top at (origin.y - fontSize);
+                    // offset the origin so the glyphs land where the box was.
+                    const id = this.scene.addText(worldX, worldY + fontSize, content, fontSize);
+                    // Text defaults to a solid black fill and no stroke. The active
+                    // fill (often a light shape color) or the engine default (white)
+                    // would be invisible against a white artboard; black is the
+                    // expected, readable default for text.
+                    const style = JSON.parse(this.ui.getCurrentStyle());
+                    style.fills = [{ r: 0, g: 0, b: 0, a: 1 }];
+                    style.strokes = [];
+                    this.scene.setNodeStyleNoHistory(id, JSON.stringify(style));
+                    this.scene.engine!.clear_selection();
+                    this.scene.selectNode(id, false);
+                    this.ui.updateLayerList();
+                    this.ui.syncWithSelection();
+                },
             });
-
-            input.addEventListener('blur', commit);
-
-            container.appendChild(input);
-            input.focus();
-            autoGrow();
         } else if (this.ui.activeTool === 'rect' || this.ui.activeTool === 'ellipse'
                    || this.ui.activeTool === 'polygon' || this.ui.activeTool === 'star'
                    || this.ui.activeTool === 'artboard') {
@@ -1328,20 +1421,46 @@ export class InputManager {
             }
             this.previewRect = { x: this.startPos.x, y: this.startPos.y, w: 0, h: 0, tool: this.ui.activeTool };
         } else if (this.ui.activeTool === 'paint-bucket') {
-            this.handlePaintBucketClick(this.startPos);
+            this.handlePaintBucketClick(this.startPos, e.altKey);
         } else if (this.ui.activeTool === 'scissors') {
             this.handleScissorsDown(this.startPos);
         }
     }
 
-    handlePaintBucketClick(pos: { x: number; y: number }) {
+    handlePaintBucketClick(pos: { x: number; y: number }, wantEdge = false) {
         if (!this.scene.engine) return;
+        const edgeTol = 6 / this.renderer.zoom;
+        const paintEdge = () => {
+            const id = this.scene.queryEdgeAt(pos.x, pos.y, edgeTol);
+            if (id < 0) return false;
+            const c = this.ui.getLivePaintStroke();
+            this.scene.setEdgePaint(id, c.r, c.g, c.b, c.a, this.activeStrokeWidth());
+            return true;
+        };
+        // Filling a region is the primary action. Only paint an edge when the
+        // user explicitly Alt-clicks — otherwise a click a few px from a boundary
+        // would paint a near-invisible line instead of filling the region.
+        if (wantEdge && paintEdge()) return;
+
         const faceId = this.scene.engine.query_face_at(pos.x, pos.y);
         if (faceId >= 0) {
-            // Get the active fill color from UI
-            const color = this.ui.getActiveFillColor();
-            this.scene.setFaceFill(faceId, color.r, color.g, color.b, color.a);
+            const c = this.ui.getLivePaintFill();
+            this.scene.setFaceFill(faceId, c.r, c.g, c.b, c.a);
+            return;
         }
+        // Clicked outside every region (e.g. on the outline itself) → the nearest
+        // edge is the sensible target so clicking a lone outline still paints.
+        paintEdge();
+    }
+
+    /** Current default stroke width from the active style (fallback 2). */
+    private activeStrokeWidth(): number {
+        try {
+            const s = JSON.parse(this.ui.getCurrentStyle());
+            const w = s?.strokes?.[0]?.width;
+            if (typeof w === 'number' && w > 0) return w;
+        } catch { /* fall through */ }
+        return 2;
     }
 
     handleDirectDown(pos: { x: number; y: number }, isShift: boolean) {
@@ -1917,6 +2036,167 @@ export class InputManager {
         this.ui.syncWithSelection();
     }
 
+    /** Called when the Live Paint (paint-bucket) tool is activated. If shapes are
+     *  selected, turn them into a Live Paint group (or enter an existing one) so
+     *  the user can paint immediately — clicking the tool IS "Make Live Paint". */
+    enterPaintBucketMode() {
+        const sel = Array.from(this.scene.engine!.get_selection());
+        if (sel.length === 0) return; // no selection → paint any region freely
+        // A single existing Live Paint group → just enter it.
+        if (sel.length === 1 && this.scene.getNodeLivePaint(sel[0])) {
+            this.enterLivePaintGroup(sel[0]);
+            return;
+        }
+        // Only vector shapes/groups can form a Live Paint group; drop text/images.
+        const paintable = sel.filter(id => {
+            const t = this.scene.getNode(id)?.node_type;
+            return t === 'Path' || t === 'Rect' || t === 'Ellipse' || t === 'Group';
+        });
+        if (paintable.length === 0) return;
+        if (paintable.length !== sel.length) {
+            this.scene.engine!.clear_selection();
+            for (const id of paintable) this.scene.engine!.select_node(id, true);
+        }
+        this.makeLivePaintGroup();
+    }
+
+    /** Turn the current selection into a Live Paint group — a special object
+     *  (Illustrator's Object › Live Paint › Make). The selected shapes are
+     *  grouped (an existing group is reused), flagged as Live Paint, renamed,
+     *  and set as the active paint target. One undo step. */
+    makeLivePaintGroup() {
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length === 0) return;
+        let groupId = 0;
+        this.scene.transaction(() => {
+            if (selection.length === 1 && this.scene.getNode(selection[0])?.node_type === 'Group') {
+                groupId = selection[0];
+            } else {
+                groupId = this.scene.groupNodes(selection);
+            }
+            this.scene.setNodeLivePaint(groupId, true);
+            this.scene.setNodeName(groupId, 'Live Paint');
+            this.scene.setLivePaintGroup(groupId);
+        });
+        // Enter paint mode on the new group, deselected so the selection frame
+        // doesn't cover the regions you're about to paint.
+        this.scene.engine!.clear_selection();
+        this.ui.setActiveTool('paint-bucket');
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.ui.contextBar?.refresh();
+        this.renderer.requestRender();
+    }
+
+    /** Nearest ancestor (or self) that is a Live Paint group, or null. */
+    private findLivePaintAncestor(id: number): number | null {
+        let cur: number = id;
+        while (cur >= 0) {
+            if (this.scene.getNodeLivePaint(cur)) return cur;
+            cur = this.scene.engine!.get_node_parent(cur);
+        }
+        return null;
+    }
+
+    /** Enter an existing Live Paint group: scope painting to it and arm the
+     *  bucket. Used by double-click and the Edit action. */
+    enterLivePaintGroup(groupId: number) {
+        if (!this.scene.getNodeLivePaint(groupId)) return;
+        this.scene.setLivePaintGroup(groupId);
+        this.scene.engine!.clear_selection();
+        this.ui.setActiveTool('paint-bucket');
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.ui.contextBar?.refresh();
+        this.renderer.requestRender();
+    }
+
+    /** Stop editing the active Live Paint group (back to the Selection tool).
+     *  The group stays the active Live Paint object — its faces keep rendering
+     *  in-stream — so we do NOT clear the scope here (only Release/Expand do). */
+    exitLivePaintGroup() {
+        this.ui.setActiveTool('selection');
+        this.scene.engine!.clear_selection();
+        this.ui.syncWithSelection();
+        this.ui.contextBar?.refresh();
+        this.renderer.requestRender();
+    }
+
+    /** Expand a Live Paint group (Illustrator's Object › Live Paint › Expand):
+     *  a destructive Divide. Every COLORED face becomes one flat, non-overlapping
+     *  filled path (its painted color, else the source fill showing through), and
+     *  every painted edge becomes a stroked path. The originals are REMOVED;
+     *  uncolored faces are discarded. Output nests "Fills" + "Strokes" groups. */
+    expandLivePaintGroup(groupId: number) {
+        const e = this.scene.engine!;
+        // Ensure faces are computed for THIS group's geometry.
+        this.scene.setLivePaintGroup(groupId);
+        type Pt = { x: number; y: number; cp1: number[]; cp2: number[] };
+        // Every colored face with its EFFECTIVE fill (painted, or absorbed source).
+        const faces = JSON.parse(e.get_live_paint_faces()) as Array<{ outline: Pt[]; fill: { r: number; g: number; b: number; a: number } }>;
+        const edges = JSON.parse(e.get_painted_edges()) as Array<{ polyline?: number[][]; outline?: Pt[]; color: { r: number; g: number; b: number; a: number }; width: number }>;
+        if (faces.length === 0 && edges.length === 0) {
+            this.releaseLivePaintGroup(groupId);
+            return;
+        }
+        const outPts = (o?: Pt[]) => (o || []).map(p => ({ x: p.x, y: p.y, cp1: p.cp1, cp2: p.cp2, corner_radius: 0 }));
+        const polyPts = (poly: number[][]) => poly.map(([x, y]) => ({ x, y, cp1: [x, y], cp2: [x, y], corner_radius: 0 }));
+        let expanded = 0;
+        this.scene.transaction(() => {
+            const fillIds: number[] = [];
+            for (const f of faces) {
+                const pts = outPts(f.outline);
+                if (pts.length < 3) continue;
+                const id = e.add_path(JSON.stringify([{ closed: true, points: pts }]));
+                e.set_node_style(id, JSON.stringify({ fills: [f.fill], strokes: [], opacity: 1, blend_mode: 0, fill_rule: 0, corner_radius: 0, effects: [] }));
+                e.set_node_name(id, 'Fill');
+                fillIds.push(id);
+            }
+            const strokeIds: number[] = [];
+            for (const eg of edges) {
+                const pts = eg.outline && eg.outline.length >= 2 ? outPts(eg.outline) : (eg.polyline ? polyPts(eg.polyline) : []);
+                if (pts.length < 2) continue;
+                const id = e.add_path(JSON.stringify([{ closed: false, points: pts }]));
+                e.set_node_style(id, JSON.stringify({ fills: [], strokes: [{ paint: eg.color, width: eg.width > 0 ? eg.width : 2, cap: 1, join: 1, dash_array: [], dash_offset: 0, miter_limit: 4, alignment: 'Center' }], opacity: 1, blend_mode: 0, fill_rule: 0, corner_radius: 0, effects: [] }));
+                e.set_node_name(id, 'Edge');
+                strokeIds.push(id);
+            }
+            // Destructive: drop the Live Paint marks and the ORIGINAL shapes.
+            e.set_live_paint_group(0);
+            e.clear_live_paint_marks();
+            e.remove_node(groupId);
+            // Nest Fills (bottom) + Strokes (top) inside an "Expanded" group.
+            const parts: number[] = [];
+            if (fillIds.length) { const g = e.group_nodes(JSON.stringify(fillIds)); e.set_node_name(g, 'Fills'); parts.push(g); }
+            if (strokeIds.length) { const g = e.group_nodes(JSON.stringify(strokeIds)); e.set_node_name(g, 'Strokes'); parts.push(g); }
+            if (parts.length === 0) return;
+            expanded = parts.length > 1 ? e.group_nodes(JSON.stringify(parts)) : parts[0];
+            e.set_node_name(expanded, 'Expanded');
+        });
+        this.scene.invalidateCache();
+        e.clear_selection();
+        if (expanded) this.scene.selectNode(expanded, false);
+        this.ui.setActiveTool('selection');
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.ui.contextBar?.refresh();
+        this.renderer.requestRender();
+    }
+
+    /** Internal fallback: turn a Live Paint group back into a plain group
+     *  (removes the flag + clears the paint target). Used by Expand when there
+     *  is nothing painted to bake — there is no user-facing "Release" action. */
+    private releaseLivePaintGroup(groupId?: number) {
+        const id = groupId ?? this.scene.getLivePaintGroup();
+        this.scene.transaction(() => {
+            if (id >= 0) this.scene.setNodeLivePaint(id, false);
+            this.scene.setLivePaintGroup(0);
+        });
+        this.ui.updateLayerList();
+        this.ui.contextBar?.refresh();
+        this.renderer.requestRender();
+    }
+
     ungroupSelection() {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
@@ -1999,13 +2279,22 @@ export class InputManager {
      *
      * Everything is wrapped in a single undo step.
      */
-    flattenSelection() {
+    async flattenSelection() {
         const selection = Array.from(this.scene.engine!.get_selection());
         if (selection.length === 0) return;
 
         // Exit path editing if active — flattening changes geometry
         if (this.editingNodeId !== null) {
             this.exitEditMode();
+        }
+
+        // Outlining text needs an async font parse (opentype.js). The transaction
+        // below is synchronous, so pre-compute outlines for every text node first.
+        const textOutlines = new Map<number, Subpath[] | null>();
+        for (const id of selection) {
+            if (this.scene.getNode(id)?.node_type !== 'Text') continue;
+            const geo = this.scene.getNodeGeometry(id)?.Text;
+            textOutlines.set(id, geo ? await textNodeToSubpaths(geo, this.renderer.ck) : null);
         }
 
         this.scene.transaction(() => {
@@ -2018,7 +2307,7 @@ export class InputManager {
 
                 // ── Step 1: Text → Path (create outlines) ──────────────
                 if (node.node_type === 'Text') {
-                    const subpaths = this.renderer.getTextPath(id);
+                    const subpaths = textOutlines.get(id) ?? null;
                     if (subpaths && subpaths.length > 0) {
                         this.scene.replaceGeometryWithPath(id, subpaths);
                     } else {
@@ -2166,6 +2455,7 @@ export class InputManager {
         if (this.panDrag && this.isMouseDown) {
             this.renderer.pan.x = this.panDrag.panX + (e.clientX - this.panDrag.screenX);
             this.renderer.pan.y = this.panDrag.panY + (e.clientY - this.panDrag.screenY);
+            this.renderer.notifyViewChange();
             return;
         }
         if (this.isSpacePan) return; // hand tool active — no hover/tool behavior
@@ -2203,11 +2493,23 @@ export class InputManager {
             }
         }
 
-        // Paint bucket hover preview
+        // Paint bucket hover preview. Filling is primary, so we highlight the
+        // region under the cursor; only when Alt is held (edge mode) do we
+        // highlight the nearest edge — matching what a click will do.
         if (!this.isMouseDown && this.ui.activeTool === 'paint-bucket') {
+            const edgeTol = 6 / this.renderer.zoom;
             const faceId = this.scene.engine!.query_face_at(this.currentPos.x, this.currentPos.y);
-            this.renderer.hoverFaceId = faceId;
-            this.canvas.style.cursor = faceId >= 0 ? 'crosshair' : 'default';
+            if (e.altKey || faceId < 0) {
+                // Edge mode (Alt), or outside any region → preview the edge.
+                const edgeId = this.scene.queryEdgeAt(this.currentPos.x, this.currentPos.y, edgeTol);
+                this.renderer.hoverEdgeId = edgeId;
+                this.renderer.hoverFaceId = e.altKey ? -1 : faceId;
+                this.canvas.style.cursor = edgeId >= 0 ? 'crosshair' : 'default';
+            } else {
+                this.renderer.hoverEdgeId = -1;
+                this.renderer.hoverFaceId = faceId;
+                this.canvas.style.cursor = 'crosshair';
+            }
         }
 
         // Scissors / Add-Point / Segment hover preview
@@ -2388,13 +2690,14 @@ export class InputManager {
                 } else if (nodeType === 4) {
                     // Text (auto-width): resizing scales the FONT SIZE, like
                     // Figma — its box hugs the content, so there's no width/height
-                    // to stretch. Uniform factor from the dragged axis (corner →
-                    // whichever axis moved more, relative to its size).
+                    // to stretch. Edges use the dragged axis; corners use the
+                    // geometric mean sqrt(kx·ky) so the scale is smooth and
+                    // direction-independent (matches Figma's proportional feel).
                     const tg = this.scene.getNodeGeometry(id)?.Text;
                     if (tg) {
                         const k = (t === 'e' || t === 'w') ? kx
                             : (t === 'n' || t === 's') ? ky
-                            : (Math.abs(kx - 1) >= Math.abs(ky - 1) ? kx : ky);
+                            : Math.sqrt(Math.abs(kx * ky));
                         const newSize = Math.max(1, Math.min(2000, tg.font_size * k));
                         this.scene.engine!.set_text_content(id, tg.content, newSize);
                         this.anchorNodeToFrameTopLeft(id);
@@ -2504,7 +2807,17 @@ export class InputManager {
                     const b = this.scene.getNodeBounds(id);
                     const targetX = live.x + (b[0] - bounds.x) * scaleX;
                     const targetY = live.y + (b[1] - bounds.y) * scaleY;
-                    this.scene.engine!.resize_node(id, (b[2] - b[0]) * scaleX, (b[3] - b[1]) * scaleY);
+                    // Text is auto-width: resize_node is a no-op for it, so scale
+                    // the font size (geometric mean of the axes) instead. Read from
+                    // the just-restored snapshot state, so it never compounds.
+                    const tg = this.scene.getNodeType(id) === 4
+                        ? this.scene.getNodeGeometry(id)?.Text : null;
+                    if (tg) {
+                        const newSize = Math.max(1, Math.min(2000, tg.font_size * Math.sqrt(Math.abs(scaleX * scaleY))));
+                        this.scene.engine!.set_text_content(id, tg.content, newSize);
+                    } else {
+                        this.scene.engine!.resize_node(id, (b[2] - b[0]) * scaleX, (b[3] - b[1]) * scaleY);
+                    }
                     const nb = this.scene.getNodeBounds(id);
                     const dx = targetX - nb[0];
                     const dy = targetY - nb[1];
@@ -3333,13 +3646,17 @@ export class InputManager {
         return this.scene.hitTestGrouped(pos.x, pos.y);
     }
 
-    /** Convert a text node to a path node (destructive). */
-    createOutlines(id: number) {
-        const subpaths = this.renderer.getTextPath(id);
+    /** Convert a text node to a path node (destructive). Parses the font with
+     *  opentype.js off the cached TTF, so it's async (font may need fetching). */
+    async createOutlines(id: number) {
+        const geo = this.scene.getNodeGeometry(id)?.Text;
+        if (!geo) return;
+        const subpaths = await textNodeToSubpaths(geo, this.renderer.ck);
         if (subpaths && subpaths.length > 0) {
             this.scene.replaceGeometryWithPath(id, subpaths);
             this.ui.syncWithSelection();
             this.ui.updateLayerList();
+            this.renderer.requestRender();
         }
     }
 }

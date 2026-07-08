@@ -757,6 +757,19 @@ body, html {
     flex-shrink: 0;
 }
 
+/* Empty state shown in the inspector when nothing is selected. */
+.props-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 40px 24px;
+    min-height: 140px;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.5;
+}
+
 .panel-section-header {
     display: flex;
     align-items: center;
@@ -1263,6 +1276,112 @@ body.scrubbing * {
     flex-shrink: 0;
 }
 
+/* ─── Effects panel ─── */
+
+#effects-list {
+    gap: 6px !important;
+}
+
+.effect-empty {
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 2px 4px 4px;
+}
+
+.effect-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.effect-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.effect-head .prop-select {
+    flex: 1;
+    height: 22px;
+    font-size: 11px;
+}
+
+.effect-head .icon-toggle {
+    flex-shrink: 0;
+    font-size: 15px;
+    line-height: 1;
+    color: var(--text-dim);
+}
+
+.effect-head .icon-toggle:hover {
+    color: var(--text-main);
+}
+
+.effect-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.effect-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+}
+
+.effect-row .color-input {
+    width: 22px;
+    height: 22px;
+    min-width: 22px;
+    flex-shrink: 0;
+    align-self: flex-end;
+    margin-bottom: 1px;
+}
+
+.effect-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+}
+
+.effect-field-label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-dim);
+    padding-left: 1px;
+}
+
+.effect-input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.effect-input-wrap .prop-input {
+    height: 22px;
+    font-size: 11px;
+    width: 100%;
+}
+
+.effect-unit {
+    position: absolute;
+    right: 6px;
+    font-size: 9px;
+    color: var(--text-dim);
+    pointer-events: none;
+}
+
+.effect-input-wrap:has(.effect-unit) .prop-input {
+    padding-right: 16px;
+}
+
 /* ─── Stroke sub-properties (indented) ─── */
 
 .stroke-details {
@@ -1615,6 +1734,21 @@ body.scrubbing * {
     opacity: 0.9;
 }
 
+/* Live Paint group: a small pill so the special object reads at a glance. */
+.layer-lp-badge {
+    flex: 0 0 auto;
+    margin-right: 4px;
+    padding: 1px 5px;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    line-height: 1.3;
+    border-radius: 999px;
+    color: var(--accent, #6c8cff);
+    background: color-mix(in srgb, var(--accent, #6c8cff) 18%, transparent);
+    white-space: nowrap;
+}
+
 /* Figma-style mask wrapping: the masked rows plus the mask row that bounds
    them are wrapped in ONE container. Kept minimal — a single thin, muted
    vertical guide (no bracket ticks, no bright bar) with a faint tint groups
@@ -1930,6 +2064,19 @@ body.scrubbing * {
 .cb-swatch::-webkit-color-swatch {
     border: none;
     border-radius: 2px;
+}
+
+.cb-select {
+    height: 22px;
+    border: 1.5px solid var(--border-light);
+    border-radius: 4px;
+    background: var(--panel-bg, #2a2a2a);
+    color: var(--text, #eee);
+    font-size: 11px;
+    padding: 0 4px;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
 }
 
 /* Badge */

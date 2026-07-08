@@ -113,3 +113,12 @@ export function isFontLoaded(fontFamily: string): boolean {
 export function getFontData(fontFamily: string): ArrayBuffer | null {
     return fontDataCache.get(fontFamily)?.[0] ?? null;
 }
+
+/** Get cached font data for a weight: the bold TTF for weight ≥ 600 when one is
+ *  cached, otherwise the regular TTF. Null if the family isn't loaded. */
+export function getFontDataForWeight(fontFamily: string, weight: number): ArrayBuffer | null {
+    const buffers = fontDataCache.get(fontFamily);
+    if (!buffers) return null;
+    if (weight >= 600 && buffers.length > 1) return buffers[1];
+    return buffers[0];
+}

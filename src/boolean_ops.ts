@@ -151,7 +151,7 @@ function nodeToWorldPath(
 }
 
 /** Parse a CanvasKit path back into engine subpaths via toCmds(). */
-function pathToSubpaths(ck: CanvasKit, path: Path): Subpath[] {
+export function pathToSubpaths(ck: CanvasKit, path: Path): Subpath[] {
     const cmds = path.toCmds();
 
     const ckAny = ck as unknown as Record<string, number>;

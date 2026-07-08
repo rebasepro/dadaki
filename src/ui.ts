@@ -8,7 +8,7 @@ import type { GradientGeo } from './svg_utils';
 import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
 import { parseSvgStylesheet, matchedCssStyles } from './svg_css';
 import type { CssDecl } from './svg_css';
-import type { SVGExportInput, FilledFace } from './svg_export';
+import type { SVGExportInput, FilledFace, LivePaintRenderData } from './svg_export';
 import type { SVGSubpath, SVGGradientData } from './svg_utils';
 import type { ContextBar } from './context_bar';
 import type { Toolbar } from './toolbar';
@@ -598,8 +598,9 @@ export class UIEngine {
 
         // Exit path/text editing when switching tools to clear dimming
         const im = this.scene.renderer?.inputManager;
-        if (im && im.editingNodeId !== null) {
-            im.exitEditMode();
+        if (im) {
+            im.commitActiveTextEdit(); // close any open inline text overlay
+            if (im.editingNodeId !== null) im.exitEditMode();
         }
 
         // Set cursor on canvas based on tool
@@ -621,11 +622,27 @@ export class UIEngine {
             canvas.style.cursor = cursorMap[toolId] || 'default';
         }
 
+        // Activating Live Paint with a selection makes (or enters) a Live Paint
+        // group, so "select shapes → click Live Paint" produces the group.
+        if (toolId === 'paint-bucket' && im) {
+            im.enterPaintBucketMode();
+        }
+
         this.contextBar?.refresh();
     }
 
+    // Live Paint colors are INDEPENDENT of the selection: changing them only
+    // sets what the next region/edge click paints — it must never recolor the
+    // selected shapes (that was the "color swatch changes all shapes" bug).
+    private _livePaintFill: Color = { r: 0.2, g: 0.55, b: 0.9, a: 1 };
+    private _livePaintStroke: Color = { r: 0, g: 0, b: 0, a: 1 };
+    getLivePaintFill(): Color { return { ...this._livePaintFill }; }
+    getLivePaintStroke(): Color { return { ...this._livePaintStroke }; }
+    setLivePaintFill(hex: string) { this._livePaintFill = this.hexToRgb(hex); }
+    setLivePaintStroke(hex: string) { this._livePaintStroke = this.hexToRgb(hex); }
+
     /** Get the current fill color from the UI as {r, g, b, a} in 0-1 range. */
-    
+
     updateActiveFillColor(hex: string) {
         const c = this.hexToRgb(hex);
         const selection = this.scene.engine!.get_selection();
@@ -819,6 +836,17 @@ export class UIEngine {
     /** Current visual size of a node, full precision — the same measure the
      *  panel displays and resizeNode targets (resolved rounded outline for paths). */
     private getNodeDisplaySize(node: SceneNode, id: number): { w: number; h: number } | null {
+        // Groups have no geometry of their own — report their world bounding box
+        // (the same rectangle the selection frame draws).
+        if (node.node_type === 'Group') {
+            const b = this.scene.getNodeBounds(id);
+            if (b && b.length >= 4) {
+                const w = b[2] - b[0];
+                const h = b[3] - b[1];
+                if (w > 0 && h > 0) return { w, h };
+            }
+            return null;
+        }
         if (node.geometry.Rect) {
             return { w: node.geometry.Rect.width, h: node.geometry.Rect.height };
         }
@@ -1796,6 +1824,8 @@ export class UIEngine {
             const nodeName = this.scene.getNodeName(id);
             let nodeIsMask = false;
             try { nodeIsMask = this.scene.getNodeIsMask(id); } catch { /* noop */ }
+            let nodeIsLivePaint = false;
+            try { nodeIsLivePaint = isGroup && this.scene.getNodeLivePaint(id); } catch { /* noop */ }
 
             const item = document.createElement('div');
             item.className = 'layer-item';
@@ -1825,13 +1855,15 @@ export class UIEngine {
             const lockIcon = nodeLocked === true ? iconLock(12) : iconUnlock(12);
             // Mask badge: a small marker so mask layers are recognizable.
             const maskBadge = nodeIsMask ? `<span class="layer-mask-badge" title="Mask">◐</span>` : '';
+            const livePaintBadge = nodeIsLivePaint ? `<span class="layer-lp-badge" title="Live Paint group">Live Paint</span>` : '';
+            if (nodeIsLivePaint) item.classList.add('layer-livepaint');
 
             item.innerHTML = `
                 <div class="layer-item-row" style="padding-left: ${indent + 4}px">
                     ${chevronHtml}
                     <span class="layer-icon">${icon}</span>
                     <span class="layer-name" data-node-id="${id}">${nodeName || `Node ${id}`}</span>
-                    ${maskBadge}
+                    ${maskBadge}${livePaintBadge}
                     <span class="layer-actions">
                         <span class="layer-lock-btn" data-lock-id="${id}" title="${nodeLocked ? 'Unlock' : 'Lock'}">${lockIcon}</span>
                         <span class="layer-vis-btn" data-vis-id="${id}" title="Toggle visibility">${visIcon}</span>
@@ -2624,14 +2656,22 @@ export class UIEngine {
             }
         }
 
-        // Collect live-paint face fills
+        // Collect per-group Live Paint render data — faces (effective color)
+        // draw under each group's member strokes, painted edges on top, mirroring
+        // the in-app compositing. Falls back to `filledFaces` if none.
+        let livePaint: LivePaintRenderData | undefined;
         let filledFaces: FilledFace[] | undefined;
         if (this.scene.engine) {
             try {
-                const facesJson = this.scene.engine.get_filled_faces();
-                const parsed = JSON.parse(facesJson) as FilledFace[];
-                if (parsed.length > 0) filledFaces = parsed;
-            } catch { /* no faces */ }
+                const data = JSON.parse(this.scene.engine.get_live_paint_render_data()) as LivePaintRenderData;
+                if (data.groups && data.groups.length > 0) livePaint = data;
+            } catch { /* no live paint */ }
+            if (!livePaint) {
+                try {
+                    const parsed = JSON.parse(this.scene.engine.get_filled_faces()) as FilledFace[];
+                    if (parsed.length > 0) filledFaces = parsed;
+                } catch { /* no faces */ }
+            }
         }
 
         let svg = buildSVGFromData({
@@ -2641,6 +2681,7 @@ export class UIEngine {
             rootNodeIds,
             localTransforms,
             filledFaces,
+            livePaint,
             imageDataUris,
             viewBox: bounds,
             background,
@@ -4153,6 +4194,14 @@ export class UIEngine {
         const anyMask = sel.some(id => { try { return this.scene.getNodeIsMask(id); } catch { return false; } });
         const maskLabel = anyMask ? 'Release Mask' : 'Use as Mask';
 
+        // Live Paint toggles: a selected Live Paint group offers Release; any
+        // other selection offers Make.
+        const singleLivePaint = sel.length === 1
+            && (() => { try { return this.scene.getNodeLivePaint(sel[0]); } catch { return false; } })();
+        const livePaintItems: Array<{ label: string; action: string; shortcut: string }> = singleLivePaint
+            ? [{ label: 'Expand Live Paint', action: 'expand-live-paint', shortcut: '' }]
+            : [{ label: 'Make Live Paint', action: 'make-live-paint', shortcut: '⌘⌥X' }];
+
         const items: Array<{ label: string; action: string; shortcut: string } | 'separator'> = [
             { label: 'Bring to Front', action: 'bring-to-front', shortcut: '⌘]' },
             { label: 'Bring Forward', action: 'bring-forward', shortcut: ']' },
@@ -4161,6 +4210,7 @@ export class UIEngine {
             'separator',
             { label: 'Group', action: 'group', shortcut: '⌘G' },
             { label: 'Ungroup', action: 'ungroup', shortcut: '⌘⇧G' },
+            ...livePaintItems,
             { label: 'Flatten', action: 'flatten', shortcut: '⌘E' },
             { label: maskLabel, action: 'toggle-mask', shortcut: '' },
             'separator',

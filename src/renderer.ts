@@ -1,4 +1,7 @@
-import type { Canvas, CanvasKit, Paint, Surface } from 'canvaskit-wasm';
+import type { Canvas, CanvasKit, Paint, Path, Surface } from 'canvaskit-wasm';
+
+/** A Live Paint outline point: anchor + incoming/outgoing bézier handles. */
+type OutlinePt = { x: number; y: number; cp1: number[]; cp2: number[] };
 import { buildFontProvider, isFontLoaded, loadGoogleFontData, onFontLoaded } from './fonts';
 
 /** Helper for efficient zero-copy parsing of the WASM binary render buffer. */
@@ -55,7 +58,7 @@ export type ArtboardHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 9; // v9: gradient spread + radial focal point
+const EXPECTED_RENDER_PROTOCOL_VERSION = 10; // v10: in-stream Live Paint faces/edges (CMD 7/8)
 
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {
@@ -67,14 +70,6 @@ interface EffectRecord {
 }
 
 export class Renderer {
-    /** Generate a path for a text node (for "Create Outlines"), or null.
-     *  NOTE: this canvaskit-wasm build's Font API exposes glyph IDs/widths/bounds
-     *  but NOT per-glyph outlines (no getGlyphPaths), so real text→vector
-     *  conversion isn't available here; callers must handle null. */
-    getTextPath(_id: number): any[] | null {
-        return null;
-    }
-
     /** Local-space bounding box of a text node's rendered glyphs, used for the
      *  selection frame. Measures with the Font glyph-width API (getGlyphPaths
      *  isn't available in this build). Falls back to an em-based estimate. */
@@ -117,6 +112,7 @@ export class Renderer {
     inputManager: InputManager | null = null;
     /** Face ID currently being hovered by the paint bucket tool (or -1). */
     hoverFaceId: number = -1;
+    hoverEdgeId: number = -1;
     /** UI-level selected artboard (drawn highlighted with resize handles). */
     selectedArtboardId: number | null = null;
 
@@ -164,7 +160,6 @@ export class Renderer {
     private _effectPaint: Paint | null = null;
 
     // ─── Filled faces cache ───
-    private _filledFacesCache: { data: { boundary: number[][]; fill: { r: number; g: number; b: number; a: number } }[] } | null = null;
 
     // ─── Cached overlay paints (created once, reused every frame) ───
     private _overlayPaints: {
@@ -201,6 +196,14 @@ export class Renderer {
         this._needsRender = true;
     }
 
+    /** Subscribers notified whenever zoom/pan change (view transform changed).
+     *  Used by the inline text-edit overlay to stay glued over the glyphs. */
+    private viewChangeCbs: Array<() => void> = [];
+    /** Register a callback fired on every zoom/pan change. */
+    onViewChange(cb: () => void) { this.viewChangeCbs.push(cb); }
+    /** Notify view-change subscribers. Call after mutating zoom/pan directly. */
+    notifyViewChange() { for (const cb of this.viewChangeCbs) cb(); }
+
     /** Invalidate all cached rendering resources. Call when the scene mutates. */
     invalidateRenderCaches() {
         // Clear path cache
@@ -214,9 +217,6 @@ export class Renderer {
             if (shader) shader.delete();
         }
         this._gradientCache.clear();
-
-        // Clear filled faces cache
-        this._filledFacesCache = null;
 
         // Clear effect filter cache
         for (const f of this._effectFilterCache.values()) {
@@ -449,6 +449,7 @@ export class Renderer {
         // there are multiple artboards) in the viewport.
         this.pan.x = (viewW - docW * this.zoom) / 2 - originX * this.zoom;
         this.pan.y = (viewH - docH * this.zoom) / 2 - originY * this.zoom;
+        this.notifyViewChange();
     }
 
     /** Fit the given world-space bounds in the viewport (zoom to selection). */
@@ -462,6 +463,7 @@ export class Renderer {
         this.zoom = Math.max(0.02, Math.min(64, scale));
         this.pan.x = (viewW - b.w * this.zoom) / 2 - b.x * this.zoom;
         this.pan.y = (viewH - b.h * this.zoom) / 2 - b.y * this.zoom;
+        this.notifyViewChange();
     }
 
     /** Set zoom keeping the viewport center fixed. */
@@ -474,6 +476,7 @@ export class Renderer {
         this.zoom = Math.max(0.01, Math.min(100, newZoom));
         this.pan.x = cx - worldX * this.zoom;
         this.pan.y = cy - worldY * this.zoom;
+        this.notifyViewChange();
     }
 
     loop() {
@@ -650,6 +653,36 @@ export class Renderer {
                 if (this._maskTypeStack.length > 0) this._maskTypeStack.pop();
                 canvas.restore(); // content → mask/outer layer (SrcIn)
                 canvas.restore(); // masked result → canvas
+            } else if (cmdType === 7) { // CMD_LP_FACES (Live Paint face fills)
+                const faceCount = reader.u32();
+                p.setStyle(this.ck.PaintStyle.Fill);
+                p.setShader(null);
+                p.setAntiAlias(true);
+                for (let fi = 0; fi < faceCount; fi++) {
+                    const r = reader.f32(), gg = reader.f32(), bb = reader.f32(), aa = reader.f32();
+                    const path = this.readOutlinePath(reader, true);
+                    p.setColor(this.ck.Color4f(r, gg, bb, aa));
+                    canvas.drawPath(path, p);
+                    path.delete();
+                }
+            } else if (cmdType === 8) { // CMD_LP_EDGES (Live Paint painted edges)
+                const edgeCount = reader.u32();
+                p.setStyle(this.ck.PaintStyle.Stroke);
+                p.setShader(null);
+                p.setAntiAlias(true);
+                p.setStrokeCap(this.ck.StrokeCap.Round);
+                p.setStrokeJoin(this.ck.StrokeJoin.Round);
+                for (let ei = 0; ei < edgeCount; ei++) {
+                    const r = reader.f32(), gg = reader.f32(), bb = reader.f32(), aa = reader.f32();
+                    const width = reader.f32();
+                    const path = this.readOutlinePath(reader, false);
+                    p.setColor(this.ck.Color4f(r, gg, bb, aa));
+                    p.setStrokeWidth(width > 0 ? width : 2);
+                    canvas.drawPath(path, p);
+                    path.delete();
+                }
+                p.setStrokeCap(this.ck.StrokeCap.Butt);
+                p.setStrokeJoin(this.ck.StrokeJoin.Miter);
             } else if (cmdType === 2) { // CMD_DRAW_NODE
                 const nodeType = reader.u32();
                 const matrix = reader.f32Array(9);
@@ -953,8 +986,9 @@ export class Renderer {
             }
         }
 
-        // Draw filled faces (Live Paint)
-        this.drawFilledFaces(canvas);
+        // Live Paint faces/edges are no longer drawn here — they're emitted
+        // in-stream at the group's z (CMD_LP_FACES/EDGES) so members' strokes
+        // sit on top, like Illustrator.
 
         // Editor overlays — never part of exported output.
         if (!exporting) {
@@ -2115,55 +2149,49 @@ export class Renderer {
         dotPaint.delete();
     }
 
-    private drawFilledFaces(canvas: Canvas) {
-        if (!this.scene.engine) return;
-        try {
-            // Use cached faces data to avoid JSON.parse every frame
-            if (!this._filledFacesCache) {
-                const json = this.scene.engine.get_filled_faces();
-                const parsed = JSON.parse(json);
-                this._filledFacesCache = { data: parsed || [] };
-            }
-            const faces = this._filledFacesCache.data;
-            if (faces.length === 0) return;
+    /** Read a bézier outline from the render buffer (`[count][x,y,cp1x,cp1y,
+     *  cp2x,cp2y]×N`) and build a CanvasKit path. Matches `write_outline_points`. */
+    private readOutlinePath(reader: BinaryReader, closed: boolean): Path {
+        const n = reader.u32();
+        const pts: OutlinePt[] = [];
+        for (let i = 0; i < n; i++) {
+            pts.push({ x: reader.f32(), y: reader.f32(), cp1: [reader.f32(), reader.f32()], cp2: [reader.f32(), reader.f32()] });
+        }
+        return this.pathFromOutline(pts, closed);
+    }
 
-            if (!this.paint) this.paint = new this.ck.Paint();
-            const paint = this.paint;
-            paint.setStyle(this.ck.PaintStyle.Fill);
-            paint.setAntiAlias(true);
-
-            for (const face of faces) {
-                const boundary = face.boundary;
-                if (!boundary || boundary.length < 3) continue;
-
-                const path = new this.ck.Path();
-                path.moveTo(boundary[0][0], boundary[0][1]);
-                for (let i = 1; i < boundary.length; i++) {
-                    path.lineTo(boundary[i][0], boundary[i][1]);
-                }
-                path.close();
-
-                const f = face.fill;
-                paint.setColor(this.ck.Color(f.r * 255, f.g * 255, f.b * 255, f.a));
-                canvas.drawPath(path, paint);
-                path.delete();
-            }
-        } catch {}
+    /** Reconstruct a CanvasKit path from an anchor+handles outline (the same
+     *  cubic reconstruction the binary geometry reader uses). */
+    private pathFromOutline(outline: OutlinePt[], closed: boolean): Path {
+        const path = new this.ck.Path();
+        if (!outline.length) return path;
+        path.moveTo(outline[0].x, outline[0].y);
+        for (let i = 0; i < outline.length - 1; i++) {
+            const a = outline[i], b = outline[i + 1];
+            path.cubicTo(a.cp2[0], a.cp2[1], b.cp1[0], b.cp1[1], b.x, b.y);
+        }
+        if (closed && outline.length >= 2) {
+            const a = outline[outline.length - 1], b = outline[0];
+            path.cubicTo(a.cp2[0], a.cp2[1], b.cp1[0], b.cp1[1], b.x, b.y);
+            path.close();
+        }
+        return path;
     }
 
     private drawPaintBucketHover(canvas: Canvas) {
+        // Only while the Live Paint tool is armed — avoids a stale highlight
+        // lingering after the user switches tools.
+        if (this.inputManager?.ui?.activeTool !== 'paint-bucket') return;
+        // Edge hover takes precedence — the cursor is over a line, not a region.
+        if (this.hoverEdgeId >= 0 && this.scene.engine) {
+            this.drawEdgeHover(canvas);
+            return;
+        }
         if (this.hoverFaceId < 0 || !this.scene.engine) return;
         try {
-            const json = this.scene.engine.get_face_boundary(this.hoverFaceId);
-            const boundary = JSON.parse(json);
-            if (!boundary || boundary.length < 3) return;
-
-            const path = new this.ck.Path();
-            path.moveTo(boundary[0][0], boundary[0][1]);
-            for (let i = 1; i < boundary.length; i++) {
-                path.lineTo(boundary[i][0], boundary[i][1]);
-            }
-            path.close();
+            const outline = JSON.parse(this.scene.engine.get_face_boundary(this.hoverFaceId)) as OutlinePt[];
+            if (!outline || outline.length < 2) return;
+            const path = this.pathFromOutline(outline, true);
 
             const paint = new this.ck.Paint();
             paint.setColor(this.ck.Color(66, 133, 244, 0.3));
@@ -2174,6 +2202,26 @@ export class Renderer {
             paint.setColor(this.ck.Color(66, 133, 244, 0.8));
             paint.setStyle(this.ck.PaintStyle.Stroke);
             paint.setStrokeWidth(1.5 / this.zoom);
+            canvas.drawPath(path, paint);
+
+            path.delete();
+            paint.delete();
+        } catch {}
+    }
+
+    private drawEdgeHover(canvas: Canvas) {
+        try {
+            const outline = JSON.parse(this.scene.engine!.get_edge_polyline(this.hoverEdgeId)) as OutlinePt[];
+            if (!outline || outline.length < 2) return;
+            const path = this.pathFromOutline(outline, false);
+
+            const paint = new this.ck.Paint();
+            paint.setStyle(this.ck.PaintStyle.Stroke);
+            paint.setStrokeCap(this.ck.StrokeCap.Round);
+            paint.setStrokeJoin(this.ck.StrokeJoin.Round);
+            paint.setAntiAlias(true);
+            paint.setColor(this.ck.Color(66, 133, 244, 0.9));
+            paint.setStrokeWidth(4 / this.zoom);
             canvas.drawPath(path, paint);
 
             path.delete();

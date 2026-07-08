@@ -743,6 +743,58 @@ export class WasmScene {
         this.autosave?.trigger();
     }
 
+    /** Set the Live Paint gap-closing distance (world units, 0 = off). Undoable:
+     *  it changes which regions exist, so it can gain/lose fills. */
+    setGapBridgeDistance(distance: number) {
+        this.saveHistory();
+        this.engine!.set_gap_bridge_distance(distance);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    getGapBridgeDistance(): number {
+        return this.engine?.get_gap_bridge_distance() ?? 0;
+    }
+
+    /** Nearest paintable Live Paint edge to a point, or -1. */
+    queryEdgeAt(x: number, y: number, tolerance: number): number {
+        return this.engine?.query_edge_at(x, y, tolerance) ?? -1;
+    }
+
+    /** Scope Live Paint to a group node (0 clears). Undoable. */
+    setLivePaintGroup(nodeId: number) {
+        this.saveHistory();
+        this.engine!.set_live_paint_group(nodeId);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** Active Live Paint group node id, or -1. */
+    getLivePaintGroup(): number {
+        return this.engine?.get_live_paint_group() ?? -1;
+    }
+
+    /** Flag (or unflag) a Group as a Live Paint group. Undoable. */
+    setNodeLivePaint(id: number, value: boolean) {
+        this.saveHistory();
+        this.engine!.set_node_live_paint(id, value);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** True if the node is a Live Paint group. */
+    getNodeLivePaint(id: number): boolean {
+        return this.engine?.get_node_live_paint(id) ?? false;
+    }
+
+    /** Paint a Live Paint edge with a stroke color/width. Undoable. */
+    setEdgePaint(edgeId: number, r: number, g: number, b: number, a: number, width: number) {
+        this.saveHistory();
+        this.engine!.set_edge_paint(edgeId, r, g, b, a, width);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
     convertToPath(id: number): boolean {
         this.saveHistory();
         const converted = this.engine!.convert_to_path(id);

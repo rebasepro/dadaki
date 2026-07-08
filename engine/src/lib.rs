@@ -36,7 +36,7 @@ pub enum NodeType {
     Image,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct Color {
     pub r: f32,
     pub g: f32,
@@ -709,6 +709,11 @@ pub struct Node {
     /// clipping lands.
     #[serde(default)]
     pub clip_content: bool,
+    /// When true, this Group is a Live Paint group — a special object whose
+    /// child paths form one paintable planar surface (Illustrator's Live Paint
+    /// Group). Only meaningful on `NodeType::Group`. See `Scene::live_paint_group`.
+    #[serde(default)]
+    pub live_paint: bool,
 }
 
 use rstar::{RTree, RTreeObject, AABB, PointDistance};
@@ -737,6 +742,14 @@ const CMD_BEGIN_MASK: u32 = 4;
 const CMD_BEGIN_MASKED_CONTENT: u32 = 5;
 /// Close both the content and mask layers, compositing the masked result.
 const CMD_END_MASK: u32 = 6;
+/// Live Paint face fills, emitted just inside a Live Paint group's START_GROUP
+/// so they render UNDER the members' strokes. Payload: count u32, then per face
+/// [r,g,b,a f32][point_count u32][x,y,cp1x,cp1y,cp2x,cp2y f32 × N] (closed).
+const CMD_LP_FACES: u32 = 7;
+/// Live Paint painted-edge strokes, emitted just before END_GROUP (on top of the
+/// members). Payload: count u32, then per edge [r,g,b,a,width f32][point_count u32]
+/// [x,y,cp1x,cp1y,cp2x,cp2y f32 × N] (open).
+const CMD_LP_EDGES: u32 = 8;
 
 /// Magic marker: ASCII "VEC1" as a little-endian u32.
 pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
@@ -749,7 +762,9 @@ pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// v7: effects records are self-describing per kind; added kind 2 = ColorMatrix.
 /// v8: ColorMatrix gains a linear_rgb u32 flag; CMD_BEGIN_MASK gains mask_type u32.
 /// v9: gradients gain spread (u32) + focal point (fx, fy, fr) after end_x/end_y.
-pub const RENDER_PROTOCOL_VERSION: u32 = 9;
+/// v10: Live Paint faces/edges drawn in-stream at group z (CMD_LP_FACES/EDGES);
+///      members of a Live Paint group write zero fills (faces provide the fill).
+pub const RENDER_PROTOCOL_VERSION: u32 = 10;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -767,6 +782,18 @@ fn end_record(buf: &mut Vec<u8>, len_pos: usize) {
 
 /// Write a paint value (solid color, gradient, or pattern) to a byte buffer.
 /// Type tags: 0=none, 1=solid, 2=linear, 3=radial, 4=pattern.
+/// Write a bézier outline into the render buffer: `[point_count u32]` then per
+/// point `x, y, cp1x, cp1y, cp2x, cp2y` (6 f32) — the layout CMD_LP_FACES/EDGES
+/// and the reader's cubic reconstruction share.
+fn write_outline_points(buf: &mut Vec<u8>, pts: &[PathPoint]) {
+    buf.extend_from_slice(&(pts.len() as u32).to_le_bytes());
+    for p in pts {
+        for v in [p.x, p.y, p.cp1.x, p.cp1.y, p.cp2.x, p.cp2.y] {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+}
+
 fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>) {
     match paint {
         None => {
@@ -875,6 +902,10 @@ pub struct Scene {
     /// `artboards[0]` for back-compat with pre-artboard readers.
     #[serde(default)]
     pub artboards: Vec<Artboard>,
+    /// When set, Live Paint is scoped to this group's descendants (an Illustrator
+    /// "Live Paint Group"). None = the whole visible scene participates.
+    #[serde(default)]
+    pub live_paint_group: Option<u32>,
 }
 
 fn default_document_size() -> f32 { 1000.0 }
@@ -904,6 +935,7 @@ impl Engine {
                     h: 1000.0,
                     background: default_artboard_bg(),
                 }],
+                live_paint_group: None,
             },
             next_id: 1,
             global_transforms: HashMap::new(),
@@ -930,6 +962,11 @@ impl Engine {
     }
 
     pub fn update_render_buffer(&mut self, visible_ids: Vec<u32>) {
+        // Live Paint faces render in-stream at each group's z, so the network
+        // must be current before we walk the tree (any flagged group counts).
+        if self.has_live_paint() {
+            self.ensure_network_clean();
+        }
         self.render_buffer.clear();
         let visible_set: HashSet<u32> = visible_ids.into_iter().collect();
 
@@ -1007,6 +1044,40 @@ impl Engine {
         }
     }
 
+    /// Emit CMD_LP_FACES: every colored face (effective color) as a closed
+    /// bézier path. Drawn at the bottom of the Live Paint group.
+    fn write_lp_faces(&mut self, group: u32, total_nodes: &mut u32) {
+        let faces = self.live_paint_faces_effective(Some(group));
+        if faces.is_empty() { return; }
+        let rec = begin_record(&mut self.render_buffer);
+        self.render_buffer.extend_from_slice(&CMD_LP_FACES.to_le_bytes());
+        self.render_buffer.extend_from_slice(&0u32.to_le_bytes()); // advisory nodeId
+        self.render_buffer.extend_from_slice(&(faces.len() as u32).to_le_bytes());
+        for (c, outline) in &faces {
+            for v in [c.r, c.g, c.b, c.a] { self.render_buffer.extend_from_slice(&v.to_le_bytes()); }
+            write_outline_points(&mut self.render_buffer, outline);
+        }
+        end_record(&mut self.render_buffer, rec);
+        *total_nodes += 1;
+    }
+
+    /// Emit CMD_LP_EDGES: painted edges as open bézier strokes (color + width).
+    /// Drawn just before END_GROUP, on top of the members.
+    fn write_lp_edges(&mut self, group: u32, total_nodes: &mut u32) {
+        let edges = self.live_paint_edges_painted(Some(group));
+        if edges.is_empty() { return; }
+        let rec = begin_record(&mut self.render_buffer);
+        self.render_buffer.extend_from_slice(&CMD_LP_EDGES.to_le_bytes());
+        self.render_buffer.extend_from_slice(&0u32.to_le_bytes()); // advisory nodeId
+        self.render_buffer.extend_from_slice(&(edges.len() as u32).to_le_bytes());
+        for (c, width, outline) in &edges {
+            for v in [c.r, c.g, c.b, c.a, *width] { self.render_buffer.extend_from_slice(&v.to_le_bytes()); }
+            write_outline_points(&mut self.render_buffer, outline);
+        }
+        end_record(&mut self.render_buffer, rec);
+        *total_nodes += 1;
+    }
+
     fn write_node_recursive(
         &mut self,
         id: u32,
@@ -1039,8 +1110,23 @@ impl Engine {
             *total_nodes += 1;
 
             // Children are a sibling list — same mask-span semantics as roots.
+            // Cloned up front so `node`'s borrow ends before the &mut self calls.
             let children = node.children.clone();
+
+            // This group is a Live Paint group → its faces render here (bottom of
+            // the group, under the members' strokes), and its painted edges just
+            // before END_GROUP (on top of the members). Every flagged group
+            // renders its own faces, so multiple groups coexist.
+            let is_lp = self.scene.nodes.get(&id).map_or(false, |n| n.live_paint);
+            if is_lp {
+                self.write_lp_faces(id, total_nodes);
+            }
+
             self.write_siblings_with_masks(&children, visible_set, total_nodes);
+
+            if is_lp {
+                self.write_lp_edges(id, total_nodes);
+            }
 
             // CMD_END_GROUP
             let rec = begin_record(&mut self.render_buffer);
@@ -1082,8 +1168,11 @@ impl Engine {
             // Multi-fill, Multi-stroke, and Transforms format
             let s = &node.style;
             
-            // Fills
-            let active_fills = s.fills.clone();
+            // Fills. A member of ANY Live Paint group writes ZERO fills — the
+            // face pass provides its interior colour (so painted faces aren't
+            // hidden behind the member's own fill), matching Illustrator.
+            let suppress_fills = self.is_in_any_live_paint(id);
+            let active_fills = if suppress_fills { Vec::new() } else { s.fills.clone() };
             self.render_buffer.extend_from_slice(&(active_fills.len() as u32).to_le_bytes());
             for fill in &active_fills {
                 write_paint(&mut self.render_buffer, &Some(fill.clone()));
@@ -1243,8 +1332,13 @@ impl Engine {
 
     fn mark_dirty(&mut self, id: u32) {
         self.dirty_flags.insert(id, true);
-        // Invalidate vector network so faces recompute on next query
-        self.scene.vector_network.dirty = true;
+        // Invalidate the Live Paint network so faces recompute on next query.
+        // Only edits inside (or of) a Live Paint group matter — skip the rebuild
+        // for edits elsewhere (big win on busy documents). With no flagged group
+        // there is nothing to rebuild.
+        if self.is_in_any_live_paint(id) {
+            self.scene.vector_network.dirty = true;
+        }
     }
 
     pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32) -> u32 {
@@ -1273,6 +1367,7 @@ impl Engine {
             is_mask: false,
             mask_type: 0,
             clip_content: false,
+            live_paint: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -1309,6 +1404,7 @@ impl Engine {
             is_mask: false,
             mask_type: 0,
             clip_content: false,
+            live_paint: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -1380,6 +1476,7 @@ impl Engine {
             is_mask: false,
             mask_type: 0,
             clip_content: false,
+            live_paint: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -1437,6 +1534,7 @@ impl Engine {
             is_mask: false,
             mask_type: 0,
             clip_content: false,
+            live_paint: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -1496,6 +1594,7 @@ impl Engine {
             is_mask: false,
             mask_type: 0,
             clip_content: false,
+            live_paint: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -1563,6 +1662,24 @@ impl Engine {
 
     pub fn get_node_is_mask(&self, id: u32) -> bool {
         self.scene.nodes.get(&id).map(|n| n.is_mask).unwrap_or(false)
+    }
+
+    /// Mark (or unmark) a Group node as a Live Paint group. No-op on non-groups.
+    pub fn set_node_live_paint(&mut self, id: u32, live_paint: bool) {
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            if node.node_type == NodeType::Group {
+                node.live_paint = live_paint;
+            }
+        }
+        // Flagging or un-flagging a group changes which groups the network
+        // tracks, so always force a rebuild (un-flagging wouldn't trip the
+        // descendant check in mark_dirty).
+        self.dirty_flags.insert(id, true);
+        self.scene.vector_network.dirty = true;
+    }
+
+    pub fn get_node_live_paint(&self, id: u32) -> bool {
+        self.scene.nodes.get(&id).map(|n| n.live_paint).unwrap_or(false)
     }
 
     /// Replace a node's effects from a JSON array of `Effect` (serde-tagged,
@@ -1742,6 +1859,11 @@ impl Engine {
     }
 
     pub fn remove_node(&mut self, id: u32) {
+        // Removing a member (or the group itself) changes a Live Paint network,
+        // so invalidate it while the node still exists to be classified.
+        if self.is_in_any_live_paint(id) {
+            self.scene.vector_network.dirty = true;
+        }
         if let Some(node) = self.scene.nodes.remove(&id) {
             if let Some(parent_id) = node.parent {
                 if let Some(parent) = self.scene.nodes.get_mut(&parent_id) {
@@ -1829,6 +1951,12 @@ impl Engine {
 
         self.update_node_global_transform(child_id);
         self.update_spatial_index_recursive(child_id);
+
+        // Reparenting into or out of a Live Paint group changes its network.
+        if self.is_in_any_live_paint(child_id)
+            || old_parent.map_or(false, |p| self.is_in_any_live_paint(p)) {
+            self.scene.vector_network.dirty = true;
+        }
         true
     }
 
@@ -3141,6 +3269,7 @@ impl Engine {
             is_mask: false,
             mask_type: 0,
             clip_content: false,
+            live_paint: false,
             };
         self.scene.nodes.insert(group_id, group_node);
 
@@ -3312,6 +3441,7 @@ impl Engine {
             is_mask: false,
             mask_type: 0,
             clip_content: false,
+            live_paint: false,
             };
 
         self.scene.nodes.insert(id, node);
@@ -3378,6 +3508,7 @@ impl Engine {
             is_mask: false,
             mask_type: 0,
             clip_content: false,
+            live_paint: false,
         };
 
         self.scene.nodes.insert(id, node);
@@ -3664,8 +3795,8 @@ impl History {
 impl Engine {
     /// Rebuild the planar graph from all visible paths.
     pub fn rebuild_vector_network(&mut self) {
-        let segments = self.collect_segments();
-        self.scene.vector_network.rebuild(segments);
+        let (segments, curves) = self.collect_segments();
+        self.scene.vector_network.rebuild(segments, curves);
     }
 
     /// Mark the vector network as needing recomputation.
@@ -3682,11 +3813,13 @@ impl Engine {
         }
     }
 
-    /// Get the boundary polygon of a face as JSON.
+    /// Get a face's exact-bézier outline as JSON `[{x,y,cp1:[x,y],cp2:[x,y]}]`
+    /// (closed subpath). Used for the hover highlight.
     pub fn get_face_boundary(&mut self, face_id: u32) -> String {
         self.ensure_network_clean();
-        match self.scene.vector_network.faces.get(&face_id) {
-            Some(face) => serde_json::to_string(&face.boundary_polygon).unwrap_or_default(),
+        let vn = &self.scene.vector_network;
+        match vn.faces.get(&face_id) {
+            Some(face) => serde_json::to_string(&pathpoints_to_json(&vn.face_outline(face))).unwrap_or_default(),
             None => "[]".to_string(),
         }
     }
@@ -3705,16 +3838,20 @@ impl Engine {
         }
     }
 
-    /// Get all filled faces as JSON for rendering.
+    /// Get all filled faces as JSON for rendering. Each face carries both the
+    /// flattened `boundary` polygon (hit tests) and the exact-bézier `outline`
+    /// (anchor + handles) used to render/export true curves.
     pub fn get_filled_faces(&mut self) -> String {
         self.ensure_network_clean();
-        let filled: Vec<serde_json::Value> = self.scene.vector_network.faces.values()
+        let vn = &self.scene.vector_network;
+        let filled: Vec<serde_json::Value> = vn.faces.values()
             .filter(|f| f.fill.is_some() && !f.is_outer)
             .map(|f| {
                 let fill = f.fill.as_ref().unwrap();
                 serde_json::json!({
                     "id": f.id,
                     "boundary": f.boundary_polygon,
+                    "outline": pathpoints_to_json(&vn.face_outline(f)),
                     "fill": { "r": fill.r, "g": fill.g, "b": fill.b, "a": fill.a }
                 })
             })
@@ -3722,10 +3859,322 @@ impl Engine {
         serde_json::to_string(&filled).unwrap_or_default()
     }
 
+    /// Per-group Live Paint render data for SVG export, mirroring the in-app
+    /// compositing: every colored face (effective color, tagged with its owning
+    /// group) that draws UNDER the members' strokes, plus painted edges (on top).
+    /// JSON: `{"groups":[id,…],"faces":[{group,outline,fill}],"edges":[{group,outline,color,width}]}`.
+    pub fn get_live_paint_render_data(&mut self) -> String {
+        self.ensure_network_clean();
+        let order = self.draw_order();
+        let rank: std::collections::HashMap<u32, usize> =
+            order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let vn = &self.scene.vector_network;
+        let faces: Vec<serde_json::Value> = vn.faces.values()
+            .filter(|f| !f.is_outer)
+            .filter_map(|f| {
+                let color = f.fill.or_else(|| self.inherited_face_color(f, &rank));
+                color.map(|c| serde_json::json!({
+                    "group": f.group,
+                    "outline": pathpoints_to_json(&vn.face_outline(f)),
+                    "fill": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
+                }))
+            })
+            .collect();
+        let edges: Vec<serde_json::Value> = vn.logical_edges.values()
+            .filter_map(|le| le.paint.map(|c| serde_json::json!({
+                "group": le.group,
+                "outline": pathpoints_to_json(&le.outline),
+                "color": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
+                "width": le.width,
+            })))
+            .collect();
+        let groups = self.live_paint_group_ids();
+        serde_json::to_string(&serde_json::json!({
+            "groups": groups, "faces": faces, "edges": edges,
+        })).unwrap_or_else(|_| "{\"groups\":[],\"faces\":[],\"edges\":[]}".to_string())
+    }
+
+    /// Faces to bake on Expand: every non-outer face with an EFFECTIVE fill —
+    /// the painted override if set, else the fill of the topmost source shape
+    /// covering it (Illustrator absorbs source appearance). Faces with no fill
+    /// are omitted (discarded on expand). JSON: `[{outline, fill}]`.
+    pub fn get_live_paint_faces(&mut self) -> String {
+        self.ensure_network_clean();
+        let items: Vec<serde_json::Value> = self.live_paint_faces_effective(self.scene.live_paint_group).into_iter()
+            .map(|(c, outline)| serde_json::json!({
+                "outline": pathpoints_to_json(&outline),
+                "fill": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
+            }))
+            .collect();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Every colored face as (effective color, exact-bézier outline). Effective
+    /// color = painted override, else the topmost covering source fill. Shared by
+    /// Expand (JSON) and the render writer (in-stream faces). Pure reads.
+    fn live_paint_faces_effective(&self, group: Option<u32>) -> Vec<(Color, Vec<PathPoint>)> {
+        let order = self.draw_order();
+        let rank: std::collections::HashMap<u32, usize> =
+            order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let vn = &self.scene.vector_network;
+        vn.faces.values()
+            .filter(|f| !f.is_outer)
+            .filter(|f| group.map_or(true, |g| f.group == g))
+            .filter_map(|f| {
+                let color = f.fill.or_else(|| self.inherited_face_color(f, &rank));
+                color.map(|c| (c, vn.face_outline(f)))
+            })
+            .collect()
+    }
+
+    /// Painted logical edges as (color, width, exact-bézier outline). Optionally
+    /// filtered to a single Live Paint group. Pure reads.
+    fn live_paint_edges_painted(&self, group: Option<u32>) -> Vec<(Color, f32, Vec<PathPoint>)> {
+        self.scene.vector_network.logical_edges.values()
+            .filter(|le| group.map_or(true, |g| le.group == g))
+            .filter_map(|le| le.paint.map(|c| (c, le.width, le.outline.clone())))
+            .collect()
+    }
+
+    /// Ids of every node flagged as a Live Paint group, ascending (stable order).
+    fn live_paint_group_ids(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.scene.nodes.iter()
+            .filter(|(_, n)| n.live_paint)
+            .map(|(&id, _)| id)
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Whether any node in the scene is a Live Paint group.
+    fn has_live_paint(&self) -> bool {
+        self.scene.nodes.values().any(|n| n.live_paint)
+    }
+
+    /// Whether `id` is a Live Paint group or a descendant of one.
+    fn is_in_any_live_paint(&self, id: u32) -> bool {
+        self.live_paint_group_ids().iter()
+            .any(|&g| g == id || self.is_descendant_of(id, g))
+    }
+
+    /// The fill of the topmost source shape whose interior contains `face`
+    /// (its containment signature), or None if none of them has a fill color.
+    fn inherited_face_color(&self, face: &vector_network::PlanarFace, rank: &std::collections::HashMap<u32, usize>) -> Option<Color> {
+        let mut best: Option<(usize, Color)> = None;
+        for &nid in &face.signature {
+            let node = match self.scene.nodes.get(&nid) { Some(n) => n, None => continue };
+            if let Some(c) = node.style.fills.first().and_then(paint_color) {
+                let r = rank.get(&nid).copied().unwrap_or(0);
+                if best.map_or(true, |(br, _)| r >= br) {
+                    best = Some((r, c));
+                }
+            }
+        }
+        best.map(|(_, c)| c)
+    }
+
+    /// Node ids in paint order (root list, depth-first; later = drawn on top).
+    fn draw_order(&self) -> Vec<u32> {
+        fn dfs(engine: &Engine, id: u32, out: &mut Vec<u32>) {
+            out.push(id);
+            if let Some(n) = engine.scene.nodes.get(&id) {
+                for &c in &n.children { dfs(engine, c, out); }
+            }
+        }
+        let mut out = Vec::new();
+        for &r in &self.scene.root_nodes { dfs(self, r, &mut out); }
+        out
+    }
+
+    /// Scope Live Paint to a group's descendants (an Illustrator "Live Paint
+    /// Group"). Pass 0 to clear the scope (whole scene participates again).
+    pub fn set_live_paint_group(&mut self, node_id: u32) {
+        self.scene.live_paint_group = if node_id == 0 { None } else { Some(node_id) };
+        self.scene.vector_network.dirty = true;
+    }
+
+    /// The active Live Paint group node id, or -1 if none.
+    pub fn get_live_paint_group(&self) -> i32 {
+        self.scene.live_paint_group.map(|g| g as i32).unwrap_or(-1)
+    }
+
+    /// Remove ALL Live Paint face fills and edge paints. Used by Expand once the
+    /// painted marks have been baked into real path shapes so they don't
+    /// double-render on top of the baked geometry.
+    pub fn clear_live_paint_marks(&mut self) {
+        self.scene.vector_network.pending_fills.clear();
+        self.scene.vector_network.painted_edges.clear();
+        for face in self.scene.vector_network.faces.values_mut() {
+            face.fill = None;
+        }
+        for le in self.scene.vector_network.logical_edges.values_mut() {
+            le.paint = None;
+            le.width = 0.0;
+        }
+    }
+
+    /// Nearest paintable edge to a point (world units), or -1.
+    pub fn query_edge_at(&mut self, x: f32, y: f32, tolerance: f32) -> i32 {
+        self.ensure_network_clean();
+        match self.scene.vector_network.query_edge_at(x, y, tolerance) {
+            Some(id) => id as i32,
+            None => -1,
+        }
+    }
+
+    /// Paint a logical edge with a stroke color/width. The paint is anchored in
+    /// the source path's local space so it follows the path when it moves.
+    pub fn set_edge_paint(&mut self, edge_id: u32, r: f32, g: f32, b: f32, a: f32, width: f32) {
+        self.ensure_network_clean();
+        let (src, world_mid, seg, t) = match self.scene.vector_network.logical_edges.get(&edge_id) {
+            Some(le) => (le.source_node, vector_network::polyline_midpoint(&le.polyline), le.anchor_seg, le.anchor_t),
+            None => return,
+        };
+        let color = Color { r, g, b, a };
+        let local = self.world_to_local(src, world_mid);
+        let edges = &mut self.scene.vector_network.painted_edges;
+        // Replace any paint already anchored to this edge (same node + segment,
+        // or ~same spot for legacy entries).
+        edges.retain(|pe| !(pe.source_node == src
+            && ((seg >= 0 && pe.seg == seg && (pe.t - t).abs() < 0.02)
+                || (pe.local - local).length() < 2.0)));
+        edges.push(vector_network::PaintedEdge { source_node: src, local, color, width, seg, t });
+        // Reflect immediately on the live logical edge.
+        if let Some(le) = self.scene.vector_network.logical_edges.get_mut(&edge_id) {
+            le.paint = Some(color);
+            le.width = width;
+        }
+    }
+
+    /// Remove the paint from a logical edge.
+    pub fn clear_edge_paint(&mut self, edge_id: u32) {
+        self.ensure_network_clean();
+        let (src, world_mid) = match self.scene.vector_network.logical_edges.get(&edge_id) {
+            Some(le) => (le.source_node, vector_network::polyline_midpoint(&le.polyline)),
+            None => return,
+        };
+        let local = self.world_to_local(src, world_mid);
+        self.scene.vector_network.painted_edges
+            .retain(|pe| !(pe.source_node == src && (pe.local - local).length() < 2.0));
+        if let Some(le) = self.scene.vector_network.logical_edges.get_mut(&edge_id) {
+            le.paint = None;
+            le.width = 0.0;
+        }
+    }
+
+    /// A logical edge's exact-bézier outline as JSON `[{x,y,cp1,cp2}]` (for the
+    /// hover highlight), or `[]` if the id is unknown.
+    pub fn get_edge_polyline(&mut self, edge_id: u32) -> String {
+        self.ensure_network_clean();
+        match self.scene.vector_network.logical_edges.get(&edge_id) {
+            Some(le) => serde_json::to_string(&pathpoints_to_json(&le.outline)).unwrap_or_else(|_| "[]".to_string()),
+            None => "[]".to_string(),
+        }
+    }
+
+    /// All painted logical edges as JSON for rendering. Carries the exact-bézier
+    /// `outline` (anchor + handles) and the flattened `polyline` (fallback).
+    pub fn get_painted_edges(&mut self) -> String {
+        self.ensure_network_clean();
+        let items: Vec<serde_json::Value> = self.scene.vector_network.logical_edges.values()
+            .filter_map(|le| le.paint.map(|c| serde_json::json!({
+                "polyline": le.polyline.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
+                "outline": pathpoints_to_json(&le.outline),
+                "color": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
+                "width": le.width,
+            })))
+            .collect();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Re-attach persisted edge paints to freshly-built logical edges. Runs
+    /// after each rebuild: the local anchor is mapped to world through the
+    /// current transform, then matched to the nearest same-source logical edge.
+    pub(crate) fn resolve_painted_edges(&mut self) {
+        if self.scene.vector_network.painted_edges.is_empty() {
+            return;
+        }
+        // Snapshot each logical edge's identity: id, source, world midpoint, and
+        // the source segments (+t-ranges) it covers.
+        let candidates: Vec<(u32, u32, glam::Vec2, Vec<(u32, f32, f32)>)> =
+            self.scene.vector_network.logical_edges.values()
+                .map(|le| (le.id, le.source_node, vector_network::polyline_midpoint(&le.polyline), le.segs.clone()))
+                .collect();
+
+        let painted = self.scene.vector_network.painted_edges.clone();
+        const MATCH_TOL: f32 = 40.0;
+        for pe in &painted {
+            let same: Vec<&(u32, u32, glam::Vec2, Vec<(u32, f32, f32)>)> =
+                candidates.iter().filter(|(_, src, _, _)| *src == pe.source_node).collect();
+            if same.is_empty() {
+                continue;
+            }
+            // Tier 1 (structural): the logical edge on this source whose covered
+            // segments include (pe.seg, pe.t). Robust when a crossing moves.
+            let mut chosen: Option<u32> = None;
+            if pe.seg >= 0 {
+                let seg = pe.seg as u32;
+                chosen = same.iter()
+                    .find(|(_, _, _, segs)| segs.iter().any(|&(s, lo, hi)| s == seg && pe.t >= lo - 1e-4 && pe.t <= hi + 1e-4))
+                    .map(|(id, _, _, _)| *id);
+            }
+            // Tier 2 (fallback): nearest midpoint (legacy files / no structural id).
+            if chosen.is_none() {
+                let target = self.local_to_world(pe.source_node, pe.local);
+                let mut best: Option<(u32, f32)> = None;
+                for (id, _, mid, _) in &same {
+                    let d = (*mid - target).length();
+                    if best.map_or(true, |(_, bd)| d < bd) { best = Some((*id, d)); }
+                }
+                if let Some((id, d)) = best {
+                    if d <= MATCH_TOL || same.len() == 1 { chosen = Some(id); }
+                }
+            }
+            if let Some(id) = chosen {
+                if let Some(le) = self.scene.vector_network.logical_edges.get_mut(&id) {
+                    le.paint = Some(pe.color);
+                    le.width = pe.width;
+                }
+            }
+        }
+    }
+
+    /// World→local for a node using its global transform (identity if unknown).
+    fn world_to_local(&self, node: u32, p: glam::Vec2) -> glam::Vec2 {
+        match self.global_transforms.get(&node) {
+            Some(m) => {
+                let mat = glam::Mat3::from_cols_array(m);
+                mat.inverse().transform_point2(p)
+            }
+            None => p,
+        }
+    }
+
+    /// Local→world for a node using its global transform (identity if unknown).
+    fn local_to_world(&self, node: u32, p: glam::Vec2) -> glam::Vec2 {
+        match self.global_transforms.get(&node) {
+            Some(m) => glam::Mat3::from_cols_array(m).transform_point2(p),
+            None => p,
+        }
+    }
+
     /// Set gap tolerance for the vector network.
     pub fn set_gap_tolerance(&mut self, tolerance: f32) {
         self.scene.vector_network.gap_tolerance = tolerance;
         self.scene.vector_network.dirty = true;
+    }
+
+    /// Set the Live Paint gap-closing distance (world units). Open path ends
+    /// within this distance are bridged so the enclosed region is fillable.
+    /// 0 disables gap closing.
+    pub fn set_gap_bridge_distance(&mut self, distance: f32) {
+        self.scene.vector_network.gap_bridge_distance = distance.max(0.0);
+        self.scene.vector_network.dirty = true;
+    }
+
+    /// Get the current Live Paint gap-closing distance.
+    pub fn get_gap_bridge_distance(&self) -> f32 {
+        self.scene.vector_network.gap_bridge_distance
     }
 
     /// Check if the vector network is dirty.
@@ -3879,6 +4328,27 @@ impl Engine {
         }).collect();
         format!("[{}]", items.join(","))
     }
+}
+
+/// A representative solid color for a paint: solids as-is, gradients → first
+/// stop (documented approximation for Live Paint), patterns → none.
+fn paint_color(p: &Paint) -> Option<Color> {
+    match p {
+        Paint::Solid(c) => Some(*c),
+        Paint::Gradient(g) => g.stops.first().map(|s| s.color),
+        Paint::Pattern(_) => None,
+    }
+}
+
+/// Serialize a bézier outline (anchor + handles) to the JSON shape the renderer,
+/// SVG export, and Expand consume: `[{x,y,cp1:[x,y],cp2:[x,y]}]`.
+fn pathpoints_to_json(pts: &[PathPoint]) -> Vec<serde_json::Value> {
+    pts.iter().map(|p| serde_json::json!({
+        "x": p.x,
+        "y": p.y,
+        "cp1": [p.cp1.x, p.cp1.y],
+        "cp2": [p.cp2.x, p.cp2.y],
+    })).collect()
 }
 
 /// Minimal JSON string escaper for artboard names.
@@ -4495,6 +4965,7 @@ mod tests {
                 {"x":400.0,"y":400.0,"cp1":[400.0,400.0],"cp2":[400.0,400.0]}
             ]}]"#,
         );
+        flag_scene_lp(&mut engine);
         // Compute faces and fill one, so the planar network has content too
         let face = engine.query_face_at(300.0, 200.0);
         assert!(face >= 0, "expected a face inside the triangle");
@@ -4510,6 +4981,670 @@ mod tests {
         assert!((b[0] - 100.0).abs() < 0.5, "position must be restored, got {:?}", b);
         let filled = engine.get_filled_faces();
         assert!(filled.contains("\"r\":1.0"), "face fill must be restored, got {}", filled);
+    }
+
+    #[test]
+    fn test_fill_survives_large_move_via_signature() {
+        // The headline Live Paint behavior: painting a region, then moving the
+        // bounding path far, must keep the fill attached. The move (300px) is well
+        // beyond the centroid-fallback threshold (50px), so only signature matching
+        // (same bounding node) can preserve it.
+        let mut engine = Engine::new();
+        let path_id = engine.add_path(
+            r#"[{"closed":true,"points":[
+                {"x":100.0,"y":100.0,"cp1":[100.0,100.0],"cp2":[100.0,100.0]},
+                {"x":400.0,"y":100.0,"cp1":[400.0,100.0],"cp2":[400.0,100.0]},
+                {"x":400.0,"y":400.0,"cp1":[400.0,400.0],"cp2":[400.0,400.0]}
+            ]}]"#,
+        );
+        flag_scene_lp(&mut engine);
+        let face = engine.query_face_at(300.0, 200.0);
+        assert!(face >= 0, "expected a face inside the triangle");
+        engine.set_face_fill(face as u32, 1.0, 0.0, 0.0, 1.0);
+
+        engine.move_node(path_id, 300.0, 300.0);
+        // get_filled_faces rebuilds the dirty network and remaps fills.
+        let filled = engine.get_filled_faces();
+        assert!(filled.contains("\"r\":1.0"),
+            "fill must follow the region across a large move, got {}", filled);
+        // And the filled region is now at the moved location, not the old one.
+        assert!(engine.query_face_at(600.0, 500.0) >= 0, "moved region should exist");
+    }
+
+    #[test]
+    fn test_overlapping_circle_fills_follow_separation() {
+        // The hard case: two overlapping circles make three faces, all bounded by
+        // BOTH arcs — so a "bounding paths" signature can't tell them apart. The
+        // containment signature (which circle contains the face) can: left={a},
+        // middle={a,b}, right={b}. Moving the circles apart must keep the left
+        // fill on circle a and the right fill on circle b; the middle drops.
+        let mut engine = Engine::new();
+        let a = engine.add_ellipse(300.0, 300.0, 120.0, 120.0);
+        let b = engine.add_ellipse(420.0, 300.0, 120.0, 120.0);
+        let _ = a;
+        flag_scene_lp(&mut engine);
+        let left = engine.query_face_at(240.0, 300.0);
+        let mid = engine.query_face_at(360.0, 300.0);
+        let right = engine.query_face_at(480.0, 300.0);
+        assert!(left >= 0 && mid >= 0 && right >= 0, "expected three faces");
+        assert!(left != mid && mid != right && left != right, "faces must be distinct");
+        engine.set_face_fill(left as u32, 1.0, 0.0, 0.0, 1.0);   // red → circle a
+        engine.set_face_fill(mid as u32, 0.0, 1.0, 0.0, 1.0);    // green → overlap
+        engine.set_face_fill(right as u32, 0.0, 0.0, 1.0, 1.0);  // blue → circle b
+
+        // Separate the circles (b moves right by 200 → no overlap).
+        engine.move_node(b, 200.0, 0.0);
+        let filled = engine.get_filled_faces();
+
+        assert!(filled.contains("\"r\":1.0"), "red must follow circle a, got {}", filled);
+        assert!(filled.contains("\"b\":1.0"), "blue must follow circle b, got {}", filled);
+        assert!(!filled.contains("\"g\":1.0"), "green (vanished overlap) must drop, got {}", filled);
+    }
+
+    #[test]
+    fn test_deleted_shape_fill_does_not_bleed() {
+        // Fill a triangle, delete it, then add an unrelated shape nearby. The old
+        // fill must NOT re-attach to the new shape's region (its defining shape is
+        // gone), even if their centroids are within the fallback threshold.
+        let mut engine = Engine::new();
+        let tri = engine.add_path(
+            r#"[{"closed":true,"points":[
+                {"x":100.0,"y":100.0,"cp1":[100.0,100.0],"cp2":[100.0,100.0]},
+                {"x":300.0,"y":100.0,"cp1":[300.0,100.0],"cp2":[300.0,100.0]},
+                {"x":200.0,"y":300.0,"cp1":[200.0,300.0],"cp2":[200.0,300.0]}
+            ]}]"#,
+        );
+        let g = flag_scene_lp(&mut engine);
+        let f = engine.query_face_at(200.0, 160.0);
+        assert!(f >= 0);
+        engine.set_face_fill(f as u32, 1.0, 0.0, 0.0, 1.0);
+        assert!(engine.get_filled_faces().contains("\"r\":1.0"));
+
+        engine.remove_node(tri);
+        // A rectangle whose centroid sits near the deleted triangle's fill,
+        // added into the same Live Paint group so it forms a real region.
+        let rect = engine.add_rect(170.0, 140.0, 60.0, 60.0);
+        engine.set_parent(rect, Some(g));
+        let filled = engine.get_filled_faces();
+        assert!(!filled.contains("\"r\":1.0"),
+            "a deleted shape's fill must not bleed onto an unrelated region, got {}", filled);
+    }
+
+    #[test]
+    fn test_edge_paint_follows_source_move() {
+        // Paint the outline of a lone triangle (one logical edge, since there are
+        // no crossings), then move the triangle. The edge paint is anchored in the
+        // path's local space, so it must survive the move and re-attach.
+        let mut engine = Engine::new();
+        let tri = engine.add_path(
+            r#"[{"closed":true,"points":[
+                {"x":100.0,"y":100.0,"cp1":[100.0,100.0],"cp2":[100.0,100.0]},
+                {"x":300.0,"y":100.0,"cp1":[300.0,100.0],"cp2":[300.0,100.0]},
+                {"x":200.0,"y":260.0,"cp1":[200.0,260.0],"cp2":[200.0,260.0]}
+            ]}]"#,
+        );
+        flag_scene_lp(&mut engine);
+        // Hit the top edge of the triangle.
+        let edge = engine.query_edge_at(200.0, 100.0, 8.0);
+        assert!(edge >= 0, "expected a paintable edge on the triangle outline");
+        engine.set_edge_paint(edge as u32, 1.0, 0.0, 0.0, 1.0, 3.0);
+        assert!(engine.get_painted_edges().contains("\"r\":1.0"), "edge paint should render");
+
+        // Move the whole triangle; the paint must follow.
+        engine.move_node(tri, 400.0, 250.0);
+        let painted = engine.get_painted_edges();
+        assert!(painted.contains("\"r\":1.0"), "edge paint must survive the move, got {}", painted);
+    }
+
+    #[test]
+    fn test_gap_closing_makes_open_region_fillable() {
+        // An open square outline with a ~10px gap between its endpoints is not a
+        // closed region — no face — until gap closing bridges the opening.
+        let mut engine = Engine::new();
+        engine.add_path(
+            r#"[{"closed":false,"points":[
+                {"x":100.0,"y":100.0,"cp1":[100.0,100.0],"cp2":[100.0,100.0]},
+                {"x":300.0,"y":100.0,"cp1":[300.0,100.0],"cp2":[300.0,100.0]},
+                {"x":300.0,"y":300.0,"cp1":[300.0,300.0],"cp2":[300.0,300.0]},
+                {"x":100.0,"y":300.0,"cp1":[100.0,300.0],"cp2":[100.0,300.0]},
+                {"x":100.0,"y":110.0,"cp1":[100.0,110.0],"cp2":[100.0,110.0]}
+            ]}]"#,
+        );
+        flag_scene_lp(&mut engine);
+        assert_eq!(engine.query_face_at(200.0, 200.0), -1,
+            "open region must not be fillable without gap closing");
+
+        engine.set_gap_bridge_distance(20.0);
+        assert!(engine.query_face_at(200.0, 200.0) >= 0,
+            "gap closing must bridge the 10px opening and make the region fillable");
+    }
+
+    // ─── Live Paint: systematic coverage ────────────────────────────────────
+    // Deterministic geometry/group-model tests (the browser was only ever a
+    // smoke check). Faces are counted directly off the planar network after a
+    // query forces `ensure_network_clean`.
+
+    /// Number of bounded (non-outer) faces in the current planar network.
+    fn inner_faces(engine: &mut Engine) -> usize {
+        engine.query_face_at(-1.0e9, -1.0e9); // force a clean rebuild
+        engine.scene.vector_network.faces.values().filter(|f| !f.is_outer).count()
+    }
+
+    /// Wrap every current root node in one Live Paint–flagged group and make it
+    /// the active group. Shapes only form a paint surface inside a flagged group,
+    /// so tests that build a flat scene call this before painting/querying.
+    fn flag_scene_lp(engine: &mut Engine) -> u32 {
+        let roots = engine.scene.root_nodes.clone();
+        let ids = format!("[{}]", roots.iter().map(|i| i.to_string())
+            .collect::<Vec<_>>().join(","));
+        let g = engine.group_nodes(&ids);
+        engine.set_node_live_paint(g, true);
+        engine.set_live_paint_group(g);
+        g
+    }
+
+    #[test]
+    fn test_two_overlapping_rects_make_three_faces() {
+        // The case the user hit: two overlapping axis-aligned rectangles must
+        // split into exactly three fillable regions — A-only, overlap, B-only —
+        // each a distinct face. (Guards the planar split at the crossing points.)
+        let mut engine = Engine::new();
+        engine.add_rect(0.0, 0.0, 100.0, 100.0);   // A: [0,100]²
+        engine.add_rect(50.0, 50.0, 100.0, 100.0); // B: [50,150]²
+        flag_scene_lp(&mut engine);
+
+        let a_only = engine.query_face_at(25.0, 25.0);
+        let overlap = engine.query_face_at(75.0, 75.0);
+        let b_only = engine.query_face_at(125.0, 125.0);
+
+        assert!(a_only >= 0 && overlap >= 0 && b_only >= 0,
+            "each region must be fillable: {a_only},{overlap},{b_only}");
+        assert!(a_only != overlap && overlap != b_only && a_only != b_only,
+            "the three regions must be distinct faces");
+        assert_eq!(inner_faces(&mut engine), 3, "exactly three bounded faces");
+    }
+
+    #[test]
+    fn test_rect_region_paint_is_stored_and_returned() {
+        // Painting a rectangle region stores the fill and get_filled_faces returns
+        // it with the right color.
+        let mut engine = Engine::new();
+        engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        engine.add_rect(50.0, 50.0, 100.0, 100.0);
+        flag_scene_lp(&mut engine);
+        let overlap = engine.query_face_at(75.0, 75.0);
+        assert!(overlap >= 0);
+        engine.set_face_fill(overlap as u32, 0.0, 1.0, 0.0, 1.0);
+        let filled = engine.get_filled_faces();
+        assert!(filled.contains("\"g\":1.0"), "painted region fill must be returned, got {filled}");
+    }
+
+    #[test]
+    fn test_rect_fill_follows_move_via_signature() {
+        // Paint A-only region, move rect A far; the fill must stay on A's region
+        // (containment signature = {A}), not drift or vanish.
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        engine.add_rect(50.0, 50.0, 100.0, 100.0);
+        flag_scene_lp(&mut engine);
+        let a_only = engine.query_face_at(25.0, 25.0);
+        assert!(a_only >= 0);
+        engine.set_face_fill(a_only as u32, 1.0, 0.0, 0.0, 1.0);
+        engine.move_node(a, 400.0, 400.0); // separate the rects entirely
+        let filled = engine.get_filled_faces();
+        assert!(filled.contains("\"r\":1.0"), "A's fill must follow the moved rect, got {filled}");
+    }
+
+    #[test]
+    fn test_live_paint_group_scopes_faces_to_members() {
+        // Only shapes inside a Live Paint–flagged group form a paint surface;
+        // shapes outside any flagged group are not paintable. A second flagged
+        // group is an INDEPENDENT network, so both coexist.
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(50.0, 50.0, 100.0, 100.0);
+        let outside = engine.add_rect(500.0, 500.0, 100.0, 100.0);
+        let group = engine.group_nodes(&format!("[{},{}]", a, b));
+        engine.set_node_live_paint(group, true);
+
+        assert!(engine.query_face_at(75.0, 75.0) >= 0, "in-group overlap must be paintable");
+        assert_eq!(engine.query_face_at(550.0, 550.0), -1,
+            "a shape outside any Live Paint group must not be paintable");
+        assert_eq!(inner_faces(&mut engine), 3, "only the two grouped rects contribute (3 faces)");
+
+        // Flagging the outside shape's group brings it in as its OWN network.
+        let g2 = engine.group_nodes(&format!("[{}]", outside));
+        engine.set_node_live_paint(g2, true);
+        assert!(engine.query_face_at(550.0, 550.0) >= 0,
+            "flagging its group makes the outside shape paintable");
+        assert_eq!(inner_faces(&mut engine), 4, "3 from the pair + 1 lone rect");
+    }
+
+    #[test]
+    fn test_unflagging_group_removes_its_faces() {
+        // Un-flagging a Live Paint group removes it from the network — its faces
+        // stop existing (the paint surface is gone).
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let group = engine.group_nodes(&format!("[{}]", a));
+        engine.set_node_live_paint(group, true);
+        assert!(engine.query_face_at(25.0, 25.0) >= 0, "flagged group is paintable");
+        engine.set_node_live_paint(group, false);
+        assert_eq!(engine.query_face_at(25.0, 25.0), -1,
+            "un-flagging the group removes its paint surface");
+    }
+
+    #[test]
+    fn test_two_groups_paint_independently() {
+        // Two separate Live Paint groups, each a lone rect. Painting a face in one
+        // must not affect the other, and both fills render (distinct groups).
+        let mut engine = Engine::new();
+        let r1 = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let r2 = engine.add_rect(300.0, 0.0, 100.0, 100.0);
+        let g1 = engine.group_nodes(&format!("[{}]", r1));
+        let g2 = engine.group_nodes(&format!("[{}]", r2));
+        engine.set_node_live_paint(g1, true);
+        engine.set_node_live_paint(g2, true);
+
+        let f1 = engine.query_face_at(50.0, 50.0);
+        let f2 = engine.query_face_at(350.0, 50.0);
+        assert!(f1 >= 0 && f2 >= 0 && f1 != f2, "each group has its own face: {f1},{f2}");
+        engine.set_face_fill(f1 as u32, 1.0, 0.0, 0.0, 1.0);
+        engine.set_face_fill(f2 as u32, 0.0, 0.0, 1.0, 1.0);
+        let filled = engine.get_filled_faces();
+        assert!(filled.contains("\"r\":1.0"), "group 1 fill present: {filled}");
+        assert!(filled.contains("\"b\":1.0"), "group 2 fill present: {filled}");
+        // Faces are tagged with their owning group.
+        let vn = &engine.scene.vector_network;
+        let groups: std::collections::HashSet<u32> =
+            vn.faces.values().filter(|f| !f.is_outer).map(|f| f.group).collect();
+        assert_eq!(groups.len(), 2, "faces are partitioned across the two groups");
+        assert!(groups.contains(&g1) && groups.contains(&g2), "both group ids present");
+    }
+
+    #[test]
+    fn test_live_paint_flag_and_group_survive_save_load() {
+        // The Live Paint special-object flag + the active group id must persist
+        // through the .vec (protobuf) format.
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(50.0, 50.0, 100.0, 100.0);
+        let group = engine.group_nodes(&format!("[{},{}]", a, b));
+        engine.set_node_live_paint(group, true);
+        engine.set_live_paint_group(group);
+        assert!(engine.get_node_live_paint(group));
+        assert_eq!(engine.get_live_paint_group(), group as i32);
+
+        let bytes = engine.serialize_proto();
+        let mut e2 = Engine::new();
+        assert!(e2.deserialize_proto(&bytes), "must decode");
+        assert!(e2.get_node_live_paint(group), "live_paint flag must survive save/load");
+        assert_eq!(e2.get_live_paint_group(), group as i32,
+            "active Live Paint group must survive save/load");
+    }
+
+    #[test]
+    fn test_painted_edge_survives_save_load() {
+        // A painted edge (stored by local-space identity) must round-trip through
+        // the file format and re-attach after the network rebuilds.
+        let mut engine = Engine::new();
+        engine.add_rect(0.0, 0.0, 200.0, 200.0);
+        flag_scene_lp(&mut engine);
+        let edge = engine.query_edge_at(100.0, 0.0, 8.0); // on the top edge
+        assert!(edge >= 0, "the rect outline is one paintable logical edge");
+        engine.set_edge_paint(edge as u32, 1.0, 0.0, 0.0, 1.0, 4.0);
+        assert!(engine.get_painted_edges().contains("\"r\":1.0"));
+
+        let bytes = engine.serialize_proto();
+        let mut e2 = Engine::new();
+        assert!(e2.deserialize_proto(&bytes), "must decode");
+        assert!(e2.get_painted_edges().contains("\"r\":1.0"),
+            "edge paint must survive save/load, got {}", e2.get_painted_edges());
+    }
+
+    #[test]
+    fn test_tjunction_line_splits_rectangle() {
+        // A line whose endpoints land ON a rectangle's edges (T-junctions) must
+        // split the rectangle into two fillable faces. This is the degenerate
+        // case behind "some regions of aligned rectangles aren't clickable".
+        let mut engine = Engine::new();
+        engine.add_rect(0.0, 0.0, 200.0, 200.0);
+        engine.add_path(
+            r#"[{"closed":false,"points":[
+                {"x":100.0,"y":0.0,"cp1":[100.0,0.0],"cp2":[100.0,0.0]},
+                {"x":100.0,"y":200.0,"cp1":[100.0,200.0],"cp2":[100.0,200.0]}
+            ]}]"#,
+        );
+        flag_scene_lp(&mut engine);
+        let left = engine.query_face_at(50.0, 100.0);
+        let right = engine.query_face_at(150.0, 100.0);
+        assert!(left >= 0 && right >= 0, "both halves must be fillable: {left},{right}");
+        assert!(left != right, "the dividing line must split the rect into two faces");
+        assert_eq!(inner_faces(&mut engine), 2, "exactly two faces");
+    }
+
+    #[test]
+    fn test_edge_aligned_rects_every_region_fillable() {
+        // Three rectangles whose edges align (T-junctions everywhere). Every
+        // strictly-interior point of the union must resolve to a face.
+        let mut engine = Engine::new();
+        let rects = [(150.0, 100.0, 200.0, 200.0),
+                     (250.0, 150.0, 200.0, 200.0),
+                     (200.0, 250.0, 200.0, 200.0)];
+        for &(x, y, w, h) in &rects { engine.add_rect(x, y, w, h); }
+        flag_scene_lp(&mut engine);
+        // Avoid edge lines so we only probe true interiors.
+        let edge_x = [150.0f32, 350.0, 250.0, 450.0, 200.0, 400.0];
+        let edge_y = [100.0f32, 300.0, 150.0, 350.0, 250.0, 450.0];
+        let mut checked = 0;
+        let mut x = 157.0;
+        while x < 450.0 {
+            let mut y = 107.0;
+            while y < 452.0 {
+                let on_edge = edge_x.iter().any(|&e| (e - x).abs() < 1.0)
+                    || edge_y.iter().any(|&e| (e - y).abs() < 1.0);
+                let inside = rects.iter().any(|&(rx, ry, rw, rh)|
+                    x > rx && x < rx + rw && y > ry && y < ry + rh);
+                if inside && !on_edge {
+                    assert!(engine.query_face_at(x, y) >= 0,
+                        "interior point ({x},{y}) must be fillable");
+                    checked += 1;
+                }
+                y += 11.0;
+            }
+            x += 11.0;
+        }
+        assert!(checked > 20, "sanity: probed a meaningful number of interior points");
+    }
+
+    #[test]
+    fn test_stacked_rects_sharing_edge_are_both_paintable() {
+        // The user's "T" layout: a wide rect on top and a narrow rect below that
+        // share a horizontal edge line (the narrow rect's top corners are
+        // T-junctions on the wide rect's bottom edge). Each rect is a closed
+        // region, so both must be independently fillable as distinct faces.
+        let mut engine = Engine::new();
+        engine.add_rect(0.0, 0.0, 200.0, 100.0);    // top: [0,200]x[0,100]
+        engine.add_rect(50.0, 100.0, 100.0, 200.0); // bottom: [50,150]x[100,300]
+        flag_scene_lp(&mut engine);
+        let top = engine.query_face_at(100.0, 50.0);
+        let bottom = engine.query_face_at(100.0, 200.0);
+        assert!(top >= 0, "the top rect must be fillable");
+        assert!(bottom >= 0, "the bottom rect must be fillable");
+        assert!(top != bottom, "top and bottom are distinct faces");
+    }
+
+    #[test]
+    fn test_three_overlapping_rects_regions_are_distinct() {
+        // Three mutually overlapping rects (like the reported screenshot): the
+        // region centres must each resolve to a distinct, fillable face.
+        let mut engine = Engine::new();
+        engine.add_rect(150.0, 100.0, 240.0, 240.0);
+        engine.add_rect(300.0, 150.0, 220.0, 170.0);
+        engine.add_rect(220.0, 240.0, 200.0, 320.0);
+        flag_scene_lp(&mut engine);
+        let probes = [
+            (200.0, 150.0), // rect 1 only
+            (470.0, 200.0), // rect 2 only
+            (250.0, 500.0), // rect 3 only
+            (330.0, 250.0), // a multi-overlap cell
+        ];
+        let faces: Vec<i32> = probes.iter().map(|&(x, y)| engine.query_face_at(x, y)).collect();
+        assert!(faces.iter().all(|&f| f >= 0), "every probed region is fillable: {faces:?}");
+        let distinct: std::collections::HashSet<i32> = faces.iter().copied().collect();
+        assert_eq!(distinct.len(), faces.len(), "each probed region is a distinct face: {faces:?}");
+    }
+
+    #[test]
+    fn test_circle_face_outline_is_true_curve() {
+        // A painted circle's face outline must be exact béziers (real handles),
+        // not a polygon. Sampled points stay within 0.05px of the true r=100
+        // circle (the old 32-gon deviated ~0.5px).
+        use glam::Vec2;
+        let mut engine = Engine::new();
+        engine.add_ellipse(200.0, 200.0, 100.0, 100.0);
+        flag_scene_lp(&mut engine);
+        let f = engine.query_face_at(200.0, 200.0);
+        assert!(f >= 0, "circle interior must be a face");
+        let face = engine.scene.vector_network.faces.get(&(f as u32)).unwrap().clone();
+        let outline = engine.scene.vector_network.face_outline(&face);
+        assert!(outline.len() >= 3, "outline anchors: {}", outline.len());
+
+        let curved = outline.iter().any(|p| (p.cp1 - Vec2::new(p.x, p.y)).length() > 1.0);
+        assert!(curved, "outline must carry real bezier handles, not a polygon");
+
+        let eval = |p: &[Vec2; 4], t: f32| {
+            let mt = 1.0 - t;
+            p[0] * (mt * mt * mt) + p[1] * (3.0 * mt * mt * t)
+                + p[2] * (3.0 * mt * t * t) + p[3] * (t * t * t)
+        };
+        let n = outline.len();
+        let mut maxdev = 0.0f32;
+        for i in 0..n {
+            let a = &outline[i];
+            let b = &outline[(i + 1) % n];
+            let cp = [Vec2::new(a.x, a.y), a.cp2, b.cp1, Vec2::new(b.x, b.y)];
+            for k in 0..=12 {
+                let t = k as f32 / 12.0;
+                let dev = ((eval(&cp, t) - Vec2::new(200.0, 200.0)).length() - 100.0).abs();
+                maxdev = maxdev.max(dev);
+            }
+        }
+        assert!(maxdev < 0.05, "circle outline deviates {maxdev}px (want <0.05)");
+    }
+
+    #[test]
+    #[ignore] // perf smoke — run with: cargo test --release -- --ignored perf_
+    fn perf_100_overlapping_shapes_rebuild() {
+        use std::time::Instant;
+        let mut engine = Engine::new();
+        for i in 0..100 {
+            let x = (i % 10) as f32 * 35.0 + 60.0;
+            let y = (i / 10) as f32 * 35.0 + 60.0;
+            engine.add_ellipse(x, y, 45.0, 45.0); // heavy overlap
+        }
+        let t = Instant::now();
+        let _ = engine.query_face_at(100.0, 100.0); // forces a full rebuild
+        let ms = t.elapsed().as_millis();
+        assert!(ms < 300, "100-shape rebuild took {ms}ms (want < 300ms in release)");
+    }
+
+    #[test]
+    fn test_painted_edge_stays_on_span_when_crossing_moves() {
+        // Paint the LEFT span of a horizontal line (split by a vertical crossing),
+        // then slide the crossing right. Structural identity (source seg + t) must
+        // keep the paint on the left span rather than drifting to the right one.
+        let mut engine = Engine::new();
+        engine.add_path(
+            r#"[{"closed":false,"points":[
+                {"x":0.0,"y":100.0,"cp1":[0.0,100.0],"cp2":[0.0,100.0]},
+                {"x":400.0,"y":100.0,"cp1":[400.0,100.0],"cp2":[400.0,100.0]}
+            ]}]"#,
+        );
+        let v = engine.add_path(
+            r#"[{"closed":false,"points":[
+                {"x":100.0,"y":0.0,"cp1":[100.0,0.0],"cp2":[100.0,0.0]},
+                {"x":100.0,"y":200.0,"cp1":[100.0,200.0],"cp2":[100.0,200.0]}
+            ]}]"#,
+        );
+        flag_scene_lp(&mut engine);
+        let edge = engine.query_edge_at(50.0, 100.0, 8.0); // left span
+        assert!(edge >= 0, "left span must be a paintable edge");
+        engine.set_edge_paint(edge as u32, 1.0, 0.0, 0.0, 1.0, 3.0);
+
+        engine.move_node(v, 150.0, 0.0); // crossing 100 → 250
+        let painted: serde_json::Value = serde_json::from_str(&engine.get_painted_edges()).unwrap();
+        let arr = painted.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "exactly one painted edge survives, got {}", arr.len());
+        // Its polyline must lie on the LEFT span (all x < the new crossing at 250).
+        let pl = arr[0]["polyline"].as_array().unwrap();
+        let max_x = pl.iter().map(|p| p[0].as_f64().unwrap()).fold(f64::MIN, f64::max);
+        assert!(max_x <= 251.0, "paint must stay on the left span (max x {max_x} should be ≤ 250)");
+    }
+
+    #[test]
+    fn test_scoped_invalidation_ignores_outside_edits() {
+        // With a Live Paint group, edits OUTSIDE it must not invalidate the
+        // network (perf), while edits inside it must.
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(50.0, 50.0, 100.0, 100.0);
+        let outside = engine.add_rect(500.0, 500.0, 100.0, 100.0);
+        let group = engine.group_nodes(&format!("[{},{}]", a, b));
+        engine.set_node_live_paint(group, true);
+        engine.query_face_at(75.0, 75.0); // force a clean rebuild
+        assert!(!engine.is_vector_network_dirty(), "clean after rebuild");
+
+        engine.move_node(outside, 10.0, 10.0);
+        assert!(!engine.is_vector_network_dirty(), "edit outside the group must not invalidate");
+
+        engine.move_node(a, 5.0, 5.0);
+        assert!(engine.is_vector_network_dirty(), "edit inside the group must invalidate");
+    }
+
+    #[test]
+    fn test_two_ellipses_three_faces() {
+        // Curved crossings (not just straight edges): two overlapping ellipses
+        // must split into left/overlap/right, each a distinct face.
+        let mut engine = Engine::new();
+        engine.add_ellipse(260.0, 300.0, 110.0, 90.0);
+        engine.add_ellipse(380.0, 300.0, 110.0, 90.0);
+        flag_scene_lp(&mut engine);
+        let l = engine.query_face_at(190.0, 300.0);
+        let m = engine.query_face_at(320.0, 300.0);
+        let r = engine.query_face_at(450.0, 300.0);
+        assert!(l >= 0 && m >= 0 && r >= 0, "ellipse regions: {l},{m},{r}");
+        assert!(l != m && m != r && l != r, "three distinct faces");
+    }
+
+    #[test]
+    fn test_curved_line_divides_rect_into_two_curved_faces() {
+        // A cubic whose ends land on a rect's top/bottom edges must split it into
+        // two faces whose shared boundary is a real curve (handles, not a polygon).
+        let mut engine = Engine::new();
+        engine.add_rect(0.0, 0.0, 200.0, 200.0);
+        engine.add_path(
+            r#"[{"closed":false,"points":[
+                {"x":100.0,"y":0.0,"cp1":[100.0,0.0],"cp2":[160.0,66.0]},
+                {"x":100.0,"y":200.0,"cp1":[40.0,133.0],"cp2":[100.0,200.0]}
+            ]}]"#,
+        );
+        flag_scene_lp(&mut engine);
+        let left = engine.query_face_at(30.0, 100.0);
+        let right = engine.query_face_at(180.0, 100.0);
+        assert!(left >= 0 && right >= 0 && left != right, "curved divider must split: {left},{right}");
+        let face = engine.scene.vector_network.faces.get(&(left as u32)).unwrap().clone();
+        let outline = engine.scene.vector_network.face_outline(&face);
+        let curved = outline.iter().any(|p| (p.cp1 - glam::Vec2::new(p.x, p.y)).length() > 1.0);
+        assert!(curved, "the dividing boundary must reconstruct as a curve");
+    }
+
+    #[test]
+    fn test_self_intersecting_bowtie_no_panic_and_faces() {
+        // A self-crossing (bowtie) closed path must not panic and yields faces.
+        let mut engine = Engine::new();
+        engine.add_path(
+            r#"[{"closed":true,"points":[
+                {"x":0.0,"y":0.0,"cp1":[0.0,0.0],"cp2":[0.0,0.0]},
+                {"x":100.0,"y":100.0,"cp1":[100.0,100.0],"cp2":[100.0,100.0]},
+                {"x":100.0,"y":0.0,"cp1":[100.0,0.0],"cp2":[100.0,0.0]},
+                {"x":0.0,"y":100.0,"cp1":[0.0,100.0],"cp2":[0.0,100.0]}
+            ]}]"#,
+        );
+        flag_scene_lp(&mut engine);
+        // The diagonals cross at (50,50), so the two lobes are LEFT and RIGHT.
+        // Must not panic; both lobes should be fillable.
+        let left = engine.query_face_at(15.0, 50.0);
+        let right = engine.query_face_at(85.0, 50.0);
+        assert!(left >= 0 && right >= 0, "bowtie lobes fillable: {left},{right}");
+        assert!(left != right, "the two lobes are distinct faces");
+    }
+
+    #[test]
+    fn test_random_scenes_no_dead_zones_or_panics() {
+        // Deterministic fuzz: random rects/ellipses. Every shape's centre must
+        // resolve to a face (no unfillable "dead zones"), and nothing panics.
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        for seed in 0..60u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut engine = Engine::new();
+            let mut centers: Vec<(f32, f32)> = Vec::new();
+            let k = rng.gen_range(2..7);
+            for _ in 0..k {
+                let x = rng.gen_range(60.0..440.0);
+                let y = rng.gen_range(60.0..440.0);
+                let w = rng.gen_range(50.0..170.0);
+                let h = rng.gen_range(50.0..170.0);
+                if rng.gen_bool(0.5) {
+                    engine.add_rect(x, y, w, h);
+                    centers.push((x + w / 2.0, y + h / 2.0));
+                } else {
+                    engine.add_ellipse(x, y, w / 2.0, h / 2.0);
+                    centers.push((x, y)); // ellipse origin is its centre
+                }
+            }
+            flag_scene_lp(&mut engine);
+            for (cx, cy) in &centers {
+                assert!(engine.query_face_at(*cx, *cy) >= 0,
+                    "seed {seed}: shape centre ({cx},{cy}) is a dead zone");
+            }
+            // Rebuild is deterministic.
+            let s1 = engine.serialize_scene();
+            let s2 = engine.serialize_scene();
+            assert_eq!(s1, s2, "seed {seed}: non-deterministic serialization");
+        }
+    }
+
+    #[test]
+    fn test_expand_faces_inherit_topmost_source_fill() {
+        // Two overlapping filled rects, nothing painted. Expand's face list must
+        // divide into 3 colored faces: A-only=A's fill, B-only=B's fill, overlap
+        // = the TOPMOST source's fill (B, added later). So 1 red + 2 blue.
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(50.0, 50.0, 100.0, 100.0); // drawn on top
+        engine.set_node_style(a, r#"{"fills":[{"r":1.0,"g":0.0,"b":0.0,"a":1.0}],"strokes":[],"opacity":1.0,"blend_mode":0,"fill_rule":0,"corner_radius":0.0,"effects":[]}"#);
+        engine.set_node_style(b, r#"{"fills":[{"r":0.0,"g":0.0,"b":1.0,"a":1.0}],"strokes":[],"opacity":1.0,"blend_mode":0,"fill_rule":0,"corner_radius":0.0,"effects":[]}"#);
+        flag_scene_lp(&mut engine);
+
+        let json = engine.get_live_paint_faces();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 3, "3 colored faces, got {json}");
+        let red = arr.iter().filter(|f| f["fill"]["r"].as_f64() == Some(1.0)).count();
+        let blue = arr.iter().filter(|f| f["fill"]["b"].as_f64() == Some(1.0)).count();
+        assert_eq!(red, 1, "A-only inherits red");
+        assert_eq!(blue, 2, "B-only + overlap inherit blue (topmost)");
+    }
+
+    #[test]
+    fn test_clear_live_paint_marks_removes_fills_and_edges() {
+        // Expand bakes marks into real shapes, then calls clear_live_paint_marks
+        // so nothing double-renders. After it, no faces are filled and no edges
+        // are painted.
+        let mut engine = Engine::new();
+        engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        engine.add_rect(50.0, 50.0, 100.0, 100.0);
+        flag_scene_lp(&mut engine);
+        let f = engine.query_face_at(75.0, 75.0);
+        engine.set_face_fill(f as u32, 1.0, 0.0, 0.0, 1.0);
+        let edge = engine.query_edge_at(75.0, 50.0, 8.0);
+        if edge >= 0 { engine.set_edge_paint(edge as u32, 0.0, 0.0, 1.0, 1.0, 3.0); }
+        assert!(engine.get_filled_faces().len() > 2, "precondition: something painted");
+
+        engine.clear_live_paint_marks();
+        assert_eq!(engine.get_filled_faces(), "[]", "all face fills cleared");
+        assert_eq!(engine.get_painted_edges(), "[]", "all edge paints cleared");
+    }
+
+    #[test]
+    fn test_set_node_live_paint_only_affects_groups() {
+        // The flag is meaningful only on groups — setting it on a plain shape is
+        // a no-op (so the context bar never treats a rectangle as Live Paint).
+        let mut engine = Engine::new();
+        let r = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        engine.set_node_live_paint(r, true);
+        assert!(!engine.get_node_live_paint(r), "a non-group can't be a Live Paint group");
     }
 
     #[test]
@@ -4592,6 +5727,7 @@ mod tests {
             ]}]"#,
         );
         let _ = tri;
+        flag_scene_lp(&mut engine);
         let face = engine.query_face_at(700.0, 600.0);
         assert!(face >= 0);
         engine.set_face_fill(face as u32, 0.2, 0.4, 0.6, 1.0);
@@ -4648,6 +5784,84 @@ mod tests {
             off = end;
         }
         assert_eq!(off, buf.len(), "records must tile the whole buffer exactly");
+    }
+
+    #[test]
+    fn test_live_paint_render_commands_and_fill_suppression() {
+        // An active Live Paint group must emit CMD_LP_FACES(7) right after its
+        // START_GROUP(1), the records must tile the buffer exactly (framing), and
+        // its member DRAW_NODE records must carry ZERO fills (faces provide them).
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(50.0, 50.0, 100.0, 100.0);
+        engine.set_node_style(a, r#"{"fills":[{"r":1.0,"g":0.0,"b":0.0,"a":1.0}],"strokes":[],"opacity":1.0,"blend_mode":0,"fill_rule":0,"corner_radius":0.0,"effects":[]}"#);
+        engine.set_node_style(b, r#"{"fills":[{"r":0.0,"g":0.0,"b":1.0,"a":1.0}],"strokes":[],"opacity":1.0,"blend_mode":0,"fill_rule":0,"corner_radius":0.0,"effects":[]}"#);
+        let g = engine.group_nodes(&format!("[{},{}]", a, b));
+        engine.set_node_live_paint(g, true);
+        engine.set_live_paint_group(g);
+        engine.update_render_buffer(vec![a, b, g]);
+
+        let buf = &engine.render_buffer;
+        let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+        assert_eq!(rd(4), RENDER_PROTOCOL_VERSION, "version");
+        let count = rd(8);
+        let mut cmds = Vec::new();
+        let mut fill_counts = Vec::new();
+        let mut off = 12usize;
+        for _ in 0..count {
+            let len = rd(off) as usize;
+            let start = off + 4;
+            let cmd = rd(start);
+            cmds.push(cmd);
+            if cmd == 2 {
+                // DRAW_NODE: cmd, nodeId, nodeType, 9×f32 transform, then fillCount.
+                fill_counts.push(rd(start + 4 + 4 + 4 + 36));
+            }
+            off += 4 + len;
+        }
+        assert_eq!(off, buf.len(), "records must tile the buffer exactly");
+        assert_eq!(cmds[0], 1, "group opens first");
+        assert_eq!(cmds[1], 7, "faces emitted at group bottom, got {cmds:?}");
+        assert!(cmds.contains(&3), "group closes");
+        assert!(!fill_counts.is_empty(), "members were drawn");
+        assert!(fill_counts.iter().all(|&fc| fc == 0), "member fills suppressed, got {fill_counts:?}");
+    }
+
+    #[test]
+    fn test_two_live_paint_groups_render_simultaneously() {
+        // Two independent Live Paint groups must BOTH emit their own faces at
+        // their own group's z — not just the "active" one. Sequence per group:
+        // START_GROUP(1), CMD_LP_FACES(7), member DRAW(2), END_GROUP(3).
+        let mut engine = Engine::new();
+        let r1 = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let r2 = engine.add_rect(300.0, 0.0, 100.0, 100.0);
+        let g1 = engine.group_nodes(&format!("[{}]", r1));
+        let g2 = engine.group_nodes(&format!("[{}]", r2));
+        engine.set_node_live_paint(g1, true);
+        engine.set_node_live_paint(g2, true);
+        // Paint one face in each so CMD_LP_FACES has content for both.
+        let f1 = engine.query_face_at(50.0, 50.0);
+        let f2 = engine.query_face_at(350.0, 50.0);
+        engine.set_face_fill(f1 as u32, 1.0, 0.0, 0.0, 1.0);
+        engine.set_face_fill(f2 as u32, 0.0, 0.0, 1.0, 1.0);
+
+        engine.update_render_buffer(vec![r1, r2, g1, g2]);
+        let buf = &engine.render_buffer;
+        let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
+        let count = rd(8);
+        let mut cmds = Vec::new();
+        let mut off = 12usize;
+        for _ in 0..count {
+            let len = rd(off) as usize;
+            cmds.push(rd(off + 4));
+            off += 4 + len;
+        }
+        assert_eq!(off, buf.len(), "records must tile the buffer exactly");
+        // Two groups → two face passes, one inside each group bracket.
+        let face_passes = cmds.iter().filter(|&&c| c == 7).count();
+        assert_eq!(face_passes, 2, "each flagged group emits its own faces, got {cmds:?}");
+        let starts = cmds.iter().filter(|&&c| c == 1).count();
+        assert_eq!(starts, 2, "both groups open, got {cmds:?}");
     }
 
     #[test]

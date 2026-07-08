@@ -22,6 +22,8 @@ export type EditorContext =
     | 'text-selected'   // one Text node selected
     | 'group-selected'  // exactly one Group node selected
     | 'multi-select'    // 2+ nodes selected
+    | 'live-paint-object' // a Live Paint group selected (Selection tool)
+    | 'live-paint'      // paint-bucket tool active (wins over selection)
     | 'pen-drawing'     // input.currentPathPoints.length > 0
     | 'path-editing';   // input.editingNodeId != null
 
@@ -105,6 +107,12 @@ export function getEditorContext(ui: UIEngine, input: InputManager, scene: WasmS
         context = 'path-editing';
     } else if (input.currentPathPoints.length > 0) {
         context = 'pen-drawing';
+    } else if (activeTool === 'paint-bucket') {
+        // Live Paint is a mode: the tool wins over the current selection so the
+        // bar always shows paint options (color, gaps, Make Live Paint Group).
+        context = 'live-paint';
+    } else if (selectedIds.length === 1 && primaryNodeType === 'Group' && scene.getNodeLivePaint(selectedIds[0])) {
+        context = 'live-paint-object';
     } else if (selectedIds.length === 1 && primaryNodeType === 'Group') {
         context = 'group-selected';
     } else if (selectedIds.length === 1 && primaryNodeType === 'Text') {

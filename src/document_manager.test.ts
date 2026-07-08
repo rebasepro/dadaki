@@ -37,8 +37,8 @@ function makeManager() {
     const scene = new WasmScene({} as never);
     scene.engine = new Engine();
     const ui = { setZoom: vi.fn(), updateLayerList: vi.fn(), syncWithSelection: vi.fn(), parseSVG: vi.fn() };
-    const input = { exitEditMode: vi.fn(), currentPathPoints: [] as unknown[] };
-    const renderer = { zoom: 1, pan: { x: 0, y: 0 }, fitToArtboard: vi.fn() };
+    const input = { exitEditMode: vi.fn(), commitActiveTextEdit: vi.fn(), currentPathPoints: [] as unknown[] };
+    const renderer = { zoom: 1, pan: { x: 0, y: 0 }, fitToArtboard: vi.fn(), notifyViewChange: vi.fn() };
     const tabStrip = { render: vi.fn() };
     const fileService = { activeDoc: null as unknown, refreshChrome: vi.fn() };
     const dm = new DocumentManager(
