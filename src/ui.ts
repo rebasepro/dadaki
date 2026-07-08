@@ -2552,6 +2552,9 @@ export class UIEngine {
         // this tags them with __rasterFilter which parseSVGInternal turns into an
         // image node. (Uses the SAME doc so the tags survive to the sync pass.)
         await this.rasterizeFilteredElements(doc);
+        // Decode <image> elements up-front (intrinsic size, preserveAspectRatio
+        // fitting, SVG-in-image rasterization); tags each with __imageFit.
+        await this.preprocessImages(doc);
         this.scene.transaction(() => {
             const before = new Set(this.scene.getRootNodes());
             this.parseSVGInternal(svgText, patternImages, doc);
@@ -2623,6 +2626,147 @@ export class UIEngine {
         } finally {
             document.body.removeChild(host);
         }
+    }
+
+    /**
+     * Decode every data-URI `<image>` up-front and tag it with `__imageFit`
+     * (image id + the final local rect). Handles: intrinsic sizing when
+     * width/height are omitted/auto; `preserveAspectRatio` (meet letterboxing,
+     * slice cropping, alignment); and SVG-in-`<image>` (CanvasKit can't decode
+     * SVG, so we rasterize it to PNG). External hrefs are left for the sync pass
+     * (unsupported). Runs in the async pre-pass so the sync importer stays sync.
+     */
+    private async preprocessImages(doc: Document): Promise<void> {
+        const XLINK = 'http://www.w3.org/1999/xlink';
+        for (const el of Array.from(doc.querySelectorAll('image'))) {
+            const href = el.getAttribute('href') || el.getAttributeNS(XLINK, 'href') || '';
+            if (!href.startsWith('data:')) continue; // external → sync pass warns
+            const parsed = this.parseImageDataUri(href);
+            if (!parsed) continue;
+            // svgz: gunzip to plain SVG so the browser can load/rasterize it.
+            if (parsed.bytes.length > 2 && parsed.bytes[0] === 0x1f && parsed.bytes[1] === 0x8b) {
+                const svgText = await this.gunzip(parsed.bytes);
+                if (!svgText) continue;
+                parsed.bytes = new TextEncoder().encode(svgText);
+                parsed.loadUri = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgText)));
+            }
+            // Browser decodes png/jpeg/gif/svg → gives us the intrinsic size.
+            const img = await this.loadImage(parsed.loadUri).catch(() => null);
+            if (!img) continue;
+            const natW = img.naturalWidth || img.width;
+            const natH = img.naturalHeight || img.height;
+            if (!natW || !natH) continue;
+
+            // Viewport rect from x/y/width/height, with intrinsic fallback for
+            // omitted/auto dimensions (a single given side keeps the aspect).
+            const x = parseSvgLength(el.getAttribute('x'), 0);
+            const y = parseSvgLength(el.getAttribute('y'), 0);
+            const wAttr = el.getAttribute('width');
+            const hAttr = el.getAttribute('height');
+            const hasW = !!wAttr && wAttr !== 'auto';
+            const hasH = !!hAttr && hAttr !== 'auto';
+            let vw = hasW ? parseSvgLength(wAttr, 0) : 0;
+            let vh = hasH ? parseSvgLength(hAttr, 0) : 0;
+            if (!hasW && !hasH) { vw = natW; vh = natH; }
+            else if (!hasW) { vw = vh * natW / natH; }
+            else if (!hasH) { vh = vw * natH / natW; }
+            if (vw <= 0 || vh <= 0) continue;
+
+            const par = (el.getAttribute('preserveAspectRatio') || 'xMidYMid meet').trim();
+            // A raster image needs re-rasterizing ONLY when preserveAspectRatio
+            // actually letterboxes/crops it — i.e. when the box aspect differs
+            // from the image's. Otherwise register the original bytes (keeps
+            // full fidelity, e.g. 16-bit PNGs, and avoids a re-encode).
+            const aspectMatches = Math.abs(vw / vh - natW / natH) < 1e-3;
+            const stretch = !parsed.isSvg && (par.startsWith('none') || aspectMatches);
+            let imageId: number;
+            if (stretch) {
+                try { imageId = this.scene.engine!.register_image(parsed.bytes, parsed.mime); }
+                catch { continue; }
+            } else {
+                // Rasterize onto a viewport-sized canvas honoring
+                // preserveAspectRatio (letterbox/crop/align + clipping), or
+                // convert SVG→PNG. 2× for crispness.
+                const bytes = await this.rasterizeImageFit(img, vw, vh, natW, natH, par);
+                if (!bytes) continue;
+                try { imageId = this.scene.engine!.register_image(bytes, 'image/png'); }
+                catch { continue; }
+            }
+            (el as unknown as { __imageFit?: unknown }).__imageFit = { imageId, x, y, w: vw, h: vh };
+        }
+    }
+
+    /** Parse a `data:` URI into raw bytes + mime + an <img>-loadable URI,
+     *  transparently gunzipping `.svgz` (gzip-compressed SVG). */
+    private parseImageDataUri(href: string): { bytes: Uint8Array; mime: string; isSvg: boolean; loadUri: string } | null {
+        const m = href.match(/^data:([^;,]*)(;base64)?,(.*)$/s);
+        if (!m) return null;
+        let mime = (m[1] || 'image/png').toLowerCase();
+        let bytes: Uint8Array;
+        if (m[2]) {
+            const bin = atob(m[3]);
+            bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        } else {
+            bytes = new TextEncoder().encode(decodeURIComponent(m[3]));
+        }
+        // gzip magic → svgz. (DecompressionStream isn't sync; handled in loadImage.)
+        const isGzip = bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+        const isSvg = mime.includes('svg') || isGzip ||
+            (mime === 'image/png' && /^\s*<(\?xml|svg)/.test(new TextDecoder().decode(bytes.slice(0, 64))));
+        if (isSvg && !mime.includes('svg')) mime = 'image/svg+xml';
+        // For <img> loading we hand back the original href (browsers load svg/
+        // svgz/png/jpeg data URIs directly); gzip svgz is expanded in loadImage.
+        return { bytes, mime, isSvg, loadUri: href };
+    }
+
+    /** Load a data URI into an HTMLImageElement (decodes intrinsic size). */
+    private loadImage(uri: string): Promise<HTMLImageElement> {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error('image load failed'));
+            img.src = uri;
+        });
+    }
+
+    /** Gunzip bytes to a UTF-8 string (for .svgz), or null on failure. */
+    private async gunzip(bytes: Uint8Array): Promise<string | null> {
+        try {
+            const ds = new (window as unknown as { DecompressionStream: new (f: string) => GenericTransformStream }).DecompressionStream('gzip');
+            const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(ds);
+            const buf = await new Response(stream).arrayBuffer();
+            return new TextDecoder().decode(buf);
+        } catch { return null; }
+    }
+
+    /** Draw `img` onto a `vw×vh` canvas honoring preserveAspectRatio (align +
+     *  meet/slice), clipping to the viewport, and return PNG bytes. */
+    private rasterizeImageFit(img: HTMLImageElement, vw: number, vh: number, natW: number, natH: number, par: string): Promise<Uint8Array | null> {
+        const scale = 2;
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(vw * scale));
+        c.height = Math.max(1, Math.round(vh * scale));
+        const ctx = c.getContext('2d');
+        if (!ctx) return Promise.resolve(null);
+        const tokens = par.split(/\s+/);
+        const align = tokens[0] || 'xMidYMid';
+        const slice = tokens[1] === 'slice';
+        let dw: number, dh: number, dx: number, dy: number;
+        if (align === 'none') {
+            dw = vw; dh = vh; dx = 0; dy = 0;
+        } else {
+            const s = slice ? Math.max(vw / natW, vh / natH) : Math.min(vw / natW, vh / natH);
+            dw = natW * s; dh = natH * s;
+            const ax = align.includes('xMax') ? 1 : align.includes('xMid') ? 0.5 : 0;
+            const ay = align.includes('YMax') ? 1 : align.includes('YMid') ? 0.5 : 0;
+            dx = (vw - dw) * ax;
+            dy = (vh - dh) * ay;
+        }
+        ctx.drawImage(img, dx * scale, dy * scale, dw * scale, dh * scale);
+        return new Promise((resolve) => {
+            c.toBlob(async (b) => resolve(b ? new Uint8Array(await b.arrayBuffer()) : null), 'image/png');
+        });
     }
 
     /** Rasterize every `<pattern>` in the doc to a tile image (via the browser's
@@ -3511,27 +3655,36 @@ export class UIEngine {
                     gradientGeo = bakedGradientGeo(subpaths, composedMat);
                 }
             } else if (tag === 'image') {
-                const href = el.getAttribute('href') || el.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '';
-                const ix = parseSvgLength(el.getAttribute('x'), 0);
-                const iy = parseSvgLength(el.getAttribute('y'), 0);
-                const iw = parseSvgLength(el.getAttribute('width'), 0) || 100;
-                const ih = parseSvgLength(el.getAttribute('height'), 0) || 100;
-                const m = href.match(/^data:([^;,]*)(;base64)?,(.*)$/s);
-                if (m && m[2]) {
-                    // base64 data URI → decode and register the bytes
-                    const mime = m[1] || 'image/png';
-                    try {
-                        const binStr = atob(m[3]);
-                        const bytes = new Uint8Array(binStr.length);
-                        for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
-                        const imageId = this.scene.engine!.register_image(bytes, mime);
-                        nodeId = this.scene.engine!.add_image(0, 0, iw, ih, imageId);
-                        const offsetMat = composeMatrices(composedMat, translateMatrix(ix, iy));
-                        this.scene.setNodeTransform(nodeId, offsetMat);
-                    } catch (err) { console.warn('Failed to import <image>:', err); }
-                } else if (href) {
-                    // External URL — not fetched in v1.
-                    console.warn('Skipping external <image> href (unsupported):', href.slice(0, 64));
+                // preprocessImages (async pre-pass) decoded the image: intrinsic
+                // size, preserveAspectRatio fit, and SVG-in-image rasterization.
+                const fit = (el as unknown as { __imageFit?: { imageId: number; x: number; y: number; w: number; h: number } }).__imageFit;
+                if (fit) {
+                    nodeId = this.scene.engine!.add_image(0, 0, fit.w, fit.h, fit.imageId);
+                    const offsetMat = composeMatrices(composedMat, translateMatrix(fit.x, fit.y));
+                    this.scene.setNodeTransform(nodeId, offsetMat);
+                } else {
+                    // Fallback: preprocessImages didn't tag this one (decode/encode
+                    // failed, or an image type it skipped) — register the raw
+                    // data-URI bytes stretched to the box, as before.
+                    const href = el.getAttribute('href') || el.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '';
+                    const ix = parseSvgLength(el.getAttribute('x'), 0);
+                    const iy = parseSvgLength(el.getAttribute('y'), 0);
+                    const iw = parseSvgLength(el.getAttribute('width'), 0) || 100;
+                    const ih = parseSvgLength(el.getAttribute('height'), 0) || 100;
+                    const m = href.match(/^data:([^;,]*)(;base64)?,(.*)$/s);
+                    if (m && m[2]) {
+                        const mime = m[1] || 'image/png';
+                        try {
+                            const binStr = atob(m[3]);
+                            const bytes = new Uint8Array(binStr.length);
+                            for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+                            const imageId = this.scene.engine!.register_image(bytes, mime);
+                            nodeId = this.scene.engine!.add_image(0, 0, iw, ih, imageId);
+                            this.scene.setNodeTransform(nodeId, composeMatrices(composedMat, translateMatrix(ix, iy)));
+                        } catch (err) { console.warn('Failed to import <image>:', err); }
+                    } else if (href) {
+                        console.warn('Skipping external <image> href (unsupported):', href.slice(0, 64));
+                    }
                 }
             }
 
