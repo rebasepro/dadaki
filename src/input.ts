@@ -70,6 +70,10 @@ interface ScissorTarget {
     distance: number;
 }
 
+/** Tools that snap their origin point, so they also get a pre-drag snap
+ *  preview (guides shown while hovering, before the drag starts). */
+const HOVER_SNAP_TOOLS = new Set(['line', 'rect', 'ellipse', 'polygon', 'star', 'artboard', 'pen']);
+
 export class InputManager {
     canvas: HTMLCanvasElement;
     scene: WasmScene;
@@ -241,6 +245,10 @@ export class InputManager {
         this.canvas.addEventListener('mousedown', withRender((e: MouseEvent) => this.onMouseDown(e)));
         this.canvas.addEventListener('dblclick', withRender((e: MouseEvent) => this.onDoubleClick(e)));
         this.canvas.addEventListener('contextmenu', (e) => this.onContextMenu(e));
+        // Clear any hover snap-preview guides when the pointer leaves the canvas.
+        this.canvas.addEventListener('mouseleave', withRender(() => {
+            if (!this.isMouseDown && this.activeSnapGuides.length) this.activeSnapGuides = [];
+        }));
         window.addEventListener('mousemove', withRender((e: MouseEvent) => this.onMouseMove(e)));
         window.addEventListener('mouseup', withRender((e: MouseEvent) => this.onMouseUp(e)));
         window.addEventListener('keydown', withRender((e: KeyboardEvent) => this.onKeyDown(e)));
@@ -521,6 +529,13 @@ export class InputManager {
         const tag = (e.target as HTMLElement)?.tagName;
         if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
         if ((e.target as HTMLElement)?.isContentEditable) return;
+
+        // ⌘/Ctrl toggles snapping: clear the hover snap-preview the instant it's
+        // held, without needing a mouse move.
+        if (e.key === 'Meta' || e.key === 'Control') {
+            this.metaKey = e.metaKey; this.ctrlKey = e.ctrlKey;
+            this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
+        }
 
         // Space: hold for hand tool (pan-drag)
         if (e.key === ' ') {
@@ -1112,6 +1127,22 @@ export class InputManager {
             x: (screenX - this.renderer.pan.x) / this.renderer.zoom,
             y: (screenY - this.renderer.pan.y) / this.renderer.zoom
         };
+    }
+
+    /** Recompute the pre-drag snap-preview guides for the current hover position.
+     *  Called from mousemove AND from ⌘/Ctrl key changes, so the guides appear or
+     *  clear the instant the modifier is pressed/released — not only on movement. */
+    updateHoverSnapPreview(bypassed: boolean) {
+        if (this.isMouseDown) return;
+        const want = HOVER_SNAP_TOOLS.has(this.ui.activeTool) && this.editingNodeId === null && !bypassed;
+        if (want) {
+            this.snap.begin(this.scene, []);
+            const s = this.snap.snapPoint(this.currentPos.x, this.currentPos.y, 8 / this.renderer.zoom);
+            this.snap.end();
+            this.activeSnapGuides = s.guides;
+        } else if (this.activeSnapGuides.length) {
+            this.activeSnapGuides = [];
+        }
     }
 
     onWheel(e: WheelEvent) {
@@ -2555,6 +2586,10 @@ export class InputManager {
             this.hoverSegment = null;
         }
 
+        // Pre-drag snap preview: for tools that snap their origin, show the snap
+        // guides while hovering so the start point is defined by snapping too.
+        if (!this.isMouseDown) this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
+
         if (!this.isMouseDown) return;
 
         // On-canvas gradient handle drag (endpoints / stops / freshly inserted stop)
@@ -3172,7 +3207,10 @@ export class InputManager {
             return;
         }
 
-        this.canvas.style.cursor = 'default';
+        // Restore the cursor to match the active tool (a locked creation tool
+        // keeps its crosshair; Selection gets the default arrow). A revert to
+        // Selection later in this handler re-applies it via setActiveTool.
+        this.ui.applyToolCursor();
 
         if (this.rotateHandleType) {
             this.rotateHandleType = null;

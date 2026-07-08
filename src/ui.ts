@@ -609,25 +609,7 @@ export class UIEngine {
         }
 
         // Set cursor on canvas based on tool
-        const canvas = document.getElementById('editor-canvas') as HTMLCanvasElement;
-        if (canvas) {
-            const cursorMap: Record<string, string> = {
-                'selection': 'default',
-                'direct': 'default',
-                'pen': 'crosshair',
-                'pencil': 'crosshair',
-                'line': 'crosshair',
-                'rect': 'crosshair',
-                'ellipse': 'crosshair',
-                'polygon': 'crosshair',
-                'star': 'crosshair',
-                'text': 'text',
-                
-                'paint-bucket': 'crosshair',
-                'scissors': 'crosshair',
-            };
-            canvas.style.cursor = cursorMap[toolId] || 'default';
-        }
+        this.applyToolCursor();
 
         // Activating Live Paint with a selection makes (or enters) a Live Paint
         // group, so "select shapes → click Live Paint" produces the group.
@@ -636,6 +618,30 @@ export class UIEngine {
         }
 
         this.contextBar?.refresh();
+    }
+
+    /** Cursor for each tool. Creation tools use the crosshair. */
+    private static readonly TOOL_CURSORS: Record<string, string> = {
+        selection: 'default',
+        direct: 'default',
+        pen: 'crosshair',
+        pencil: 'crosshair',
+        line: 'crosshair',
+        rect: 'crosshair',
+        ellipse: 'crosshair',
+        polygon: 'crosshair',
+        star: 'crosshair',
+        text: 'text',
+        'paint-bucket': 'crosshair',
+        scissors: 'crosshair',
+    };
+
+    /** Set the canvas cursor to match the active tool. Callable after a drag
+     *  gesture (e.g. mouseup) so a locked creation tool keeps its crosshair
+     *  instead of falling back to the default arrow. */
+    applyToolCursor() {
+        const canvas = document.getElementById('editor-canvas') as HTMLCanvasElement | null;
+        if (canvas) canvas.style.cursor = UIEngine.TOOL_CURSORS[this.activeTool] ?? 'default';
     }
 
     // Live Paint colors are INDEPENDENT of the selection: changing them only
