@@ -56,7 +56,7 @@ export type ArtboardHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 8; // v8: ColorMatrix linear_rgb flag + CMD_BEGIN_MASK mask_type
+const EXPECTED_RENDER_PROTOCOL_VERSION = 9; // v9: gradient spread + radial focal point
 
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {
@@ -698,7 +698,9 @@ export class Renderer {
                             type: fillType,
                             stops,
                             start: [reader.f32(), reader.f32()],
-                            end: [reader.f32(), reader.f32()]
+                            end: [reader.f32(), reader.f32()],
+                            spread: reader.u32(),
+                            focal: [reader.f32(), reader.f32(), reader.f32()], // fx, fy, fr
                         });
                     } else if (fillType === 4) { // Pattern
                         fills.push({
@@ -737,7 +739,9 @@ export class Renderer {
                             type: strokeType,
                             stops,
                             start: [reader.f32(), reader.f32()],
-                            end: [reader.f32(), reader.f32()]
+                            end: [reader.f32(), reader.f32()],
+                            spread: reader.u32(),
+                            focal: [reader.f32(), reader.f32(), reader.f32()], // fx, fy, fr
                         };
                     } else if (strokeType === 4) { // Pattern
                         paint = {
@@ -849,7 +853,7 @@ export class Renderer {
                             p.setShader(null);
                         } else if (fill.type === 2 || fill.type === 3) {
                             const fillShader = this.getOrCreateGradientShader(
-                                fill.type, fill.stops, fill.start, fill.end, nodeAlpha
+                                fill.type, fill.stops, fill.start, fill.end, nodeAlpha, fill.spread, fill.focal
                             );
                             p.setShader(fillShader);
                         } else if (fill.type === 4) {
@@ -878,7 +882,7 @@ export class Renderer {
                             p.setShader(null);
                         } else if (st.paint.type === 2 || st.paint.type === 3) {
                             const strokeShader = this.getOrCreateGradientShader(
-                                st.paint.type, st.paint.stops, st.paint.start, st.paint.end, nodeAlpha
+                                st.paint.type, st.paint.stops, st.paint.start, st.paint.end, nodeAlpha, st.paint.spread, st.paint.focal
                             );
                             p.setShader(strokeShader);
                         } else if (st.paint.type === 4) {
@@ -1063,26 +1067,35 @@ export class Renderer {
         start: [number, number],
         end: [number, number],
         nodeAlpha: number = 1.0,
+        /** spreadMethod: 0 = pad, 1 = repeat, 2 = reflect. */
+        spread: number = 0,
+        /** Radial focal point [fx, fy, fr]; defaults to the center circle. */
+        focal: [number, number, number] = [start[0], start[1], 0],
     ): ReturnType<CanvasKit['Shader']['MakeLinearGradient']> {
         // Build a compact cache key from gradient parameters
-        let key = `${gradType}|${start[0]},${start[1]}|${end[0]},${end[1]}|${nodeAlpha}`;
+        let key = `${gradType}|${start[0]},${start[1]}|${end[0]},${end[1]}|${nodeAlpha}|${spread}|${focal.join(',')}`;
         for (const s of stops) {
             key += `|${s.offset},${s.r},${s.g},${s.b},${s.a}`;
         }
         const cached = this._gradientCache.get(key);
         if (cached) return cached;
 
+        // spreadMethod → Skia TileMode: pad→Clamp, repeat→Repeat, reflect→Mirror.
+        const tileMode = spread === 1 ? this.ck.TileMode.Repeat
+            : spread === 2 ? this.ck.TileMode.Mirror
+            : this.ck.TileMode.Clamp;
         const colors = stops.map(s => this.ck.Color4f(s.r, s.g, s.b, s.a * nodeAlpha));
         const offsets = stops.map(s => s.offset);
         let shader: ReturnType<CanvasKit['Shader']['MakeLinearGradient']>;
         if (gradType === 2) { // Linear
             shader = this.ck.Shader.MakeLinearGradient(
-                start, end, colors, offsets, this.ck.TileMode.Clamp,
+                start, end, colors, offsets, tileMode,
             );
-        } else { // Radial
+        } else { // Radial — focal point is the start circle (fx, fy, fr), the
+            // center circle is (start, radius). Concentric when focal = center.
             const radius = Math.hypot(end[0] - start[0], end[1] - start[1]);
             shader = this.ck.Shader.MakeTwoPointConicalGradient(
-                start, 0, start, radius, colors, offsets, this.ck.TileMode.Clamp,
+                [focal[0], focal[1]], focal[2], start, radius, colors, offsets, tileMode,
             );
         }
         this._gradientCache.set(key, shader);

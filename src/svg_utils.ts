@@ -797,6 +797,10 @@ export interface SVGGradientData {
     start_x: number; start_y: number;
     /** End point in local coordinate space */
     end_x: number; end_y: number;
+    /** spreadMethod: 0 = pad, 1 = repeat, 2 = reflect. */
+    spread: number;
+    /** Radial focal point in local space; absent = concentric (focal = center). */
+    focal?: { x: number; y: number; r: number };
 }
 
 /**
@@ -882,14 +886,22 @@ export function resolveGradient(
 
     // Resolve an attribute through the href/xlink:href template chain — coords,
     // gradientUnits and gradientTransform (like stops) commonly live on a
-    // referenced template gradient in Illustrator/Figma exports.
+    // referenced template gradient in Illustrator/Figma exports. Per spec the
+    // href of a gradient must reference ANOTHER GRADIENT; we only inherit
+    // through gradient elements (a href to e.g. a <rect> is invalid and ignored,
+    // matching resvg) so we don't pull unrelated attributes off the wrong node.
+    const isGradientEl = (e: Element): boolean => {
+        const t = (e.localName || e.tagName).toLowerCase();
+        return t === 'lineargradient' || t === 'radialgradient';
+    };
     const resolveAttr = (name: string): string | null => {
         let cur: Element | null = el;
         for (let hops = 0; cur && hops < 5; hops++) {
             const v = cur.getAttribute(name);
             if (v !== null && v !== '') return v;
             const href: string | null | undefined = cur.getAttribute('href') ?? cur.getAttribute('xlink:href');
-            cur = href?.startsWith('#') ? svgDoc.getElementById(href.slice(1)) : null;
+            const next = href?.startsWith('#') ? svgDoc.getElementById(href.slice(1)) : null;
+            cur = next && isGradientEl(next) ? next : null;
         }
         return null;
     };
@@ -912,10 +924,9 @@ export function resolveGradient(
     const gt = gtAttr ? parseSVGTransform(gtAttr) : null;
     const applyGt = (x: number, y: number): [number, number] => gt ? transformPoint(gt, x, y) : [x, y];
 
-    // spreadMethod repeat/reflect can't be represented by our 2-point clamp
-    // gradient model — we approximate them as `pad` (clamp). Read it anyway so
-    // the intent is visible and future work has a hook.
-    // const spread = resolveAttr('spreadMethod') || 'pad';
+    // spreadMethod → engine spread code: pad=0, repeat=1, reflect=2.
+    const spreadStr = resolveAttr('spreadMethod') || 'pad';
+    const spread = spreadStr === 'repeat' ? 1 : spreadStr === 'reflect' ? 2 : 0;
 
     let start_x: number, start_y: number, end_x: number, end_y: number;
 
@@ -932,12 +943,12 @@ export function resolveGradient(
             [end_x, end_y]     = transformPoint(g.userToLocal, x2, y2);
         }
 
-        return { gradient_type: 'Linear', stops, start_x, start_y, end_x, end_y };
+        return { gradient_type: 'Linear', stops, start_x, start_y, end_x, end_y, spread };
     } else {
-        // radialGradient — default cx=0.5, cy=0.5, r=0.5.
-        // Focal point (fx/fy) can't be represented by our 2-point radial model,
-        // so it's ignored (approximated by the geometric center).
+        // radialGradient — default cx=0.5, cy=0.5, r=0.5. Focal point defaults
+        // to the center: fx=cx, fy=cy, fr=0.
         const cx = num('cx', 0.5), cy = num('cy', 0.5), r = num('r', 0.5);
+        const fx = num('fx', cx), fy = num('fy', cy), fr = num('fr', 0);
 
         // Transform the center and a +x radius-edge point together, so the
         // gradientTransform's rotation/scale affects the radius. A non-uniform
@@ -945,16 +956,28 @@ export function resolveGradient(
         // the transformed major-axis radius (an approximation).
         const [c0x, c0y] = applyGt(cx, cy);
         const [e0x, e0y] = applyGt(cx + r, cy);
+        const [f0x, f0y] = applyGt(fx, fy);
+        const [fe0x] = applyGt(fx + fr, fy); // transformed focal-radius edge
 
-        if (isOBB) {
-            start_x = g.bx + c0x * g.bw;  start_y = g.by + c0y * g.bh;
-            end_x   = g.bx + e0x * g.bw;  end_y   = g.by + e0y * g.bh;
-        } else {
-            [start_x, start_y] = transformPoint(g.userToLocal, c0x, c0y);
-            [end_x, end_y]     = transformPoint(g.userToLocal, e0x, e0y);
-        }
+        const toLocal = (px: number, py: number): [number, number] => isOBB
+            ? [g.bx + px * g.bw, g.by + py * g.bh]
+            : transformPoint(g.userToLocal, px, py);
 
-        return { gradient_type: 'Radial', stops, start_x, start_y, end_x, end_y };
+        [start_x, start_y] = toLocal(c0x, c0y);
+        [end_x, end_y]     = toLocal(e0x, e0y);
+        const [flx, fly]   = toLocal(f0x, f0y);
+        // Focal radius scales with the same objectBoundingBox width the center
+        // radius uses (keeps fr proportional to r under OBB).
+        const [felx]       = toLocal(fe0x, f0y);
+        const focalR       = Math.hypot(felx - flx, 0);
+
+        // Only emit a focal when it actually differs from the center (avoids
+        // perturbing the common concentric case).
+        const hasFocal = Math.abs(flx - start_x) > 1e-4 || Math.abs(fly - start_y) > 1e-4 || focalR > 1e-4;
+        return {
+            gradient_type: 'Radial', stops, start_x, start_y, end_x, end_y, spread,
+            ...(hasFocal ? { focal: { x: flx, y: fly, r: focalR } } : {}),
+        };
     }
 }
 

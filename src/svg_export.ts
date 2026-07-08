@@ -145,17 +145,27 @@ export function buildSVGFromData(input: SVGExportInput): string {
             `<stop offset="${s.offset}" stop-color="${toHex(s.color)}" stop-opacity="${s.color.a}" />`
         ).join('');
 
+        // spreadMethod: 0 = pad (default, omitted), 1 = repeat, 2 = reflect.
+        const spreadAttr = paint.spread === 1 ? ' spreadMethod="repeat"'
+            : paint.spread === 2 ? ' spreadMethod="reflect"' : '';
+
         if (paint.gradient_type === 'Linear') {
             gradientDefs.push(
                 `<linearGradient id="${gradId}" x1="${paint.start_x}" y1="${paint.start_y}" ` +
-                `x2="${paint.end_x}" y2="${paint.end_y}" gradientUnits="userSpaceOnUse">` +
+                `x2="${paint.end_x}" y2="${paint.end_y}" gradientUnits="userSpaceOnUse"${spreadAttr}>` +
                 `${stops}</linearGradient>`
             );
         } else {
             const radius = Math.hypot(paint.end_x - paint.start_x, paint.end_y - paint.start_y);
+            // Radial focal point (fx/fy/fr): emit only when it differs from the
+            // center, so concentric gradients stay clean.
+            const f = paint.focal;
+            const focalAttr = f
+                ? ` fx="${f.x}" fy="${f.y}"${f.r ? ` fr="${f.r}"` : ''}`
+                : '';
             gradientDefs.push(
                 `<radialGradient id="${gradId}" cx="${paint.start_x}" cy="${paint.start_y}" ` +
-                `r="${radius}" gradientUnits="userSpaceOnUse">` +
+                `r="${radius}" gradientUnits="userSpaceOnUse"${focalAttr}${spreadAttr}>` +
                 `${stops}</radialGradient>`
             );
         }

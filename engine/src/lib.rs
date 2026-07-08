@@ -76,16 +76,32 @@ pub enum GradientType {
     Radial,
 }
 
+/// Radial-gradient focal point (SVG fx/fy/fr). Absent = concentric (focal at
+/// the center circle, focal radius 0), which is the common case.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GradientFocal {
+    pub x: f32,
+    pub y: f32,
+    #[serde(default)]
+    pub r: f32,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Gradient {
     pub gradient_type: GradientType,
     pub stops: Vec<GradientStop>,
-    /// Start point in node-local coordinate space
+    /// Start point (linear: line start; radial: center) in node-local space.
     pub start_x: f32,
     pub start_y: f32,
-    /// End point in node-local coordinate space  
+    /// End point (linear: line end; radial: a point at `r` from the center).
     pub end_x: f32,
     pub end_y: f32,
+    /// spreadMethod: 0 = pad (clamp), 1 = repeat, 2 = reflect.
+    #[serde(default)]
+    pub spread: u8,
+    /// Radial focal point; `None` means concentric (focal = center, fr = 0).
+    #[serde(default)]
+    pub focal: Option<GradientFocal>,
 }
 
 /// A tiled-image pattern fill. The tile is an encoded image in `Scene.images`;
@@ -732,7 +748,8 @@ pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// v6: paint type 4 = pattern (image_id + tile w/h + 6-float transform).
 /// v7: effects records are self-describing per kind; added kind 2 = ColorMatrix.
 /// v8: ColorMatrix gains a linear_rgb u32 flag; CMD_BEGIN_MASK gains mask_type u32.
-pub const RENDER_PROTOCOL_VERSION: u32 = 8;
+/// v9: gradients gain spread (u32) + focal point (fx, fy, fr) after end_x/end_y.
+pub const RENDER_PROTOCOL_VERSION: u32 = 9;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -789,6 +806,18 @@ fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>) {
             buf.extend_from_slice(&g.start_y.to_le_bytes());
             buf.extend_from_slice(&g.end_x.to_le_bytes());
             buf.extend_from_slice(&g.end_y.to_le_bytes());
+            // spreadMethod + radial focal point (v9). Focal defaults to the
+            // center circle (fx=cx, fy=cy, fr=0), which the renderer's
+            // two-point conical builder renders identically to a concentric
+            // radial — so pre-focal gradients are unaffected.
+            buf.extend_from_slice(&(g.spread as u32).to_le_bytes());
+            let (fx, fy, fr) = match &g.focal {
+                Some(f) => (f.x, f.y, f.r),
+                None => (g.start_x, g.start_y, 0.0),
+            };
+            buf.extend_from_slice(&fx.to_le_bytes());
+            buf.extend_from_slice(&fy.to_le_bytes());
+            buf.extend_from_slice(&fr.to_le_bytes());
         }
     }
 }

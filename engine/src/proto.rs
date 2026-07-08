@@ -8,7 +8,7 @@ use base64::{Engine as B64Engine, engine::general_purpose::STANDARD as BASE64};
 use glam::Vec2;
 
 use crate::{
-    Color, Geometry, Gradient, GradientStop, GradientType, Node, NodeType, Paint, PathPoint, Scene, Style,
+    Color, Geometry, Gradient, GradientFocal, GradientStop, GradientType, Node, NodeType, Paint, PathPoint, Scene, Style,
     vector_network::{VectorNetwork, NodeVectorNetwork, NetworkVertex, NetworkEdge, NetworkRegion},
 };
 
@@ -157,6 +157,16 @@ pub struct ProtoGradient {
     pub end_x: f32,
     #[prost(float, tag = "6")]
     pub end_y: f32,
+    #[prost(uint32, tag = "7")]
+    pub spread: u32,
+    #[prost(bool, tag = "8")]
+    pub has_focal: bool,
+    #[prost(float, tag = "9")]
+    pub focal_x: f32,
+    #[prost(float, tag = "10")]
+    pub focal_y: f32,
+    #[prost(float, tag = "11")]
+    pub focal_r: f32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -455,6 +465,11 @@ impl From<&Gradient> for ProtoGradient {
             start_y: g.start_y,
             end_x: g.end_x,
             end_y: g.end_y,
+            spread: g.spread as u32,
+            has_focal: g.focal.is_some(),
+            focal_x: g.focal.as_ref().map(|f| f.x).unwrap_or(0.0),
+            focal_y: g.focal.as_ref().map(|f| f.y).unwrap_or(0.0),
+            focal_r: g.focal.as_ref().map(|f| f.r).unwrap_or(0.0),
         }
     }
 }
@@ -472,6 +487,12 @@ impl From<&ProtoGradient> for Gradient {
             start_y: g.start_y,
             end_x: g.end_x,
             end_y: g.end_y,
+            spread: g.spread as u8,
+            focal: if g.has_focal {
+                Some(GradientFocal { x: g.focal_x, y: g.focal_y, r: g.focal_r })
+            } else {
+                None
+            },
         }
     }
 }

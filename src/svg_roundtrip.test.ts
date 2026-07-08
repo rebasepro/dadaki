@@ -262,6 +262,31 @@ describe('SVG Export — Masks', () => {
         expect(rect.getAttribute('fill')).toBe(`url(#${pid})`);
     });
 
+    it('exports spreadMethod and a radial focal point', () => {
+        const input: SVGExportInput = {
+            docWidth: 400, docHeight: 400,
+            nodes: {
+                1: makeNode({
+                    geometry: { Rect: { width: 100, height: 100 } },
+                    style: defaultStyle({ fills: [{
+                        gradient_type: 'Radial',
+                        stops: [{ offset: 0, color: { r: 1, g: 1, b: 1, a: 1 } }, { offset: 1, color: { r: 0, g: 0, b: 0, a: 1 } }],
+                        start_x: 50, start_y: 50, end_x: 90, end_y: 50,
+                        spread: 1, focal: { x: 30, y: 20, r: 0 },
+                    }] as never }),
+                }),
+            },
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY },
+        };
+        const doc = parseSVG(buildSVGFromData(input));
+        const rg = queryTag(doc, 'radialGradient')!;
+        expect(rg, 'a <radialGradient> def is emitted').toBeTruthy();
+        expect(rg.getAttribute('spreadMethod')).toBe('repeat');
+        expect(rg.getAttribute('fx')).toBe('30');
+        expect(rg.getAttribute('fy')).toBe('20');
+    });
+
     it('a node with a drop-shadow effect exports a <filter> with feDropShadow', () => {
         const input: SVGExportInput = {
             docWidth: 400, docHeight: 400,

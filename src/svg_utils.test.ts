@@ -490,14 +490,37 @@ describe('resolveGradient', () => {
         expect(g.end_x).toBeCloseTo(80); // inherited x2
     });
 
-    it('imports a repeat spreadMethod gradient without crashing (approximated as pad)', () => {
-        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
-            <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="50" y2="0" spreadMethod="repeat">
+    it('parses spreadMethod repeat/reflect into the engine spread code', () => {
+        const mk = (m: string) => parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
+            <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="50" y2="0" spreadMethod="${m}">
               <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
             </linearGradient></defs></svg>`);
-        const g = resolveGradient(doc, 'url(#g)');
-        expect(g).not.toBeNull();
-        expect(g!.gradient_type).toBe('Linear');
+        expect(resolveGradient(mk('pad'), 'url(#g)')!.spread).toBe(0);
+        expect(resolveGradient(mk('repeat'), 'url(#g)')!.spread).toBe(1);
+        expect(resolveGradient(mk('reflect'), 'url(#g)')!.spread).toBe(2);
+    });
+
+    it('parses a radial focal point (fx/fy) offset from the center', () => {
+        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
+            <radialGradient id="g" gradientUnits="userSpaceOnUse" cx="50" cy="50" r="40" fx="30" fy="20">
+              <stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/>
+            </radialGradient></defs></svg>`);
+        const g = resolveGradient(doc, 'url(#g)')!;
+        expect(g.gradient_type).toBe('Radial');
+        expect(g.start_x).toBeCloseTo(50); // center
+        expect(g.focal).toBeTruthy();
+        expect(g.focal!.x).toBeCloseTo(30);
+        expect(g.focal!.y).toBeCloseTo(20);
+    });
+
+    it('omits the focal when it coincides with the center (concentric)', () => {
+        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
+            <radialGradient id="g" gradientUnits="userSpaceOnUse" cx="50" cy="50" r="40">
+              <stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/>
+            </radialGradient></defs></svg>`);
+        const g = resolveGradient(doc, 'url(#g)')!;
+        expect(g.focal).toBeUndefined();
+        expect(g.spread).toBe(0);
     });
 
     it('maps a default objectBoundingBox linear gradient onto the geometry bbox', () => {

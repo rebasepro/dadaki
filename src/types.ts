@@ -25,6 +25,10 @@ export interface Gradient {
     start_y: number;
     end_x: number;
     end_y: number;
+    /** spreadMethod: 0 = pad, 1 = repeat, 2 = reflect. */
+    spread?: number;
+    /** Radial focal point; absent = concentric (focal at center, fr 0). */
+    focal?: { x: number; y: number; r: number };
 }
 
 /** A tiled-image pattern fill (matches the engine's Pattern struct). */

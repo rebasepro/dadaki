@@ -2890,6 +2890,8 @@ export class UIEngine {
                 start_y: paint.data.start_y,
                 end_x: paint.data.end_x,
                 end_y: paint.data.end_y,
+                spread: paint.data.spread ?? 0,
+                ...(paint.data.focal ? { focal: paint.data.focal } : {}),
             };
         };
 
