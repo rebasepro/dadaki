@@ -832,6 +832,11 @@ export class InputManager {
         const screenX = t[2] * zoom + this.renderer.pan.x;
         const screenY = (t[5] - fontSize) * zoom + this.renderer.pan.y;
         const fam = geo.Text.font_family ? `${geo.Text.font_family}, sans-serif` : 'sans-serif';
+        // Match the node's typographic style so the overlay looks like the real
+        // text (weight/italic/letter-spacing, not just size/family).
+        const fontWeight = String(geo.Text.font_weight || 400);
+        const fontStyleCss = geo.Text.italic ? 'italic' : 'normal';
+        const letterSpacing = `${(geo.Text.letter_spacing || 0) * zoom}px`;
         // Match the node's fill colour so the overlay looks like the real text.
         const node = this.scene.getNode(id);
         const f = node?.style?.fills?.[0] as { r: number; g: number; b: number; a?: number } | undefined;
@@ -852,6 +857,9 @@ export class InputManager {
             left: `${screenX}px`, top: `${screenY}px`,
             fontSize: `${fontSize * zoom}px`,
             fontFamily: fam,
+            fontWeight,
+            fontStyle: fontStyleCss,
+            letterSpacing,
             lineHeight: String(lineHeight),
             color,
             padding: '0', border: 'none', margin: '0', background: 'transparent',
@@ -871,7 +879,7 @@ export class InputManager {
         // Auto-size the box to the content (widest line × line count).
         const measureCtx = document.createElement('canvas').getContext('2d')!;
         const autoSize = () => {
-            measureCtx.font = `${fontSize * zoom}px ${fam}`;
+            measureCtx.font = `${fontStyleCss} ${fontWeight} ${fontSize * zoom}px ${fam}`;
             let w = 0;
             for (const line of input.value.split('\n')) w = Math.max(w, measureCtx.measureText(line).width);
             input.style.width = `${Math.ceil(w) + 2}px`;
