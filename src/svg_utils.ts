@@ -900,7 +900,7 @@ export function resolveGradient(
             const v = cur.getAttribute(name);
             if (v !== null && v !== '') return v;
             const href: string | null | undefined = cur.getAttribute('href') ?? cur.getAttribute('xlink:href');
-            const next = href?.startsWith('#') ? svgDoc.getElementById(href.slice(1)) : null;
+            const next: Element | null = href?.startsWith('#') ? svgDoc.getElementById(href.slice(1)) : null;
             cur = next && isGradientEl(next) ? next : null;
         }
         return null;

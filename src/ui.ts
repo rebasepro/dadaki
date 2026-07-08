@@ -3653,9 +3653,19 @@ export class UIEngine {
      * null when there is no filter.
      */
     private parseFilterEffects(el: Element, doc: Document): any[] | 'rasterize' | null {
-        const ref = el.getAttribute('filter');
-        const m = ref && ref.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
-        if (!m) return null;
+        // `filter` may be a url(#id) reference or a CSS filter-function list,
+        // on the presentation attribute or in the inline style.
+        const styleFilter = (el.getAttribute('style') || '').match(/(?:^|;)\s*filter\s*:\s*([^;]+)/i);
+        const ref = ((styleFilter ? styleFilter[1] : el.getAttribute('filter')) || '').trim();
+        if (!ref || ref === 'none') return null;
+        const m = ref.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
+        if (!m) {
+            // No url() → a CSS filter-function list (blur(), grayscale(), …).
+            return this.parseFilterFunctions(ref, el);
+        }
+        // A url() combined with anything else (extra urls / functions) can't be
+        // composed natively — let the caller rasterize it.
+        if (ref.replace(m[0], '').trim() !== '') return 'rasterize';
         const filterEl = doc.getElementById(m[1]);
         if (!filterEl || filterEl.tagName.toLowerCase() !== 'filter') return null;
 
@@ -3695,6 +3705,77 @@ export class UIEngine {
             }
         }
         return effects.length ? effects : null;
+    }
+
+    /**
+     * Parse a CSS `filter:` function list — `blur()`, `grayscale()`, `sepia()`,
+     * `saturate()`, `hue-rotate()`, `invert()`, `brightness()`, `contrast()`,
+     * `opacity()`, `drop-shadow()` — into our native effect list. Returns
+     * 'rasterize' if any function is unknown, or null if empty. The color-adjust
+     * functions map to a ColorMatrix; per the CSS Filter Effects spec they use
+     * the default color-interpolation-filters (linearRGB).
+     */
+    private parseFilterFunctions(str: string, el: Element): any[] | 'rasterize' | null {
+        const effects: any[] = [];
+        const re = /([a-z-]+)\s*\(([^)]*)\)/gi;
+        let match: RegExpExecArray | null;
+        let sawAny = false;
+        // CSS rule: if ANY function in the list is invalid, the whole `filter`
+        // is treated as `none` (no filter). We signal that by returning null.
+        // A number/percentage amount; empty → default. Returns NaN when invalid.
+        const amount = (a: string, def: number): number => {
+            a = a.trim();
+            if (a === '') return def;
+            if (!/^[-+]?[\d.]+%?$/.test(a)) return NaN;
+            const v = parseFloat(a);
+            return a.endsWith('%') ? v / 100 : v;
+        };
+        while ((match = re.exec(str)) !== null) {
+            sawAny = true;
+            const name = match[1].toLowerCase();
+            const args = match[2].trim();
+            if (name === 'blur') {
+                // <length> only (no %, non-negative); empty = 0.
+                if (args !== '' && !/^[+]?[\d.]+(px|pt|pc|mm|cm|in|q|em|ex|rem)?$/i.test(args)) return null;
+            } else if (name === 'drop-shadow') {
+                if (!this.parseDropShadowFunction(args, el)) return null;
+            } else if (name === 'hue-rotate') {
+                // <angle> or unitless 0 or empty. Unitless nonzero is invalid.
+                if (args !== '' && !/^[-+]?[\d.]+(deg|grad|rad|turn)$/i.test(args) && !/^[-+]?0*\.?0*$/.test(args)) return null;
+            } else if (name === 'grayscale' || name === 'sepia' || name === 'saturate'
+                || name === 'invert' || name === 'brightness' || name === 'contrast'
+                || name === 'opacity') {
+                if (isNaN(amount(args, 1))) return null;
+            } else {
+                return null; // unknown/invalid function → whole filter is none
+            }
+            effects.push(name);
+        }
+        if (!sawAny) return null; // no parseable function → treat as no filter
+        // Every function validated. The browser implements CSS filter functions
+        // accurately (matrices + color space), so rasterize the element through
+        // it rather than reimplementing each function's exact semantics natively.
+        return effects.length ? 'rasterize' : null;
+    }
+
+    /** Validate a CSS `drop-shadow(<color>? <length>{2,3} <color>?)` function.
+     *  Returns true when well-formed (so the caller can rasterize it), false
+     *  when invalid (which makes the whole `filter` property `none`). */
+    private parseDropShadowFunction(args: string, _el: Element): boolean {
+        const tokens = args.match(/(?:rgba?|hsla?)\([^)]*\)|[^\s]+/gi) || [];
+        let numCount = 0, colorCount = 0;
+        for (const tok of tokens) {
+            if (/^[-+.\d]/.test(tok)) {
+                // Numeric token → must be a valid length (no %). Percentages and
+                // garbage make the whole drop-shadow invalid.
+                if (tok.endsWith('%') || isNaN(parseSvgLength(tok, NaN))) return false;
+                numCount++;
+            } else {
+                colorCount++;
+            }
+        }
+        // CSS requires 2 or 3 lengths and at most one color.
+        return numCount >= 2 && numCount <= 3 && colorCount <= 1;
     }
 
     /**
