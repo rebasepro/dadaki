@@ -7,7 +7,8 @@
       "Bash(wasm-pack build *)",
       "Read(//Users/francesco/.cargo/**)",
       "Read(//Users/francesco/.rustup/toolchains/**)",
-      "Read(//opt/homebrew/opt/**)"
+      "Read(//opt/homebrew/opt/**)",
+      "Bash(npm install *)"
     ]
   }
 }
