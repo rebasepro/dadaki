@@ -443,8 +443,13 @@ export class UIEngine {
             this.updateLayerList();
         });
 
-        // Effects: "+" adds a drop shadow to the selected node.
-        document.getElementById('add-effect-btn')?.addEventListener('click', () => this.addEffectToSelection());
+        // Effects: "+" adds a drop shadow to the selected node. stopPropagation so
+        // the click doesn't bubble to the section header and collapse the panel
+        // (which made the newly-added effect appear to "not add").
+        document.getElementById('add-effect-btn')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.addEffectToSelection();
+        });
 
         // Artboard properties panel inputs.
         this.bindArtboardPanel();
@@ -2325,13 +2330,22 @@ export class UIEngine {
         catch { return []; }
     }
 
+    /** Build a fresh effect object for the given UI type key. */
+    private defaultEffect(type: 'blur' | 'shadow' | 'color'): any {
+        if (type === 'shadow') return { DropShadow: { dx: 0, dy: 4, blur: 8, color: { r: 0, g: 0, b: 0, a: 0.35 } } };
+        if (type === 'color') return { ColorMatrix: { matrix: UIEngine.COLOR_PRESETS.grayscale.slice(), linear_rgb: true } };
+        return { Blur: { radius: 6 } };
+    }
+
     /** Add a default drop shadow to the currently-selected node. */
     private addEffectToSelection() {
         const sel = Array.from(this.scene.engine?.get_selection() ?? []);
         if (sel.length !== 1) return;
         const effects = this.getSelectedEffects(sel[0]);
-        effects.push({ DropShadow: { dx: 6, dy: 6, blur: 6, color: { r: 0, g: 0, b: 0, a: 0.4 } } });
+        effects.push(this.defaultEffect('shadow'));
         this.scene.setNodeEffects(sel[0], JSON.stringify(effects));
+        this.scene.renderer?.invalidateRenderCaches();
+        this.scene.renderer?.requestRender();
         this.renderEffectsList(sel[0]);
     }
 
@@ -2343,63 +2357,147 @@ export class UIEngine {
         if (nodeId === null) return;
         const effects = this.getSelectedEffects(nodeId);
 
-        const commit = () => {
+        if (effects.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'effect-empty';
+            empty.textContent = 'No effects';
+            list.appendChild(empty);
+            return;
+        }
+
+        // Persist edits back to the engine and repaint. `structural` also rebuilds
+        // the list DOM (needed when the effect count or type changed).
+        const commit = (structural = false) => {
             this.scene.setNodeEffects(nodeId, JSON.stringify(effects));
             this.scene.renderer?.invalidateRenderCaches();
             this.scene.renderer?.requestRender();
+            if (structural) this.renderEffectsList(nodeId);
+        };
+
+        // Live edits (typing in a number field, dragging the colour picker) fire
+        // continuously; wrap them in a gesture so the whole edit collapses into a
+        // single undo step while still previewing on every keystroke. The gesture
+        // starts lazily on the first real edit, so focusing/tabbing through a
+        // field without changing it pushes no undo snapshot.
+        const withGesture = (el: HTMLElement, onInput: () => void) => {
+            let active = false;
+            el.addEventListener('input', () => {
+                if (!active) { this.scene.beginGesture(); active = true; }
+                onInput();
+            });
+            el.addEventListener('blur', () => {
+                if (active) { this.scene.endGesture(); active = false; }
+            });
+        };
+
+        // A compact labeled number field (label above a small input), matching
+        // the density of the fill/stroke rows.
+        const numField = (label: string, val: number, on: (v: number) => void,
+                          opts: { step?: number; min?: number; max?: number; suffix?: string } = {}) => {
+            const field = document.createElement('label');
+            field.className = 'effect-field';
+            const cap = document.createElement('span');
+            cap.className = 'effect-field-label';
+            cap.textContent = label;
+            const wrap = document.createElement('span');
+            wrap.className = 'effect-input-wrap';
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.className = 'prop-input';
+            input.value = String(val);
+            if (opts.step !== undefined) input.step = String(opts.step);
+            if (opts.min !== undefined) input.min = String(opts.min);
+            if (opts.max !== undefined) input.max = String(opts.max);
+            withGesture(input, () => {
+                let v = parseFloat(input.value);
+                if (!isFinite(v)) v = 0;
+                if (opts.min !== undefined) v = Math.max(opts.min, v);
+                if (opts.max !== undefined) v = Math.min(opts.max, v);
+                on(v);
+                commit();
+            });
+            wrap.appendChild(input);
+            if (opts.suffix) {
+                const unit = document.createElement('span');
+                unit.className = 'effect-unit';
+                unit.textContent = opts.suffix;
+                wrap.appendChild(unit);
+            }
+            field.appendChild(cap);
+            field.appendChild(wrap);
+            return field;
         };
 
         effects.forEach((eff, idx) => {
-            const row = document.createElement('div');
-            row.className = 'effect-row';
-            row.style.cssText = 'display:flex; align-items:center; gap:4px; flex-wrap:wrap;';
+            const item = document.createElement('div');
+            item.className = 'effect-item';
 
             const isShadow = 'DropShadow' in eff;
             const isColor = 'ColorMatrix' in eff;
-            const typeSel = document.createElement('select');
-            typeSel.innerHTML = `<option value="blur">Blur</option><option value="shadow">Drop Shadow</option><option value="color">Color</option>`;
-            typeSel.value = isShadow ? 'shadow' : isColor ? 'color' : 'blur';
-            typeSel.style.flex = '1';
-            typeSel.addEventListener('change', () => {
-                effects[idx] = typeSel.value === 'shadow'
-                    ? { DropShadow: { dx: 6, dy: 6, blur: 6, color: { r: 0, g: 0, b: 0, a: 0.4 } } }
-                    : typeSel.value === 'color'
-                        ? { ColorMatrix: { matrix: UIEngine.COLOR_PRESETS.grayscale.slice() } }
-                        : { Blur: { radius: 6 } };
-                commit();
-                this.renderEffectsList(nodeId);
-            });
-            row.appendChild(typeSel);
 
-            const numInput = (val: number, on: (v: number) => void, title: string) => {
-                const i = document.createElement('input');
-                i.type = 'number'; i.value = String(val); i.title = title;
-                i.style.cssText = 'width:44px;';
-                i.addEventListener('change', () => { on(parseFloat(i.value) || 0); commit(); });
-                return i;
-            };
+            // ── Header: type selector + remove ──────────────────────────────
+            const head = document.createElement('div');
+            head.className = 'effect-head';
+
+            const typeSel = document.createElement('select');
+            typeSel.className = 'prop-select';
+            typeSel.innerHTML = `<option value="shadow">Drop shadow</option><option value="blur">Layer blur</option><option value="color">Color</option>`;
+            typeSel.value = isShadow ? 'shadow' : isColor ? 'color' : 'blur';
+            typeSel.addEventListener('change', () => {
+                effects[idx] = this.defaultEffect(typeSel.value as 'blur' | 'shadow' | 'color');
+                commit(true);
+            });
+            head.appendChild(typeSel);
+
+            const del = document.createElement('button');
+            del.className = 'icon-toggle';
+            del.innerHTML = '×';
+            del.title = 'Remove effect';
+            del.addEventListener('click', () => {
+                effects.splice(idx, 1);
+                commit(true);
+            });
+            head.appendChild(del);
+            item.appendChild(head);
+
+            // ── Body: type-specific controls ────────────────────────────────
+            const body = document.createElement('div');
+            body.className = 'effect-body';
 
             if (isShadow) {
                 const d = eff.DropShadow;
-                row.appendChild(numInput(d.dx, v => d.dx = v, 'Offset X'));
-                row.appendChild(numInput(d.dy, v => d.dy = v, 'Offset Y'));
-                row.appendChild(numInput(d.blur, v => d.blur = v, 'Blur'));
+
+                // Color + opacity share the first row.
+                const colorRow = document.createElement('div');
+                colorRow.className = 'effect-row';
                 const color = document.createElement('input');
                 color.type = 'color';
+                color.className = 'color-input';
                 color.value = rgbToHex({ r: d.color.r, g: d.color.g, b: d.color.b });
                 color.title = 'Shadow color';
-                color.style.cssText = 'width:28px; padding:0;';
-                color.addEventListener('change', () => {
+                withGesture(color, () => {
                     const c = hexToRgb(color.value);
                     d.color.r = c.r; d.color.g = c.g; d.color.b = c.b;
                     commit();
                 });
-                row.appendChild(color);
-                row.appendChild(numInput(d.color.a, v => d.color.a = Math.max(0, Math.min(1, v)), 'Shadow opacity (0–1)'));
+                colorRow.appendChild(color);
+                colorRow.appendChild(numField('Opacity', Math.round((d.color.a ?? 0) * 100),
+                    v => d.color.a = Math.max(0, Math.min(1, v / 100)), { min: 0, max: 100, suffix: '%' }));
+                body.appendChild(colorRow);
+
+                // Offset X / Y and blur.
+                const geomRow = document.createElement('div');
+                geomRow.className = 'effect-row';
+                geomRow.appendChild(numField('X', d.dx, v => d.dx = v, { step: 1 }));
+                geomRow.appendChild(numField('Y', d.dy, v => d.dy = v, { step: 1 }));
+                geomRow.appendChild(numField('Blur', d.blur, v => d.blur = v, { step: 1, min: 0 }));
+                body.appendChild(geomRow);
             } else if (isColor) {
-                // Preset picker (a custom imported matrix shows as "Custom").
                 const cm = eff.ColorMatrix;
+                const presetRow = document.createElement('div');
+                presetRow.className = 'effect-row';
                 const presetSel = document.createElement('select');
+                presetSel.className = 'prop-select';
                 presetSel.style.flex = '1';
                 const names = Object.keys(UIEngine.COLOR_PRESETS);
                 const cur = names.find(nm => UIEngine.COLOR_PRESETS[nm].every((x, i) => Math.abs(x - cm.matrix[i]) < 1e-4));
@@ -2410,24 +2508,18 @@ export class UIEngine {
                     const preset = UIEngine.COLOR_PRESETS[presetSel.value];
                     if (preset) { cm.matrix = preset.slice(); commit(); }
                 });
-                row.appendChild(presetSel);
+                presetRow.appendChild(presetSel);
+                body.appendChild(presetRow);
             } else {
                 const b = eff.Blur;
-                row.appendChild(numInput(b.radius, v => b.radius = v, 'Blur radius'));
+                const blurRow = document.createElement('div');
+                blurRow.className = 'effect-row';
+                blurRow.appendChild(numField('Blur', b.radius, v => b.radius = v, { step: 1, min: 0 }));
+                body.appendChild(blurRow);
             }
 
-            const del = document.createElement('button');
-            del.textContent = '✕';
-            del.title = 'Remove effect';
-            del.style.cssText = 'margin-left:auto;';
-            del.addEventListener('click', () => {
-                effects.splice(idx, 1);
-                commit();
-                this.renderEffectsList(nodeId);
-            });
-            row.appendChild(del);
-
-            list.appendChild(row);
+            item.appendChild(body);
+            list.appendChild(item);
         });
     }
 
@@ -3333,6 +3425,10 @@ export class UIEngine {
             const _ownInline = parseInlineStyle(el);
             if ((el.getAttribute('display') || _ownInline['display']) === 'none') return;
 
+            // A filter that is empty or references an invalid target makes the
+            // element (and its subtree) not render at all (SVG semantics).
+            if (this.parseFilterEffects(el, doc) === 'hide') return;
+
             // Parse this element's transform and compose with parent
             const transformAttr = el.getAttribute('transform');
             const localMat = transformAttr ? parseSVGTransform(transformAttr) : identityMatrix();
@@ -3805,7 +3901,7 @@ export class UIEngine {
      * has an unsupported primitive (caller bakes the element to an image), or
      * null when there is no filter.
      */
-    private parseFilterEffects(el: Element, doc: Document): any[] | 'rasterize' | null {
+    private parseFilterEffects(el: Element, doc: Document): any[] | 'rasterize' | 'hide' | null {
         // `filter` may be a url(#id) reference or a CSS filter-function list,
         // on the presentation attribute or in the inline style.
         const styleFilter = (el.getAttribute('style') || '').match(/(?:^|;)\s*filter\s*:\s*([^;]+)/i);
@@ -3820,7 +3916,25 @@ export class UIEngine {
         // composed natively — let the caller rasterize it.
         if (ref.replace(m[0], '').trim() !== '') return 'rasterize';
         const filterEl = doc.getElementById(m[1]);
-        if (!filterEl || filterEl.tagName.toLowerCase() !== 'filter') return null;
+        // An invalid filter reference (missing target or not a <filter>) makes
+        // the referencing element not render at all (SVG 1.1).
+        if (!filterEl || filterEl.tagName.toLowerCase() !== 'filter') return 'hide';
+
+        const primitives = Array.from(filterEl.children).filter(c => c.tagName.toLowerCase().startsWith('fe'));
+        const hasHref = filterEl.hasAttribute('href') || filterEl.hasAttribute('xlink:href');
+        // A filter with no primitives (and no template it inherits them from)
+        // produces empty output → the element is not rendered.
+        if (primitives.length === 0) return hasHref ? 'rasterize' : 'hide';
+        // The native effect path can only represent a plain effect stack over
+        // the default region/inputs. Anything with a custom filter region,
+        // primitive subregion, non-default units, explicit inputs, or href
+        // inheritance is rasterized through the browser, which implements all of
+        // that (incl. region clipping) correctly.
+        const regionAttrs = ['x', 'y', 'width', 'height', 'filterUnits', 'primitiveUnits'];
+        const hasRegion = regionAttrs.some(a => filterEl.hasAttribute(a));
+        const hasSubregion = primitives.some(p => ['x', 'y', 'width', 'height'].some(a => p.hasAttribute(a)));
+        const hasInputs = primitives.some(p => p.hasAttribute('in') || p.hasAttribute('in2'));
+        if (hasHref || hasRegion || hasSubregion || hasInputs) return 'rasterize';
 
         const effects: any[] = [];
         const firstNum = (s: string | null, def = 0): number => {
@@ -3833,7 +3947,7 @@ export class UIEngine {
         // primitive can override individually.
         const filterCIF = (filterEl.getAttribute('color-interpolation-filters') || '').trim().toLowerCase();
         const filterLinearRGB = filterCIF !== 'srgb'; // linearRGB or auto → true
-        for (const prim of Array.from(filterEl.children)) {
+        for (const prim of primitives) {
             const t = prim.tagName.toLowerCase();
             if (t === 'fegaussianblur') {
                 effects.push({ Blur: { radius: firstNum(prim.getAttribute('stdDeviation')) } });

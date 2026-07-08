@@ -109,8 +109,12 @@ export function buildSVGFromData(input: SVGExportInput): string {
         // Check if any ColorMatrix effect uses sRGB (non-default) color space.
         const hasSrgbCM = effects.some(eff => 'ColorMatrix' in eff && eff.ColorMatrix.linear_rgb === false);
         const cifAttr = hasSrgbCM ? ' color-interpolation-filters="sRGB"' : '';
-        // Generous region so shadows/blur aren't clipped.
-        filterDefs.push(`<filter id="${id}" x="-50%" y="-50%" width="200%" height="200%"${cifAttr}>${prims}</filter>`);
+        // No explicit region: our native effects have no region concept, so we
+        // rely on SVG's default filter region (-10%..120% of the bbox), which
+        // matches how resvg/browsers render these. Emitting an explicit region
+        // would also make our own importer rasterize the effect on re-import
+        // (it treats a custom region as un-representable natively).
+        filterDefs.push(`<filter id="${id}"${cifAttr}>${prims}</filter>`);
         return id;
     };
 
