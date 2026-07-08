@@ -25,6 +25,10 @@ export interface SnapDelta {
 export class SnapEngine {
     private xTargets: number[] = [];
     private yTargets: number[] = [];
+    /** True 2D anchor points (path vertices) in world space. Snapped as whole
+     *  points — both axes together — so a line endpoint lands exactly on
+     *  another path's vertex instead of on a phantom edge×edge intersection. */
+    private points: { x: number; y: number }[] = [];
     active: boolean = false;
 
     /**
@@ -35,6 +39,7 @@ export class SnapEngine {
     begin(scene: WasmScene, excludeIds: Iterable<number>, excludeArtboardId?: number) {
         this.xTargets = [];
         this.yTargets = [];
+        this.points = [];
 
         // Roots that are (or contain) a manipulated node don't participate.
         const excludedRoots = new Set<number>();
@@ -72,6 +77,23 @@ export class SnapEngine {
             if (b[2] <= b[0] && b[3] <= b[1]) continue; // empty bounds
             this.xTargets.push(b[0], (b[0] + b[2]) / 2, b[2]);
             this.yTargets.push(b[1], (b[1] + b[3]) / 2, b[3]);
+
+            // Path vertices as exact 2D snap points (endpoint chaining). Guarded
+            // so the minimal test stub — which lacks these getters — still works.
+            if (typeof scene.getResolvedSubpaths === 'function' && typeof scene.getTransform === 'function') {
+                const subs = scene.getResolvedSubpaths(rootId);
+                if (subs.length > 0) {
+                    const t = scene.getTransform(rootId); // row-major world [a,b,tx, c,d,ty, …]
+                    for (const sp of subs) {
+                        for (const p of sp.points) {
+                            this.points.push({
+                                x: t[0] * p.x + t[1] * p.y + t[2],
+                                y: t[3] * p.x + t[4] * p.y + t[5],
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         this.active = true;
@@ -81,6 +103,18 @@ export class SnapEngine {
         this.active = false;
         this.xTargets = [];
         this.yTargets = [];
+        this.points = [];
+    }
+
+    /** Nearest 2D anchor point to (x,y) within `threshold` (Euclidean), or null. */
+    private nearestPoint(x: number, y: number, threshold: number): { x: number; y: number } | null {
+        let best: { x: number; y: number } | null = null;
+        let bestDist = threshold;
+        for (const p of this.points) {
+            const d = Math.hypot(p.x - x, p.y - y);
+            if (d < bestDist) { bestDist = d; best = p; }
+        }
+        return best;
     }
 
     /** Nearest target to `value` within `threshold`, or null. */
@@ -143,6 +177,12 @@ export class SnapEngine {
     snapPoint(x: number, y: number, threshold: number): { x: number; y: number; guides: SnapGuide[] } {
         const guides: SnapGuide[] = [];
         if (!this.active) return { x, y, guides };
+
+        // A true anchor wins over independent edge snapping so endpoints chain.
+        const anchor = this.nearestPoint(x, y, threshold);
+        if (anchor) {
+            return { x: anchor.x, y: anchor.y, guides: [{ axis: 'x', pos: anchor.x }, { axis: 'y', pos: anchor.y }] };
+        }
 
         const tx = this.nearest(this.xTargets, x, threshold);
         const ty = this.nearest(this.yTargets, y, threshold);

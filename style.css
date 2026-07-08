@@ -629,6 +629,12 @@ body, html {
     color: white;
 }
 
+/* Locked (double-clicked): stays active after each draw. A ring signals the
+   tool is "pinned" so you can draw repeatedly without it reverting. */
+.tool-btn.locked {
+    box-shadow: 0 0 0 2px var(--bg-panel), 0 0 0 3px var(--accent);
+}
+
 .tool-btn svg {
     width: 16px;
     height: 16px;
@@ -669,6 +675,15 @@ body, html {
 /* Shortcut badge inside tooltip */
 .tool-btn[data-shortcut]::after {
     content: attr(data-tooltip) "  " attr(data-shortcut);
+}
+
+/* Lockable tools add a second line explaining double-click-to-lock. Placed
+   after the shortcut rule so it wins for tools that have both. */
+.tool-btn[data-lockhint]::after {
+    content: attr(data-tooltip) "  " attr(data-shortcut) "\A" attr(data-lockhint);
+    white-space: pre;
+    line-height: 1.5;
+    text-align: left;
 }
 
 .tool-btn[data-tooltip]::before {

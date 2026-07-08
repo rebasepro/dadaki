@@ -58,7 +58,7 @@ export interface ContextInfo {
 /** Every tool that isn't plain selection gets a 'tool' context (hint + tool
  *  options) while nothing is selected or in progress. */
 const NON_SELECTION_TOOLS = new Set([
-    'direct', 'pen', 'rect', 'ellipse', 'polygon', 'star', 'text', 'scissors', 'paint-bucket',
+    'direct', 'pen', 'pencil', 'line', 'rect', 'ellipse', 'polygon', 'star', 'text', 'scissors', 'paint-bucket',
 ]);
 
 /**

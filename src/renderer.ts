@@ -1948,6 +1948,8 @@ export class Renderer {
     }
 
     private drawPreview(canvas: Canvas) {
+        this.drawStrokePreview(canvas);
+
         const preview = this.inputManager?.previewRect;
         if (!preview || preview.w < 1 || preview.h < 1) return;
 
@@ -1978,6 +1980,32 @@ export class Renderer {
         shapePath?.delete();
         fillPaint.delete();
         strokePaint.delete();
+    }
+
+    /** Live preview stroke for the line and pencil tools (point-based, not a box). */
+    private drawStrokePreview(canvas: Canvas) {
+        const line = this.inputManager?.previewLine;
+        const pencil = this.inputManager?.pencilPoints;
+        if (!line && (!pencil || pencil.length < 2)) return;
+
+        const path = new this.ck.Path();
+        if (line) {
+            path.moveTo(line.x1, line.y1);
+            path.lineTo(line.x2, line.y2);
+        } else if (pencil) {
+            path.moveTo(pencil[0].x, pencil[0].y);
+            for (let i = 1; i < pencil.length; i++) path.lineTo(pencil[i].x, pencil[i].y);
+        }
+
+        const paint = new this.ck.Paint();
+        paint.setColor(this.ck.Color(0, 162, 255, 1.0));
+        paint.setStyle(this.ck.PaintStyle.Stroke);
+        paint.setStrokeWidth(1.5 / this.zoom);
+        paint.setAntiAlias(true);
+        canvas.drawPath(path, paint);
+
+        path.delete();
+        paint.delete();
     }
 
     private makePreviewPath(tool: string, x: number, y: number, w: number, h: number) {

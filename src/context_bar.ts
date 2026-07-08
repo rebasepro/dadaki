@@ -42,6 +42,8 @@ import {
 const TOOL_HINTS: Record<string, string> = {
     direct: 'Click a shape to edit its anchor points',
     pen: 'Click to place the first point of a path',
+    pencil: 'Drag to draw a freehand path',
+    line: 'Drag to draw a line — Shift: constrain to 45°',
     rect: 'Drag to draw a rectangle — Shift: square, Alt: from center',
     ellipse: 'Drag to draw an ellipse — Shift: circle, Alt: from center',
     polygon: 'Drag to draw a polygon — Shift: constrain',
@@ -52,8 +54,8 @@ const TOOL_HINTS: Record<string, string> = {
 };
 
 /** Tools whose next action applies the default style — they get style swatches. */
-const TOOLS_WITH_FILL = new Set(['pen', 'rect', 'ellipse', 'polygon', 'star', 'paint-bucket']);
-const TOOLS_WITH_STROKE = new Set(['pen', 'rect', 'ellipse', 'polygon', 'star']);
+const TOOLS_WITH_FILL = new Set(['pen', 'pencil', 'rect', 'ellipse', 'polygon', 'star', 'paint-bucket']);
+const TOOLS_WITH_STROKE = new Set(['pen', 'pencil', 'line', 'rect', 'ellipse', 'polygon', 'star']);
 
 /** Node types the boolean operations can combine. */
 const BOOLEAN_COMPATIBLE = new Set(['Path', 'Rect', 'Ellipse']);
