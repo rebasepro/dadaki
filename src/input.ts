@@ -821,45 +821,71 @@ export class InputManager {
         if (!container) return;
 
         const t = this.scene.getTransform(id); // row-major: t[2]/t[5] = translation
+        const zoom = this.renderer.zoom;
         const fontSize = geo.Text.font_size;
+        const lineHeight = geo.Text.line_height || 1.2;
         const originalContent = geo.Text.content;
-        const screenX = t[2] * this.renderer.zoom + this.renderer.pan.x;
-        const screenY = (t[5] - fontSize) * this.renderer.zoom + this.renderer.pan.y;
+        // The paragraph renders with its top at (tx, ty - fontSize); place the
+        // overlay's text box there so it sits exactly over the rendered glyphs.
+        const screenX = t[2] * zoom + this.renderer.pan.x;
+        const screenY = (t[5] - fontSize) * zoom + this.renderer.pan.y;
+        const fam = geo.Text.font_family ? `${geo.Text.font_family}, sans-serif` : 'sans-serif';
+        // Match the node's fill colour so the overlay looks like the real text.
+        const node = this.scene.getNode(id);
+        const f = node?.style?.fills?.[0] as { r: number; g: number; b: number; a?: number } | undefined;
+        const color = f && 'r' in f
+            ? `rgba(${Math.round(f.r * 255)},${Math.round(f.g * 255)},${Math.round(f.b * 255)},${f.a ?? 1})`
+            : '#000';
+
+        // Hide the underlying node while its overlay stands in (no more doubling).
+        this.renderer.editingTextId = id;
+        this.renderer.requestRender();
 
         const input = document.createElement('textarea');
         input.className = 'text-input-overlay';
         input.value = originalContent;
-        input.style.left = `${screenX}px`;
-        input.style.top = `${screenY}px`;
-        input.style.fontSize = `${fontSize * this.renderer.zoom}px`;
-        // Apply font family for WYSIWYG feel
-        const textGeo = geo.Text;
-        if (textGeo.font_family) {
-            input.style.fontFamily = textGeo.font_family + ', sans-serif';
-            // Ensure Google Font CSS is loaded for the editor
-            const linkId = `gfont-${textGeo.font_family.replace(/\s+/g, '-')}`;
+        input.spellcheck = false;
+        input.rows = 1; // so scrollHeight reflects content, not the 2-row default
+        Object.assign(input.style, {
+            left: `${screenX}px`, top: `${screenY}px`,
+            fontSize: `${fontSize * zoom}px`,
+            fontFamily: fam,
+            lineHeight: String(lineHeight),
+            color,
+            padding: '0', border: 'none', margin: '0', background: 'transparent',
+            resize: 'none', overflow: 'hidden', whiteSpace: 'pre',
+            minWidth: '0', minHeight: '0',
+            outline: '1px solid var(--accent)',
+        } as Partial<CSSStyleDeclaration>);
+        if (geo.Text.font_family) {
+            const linkId = `gfont-${geo.Text.font_family.replace(/\s+/g, '-')}`;
             if (!document.getElementById(linkId)) {
                 const link = document.createElement('link');
-                link.id = linkId;
-                link.rel = 'stylesheet';
-                link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(textGeo.font_family)}:wght@400;700&display=swap`;
+                link.id = linkId; link.rel = 'stylesheet';
+                link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(geo.Text.font_family)}:wght@400;700&display=swap`;
                 document.head.appendChild(link);
             }
         }
-        const lineCount = originalContent.split('\n').length;
-        input.rows = Math.max(lineCount + 1, 2);
-        input.style.resize = 'both';
-        input.style.minWidth = '100px';
-        input.style.minHeight = '1.5em';
-        input.style.whiteSpace = 'pre-wrap';
-        input.style.overflow = 'hidden';
+        // Auto-size the box to the content (widest line × line count).
+        const measureCtx = document.createElement('canvas').getContext('2d')!;
+        const autoSize = () => {
+            measureCtx.font = `${fontSize * zoom}px ${fam}`;
+            let w = 0;
+            for (const line of input.value.split('\n')) w = Math.max(w, measureCtx.measureText(line).width);
+            input.style.width = `${Math.ceil(w) + 2}px`;
+            input.style.height = 'auto';
+            input.style.height = `${input.scrollHeight}px`;
+        };
+        input.addEventListener('input', autoSize);
 
         let done = false;
+        const finish = () => { this.renderer.editingTextId = null; this.renderer.requestRender(); };
         const commit = () => {
             if (done) return;
             done = true;
-            const content = input.value.trim();
+            const content = input.value.replace(/\n+$/, '');
             input.remove();
+            finish();
             if (content && content !== originalContent) {
                 this.scene.setTextContent(id, content, fontSize);
                 this.ui.syncWithSelection();
@@ -869,6 +895,7 @@ export class InputManager {
             if (done) return;
             done = true;
             input.remove();
+            finish();
         };
 
         input.addEventListener('keydown', (ev: KeyboardEvent) => {
@@ -885,6 +912,7 @@ export class InputManager {
         input.addEventListener('blur', commit);
 
         container.appendChild(input);
+        autoSize();
         input.focus();
         input.select();
     }

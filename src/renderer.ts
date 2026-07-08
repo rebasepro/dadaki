@@ -128,6 +128,9 @@ export class Renderer {
     private _needsRender = true;
     /** One-shot guard so a render-protocol desync logs once, not every frame. */
     private _protocolDesyncWarned = false;
+    /** Node id of the text being edited inline (skipped while its overlay is up). */
+    editingTextId: number | null = null;
+    private get _editingTextId(): number | null { return this.editingTextId; }
     /** Dedicated SrcIn paint for compositing masked-content layers. */
     private _maskPaint: Paint | null = null;
     /** Stack of mask_type values (0 = alpha, 1 = luminance) matching the
@@ -1243,6 +1246,10 @@ export class Renderer {
             const letterSpacing = reader.f32();
             const fontFamily = reader.string();
             const content = reader.string();
+
+            // While a text node is being edited inline, the HTML overlay stands
+            // in for it — skip drawing the underlying node so it isn't doubled.
+            if (this._editingTextId === nodeId) return;
 
             // Map text_align to CanvasKit TextAlign enum
             const ckTextAlign = textAlign === 1 ? this.ck.TextAlign.Center
