@@ -103,6 +103,10 @@ export class InputManager {
     didMove: boolean = false;
     /** Live preview rect in world coords, read by Renderer each frame. */
     previewRect: { x: number; y: number; w: number; h: number; tool: string } | null = null;
+    /** Live line-tool preview (start → end) in world coords, read by Renderer. */
+    previewLine: { x1: number; y1: number; x2: number; y2: number } | null = null;
+    /** Freehand pencil-tool samples in world coords, read by Renderer each frame. */
+    pencilPoints: { x: number; y: number }[] | null = null;
     /** Accumulated pen-tool anchor points for the current path being drawn. */
     currentPathPoints: PenPathPoint[] = [];
     isDraggingHandle: boolean = false;
@@ -547,6 +551,8 @@ export class InputManager {
                 if (e.key === 'v' || e.key === 'V') this.ui.setActiveTool('selection');
                 if (e.key === 'a' || e.key === 'A') this.ui.setActiveTool('artboard');
                 if (e.key === 'p' || e.key === 'P') this.ui.setActiveTool('pen');
+                if (e.key === 'n' || e.key === 'N') this.ui.setActiveTool('pencil');
+                if (e.key === 'l' || e.key === 'L') this.ui.setActiveTool('line');
                 if (e.key === 'r' || e.key === 'R') this.ui.setActiveTool('rect');
                 if (e.key === 'o' || e.key === 'O') this.ui.setActiveTool('ellipse');
 
@@ -705,7 +711,7 @@ export class InputManager {
                 this.ui.syncWithSelection();
                 return;
             }
-            if (this.isMouseDown && (this.moveSnapshot || this.resizeSnapshot || this.previewRect || this.marqueeRect)) {
+            if (this.isMouseDown && (this.moveSnapshot || this.resizeSnapshot || this.previewRect || this.previewLine || this.pencilPoints || this.marqueeRect)) {
                 this.cancelActiveDrag();
                 return;
             }
@@ -1075,6 +1081,8 @@ export class InputManager {
         this.resizeSnapshot = null;
         this.liveResizeBounds = null;
         this.previewRect = null;
+        this.previewLine = null;
+        this.pencilPoints = null;
         this.marqueeRect = null;
         this.dragMode = 'none';
         this.isMouseDown = false;
@@ -1420,6 +1428,16 @@ export class InputManager {
                 this.startPos = { x: s.x, y: s.y };
             }
             this.previewRect = { x: this.startPos.x, y: this.startPos.y, w: 0, h: 0, tool: this.ui.activeTool };
+        } else if (this.ui.activeTool === 'line') {
+            // Snap the anchor endpoint unless Cmd/Ctrl bypasses snapping.
+            this.snap.begin(this.scene, []);
+            if (!e.metaKey && !e.ctrlKey) {
+                const s = this.snap.snapPoint(this.startPos.x, this.startPos.y, 8 / this.renderer.zoom);
+                this.startPos = { x: s.x, y: s.y };
+            }
+            this.previewLine = { x1: this.startPos.x, y1: this.startPos.y, x2: this.startPos.x, y2: this.startPos.y };
+        } else if (this.ui.activeTool === 'pencil') {
+            this.pencilPoints = [{ x: this.startPos.x, y: this.startPos.y }];
         } else if (this.ui.activeTool === 'paint-bucket') {
             this.handlePaintBucketClick(this.startPos, e.altKey);
         } else if (this.ui.activeTool === 'scissors') {
@@ -2990,6 +3008,31 @@ export class InputManager {
             this.previewRect.h = h;
         }
 
+        // Line tool: track the moving endpoint (snap, or Shift → 45° steps).
+        if (this.previewLine) {
+            let cur = this.currentPos;
+            this.activeSnapGuides = [];
+            if (e.shiftKey) {
+                const c = this.snapAngle45(cur.x - this.startPos.x, cur.y - this.startPos.y);
+                cur = { x: this.startPos.x + c.dx, y: this.startPos.y + c.dy };
+            } else if (!e.metaKey && !e.ctrlKey) {
+                const s = this.snap.snapPoint(cur.x, cur.y, 8 / this.renderer.zoom);
+                cur = { x: s.x, y: s.y };
+                this.activeSnapGuides = s.guides;
+            }
+            this.previewLine.x2 = cur.x;
+            this.previewLine.y2 = cur.y;
+        }
+
+        // Pencil tool: sample the freehand stroke, thinning near-duplicate points.
+        if (this.pencilPoints) {
+            const last = this.pencilPoints[this.pencilPoints.length - 1];
+            const minGap = 2 / this.renderer.zoom;
+            if (Math.hypot(this.currentPos.x - last.x, this.currentPos.y - last.y) >= minGap) {
+                this.pencilPoints.push({ x: this.currentPos.x, y: this.currentPos.y });
+            }
+        }
+
         // Pen tool: adjust control handles while dragging after placing an anchor
         if (this.ui.activeTool === 'pen' && this.isDraggingHandle && this.currentPathPoints.length > 0) {
             const lastPoint = this.currentPathPoints[this.currentPathPoints.length - 1];
@@ -3203,6 +3246,14 @@ export class InputManager {
             this.ui.updateLayerList();
         }
 
+        // Commit line / pencil strokes (their own point-based previews).
+        if (this.previewLine) {
+            this.finalizeLine();
+        }
+        if (this.pencilPoints) {
+            this.finalizePencil();
+        }
+
         // Commit shape creation (use previewRect which already has Shift/Alt constraints applied)
         if (this.previewRect && (this.previewRect.w > 5 || this.previewRect.h > 5)) {
             const { x, y, w, h, tool } = this.previewRect;
@@ -3236,6 +3287,7 @@ export class InputManager {
                     this.scene.engine!.clear_selection();
                     this.scene.selectNode(newId, false);
                     this.ui.syncWithSelection();
+                    this.maybeRevertTool();
                 }
                 this.ui.updateLayerList();
             }
@@ -3243,7 +3295,57 @@ export class InputManager {
 
         this.dragMode = 'none';
         this.previewRect = null;
+        this.previewLine = null;
+        this.pencilPoints = null;
         this.marqueeRect = null;
+    }
+
+    /** Turn the line-tool preview into a 2-point open path, styled and selected. */
+    finalizeLine() {
+        const L = this.previewLine;
+        this.previewLine = null;
+        if (!L) return;
+        // Ignore degenerate clicks that never became a drag.
+        if (Math.hypot(L.x2 - L.x1, L.y2 - L.y1) < 2) return;
+        const mk = (x: number, y: number) => ({ x, y, cp1: [x, y], cp2: [x, y] });
+        const subpaths = [{ points: [mk(L.x1, L.y1), mk(L.x2, L.y2)], closed: false }];
+        this.commitDrawnPath(JSON.stringify(subpaths));
+    }
+
+    /** Turn the sampled pencil stroke into an open path, styled and selected. */
+    finalizePencil() {
+        const pts = this.pencilPoints;
+        this.pencilPoints = null;
+        if (!pts || pts.length < 2) return;
+        const mk = (p: { x: number; y: number }) => ({ x: p.x, y: p.y, cp1: [p.x, p.y], cp2: [p.x, p.y] });
+        const subpaths = [{ points: pts.map(mk), closed: false }];
+        this.commitDrawnPath(JSON.stringify(subpaths));
+    }
+
+    /** Add a freshly drawn path (line/pencil), apply the active style, select it.
+     *  Open strokes are stroke-only — a fill would shade the region between the
+     *  endpoints, which is never what you want from a line or freehand stroke. */
+    private commitDrawnPath(subpathsJson: string) {
+        const newId = this.scene.addPath(subpathsJson);
+        let style = this.ui.getCurrentStyle();
+        try {
+            const s = JSON.parse(style);
+            s.fills = [];
+            style = JSON.stringify(s);
+        } catch { /* fall back to the raw style */ }
+        this.scene.setNodeStyleNoHistory(newId, style);
+        this.scene.engine!.clear_selection();
+        this.scene.selectNode(newId, false);
+        this.ui.syncWithSelection();
+        this.ui.updateLayerList();
+        this.maybeRevertTool();
+    }
+
+    /** After creating a shape, one-shot back to the Selection tool (Figma-style)
+     *  unless the tool is locked via double-click. */
+    private maybeRevertTool() {
+        if (this.ui.toolLocked) return;
+        this.ui.setActiveTool('selection');
     }
 
     /** Union of the selected nodes' world bounds, or null if nothing is selected. */

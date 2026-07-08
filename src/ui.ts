@@ -28,6 +28,10 @@ export class UIEngine {
     ck: CanvasKit;
     scene: WasmScene;
     activeTool: string = 'selection';
+    /** When true, a creation tool stays active after drawing instead of
+     *  reverting to the Selection tool (Figma one-shot). Set by double-clicking
+     *  the tool in the toolbar; cleared whenever a tool is picked normally. */
+    toolLocked: boolean = false;
     /** Shared gradient-editing state (panel ramp + on-canvas handles). */
     gradientEdit: GradientEditController;
     contextBar: ContextBar | null = null;
@@ -592,8 +596,9 @@ export class UIEngine {
         input.click();
     }
 
-    setActiveTool(toolId: string) {
+    setActiveTool(toolId: string, lock = false) {
         this.activeTool = toolId;
+        this.toolLocked = lock;
         this.toolbar?.sync(toolId);
 
         // Exit path/text editing when switching tools to clear dimming
@@ -610,6 +615,8 @@ export class UIEngine {
                 'selection': 'default',
                 'direct': 'default',
                 'pen': 'crosshair',
+                'pencil': 'crosshair',
+                'line': 'crosshair',
                 'rect': 'crosshair',
                 'ellipse': 'crosshair',
                 'polygon': 'crosshair',

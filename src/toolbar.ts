@@ -34,7 +34,9 @@ const TOOL_META: Record<string, ToolMeta> = {
     direct: { label: 'Direct Selection', icon: 'mouse-pointer-click' },
     artboard: { label: 'Artwork', shortcut: 'A', icon: 'frame' },
     pen: { label: 'Pen', shortcut: 'P', icon: 'pen-tool' },
+    pencil: { label: 'Pencil', shortcut: 'N', icon: 'pencil' },
     scissors: { label: 'Scissors', shortcut: 'C', icon: 'scissors' },
+    line: { label: 'Line', shortcut: 'L', icon: 'slash' },
     rect: { label: 'Rectangle', shortcut: 'R', icon: 'square' },
     ellipse: { label: 'Ellipse', shortcut: 'O', icon: 'circle' },
     polygon: { label: 'Polygon', icon: 'hexagon' },
@@ -51,14 +53,18 @@ const LAYOUT: LayoutEntry[] = [
     ['direct'],
     'sep',
     ['artboard'],
-    ['pen', 'scissors'],
-    ['rect', 'ellipse', 'polygon', 'star'],
+    ['pen', 'pencil', 'scissors'],
+    ['line', 'rect', 'ellipse', 'polygon', 'star'],
     ['text'],
     'sep',
     ['paint-bucket'],
 ];
 
 const LONG_PRESS_MS = 250;
+
+/** Drag-to-create tools that one-shot back to Selection after each draw, so
+ *  double-clicking them to lock (stay active) is meaningful — the tooltip says so. */
+const LOCKABLE_TOOLS = new Set(['line', 'pencil', 'rect', 'ellipse', 'polygon', 'star']);
 
 export class Toolbar {
     private el: HTMLElement;
@@ -101,7 +107,18 @@ export class Toolbar {
             this.updateButtonFace(activeGroup);
         }
         for (const [idx, btn] of this.buttons) {
-            btn.classList.toggle('active', idx === activeGroup);
+            const isActive = idx === activeGroup;
+            btn.classList.toggle('active', isActive);
+            btn.classList.toggle('locked', isActive && this.ui.toolLocked);
+            // Tooltip hint: how to lock, or how to release once locked.
+            const face = this.groupFace.get(idx);
+            if (face && LOCKABLE_TOOLS.has(face)) {
+                btn.dataset.lockhint = (isActive && this.ui.toolLocked)
+                    ? 'Locked · click to release'
+                    : 'Double-click to lock';
+            } else {
+                delete btn.dataset.lockhint;
+            }
         }
     }
 
@@ -128,6 +145,13 @@ export class Toolbar {
                 if (this.suppressClick) { this.suppressClick = false; return; }
                 this.closeFlyout();
                 this.ui.setActiveTool(this.groupFace.get(groupIdx)!);
+            });
+
+            // Double-click locks the tool so it stays active after each draw
+            // (rapid-fire drawing), instead of reverting to Selection.
+            btn.addEventListener('dblclick', () => {
+                this.closeFlyout();
+                this.ui.setActiveTool(this.groupFace.get(groupIdx)!, true);
             });
 
             if (entry.length > 1) {
