@@ -30,7 +30,15 @@
                 <button id="redo-btn" class="zoom-btn" title="Redo (⌘⇧Z)"><i data-lucide="redo-2"></i></button>
             </div>
             <div class="header-spacer"></div>
-            <button id="export-btn" class="header-btn header-btn-primary">Export</button>
+            <div class="header-actions">
+                <button id="save-btn" class="save-btn" title="Save (⌘S)">
+                    <svg class="save-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+                    <span class="save-label">Save</span>
+                </button>
+                <button id="export-btn" class="icon-btn" title="Export…">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+                </button>
+            </div>
             <div class="zoom-controls">
                 <button id="zoom-out" class="zoom-btn" title="Zoom Out (−)">−</button>
                 <div id="zoom-level" class="zoom-display">100%</div>
@@ -44,7 +52,7 @@
                 <div class="panel-section layers-section">
                     <div class="panel-section-header" data-section="layers">
                         <span class="chevron">▾</span>
-                        <span class="section-title">Layers</span>
+                        <span class="section-title">Objects</span>
                     </div>
                     <div id="layer-list" data-section-body="layers">
                         <!-- Layers injected by JS -->
@@ -63,32 +71,45 @@
             <aside id="side-panel">
                 <div class="properties-scroll">
                 <!-- ARTBOARD (shown only when an artboard is selected) -->
-                <div class="panel-section" id="artboard-section" style="display:none;">
+                <div class="panel-section artboard-panel" id="artboard-section" style="display:none;">
                     <div class="panel-section-header">
-                        <span class="section-title">Artboard</span>
+                        <span class="section-title">Frame</span>
                     </div>
                     <div class="panel-section-body">
-                        <div class="prop-row">
-                            <span class="label">Name</span>
-                            <input type="text" id="ab-name" class="prop-input" style="flex:1;">
+                        <div class="ab-field">
+                            <input type="text" id="ab-name" class="ab-name-input" placeholder="Frame name">
                         </div>
-                        <div class="dim-grid">
-                            <div class="dim-input"><span class="dim-label">X</span><input type="number" id="ab-x" value="0" step="1"></div>
-                            <div class="dim-input"><span class="dim-label">Y</span><input type="number" id="ab-y" value="0" step="1"></div>
-                            <span></span>
-                            <div class="dim-input"><span class="dim-label">W</span><input type="number" id="ab-w" value="0" step="1" min="1"></div>
-                            <div class="dim-input"><span class="dim-label">H</span><input type="number" id="ab-h" value="0" step="1" min="1"></div>
-                            <span></span>
+                        <div class="ab-row">
+                            <label class="ab-cell"><span>X</span><input type="number" id="ab-x" value="0" step="1"></label>
+                            <label class="ab-cell"><span>Y</span><input type="number" id="ab-y" value="0" step="1"></label>
                         </div>
-                        <div class="prop-row">
-                            <span class="label">Background</span>
+                        <div class="ab-row">
+                            <label class="ab-cell"><span>W</span><input type="number" id="ab-w" value="0" step="1" min="1"></label>
+                            <label class="ab-cell"><span>H</span><input type="number" id="ab-h" value="0" step="1" min="1"></label>
+                        </div>
+                        <div class="ab-field">
+                            <span class="ab-sublabel">Presets</span>
+                            <select id="ab-preset" class="prop-select ab-preset">
+                                <option value="">Custom…</option>
+                                <option value="1080x1080">Square · 1080×1080</option>
+                                <option value="1920x1080">Desktop · 1920×1080</option>
+                                <option value="1440x1024">Web · 1440×1024</option>
+                                <option value="390x844">iPhone · 390×844</option>
+                                <option value="360x800">Android · 360×800</option>
+                                <option value="1200x630">Social · 1200×630</option>
+                                <option value="595x842">A4 · 595×842</option>
+                            </select>
+                        </div>
+                        <div class="ab-field ab-bg-row">
+                            <span class="ab-sublabel">Background</span>
+                            <label class="ab-transparent"><input type="checkbox" id="ab-transparent"> Transparent</label>
                             <input type="color" id="ab-bg" class="prop-color" value="#ffffff">
-                            <span class="header-spacer"></span>
-                            <button id="ab-delete" class="header-btn header-btn-secondary" style="margin:0;">Delete</button>
                         </div>
+                        <button id="ab-delete" class="ab-delete-btn">Delete frame</button>
                     </div>
                 </div>
 
+                <div id="node-props">
                 <!-- TRANSFORM -->
                 <div class="panel-section">
                     <div class="panel-section-header" data-section="transform">
@@ -320,6 +341,7 @@
                         </div>
                     </div>
                 </div>
+                </div><!-- #node-props -->
 
                 </div><!-- .properties-scroll -->
 

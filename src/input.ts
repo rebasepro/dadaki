@@ -79,6 +79,8 @@ export class InputManager {
     // --- Modifier key state (updated every mousemove) ---
     shiftKey: boolean = false;
     altKey: boolean = false;
+    metaKey: boolean = false;
+    ctrlKey: boolean = false;
 
     // --- Move drag state (snapshot-restore, like resize) ---
     /** Snapshot of scene state taken at drag start so we can restore & reapply each frame. */
@@ -493,6 +495,7 @@ export class InputManager {
             if (!e.shiftKey) {
                 if (e.key === 'v' || e.key === 'V') this.ui.setActiveTool('selection');
                 if (e.key === 'a' || e.key === 'A') this.ui.setActiveTool('direct');
+                if (e.key === 'f' || e.key === 'F') this.ui.setActiveTool('artboard');
                 if (e.key === 'p' || e.key === 'P') this.ui.setActiveTool('pen');
                 if (e.key === 'r' || e.key === 'R') this.ui.setActiveTool('rect');
                 if (e.key === 'o' || e.key === 'O') this.ui.setActiveTool('ellipse');
@@ -970,12 +973,14 @@ export class InputManager {
         this.renderer.selectedArtboardId = id;
         this.ui.syncWithSelection();
         this.ui.refreshArtboardPanel();
+        this.ui.updateLayerList();
         this.renderer.requestRender();
     }
 
     deselectArtboard() {
         this.renderer.selectedArtboardId = null;
         this.ui.refreshArtboardPanel();
+        this.ui.updateLayerList();
         this.renderer.requestRender();
     }
 
@@ -987,6 +992,9 @@ export class InputManager {
             start: { x: ab.x, y: ab.y, w: ab.w, h: ab.h },
             startWorld: { ...this.startPos },
         };
+        // Snap to other shapes/artboards (exclude this one so it can't snap to
+        // its own edges).
+        this.snap.begin(this.scene, [], id);
         this.scene.beginGesture(); // coalesce the whole drag into one undo step
     }
 
@@ -997,15 +1005,30 @@ export class InputManager {
         const dy = this.currentPos.y - d.startWorld.y;
         let { x, y, w, h } = d.start;
         const MIN = 1;
+        const thr = 8 / this.renderer.zoom;
+        const snapOff = this.metaKey || this.ctrlKey; // Cmd/Ctrl bypasses snapping
+        this.activeSnapGuides = [];
 
         if (d.mode === 'move') {
             x += dx; y += dy;
+            if (!snapOff) {
+                const s = this.snap.snapBounds({ x, y, w, h }, thr);
+                x += s.dx; y += s.dy;
+                this.activeSnapGuides = s.guides;
+            }
         } else {
             const hnd = d.handle!;
             if (hnd.includes('e')) w = Math.max(MIN, d.start.w + dx);
             if (hnd.includes('s')) h = Math.max(MIN, d.start.h + dy);
             if (hnd.includes('w')) { w = Math.max(MIN, d.start.w - dx); x = d.start.x + (d.start.w - w); }
             if (hnd.includes('n')) { h = Math.max(MIN, d.start.h - dy); y = d.start.y + (d.start.h - h); }
+            // Snap the moving edge(s) to targets.
+            if (!snapOff) {
+                if (hnd.includes('e')) { const s = this.snap.snapAxis('x', x + w, thr); if (s) { w = Math.max(MIN, s.value - x); this.activeSnapGuides.push(s.guide); } }
+                if (hnd.includes('w')) { const s = this.snap.snapAxis('x', x, thr); if (s) { const right = x + w; x = Math.min(s.value, right - MIN); w = right - x; this.activeSnapGuides.push(s.guide); } }
+                if (hnd.includes('s')) { const s = this.snap.snapAxis('y', y + h, thr); if (s) { h = Math.max(MIN, s.value - y); this.activeSnapGuides.push(s.guide); } }
+                if (hnd.includes('n')) { const s = this.snap.snapAxis('y', y, thr); if (s) { const bottom = y + h; y = Math.min(s.value, bottom - MIN); h = bottom - y; this.activeSnapGuides.push(s.guide); } }
+            }
         }
         this.scene.setArtboardBounds(d.id, x, y, w, h);
         this.ui.refreshArtboardPanel();
@@ -1014,6 +1037,8 @@ export class InputManager {
     private endArtboardDrag() {
         if (!this.artboardDrag) return;
         this.artboardDrag = null;
+        this.snap.end();
+        this.activeSnapGuides = [];
         this.scene.endGesture();
         this.ui.refreshArtboardPanel();
     }
@@ -1230,7 +1255,8 @@ export class InputManager {
             input.focus();
             input.select();
         } else if (this.ui.activeTool === 'rect' || this.ui.activeTool === 'ellipse'
-                   || this.ui.activeTool === 'polygon' || this.ui.activeTool === 'star') {
+                   || this.ui.activeTool === 'polygon' || this.ui.activeTool === 'star'
+                   || this.ui.activeTool === 'artboard') {
             // Snap the anchor corner unless Cmd/Ctrl bypasses snapping
             this.snap.begin(this.scene, []);
             if (!e.metaKey && !e.ctrlKey) {
@@ -2063,6 +2089,8 @@ export class InputManager {
         this.currentPos = this.getPos(e);
         this.shiftKey = e.shiftKey;
         this.altKey = e.altKey;
+        this.metaKey = e.metaKey;
+        this.ctrlKey = e.ctrlKey;
 
         // Artboard move/resize drag in progress.
         if (this.artboardDrag && this.isMouseDown) {
@@ -2799,26 +2827,38 @@ export class InputManager {
         if (this.previewRect && (this.previewRect.w > 5 || this.previewRect.h > 5)) {
             const { x, y, w, h, tool } = this.previewRect;
 
-            let newId: number | undefined;
-            if (tool === 'rect') {
-                newId = this.scene.addRect(x, y, w, h);
-            } else if (tool === 'ellipse') {
-                newId = this.scene.addEllipse(x + w / 2, y + h / 2, w / 2, h / 2);
-            } else if (tool === 'polygon') {
-                newId = this.scene.addPolygon(x + w / 2, y + h / 2, Math.max(w, h) / 2, 6);
-            } else if (tool === 'star') {
-                const r = Math.max(w, h) / 2;
-                newId = this.scene.addStar(x + w / 2, y + h / 2, r, r * 0.4, 5);
-            }
-
-            // Apply the current UI style and select the new shape
-            if (newId !== undefined) {
-                this.scene.setNodeStyleNoHistory(newId, this.ui.getCurrentStyle());
+            if (tool === 'artboard') {
+                // Create a new artboard (frame) and select it, then revert to the
+                // selection tool like Figma.
+                const id = this.scene.addArtboard(x, y, w, h);
                 this.scene.engine!.clear_selection();
-                this.scene.selectNode(newId, false);
+                this.renderer.selectedArtboardId = id;
                 this.ui.syncWithSelection();
+                this.ui.refreshArtboardPanel();
+                this.ui.updateLayerList();
+                this.ui.setActiveTool('selection');
+            } else {
+                let newId: number | undefined;
+                if (tool === 'rect') {
+                    newId = this.scene.addRect(x, y, w, h);
+                } else if (tool === 'ellipse') {
+                    newId = this.scene.addEllipse(x + w / 2, y + h / 2, w / 2, h / 2);
+                } else if (tool === 'polygon') {
+                    newId = this.scene.addPolygon(x + w / 2, y + h / 2, Math.max(w, h) / 2, 6);
+                } else if (tool === 'star') {
+                    const r = Math.max(w, h) / 2;
+                    newId = this.scene.addStar(x + w / 2, y + h / 2, r, r * 0.4, 5);
+                }
+
+                // Apply the current UI style and select the new shape
+                if (newId !== undefined) {
+                    this.scene.setNodeStyleNoHistory(newId, this.ui.getCurrentStyle());
+                    this.scene.engine!.clear_selection();
+                    this.scene.selectNode(newId, false);
+                    this.ui.syncWithSelection();
+                }
+                this.ui.updateLayerList();
             }
-            this.ui.updateLayerList();
         }
 
         this.dragMode = 'none';

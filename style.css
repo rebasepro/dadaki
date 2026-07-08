@@ -51,6 +51,68 @@ body, html {
     flex: 1;
 }
 
+/* ─── Header actions: Save (.vec) + Export ─── */
+
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-right: 8px;
+}
+
+.save-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    height: 24px;
+    padding: 0 10px;
+    border-radius: 5px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.save-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-main);
+}
+
+/* Unsaved changes → the save affordance becomes the emphasized action. */
+.save-btn.dirty {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.save-btn.dirty:hover {
+    background: var(--accent);
+    color: #fff;
+}
+
+.icon-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: 5px;
+    cursor: pointer;
+    padding: 0;
+    transition: background 0.15s, color 0.15s;
+}
+
+.icon-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-main);
+}
+
 .header-btn {
     padding: 4px 12px;
     border-radius: 4px;
@@ -276,14 +338,18 @@ body, html {
 }
 
 .doc-tab-rename {
-    width: 110px;
+    min-width: 48px;
+    max-width: 200px;
     background: var(--bg-input);
     border: 1px solid var(--accent);
     border-radius: 3px;
     color: var(--text-main);
     font-size: 11px;
+    font-weight: 500;
     font-family: inherit;
+    line-height: 1;
     padding: 1px 4px;
+    margin: -1px 0;
     outline: none;
 }
 
@@ -1326,6 +1392,145 @@ body.scrubbing * {
 .layer-item.selected > .layer-item-row {
     background: var(--accent-dim);
     color: var(--accent);
+}
+
+/* Artboard rows: top-level frames, slightly emphasized. */
+.layer-item.layer-artboard > .layer-item-row {
+    font-weight: 600;
+    color: var(--text-main);
+}
+.layer-item.layer-artboard > .layer-item-row .layer-icon {
+    opacity: 0.85;
+}
+.layer-item.layer-artboard.selected > .layer-item-row {
+    color: var(--accent);
+}
+
+/* ─── Frame (artboard) properties panel ─── */
+
+.artboard-panel .panel-section-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.ab-field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ab-name-input {
+    flex: 1;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text-main);
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    padding: 6px 8px;
+    outline: none;
+}
+
+.ab-name-input:focus {
+    border-color: var(--accent);
+}
+
+.ab-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.ab-cell {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 8px;
+}
+
+.ab-cell:focus-within {
+    border-color: var(--accent);
+}
+
+.ab-cell > span {
+    font-size: 11px;
+    color: var(--text-dim);
+    width: 10px;
+    flex-shrink: 0;
+}
+
+.ab-cell input {
+    width: 100%;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-main);
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
+}
+
+.ab-sublabel {
+    font-size: 11px;
+    color: var(--text-dim);
+    flex: 1;
+}
+
+.ab-preset {
+    flex: 1.4;
+}
+
+.ab-bg-row {
+    justify-content: space-between;
+}
+
+.ab-transparent {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+}
+
+.ab-bg-row .prop-color {
+    width: 30px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: none;
+    cursor: pointer;
+}
+
+.ab-bg-row .prop-color:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.ab-delete-btn {
+    width: 100%;
+    padding: 7px;
+    margin-top: 2px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: 5px;
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.ab-delete-btn:hover {
+    background: #b3261e;
+    border-color: #b3261e;
+    color: #fff;
 }
 
 .layer-item-row:focus-visible {

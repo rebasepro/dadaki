@@ -23,10 +23,13 @@ export interface TabStripCallbacks {
 
 export class TabStrip {
     private _signature = '';
+    /** Last descriptor list, so a rename can re-render without the manager. */
+    private _lastTabs: TabDescriptor[] = [];
 
     constructor(private el: HTMLElement, private cb: TabStripCallbacks) {}
 
     render(tabs: TabDescriptor[]): void {
+        this._lastTabs = tabs;
         const sig = tabs.map(t => `${t.id}:${t.name}:${t.dirty ? 1 : 0}:${t.active ? 1 : 0}`).join('|')
             + `#${tabs.length}`;
         if (sig === this._signature) return;
@@ -89,21 +92,31 @@ export class TabStrip {
         const input = document.createElement('input');
         input.className = 'doc-tab-rename';
         input.value = t.name;
+        // Size the input to the label so the tab width doesn't jump.
+        const w = Math.max(48, Math.ceil(label.getBoundingClientRect().width) + 6);
+        input.style.width = `${w}px`;
         label.replaceWith(input);
         input.focus();
         input.select();
 
-        const commit = () => {
-            const v = input.value.trim();
-            if (v && v !== t.name) this.cb.onRename?.(t.id, v);
-            // Force a re-render next time by clearing the signature.
+        let done = false;
+        const finish = (save: boolean) => {
+            if (done) return;
+            done = true;
+            if (save) {
+                const v = input.value.trim();
+                if (v && v !== t.name) this.cb.onRename?.(t.id, v);
+            }
+            // Always re-render so the <input> is replaced by the label again,
+            // even when the name didn't change (blur/Escape with no edit).
             this._signature = '';
+            this.render(this._lastTabs);
         };
-        input.addEventListener('blur', commit);
+        input.addEventListener('blur', () => finish(true));
         input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') input.blur();
-            else if (e.key === 'Escape') { input.value = t.name; input.blur(); }
             e.stopPropagation();
+            if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+            else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
         });
     }
 }

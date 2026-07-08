@@ -32,6 +32,7 @@ interface ToolMeta {
 const TOOL_META: Record<string, ToolMeta> = {
     selection: { label: 'Selection', shortcut: 'V', icon: 'mouse-pointer-2' },
     direct: { label: 'Direct Selection', shortcut: 'A', icon: 'mouse-pointer-click' },
+    artboard: { label: 'Frame', shortcut: 'F', icon: 'frame' },
     pen: { label: 'Pen', shortcut: 'P', icon: 'pen-tool' },
     scissors: { label: 'Scissors', shortcut: 'C', icon: 'scissors' },
     rect: { label: 'Rectangle', shortcut: 'R', icon: 'square' },
@@ -49,6 +50,7 @@ const LAYOUT: LayoutEntry[] = [
     ['selection'],
     ['direct'],
     'sep',
+    ['artboard'],
     ['pen', 'scissors'],
     ['rect', 'ellipse', 'polygon', 'star'],
     ['text'],

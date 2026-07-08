@@ -25,6 +25,14 @@ export function iconFolder(size = 14): string {
     );
 }
 
+/** Frame icon – for Artboards */
+export function iconFrame(size = 14): string {
+    return svg(
+        '<line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/><line x1="8" y1="4" x2="8" y2="20"/><line x1="16" y1="4" x2="16" y2="20"/>',
+        size,
+    );
+}
+
 /** Square icon – for Rect nodes */
 export function iconSquare(size = 14): string {
     return svg(

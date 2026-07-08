@@ -1,7 +1,7 @@
 import type { CanvasKit } from 'canvaskit-wasm';
 import type { WasmScene } from './wasm_scene';
 import { FileIO } from './file_io';
-import type { Color, NodeStyle, Gradient, GradientStop, SceneNode, Paint, Stroke } from './types';
+import type { Color, NodeStyle, Gradient, GradientStop, SceneNode, Paint, Stroke, Artboard } from './types';
 import { isGradient, isPattern, StrokeAlignment } from './types';
 import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix, scaleMatrix, parseSvgLength } from './svg_utils';
 import type { GradientGeo } from './svg_utils';
@@ -12,7 +12,12 @@ import type { SVGExportInput, FilledFace } from './svg_export';
 import type { SVGSubpath, SVGGradientData } from './svg_utils';
 import type { ContextBar } from './context_bar';
 import type { Toolbar } from './toolbar';
-import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock, iconUnlock, iconFlipH, iconFlipV, iconFlatten, iconRotateCW, iconRotateCCW } from './icons';
+import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock, iconUnlock, iconFlipH, iconFlipV, iconFlatten, iconRotateCW, iconRotateCCW, iconFrame } from './icons';
+
+/** Minimal HTML escaper for names rendered via innerHTML templates. */
+function escapeHtml(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 import { GradientEditController, sampleGradientColor } from './gradient_edit';
 
 /** Element tags a <clipPath> may legally contain (basic shapes, text, use).
@@ -102,6 +107,7 @@ export class UIEngine {
 
     // Layer tree state
     private _collapsedGroups: Set<number> = new Set();
+    private _collapsedArtboards: Set<number> = new Set();
 
     /** Node ids currently being dragged in the layer panel (the whole selection
      *  when the grabbed row is part of a multi-selection), or null. */
@@ -471,7 +477,34 @@ export class UIEngine {
             if (!ab) return;
             const c = hexToRgb((e.target as HTMLInputElement).value);
             this.scene.setArtboardBackground(ab.id, c.r, c.g, c.b, 1);
+            (document.getElementById('ab-transparent') as HTMLInputElement).checked = false;
             this.scene.renderer?.requestRender();
+        });
+        document.getElementById('ab-transparent')?.addEventListener('change', (e) => {
+            const ab = current();
+            if (!ab) return;
+            const transparent = (e.target as HTMLInputElement).checked;
+            if (transparent) {
+                this.scene.setArtboardBackground(ab.id, ab.background.r, ab.background.g, ab.background.b, 0);
+            } else {
+                const c = hexToRgb((document.getElementById('ab-bg') as HTMLInputElement).value);
+                this.scene.setArtboardBackground(ab.id, c.r, c.g, c.b, 1);
+            }
+            this.refreshArtboardPanel();
+            this.scene.renderer?.requestRender();
+        });
+        document.getElementById('ab-preset')?.addEventListener('change', (e) => {
+            const ab = current();
+            const val = (e.target as HTMLSelectElement).value;
+            (e.target as HTMLSelectElement).value = ''; // reset to Custom
+            if (!ab || !val) return;
+            const [w, h] = val.split('x').map(Number);
+            if (w > 0 && h > 0) {
+                this.scene.setArtboardBounds(ab.id, ab.x, ab.y, w, h);
+                this.refreshArtboardPanel();
+                this.scene.renderer?.fitToArtboard();
+                this.scene.renderer?.requestRender();
+            }
         });
         document.getElementById('ab-delete')?.addEventListener('click', () => {
             const ab = current();
@@ -479,25 +512,43 @@ export class UIEngine {
             if (this.scene.removeArtboard(ab.id)) {
                 if (this.scene.renderer) this.scene.renderer.selectedArtboardId = null;
                 this.refreshArtboardPanel();
+                this.updateLayerList();
                 this.scene.renderer?.fitToArtboard();
             }
         });
     }
 
     /** Show/populate the artboard section when an artboard is selected. */
+    /**
+     * Reflect artboard selection in the right panel: when an artboard is
+     * selected show ONLY the Frame properties and hide the node property
+     * sections; otherwise show the node sections.
+     */
     refreshArtboardPanel() {
         const section = document.getElementById('artboard-section');
+        const nodeProps = document.getElementById('node-props');
         if (!section) return;
         const id = this.scene.renderer?.selectedArtboardId ?? null;
         const ab = id !== null ? this.scene.getArtboards().find(a => a.id === id) : undefined;
-        if (!ab) { section.style.display = 'none'; return; }
+
+        if (!ab) {
+            section.style.display = 'none';
+            if (nodeProps) nodeProps.style.display = '';
+            return;
+        }
+
         section.style.display = '';
+        if (nodeProps) nodeProps.style.display = 'none';
         (document.getElementById('ab-name') as HTMLInputElement).value = ab.name;
         (document.getElementById('ab-x') as HTMLInputElement).value = String(Math.round(ab.x));
         (document.getElementById('ab-y') as HTMLInputElement).value = String(Math.round(ab.y));
         (document.getElementById('ab-w') as HTMLInputElement).value = String(Math.round(ab.w));
         (document.getElementById('ab-h') as HTMLInputElement).value = String(Math.round(ab.h));
-        (document.getElementById('ab-bg') as HTMLInputElement).value = this.rgbToHex(ab.background);
+        const transparent = ab.background.a <= 0;
+        (document.getElementById('ab-transparent') as HTMLInputElement).checked = transparent;
+        const bg = document.getElementById('ab-bg') as HTMLInputElement;
+        bg.value = this.rgbToHex(ab.background);
+        bg.disabled = transparent;
     }
 
     /** Add a new artboard to the right of the existing ones and select it. */
@@ -884,6 +935,13 @@ export class UIEngine {
         // Keep gradient-editing state consistent with the selection
         this.gradientEdit.syncSelection();
         const selection = this.scene.engine!.get_selection();
+        // Node selection and artboard selection are mutually exclusive: selecting
+        // a node clears any selected artboard. Then reconcile which property
+        // sections are visible (Frame vs node properties).
+        if (selection.length > 0 && this.scene.renderer && this.scene.renderer.selectedArtboardId !== null) {
+            this.scene.renderer.selectedArtboardId = null;
+        }
+        this.refreshArtboardPanel();
         if (selection.length === 0) {
             this.clearPropertyPanel();
             if (!interactive) {
@@ -1672,12 +1730,8 @@ export class UIEngine {
             return; // Don't clear the list if we can't get fresh data
         }
 
-        if (rootNodes.length === 0) {
-            this.layerList.innerHTML = '';
-            return;
-        }
-
-        // Clear only after we know we have data to render
+        // Clear only after we know we can read fresh data. (We still render even
+        // with zero nodes, so artboards always show in the Objects panel.)
         this.layerList.innerHTML = '';
 
         // Figma-style mask roles: within each group, a mask marks the siblings
@@ -1784,7 +1838,7 @@ export class UIEngine {
             const nameEl = item.querySelector('.layer-name') as HTMLElement;
             nameEl.addEventListener('dblclick', (e) => {
                 e.stopPropagation();
-                this.startLayerRename(nameEl, id);
+                this.startLayerRename(nameEl, { node: id });
             });
 
             // Chevron toggle for groups
@@ -1893,12 +1947,104 @@ export class UIEngine {
             }
         };
 
-        // Root nodes, top-to-bottom (roots are not a mask scope).
-        renderSiblings(Array.from(rootNodes), 0, this.layerList);
+        // Group root nodes under the artboard that spatially contains them
+        // (display-only; nodes are not reparented in the engine). Artboards are
+        // top-level rows; nodes outside every artboard render loose below.
+        const artboards = this.scene.getArtboards();
+        const selectedArtboard = this.scene.renderer?.selectedArtboardId ?? null;
+        const rootArr = Array.from(rootNodes);
+
+        if (artboards.length === 0) {
+            renderSiblings(rootArr, 0, this.layerList);
+            return;
+        }
+
+        const byArtboard = new Map<number, number[]>();
+        for (const ab of artboards) byArtboard.set(ab.id, []);
+        const loose: number[] = [];
+        for (const rid of rootArr) {
+            const abId = this.artboardOfNode(rid, artboards);
+            if (abId !== null) byArtboard.get(abId)!.push(rid);
+            else loose.push(rid);
+        }
+
+        for (const ab of artboards) {
+            this.renderArtboardRow(ab, selectedArtboard === ab.id);
+            if (!this._collapsedArtboards.has(ab.id)) {
+                renderSiblings(byArtboard.get(ab.id)!, 1, this.layerList);
+            }
+        }
+        // Loose nodes (outside any artboard) at the root level.
+        renderSiblings(loose, 0, this.layerList);
     }
 
-    /** Start inline renaming of a layer item. */
-    private startLayerRename(nameEl: HTMLElement, nodeId: number) {
+    /** The id of the smallest artboard whose rect contains the node's bbox center, or null. */
+    private artboardOfNode(rootId: number, artboards: Artboard[]): number | null {
+        let b: Float32Array;
+        try { b = this.scene.getNodeBounds(rootId); } catch { return null; }
+        const cx = (b[0] + b[2]) / 2;
+        const cy = (b[1] + b[3]) / 2;
+        let best: number | null = null;
+        let bestArea = Infinity;
+        for (const a of artboards) {
+            if (cx >= a.x && cx <= a.x + a.w && cy >= a.y && cy <= a.y + a.h) {
+                const area = a.w * a.h;
+                if (area < bestArea) { bestArea = area; best = a.id; }
+            }
+        }
+        return best;
+    }
+
+    /** Render an artboard as a top-level panel row (select + rename + collapse). */
+    private renderArtboardRow(ab: Artboard, selected: boolean) {
+        const item = document.createElement('div');
+        item.className = 'layer-item layer-artboard' + (selected ? ' selected' : '');
+        item.dataset.artboardId = ab.id.toString();
+        const collapsed = this._collapsedArtboards.has(ab.id);
+
+        item.innerHTML = `
+            <div class="layer-item-row" style="padding-left: 4px">
+                <span class="layer-chevron ${collapsed ? '' : 'expanded'}" data-ab-toggle="${ab.id}">▸</span>
+                <span class="layer-icon">${iconFrame(14)}</span>
+                <span class="layer-name" data-ab-id="${ab.id}">${escapeHtml(ab.name)}</span>
+            </div>
+        `;
+        const row = item.querySelector('.layer-item-row') as HTMLElement;
+        const chevron = item.querySelector('.layer-chevron') as HTMLElement;
+        const nameEl = item.querySelector('.layer-name') as HTMLElement;
+
+        chevron.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (collapsed) this._collapsedArtboards.delete(ab.id);
+            else this._collapsedArtboards.add(ab.id);
+            this.updateLayerList();
+        });
+        row.addEventListener('click', (e) => {
+            if ((e.target as HTMLElement).classList.contains('layer-chevron')) return;
+            this.selectArtboardFromPanel(ab.id);
+        });
+        nameEl.addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+            this.startLayerRename(nameEl, { artboard: ab.id });
+        });
+
+        this.layerList.appendChild(item);
+    }
+
+    /** Select an artboard from the Objects panel. */
+    private selectArtboardFromPanel(id: number) {
+        const im = this.scene.renderer?.inputManager;
+        if (im) im.selectArtboard(id);
+        else if (this.scene.renderer) {
+            this.scene.engine?.clear_selection();
+            this.scene.renderer.selectedArtboardId = id;
+            this.refreshArtboardPanel();
+            this.syncWithSelection();
+        }
+    }
+
+    /** Start inline renaming of a layer row (node OR artboard). */
+    private startLayerRename(nameEl: HTMLElement, target: { node: number } | { artboard: number }) {
         const currentName = nameEl.textContent || '';
         const input = document.createElement('input');
         input.type = 'text';
@@ -1910,42 +2056,35 @@ export class UIEngine {
         input.focus();
         input.select();
 
-        const commit = () => {
-            const newName = input.value.trim() || currentName;
-            // Set the name via engine — verify node exists first
-            const existingName = this.scene.getNodeName(nodeId);
-            if (existingName !== undefined) {
-                // Update via style JSON which includes name — actually we need a different approach
-                // For now, directly set it in the engine and invalidate
-                try {
-                    this.scene.engine!.set_node_name(nodeId, newName);
-                    this.scene.invalidateCache();
-                } catch {
-                    // set_node_name may not exist yet — fallback to just updating the display
-                }
+        // A draggable ancestor blocks caret placement in some browsers; disable
+        // dragging on the row while renaming.
+        const item = nameEl.closest('.layer-item') as HTMLElement | null;
+        if (item) item.draggable = false;
+
+        let done = false;
+        const finish = (save: boolean) => {
+            if (done) return;
+            done = true;
+            if (item) item.draggable = true;
+            const newName = input.value.trim();
+            if (save && newName && newName !== currentName) {
+                if ('node' in target) this.scene.setNodeName(target.node, newName);
+                else this.scene.setArtboardName(target.artboard, newName);
             }
             this.updateLayerList();
         };
 
-        input.addEventListener('blur', commit);
+        // Keep pointer events on the input from bubbling to the row (which would
+        // select + rebuild the list and destroy the input mid-edit).
+        input.addEventListener('mousedown', (e) => e.stopPropagation());
+        input.addEventListener('click', (e) => e.stopPropagation());
+        input.addEventListener('dblclick', (e) => e.stopPropagation());
+        input.addEventListener('blur', () => finish(true));
         input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                input.blur();
-            }
-            if (e.key === 'Escape') {
-                input.value = currentName;
-                input.blur();
-            }
+            e.stopPropagation();
+            if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+            else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
         });
-
-        // A draggable ancestor blocks caret placement inside the input in some
-        // browsers; disable dragging on the row while renaming.
-        const item = nameEl.closest('.layer-item') as HTMLElement | null;
-        if (item) {
-            item.draggable = false;
-            input.addEventListener('blur', () => { item.draggable = true; }, { once: true });
-        }
     }
 
     /** Compute each node's mask role for the layers panel. Masks are

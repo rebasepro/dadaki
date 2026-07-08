@@ -27,8 +27,12 @@ export class SnapEngine {
     private yTargets: number[] = [];
     active: boolean = false;
 
-    /** Collect snap targets, excluding `excludeIds` and any root that contains them. */
-    begin(scene: WasmScene, excludeIds: Iterable<number>) {
+    /**
+     * Collect snap targets, excluding `excludeIds` and any root that contains
+     * them. `excludeArtboardId` omits one artboard's edges (so a frame being
+     * dragged/resized doesn't snap to itself).
+     */
+    begin(scene: WasmScene, excludeIds: Iterable<number>, excludeArtboardId?: number) {
         this.xTargets = [];
         this.yTargets = [];
 
@@ -44,10 +48,12 @@ export class SnapEngine {
             excludedRoots.add(root);
         }
 
-        // Artboard edges and centers — every artboard on the canvas.
+        // Artboard edges and centers — every artboard on the canvas (except one
+        // being dragged, so it can't snap to its own edges).
         const artboards = scene.getArtboards();
         if (artboards.length > 0) {
             for (const a of artboards) {
+                if (a.id === excludeArtboardId) continue;
                 this.xTargets.push(a.x, a.x + a.w / 2, a.x + a.w);
                 this.yTargets.push(a.y, a.y + a.h / 2, a.y + a.h);
             }

@@ -43,11 +43,22 @@ async function bootstrap() {
     // ─── File / document lifecycle (multi-tab) ──────────────────────────
     const tabStripEl = document.getElementById('tab-strip') as HTMLElement;
 
+    // Save button reflects dirty state: "Save" (emphasized) when there are
+    // unsaved changes, "Saved" (muted) otherwise. Clicking saves the .vec.
+    const saveBtn = document.getElementById('save-btn') as HTMLButtonElement;
+    const saveLabel = saveBtn.querySelector('.save-label') as HTMLElement;
+    const updateSaveButton = () => {
+        const dirty = fileService.activeDoc.dirty;
+        saveBtn.classList.toggle('dirty', dirty);
+        saveLabel.textContent = dirty ? 'Save' : 'Saved';
+        saveBtn.title = dirty ? 'Save changes (⌘S)' : 'All changes saved';
+    };
+
     // FileService starts with a placeholder doc; DocumentManager reassigns
-    // activeDoc as soon as it activates the restored/first document. The
-    // document name + dirty state are shown in the tab strip (rendered by the
-    // DocumentManager), so no extra chrome callback is needed here.
-    const fileService = new FileService(wasmScene, ui, new Document('Untitled'));
+    // activeDoc as soon as it activates the restored/first document. The tab
+    // strip shows the name + dirty dot; the header Save button shows save state.
+    const fileService = new FileService(wasmScene, ui, new Document('Untitled'), updateSaveButton);
+    saveBtn.addEventListener('click', () => fileService.saveActive().catch(console.error));
 
     const tabStrip = new TabStrip(tabStripEl, {
         onSelect: (id) => documentManager.activate(id),

@@ -512,6 +512,14 @@ export class WasmScene {
         return this.engine!.get_node_name(id);
     }
 
+    /** Rename a node (undo-disciplined). */
+    setNodeName(id: number, name: string) {
+        this.saveHistory();
+        this.engine!.set_node_name(id, name);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
     /** Get a node's visible flag. */
     getNodeVisible(id: number): boolean {
         return this.engine!.get_node_visible(id);

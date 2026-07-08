@@ -1954,14 +1954,16 @@ export class Renderer {
 
         const { x, y, w, h, tool } = preview;
         const rect = this.ck.LTRBRect(x, y, x + w, y + h);
-        const isCustomShape = tool !== 'rect' && tool !== 'ellipse';
+        // Artboards preview as a plain rectangle (like the rect tool).
+        const rectLike = tool === 'rect' || tool === 'artboard';
+        const isCustomShape = !rectLike && tool !== 'ellipse';
         const shapePath = isCustomShape ? this.makePreviewPath(tool, x, y, w, h) : null;
 
         const fillPaint = new this.ck.Paint();
         fillPaint.setColor(this.ck.Color(100, 149, 237, 0.3));
         fillPaint.setStyle(this.ck.PaintStyle.Fill);
 
-        if (tool === 'rect') canvas.drawRect(rect, fillPaint);
+        if (rectLike) canvas.drawRect(rect, fillPaint);
         else if (tool === 'ellipse') canvas.drawOval(rect, fillPaint);
         else canvas.drawPath(shapePath!, fillPaint);
 
@@ -1970,7 +1972,7 @@ export class Renderer {
         strokePaint.setStyle(this.ck.PaintStyle.Stroke);
         strokePaint.setStrokeWidth(1.5 / this.zoom);
 
-        if (tool === 'rect') canvas.drawRect(rect, strokePaint);
+        if (rectLike) canvas.drawRect(rect, strokePaint);
         else if (tool === 'ellipse') canvas.drawOval(rect, strokePaint);
         else canvas.drawPath(shapePath!, strokePaint);
 
