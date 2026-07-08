@@ -494,8 +494,7 @@ export class InputManager {
         if (!e.metaKey && !e.ctrlKey) {
             if (!e.shiftKey) {
                 if (e.key === 'v' || e.key === 'V') this.ui.setActiveTool('selection');
-                if (e.key === 'a' || e.key === 'A') this.ui.setActiveTool('direct');
-                if (e.key === 'f' || e.key === 'F') this.ui.setActiveTool('artboard');
+                if (e.key === 'a' || e.key === 'A') this.ui.setActiveTool('artboard');
                 if (e.key === 'p' || e.key === 'P') this.ui.setActiveTool('pen');
                 if (e.key === 'r' || e.key === 'R') this.ui.setActiveTool('rect');
                 if (e.key === 'o' || e.key === 'O') this.ui.setActiveTool('ellipse');
@@ -547,6 +546,9 @@ export class InputManager {
                 if (this.ui.gradientEdit.deleteStop(this.ui.gradientEdit.stopIndex)) {
                     this.ui.syncWithSelection();
                 }
+            } else if (this.renderer.selectedArtboardId !== null) {
+                // An artwork is selected → delete it.
+                this.deleteSelectedArtboard();
             } else {
                 this.deleteSelection();
             }
@@ -1002,11 +1004,23 @@ export class InputManager {
         this.renderer.selectedArtboardId = id;
         this.ui.syncWithSelection();
         this.ui.refreshArtboardPanel();
-        this.ui.updateLayerList();
+        // In-place highlight (no rebuild) so double-click-to-rename survives.
+        this.ui.updateLayerSelection();
         this.renderer.requestRender();
     }
 
     deselectArtboard() {
+        this.renderer.selectedArtboardId = null;
+        this.ui.refreshArtboardPanel();
+        this.ui.updateLayerSelection();
+        this.renderer.requestRender();
+    }
+
+    /** Delete the currently-selected artwork (frame). */
+    deleteSelectedArtboard() {
+        const id = this.renderer.selectedArtboardId;
+        if (id === null) return;
+        this.scene.removeArtboard(id);
         this.renderer.selectedArtboardId = null;
         this.ui.refreshArtboardPanel();
         this.ui.updateLayerList();

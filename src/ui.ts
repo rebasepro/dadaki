@@ -959,7 +959,7 @@ export class UIEngine {
         if (selection.length === 0) {
             this.clearPropertyPanel();
             if (!interactive) {
-                this.updateLayerList();
+                this.updateLayerSelection();
                 this.contextBar?.refresh();
             }
             return;
@@ -969,7 +969,7 @@ export class UIEngine {
         if (!node) {
             this.clearPropertyPanel();
             if (!interactive) {
-                this.updateLayerList();
+                this.updateLayerSelection();
                 this.contextBar?.refresh();
             }
             return;
@@ -1042,10 +1042,10 @@ export class UIEngine {
         }
 
         if (!interactive) {
-            this.updateLayerList();
+            this.updateLayerSelection();
             this.contextBar?.refresh();
         }
-        
+
         if (node.geometry.Text) {
             if (this.typographySection) this.typographySection.style.display = '';
             // Don't clobber the content field while the user is typing in it.
@@ -1737,6 +1737,25 @@ export class UIEngine {
     }
 
 
+
+    /**
+     * Update the selection highlight on existing panel rows WITHOUT rebuilding
+     * the DOM. Selecting a row must not rebuild the list, or the second click of
+     * a double-click-to-rename would land on a replaced element and never fire.
+     */
+    updateLayerSelection() {
+        if (!this.scene.engine) return;
+        let sel: Set<number>;
+        try { sel = new Set(Array.from(this.scene.engine.get_selection())); } catch { return; }
+        const selAb = this.scene.renderer?.selectedArtboardId ?? null;
+        this.layerList.querySelectorAll('.layer-item').forEach((el) => {
+            const item = el as HTMLElement;
+            let selected = false;
+            if (item.dataset.nodeId !== undefined) selected = sel.has(Number(item.dataset.nodeId));
+            else if (item.dataset.artboardId !== undefined) selected = Number(item.dataset.artboardId) === selAb;
+            item.classList.toggle('selected', selected);
+        });
+    }
 
     updateLayerList() {
         if (!this.scene.engine) return;

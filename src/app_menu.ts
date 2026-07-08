@@ -31,7 +31,7 @@ const ENTRIES: (MenuEntry | 'separator')[] = [
     { label: 'Save As…',   shortcut: '⇧⌘S', action: 'onSaveAs' },
     { label: 'Version History…', action: 'onBackups' },
     'separator',
-    { label: 'Add Artboard', action: 'onAddArtboard' },
+    { label: 'Add Artwork', action: 'onAddArtboard' },
     'separator',
     { label: 'Import SVG…', action: 'onImportSVG' },
     { label: 'Export…',    shortcut: '⇧⌘E', action: 'onExport' },

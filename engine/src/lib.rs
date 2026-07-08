@@ -897,7 +897,7 @@ impl Engine {
                 images: HashMap::new(),
                 artboards: vec![Artboard {
                     id: 1,
-                    name: "Artboard 1".to_string(),
+                    name: "Artwork 1".to_string(),
                     x: 0.0,
                     y: 0.0,
                     w: 1000.0,
@@ -3804,13 +3804,13 @@ impl Engine {
 
     // ─── Artboards ──────────────────────────────────────────────────────────
 
-    /// Add a new artboard; returns its id. Auto-named "Artboard N".
+    /// Add a new artboard; returns its id. Auto-named "Artwork N".
     pub fn add_artboard(&mut self, x: f32, y: f32, w: f32, h: f32) -> u32 {
         let id = self.scene.artboards.iter().map(|a| a.id).max().unwrap_or(0) + 1;
         let n = self.scene.artboards.len() + 1;
         self.scene.artboards.push(Artboard {
             id,
-            name: format!("Artboard {}", n),
+            name: format!("Artwork {}", n),
             x,
             y,
             w: w.max(1.0),
@@ -3820,12 +3820,8 @@ impl Engine {
         id
     }
 
-    /// Remove an artboard. Refuses to remove the last one (there is always at
-    /// least one artboard). Returns true if removed.
+    /// Remove an artboard. Returns true if one was removed.
     pub fn remove_artboard(&mut self, id: u32) -> bool {
-        if self.scene.artboards.len() <= 1 {
-            return false;
-        }
         let before = self.scene.artboards.len();
         self.scene.artboards.retain(|a| a.id != id);
         self.scene.artboards.len() != before

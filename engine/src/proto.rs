@@ -1017,7 +1017,7 @@ impl ProtoDocument {
         let artboards: Vec<crate::Artboard> = if self.artboards.is_empty() {
             vec![crate::Artboard {
                 id: 1,
-                name: "Artboard 1".to_string(),
+                name: "Artwork 1".to_string(),
                 x: 0.0,
                 y: 0.0,
                 w: doc_w,
@@ -1460,7 +1460,7 @@ mod tests {
         let bytes = old.encode_to_vec();
         let (scene, _) = deserialize_from_proto(&bytes).unwrap();
         assert_eq!(scene.artboards.len(), 1);
-        assert_eq!(scene.artboards[0].name, "Artboard 1");
+        assert_eq!(scene.artboards[0].name, "Artwork 1");
         assert_eq!(scene.artboards[0].w, 1920.0);
         assert_eq!(scene.artboards[0].h, 1080.0);
         assert_eq!(scene.artboards[0].x, 0.0);
