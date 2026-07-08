@@ -533,17 +533,24 @@ export class UIEngine {
         const section = document.getElementById('artboard-section');
         const nodeProps = document.getElementById('node-props');
         if (!section) return;
+        const empty = document.getElementById('props-empty');
         const id = this.scene.renderer?.selectedArtboardId ?? null;
         const ab = id !== null ? this.scene.getArtboards().find(a => a.id === id) : undefined;
 
         if (!ab) {
             section.style.display = 'none';
-            if (nodeProps) nodeProps.style.display = '';
+            // No artboard selected: show the node inspector only when a node is
+            // actually selected, otherwise show the empty-state hint. Leaving the
+            // node inspector visible with blank, inert controls is confusing.
+            const hasNodeSel = (this.scene.engine?.get_selection()?.length ?? 0) > 0;
+            if (nodeProps) nodeProps.style.display = hasNodeSel ? '' : 'none';
+            if (empty) empty.style.display = hasNodeSel ? 'none' : '';
             return;
         }
 
         section.style.display = '';
         if (nodeProps) nodeProps.style.display = 'none';
+        if (empty) empty.style.display = 'none';
         (document.getElementById('ab-name') as HTMLInputElement).value = ab.name;
         (document.getElementById('ab-x') as HTMLInputElement).value = String(Math.round(ab.x));
         (document.getElementById('ab-y') as HTMLInputElement).value = String(Math.round(ab.y));
@@ -3543,10 +3550,20 @@ export class UIEngine {
                 return;
             }
 
-            // Handle nested <svg> — treat as group with its own viewBox transform
+            // Handle nested <svg> — a new viewport with its own viewBox transform
+            // that CLIPS its content to the viewport rect (unless overflow:visible).
             if (tag === 'svg') {
-                const x = parseFloat(el.getAttribute('x') || '0');
-                const y = parseFloat(el.getAttribute('y') || '0');
+                // Percentage x/y/width/height resolve against the viewport size
+                // (approximated by the document size for single-level nesting).
+                const docW = this.scene.engine?.get_document_width() ?? 1000;
+                const docH = this.scene.engine?.get_document_height() ?? 1000;
+                const x = parseSvgLength(el.getAttribute('x'), 0, { percentBasis: docW });
+                const y = parseSvgLength(el.getAttribute('y'), 0, { percentBasis: docH });
+                // width/height default to 100% of the viewport when omitted.
+                const wAttr = el.getAttribute('width');
+                const hAttr = el.getAttribute('height');
+                const vw = wAttr != null ? parseSvgLength(wAttr, docW, { percentBasis: docW }) : docW;
+                const vh = hAttr != null ? parseSvgLength(hAttr, docH, { percentBasis: docH }) : docH;
                 const offsetMat = (x !== 0 || y !== 0)
                     ? composeMatrices(composedMat, translateMatrix(x, y))
                     : composedMat;
@@ -3554,7 +3571,38 @@ export class UIEngine {
                 const nestedMat = composeMatrices(offsetMat, nestedVbMat);
                 const childIds = processChildren(el, nestedMat, mergedStyles, useRefStack);
                 const groupName = el.getAttribute('id') || 'Nested SVG';
-                groupChildIds(childIds, groupName);
+
+                const overflow = (el.getAttribute('overflow')
+                    || (el.getAttribute('style') || '').match(/(?:^|;)\s*overflow\s*:\s*([^;]+)/i)?.[1]
+                    || '').trim();
+                const clip = overflow !== 'visible' && overflow !== 'auto' && vw > 0 && vh > 0;
+                if (clip && childIds.length > 0) {
+                    // Clip via the mask system: a solid viewport rect (in PARENT
+                    // space) as an alpha mask below the content.
+                    const clipRect = this.scene.addRect(0, 0, vw, vh);
+                    this.scene.setNodeTransform(clipRect, composeMatrices(composedMat, translateMatrix(x, y)));
+                    // Clean opaque fill, no stroke (a stroke would leak past the
+                    // viewport edge and fuzz the clip).
+                    try {
+                        this.scene.setNodeStyleNoHistory(clipRect, JSON.stringify({
+                            fills: [{ r: 0, g: 0, b: 0, a: 1 }], strokes: [], opacity: 1,
+                            blend_mode: 0, fill_rule: 0, corner_radius: 0, effects: [],
+                        }));
+                    } catch { /* keep default style */ }
+                    try { this.scene.engine!.set_node_is_mask(clipRect, true); } catch { /* noop */ }
+                    // Content ids move inside the clip group.
+                    const removeSet = new Set(childIds);
+                    let write = 0;
+                    for (let read = 0; read < createdIds.length; read++) {
+                        if (!removeSet.has(createdIds[read])) createdIds[write++] = createdIds[read];
+                    }
+                    createdIds.length = write;
+                    const groupId = this.scene.groupNodes([clipRect, ...childIds]);
+                    try { this.scene.engine!.set_node_name(groupId, groupName); } catch { /* noop */ }
+                    createdIds.push(groupId);
+                } else {
+                    groupChildIds(childIds, groupName);
+                }
                 return;
             }
 
