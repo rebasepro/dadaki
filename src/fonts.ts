@@ -12,8 +12,13 @@ export const GOOGLE_FONTS = [
     'Bebas Neue', 'Oswald', 'Raleway',
 ];
 
-/** Cache of loaded font ArrayBuffers. */
-const fontDataCache = new Map<string, ArrayBuffer>();
+/** Cache of loaded font ArrayBuffers per family (regular + bold TTFs). */
+const fontDataCache = new Map<string, ArrayBuffer[]>();
+
+/** Google Fonts family name → fontsource CDN id (lowercase, hyphenated). */
+function fontsourceId(fontFamily: string): string {
+    return fontFamily.toLowerCase().replace(/\s+/g, '-');
+}
 
 /** Set of fonts currently being loaded (to avoid duplicate fetches). */
 const loadingFonts = new Set<string>();
@@ -49,36 +54,36 @@ export function ensureFontCSS(fontFamily: string) {
  * Returns the ArrayBuffer, or null if loading fails.
  */
 export async function loadGoogleFontData(fontFamily: string): Promise<ArrayBuffer | null> {
-    if (fontDataCache.has(fontFamily)) return fontDataCache.get(fontFamily)!;
+    if (fontDataCache.has(fontFamily)) return fontDataCache.get(fontFamily)![0] ?? null;
     if (loadingFonts.has(fontFamily)) return null; // already in progress
 
     loadingFonts.add(fontFamily);
-    ensureFontCSS(fontFamily);
+    ensureFontCSS(fontFamily); // still needed for the HTML edit overlay (woff2 is fine there)
 
     try {
-        // Fetch the Google Fonts CSS to discover the font file URL.
-        // The browser sends its own User-Agent, which determines the file format.
-        const cssUrl = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(fontFamily)}:wght@400`;
-        const cssResp = await fetch(cssUrl);
-        if (!cssResp.ok) throw new Error(`CSS fetch failed: ${cssResp.status}`);
-        const css = await cssResp.text();
+        // Fetch raw TTFs, NOT the Google Fonts CSS: for a modern browser
+        // User-Agent that CSS resolves to woff2, which CanvasKit/FreeType can't
+        // decode (renders tofu). The fontsource CDN serves plain TTF that
+        // CanvasKit registers correctly. Grab regular (400) and bold (700).
+        const id = fontsourceId(fontFamily);
+        const url = (w: number) => `https://cdn.jsdelivr.net/fontsource/fonts/${id}@latest/latin-${w}-normal.ttf`;
+        const fetchTtf = async (w: number): Promise<ArrayBuffer | null> => {
+            try {
+                const resp = await fetch(url(w));
+                return resp.ok ? await resp.arrayBuffer() : null;
+            } catch { return null; }
+        };
+        const [regular, bold] = await Promise.all([fetchTtf(400), fetchTtf(700)]);
+        if (!regular) throw new Error('no TTF for regular weight');
+        const buffers = bold ? [regular, bold] : [regular];
 
-        // Extract the first src url(...) from the @font-face rule
-        const urlMatch = css.match(/src:\s*url\(([^)]+)\)/);
-        if (!urlMatch) throw new Error('No font URL found in CSS');
-
-        const fontUrl = urlMatch[1];
-        const fontResp = await fetch(fontUrl);
-        if (!fontResp.ok) throw new Error(`Font fetch failed: ${fontResp.status}`);
-        const fontData = await fontResp.arrayBuffer();
-
-        fontDataCache.set(fontFamily, fontData);
+        fontDataCache.set(fontFamily, buffers);
         loadingFonts.delete(fontFamily);
 
-        // Notify listeners
+        // Notify listeners (renderer repaints)
         for (const cb of fontLoadCallbacks) cb();
 
-        return fontData;
+        return regular;
     } catch (err) {
         console.warn(`[fonts] Failed to load "${fontFamily}":`, err);
         loadingFonts.delete(fontFamily);
@@ -93,8 +98,8 @@ export async function loadGoogleFontData(fontFamily: string): Promise<ArrayBuffe
 export function buildFontProvider(ck: CanvasKit): ReturnType<CanvasKit['TypefaceFontProvider']['Make']> | null {
     if (fontDataCache.size === 0) return null;
     const provider = ck.TypefaceFontProvider.Make();
-    for (const [name, data] of fontDataCache) {
-        provider.registerFont(data, name);
+    for (const [name, buffers] of fontDataCache) {
+        for (const data of buffers) provider.registerFont(data, name);
     }
     return provider;
 }
@@ -104,7 +109,7 @@ export function isFontLoaded(fontFamily: string): boolean {
     return fontDataCache.has(fontFamily);
 }
 
-/** Get cached font data (or null). */
+/** Get cached font data — the regular weight (or null). */
 export function getFontData(fontFamily: string): ArrayBuffer | null {
-    return fontDataCache.get(fontFamily) ?? null;
+    return fontDataCache.get(fontFamily)?.[0] ?? null;
 }
