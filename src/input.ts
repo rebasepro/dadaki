@@ -1152,7 +1152,13 @@ export class InputManager {
                 this.resizeTargetIds = Array.from(this.scene.dedupSelection(this.scene.engine!.get_selection()));
                 // Snapshot scene state so we can restore-then-resize each frame
                 this.resizeSnapshot = this.scene.engine!.serialize_scene();
-                if (this.frameIsAxisAligned(frame)) {
+                // A single text node always uses the oriented pipeline: its
+                // resize scales the font size from the JS-measured text bounds
+                // (the engine has no font metrics, so the legacy world-space
+                // path would use bad bounds).
+                const singleText = this.resizeTargetIds.length === 1
+                    && this.scene.getNodeType(this.resizeTargetIds[0]) === 4;
+                if (this.frameIsAxisAligned(frame) && !singleText) {
                     // Legacy world-space pipeline (with snapping)
                     this.resizeStartBounds = this.getSelectionBounds();
                     this.snap.begin(this.scene, this.resizeTargetIds);
@@ -2357,7 +2363,8 @@ export class InputManager {
                 const kx = newW / F0.w, ky = newH / F0.h;
                 const lb = this.resizeLocalBounds;
 
-                if (this.scene.getNodeType(id) === 3) {
+                const nodeType = this.scene.getNodeType(id);
+                if (nodeType === 3) {
                     // Group: scale the local transform about the local-bounds
                     // anchor so the whole subtree scales along the frame axes.
                     //   L' = L0 · T(lb+move) · S(kx,ky) · T(-lb)
@@ -2370,22 +2377,25 @@ export class InputManager {
                             { a: 1, b: 0, c: 0, d: 1, e: -lb.x, f: -lb.y },
                         )));
                     this.scene.engine!.set_node_transform_matrix(id, JSON.stringify([Lp.a, Lp.b, 0, Lp.c, Lp.d, 0, Lp.e, Lp.f, 1]));
+                } else if (nodeType === 4) {
+                    // Text (auto-width): resizing scales the FONT SIZE, like
+                    // Figma — its box hugs the content, so there's no width/height
+                    // to stretch. Uniform factor from the dragged axis (corner →
+                    // whichever axis moved more, relative to its size).
+                    const tg = this.scene.getNodeGeometry(id)?.Text;
+                    if (tg) {
+                        const k = (t === 'e' || t === 'w') ? kx
+                            : (t === 'n' || t === 's') ? ky
+                            : (Math.abs(kx - 1) >= Math.abs(ky - 1) ? kx : ky);
+                        const newSize = Math.max(1, Math.min(2000, tg.font_size * k));
+                        this.scene.engine!.set_text_content(id, tg.content, newSize);
+                        this.anchorNodeToFrameTopLeft(id);
+                    }
                 } else {
                     // Geometry resize (local units), then move so the frame's
                     // top-left corner lands where the live frame says.
                     this.scene.engine!.resize_node(id, lb.w * kx, lb.h * ky);
-                    const lb2 = this.getNodeLocalBounds(id);
-                    if (lb2) {
-                        const wt = this.scene.getTransform(id);
-                        const W: Mat = { a: wt[0], b: wt[3], c: wt[1], d: wt[4], e: wt[2], f: wt[5] };
-                        const actual = this.matApply(W, { x: lb2.x, y: lb2.y });
-                        const target = this.framePoint(this.liveFrame, 0, 0);
-                        const ddx = target.x - actual.x, ddy = target.y - actual.y;
-                        if (Math.abs(ddx) > 1e-4 || Math.abs(ddy) > 1e-4) {
-                            const local = this.worldDeltaToLocal(id, ddx, ddy);
-                            this.scene.engine!.move_node(id, local.dx, local.dy);
-                        }
-                    }
+                    this.anchorNodeToFrameTopLeft(id);
                 }
 
                 this.scene.invalidateCache();
@@ -2988,6 +2998,24 @@ export class InputManager {
         }
         const b = this.getSelectionBounds();
         return b ? { w: b.w, h: b.h, m: { a: 1, b: 0, c: 0, d: 1, e: b.x, f: b.y } } : null;
+    }
+
+    /** After a geometry/font resize, translate the node so its local-bounds
+     *  top-left lands on the live frame's top-left — keeping the drag anchor
+     *  (the handle opposite the one being dragged) fixed. */
+    private anchorNodeToFrameTopLeft(id: number) {
+        if (!this.liveFrame) return;
+        const lb2 = this.getNodeLocalBounds(id);
+        if (!lb2) return;
+        const wt = this.scene.getTransform(id);
+        const W: Mat = { a: wt[0], b: wt[3], c: wt[1], d: wt[4], e: wt[2], f: wt[5] };
+        const actual = this.matApply(W, { x: lb2.x, y: lb2.y });
+        const target = this.framePoint(this.liveFrame, 0, 0);
+        const ddx = target.x - actual.x, ddy = target.y - actual.y;
+        if (Math.abs(ddx) > 1e-4 || Math.abs(ddy) > 1e-4) {
+            const local = this.worldDeltaToLocal(id, ddx, ddy);
+            this.scene.engine!.move_node(id, local.dx, local.dy);
+        }
     }
 
     /**
