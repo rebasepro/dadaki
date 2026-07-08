@@ -200,6 +200,9 @@
                         <span class="section-title">Typography</span>
                     </div>
                     <div class="panel-section-body" data-section-body="typography">
+                        <div class="prop-row" style="align-items:stretch;">
+                            <textarea id="text-content" class="prop-input" rows="2" placeholder="Text…" style="flex:1; resize:vertical; font-family:inherit; line-height:1.3;"></textarea>
+                        </div>
                         <div class="prop-row">
                             <span class="label">Font</span>
                             <select id="text-font-family" class="prop-select" style="flex:1;">
@@ -296,7 +299,7 @@
                     <div class="panel-section-header" data-section="effects">
                         <span class="chevron">▾</span>
                         <span class="section-title" style="flex:1;">Effects</span>
-                        <button id="add-effect-btn" class="add-property-btn" title="Add Transform Effect">+</button>
+                        <button id="add-effect-btn" class="add-property-btn" title="Add Effect">+</button>
                     </div>
                     <div class="panel-section-body" id="effects-list" data-section-body="effects" style="display:flex; flex-direction:column; gap:4px;">
                         <!-- Dynamically populated by ui.ts -->
@@ -342,6 +345,11 @@
                     </div>
                 </div>
                 </div><!-- #node-props -->
+
+                <!-- Shown when nothing is selected -->
+                <div id="props-empty" class="props-empty" style="display:none;">
+                    <span>Select an object to edit its properties</span>
+                </div>
 
                 </div><!-- .properties-scroll -->
 

@@ -90,6 +90,7 @@ export class UIEngine {
     toggleLocked: HTMLButtonElement;
 
     // Typography DOM elements
+    textContentInput: HTMLTextAreaElement;
     textFontFamily: HTMLSelectElement;
     textFontSize: HTMLInputElement;
     textLineHeight: HTMLInputElement;
@@ -151,6 +152,7 @@ export class UIEngine {
         this.toggleLocked = document.getElementById('toggle-locked') as HTMLButtonElement;
 
         // Typography
+        this.textContentInput = document.getElementById('text-content') as HTMLTextAreaElement;
         this.textFontFamily = document.getElementById('text-font-family') as HTMLSelectElement;
         this.textFontSize = document.getElementById('text-font-size') as HTMLInputElement;
         this.textLineHeight = document.getElementById('text-line-height') as HTMLInputElement;
@@ -301,7 +303,7 @@ export class UIEngine {
         }
 
         // Typography properties
-        const typographyInputs = [this.textFontFamily, this.textFontSize, this.textLineHeight, this.textAlign, this.textWeight, this.textItalic, this.textLetterSpacing];
+        const typographyInputs = [this.textContentInput, this.textFontFamily, this.textFontSize, this.textLineHeight, this.textAlign, this.textWeight, this.textItalic, this.textLetterSpacing];
         for (const el of typographyInputs) {
             if (el) {
                 el.addEventListener('input', () => {
@@ -1046,6 +1048,10 @@ export class UIEngine {
         
         if (node.geometry.Text) {
             if (this.typographySection) this.typographySection.style.display = '';
+            // Don't clobber the content field while the user is typing in it.
+            if (this.textContentInput && document.activeElement !== this.textContentInput) {
+                this.textContentInput.value = node.geometry.Text.content || '';
+            }
             if (this.textFontFamily) this.textFontFamily.value = node.geometry.Text.font_family || '';
             if (this.textFontSize) this.textFontSize.value = String(node.geometry.Text.font_size || 32);
             if (this.textLineHeight) this.textLineHeight.value = String(node.geometry.Text.line_height || 1.2);
@@ -1118,7 +1124,9 @@ export class UIEngine {
         const italic = (this.textItalic?.value ?? '0') === '1';
         const letterSpacing = parseFloat(this.textLetterSpacing?.value ?? '0') || 0;
 
-        const content = node.geometry.Text.content;
+        // Content from the panel field (populated on selection, so it reflects
+        // the node's text unless the user edited it here).
+        const content = this.textContentInput ? this.textContentInput.value : node.geometry.Text.content;
         this.scene.engine!.set_text_content(id, content, fontSize);
         this.scene.engine!.set_text_properties(id, fontFamily, textAlign, lineHeight);
         this.scene.engine!.set_text_style(id, fontWeight, italic, letterSpacing);

@@ -1,6 +1,5 @@
 import type { Canvas, CanvasKit, Paint, Surface } from 'canvaskit-wasm';
 import { buildFontProvider, isFontLoaded, loadGoogleFontData, onFontLoaded } from './fonts';
-import { parseSVGPathD } from './svg_utils';
 
 /** Helper for efficient zero-copy parsing of the WASM binary render buffer. */
 class BinaryReader {
@@ -68,61 +67,41 @@ interface EffectRecord {
 }
 
 export class Renderer {
-    /** Generate a path for a text node (for "Create Outlines"). */
-    getTextPath(id: number): any[] | null {
+    /** Generate a path for a text node (for "Create Outlines"), or null.
+     *  NOTE: this canvaskit-wasm build's Font API exposes glyph IDs/widths/bounds
+     *  but NOT per-glyph outlines (no getGlyphPaths), so real text→vector
+     *  conversion isn't available here; callers must handle null. */
+    getTextPath(_id: number): any[] | null {
+        return null;
+    }
+
+    /** Local-space bounding box of a text node's rendered glyphs, used for the
+     *  selection frame. Measures with the Font glyph-width API (getGlyphPaths
+     *  isn't available in this build). Falls back to an em-based estimate. */
+    getTextLocalBounds(id: number): { x: number; y: number; w: number; h: number } | null {
         const node = this.scene.getNode(id);
         if (!node || !node.geometry.Text) return null;
-        
         const geo = node.geometry.Text;
         const fontSize = geo.font_size;
-        const fontFamily = geo.font_family;
-        const textAlign = geo.text_align; // 0=Left, 1=Center, 2=Right
         const lineHeight = geo.line_height || 1.2;
-        const content = geo.content;
-
-        // Use a generic font manager if possible, or null for default
-        const font = new this.ck.Font(null, fontSize);
-        const lines = content.split('\n');
-        const combinedPath = new this.ck.Path();
-
-        // Calculate line widths for alignment
-        const lineData: { text: string, width: number }[] = [];
-        for (const line of lines) {
-            const width = font.measureText(line);
-            lineData.push({ text: line, width });
-        }
-
-        for (let i = 0; i < lineData.length; i++) {
-            const { text, width } = lineData[i];
-            
-            // Offset for alignment
-            let offsetX = 0;
-            if (textAlign === 1) offsetX = -width / 2;
-            else if (textAlign === 2) offsetX = -width;
-
-            const offsetY = i * fontSize * lineHeight;
-
-            const glyphIDs = font.getGlyphIDs(text);
-            const glyphWidths = font.getGlyphWidths(glyphIDs);
-            const paths = font.getGlyphPaths(glyphIDs);
-            
-            let currentX = offsetX;
-            for (let j = 0; j < paths.length; j++) {
-                const p = paths[j];
-                if (p) {
-                    p.transform([1, 0, currentX, 0, 1, offsetY, 0, 0, 1]);
-                    combinedPath.addPath(p);
-                    p.delete();
-                }
-                currentX += glyphWidths[j];
+        const lines = (geo.content || '').split('\n');
+        let width = 0;
+        try {
+            const font = new this.ck.Font(null, fontSize);
+            for (const line of lines) {
+                if (!line) continue;
+                const widths = font.getGlyphWidths(font.getGlyphIDs(line));
+                let w = 0;
+                for (let k = 0; k < widths.length; k++) w += widths[k];
+                if (w > width) width = w;
             }
-        }
-
-        const svgD = combinedPath.toSVGString();
-        combinedPath.delete();
-        font.delete();
-
-        return parseSVGPathD(svgD);
+            font.delete();
+        } catch { width = 0; }
+        if (width <= 0) width = Math.max(1, geo.content.length) * fontSize * 0.6;
+        const h = fontSize + (lines.length - 1) * fontSize * lineHeight;
+        // Alignment anchors the text around the origin (center → -w/2, right → -w).
+        const offsetX = geo.text_align === 1 ? -width / 2 : geo.text_align === 2 ? -width : 0;
+        return { x: offsetX, y: -fontSize, w: width, h };
     }
 
     ck: CanvasKit;

@@ -872,7 +872,8 @@ export class InputManager {
         };
 
         input.addEventListener('keydown', (ev: KeyboardEvent) => {
-            if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
+            // Enter commits; Shift+Enter (or Cmd/Ctrl+Enter) inserts a newline.
+            if (ev.key === 'Enter' && !ev.shiftKey && !ev.metaKey && !ev.ctrlKey) {
                 ev.preventDefault();
                 commit();
             } else if (ev.key === 'Escape') {
@@ -1199,31 +1200,36 @@ export class InputManager {
 
             const input = document.createElement('textarea');
             input.className = 'text-input-overlay';
-            input.value = 'Hello World';
+            input.value = '';
+            input.placeholder = 'Type text…';
             input.style.left = `${screenX}px`;
             input.style.top = `${screenY}px`;
             input.style.fontSize = `${32 * this.renderer.zoom}px`;
             input.style.fontFamily = 'sans-serif';
-            input.rows = 3;
-            input.style.resize = 'both';
-            input.style.minWidth = '100px';
-            input.style.minHeight = '1.5em';
+            input.rows = 1;
             input.style.whiteSpace = 'pre-wrap';
             input.style.overflow = 'hidden';
+            // Grow to fit content so the box tracks what you type.
+            const autoGrow = () => { input.style.height = 'auto'; input.style.height = `${input.scrollHeight}px`; };
+            input.addEventListener('input', autoGrow);
 
-            // `done` guards against the double-commit that happens when
-            // Cmd+Enter removes the textarea, which fires blur → commit again.
+            // `done` guards against the double-commit that happens when Enter
+            // removes the textarea, which fires blur → commit again.
             let done = false;
             const commit = () => {
                 if (done) return;
                 done = true;
-                const content = input.value.trim() || 'Text';
+                const content = input.value.replace(/\n+$/, ''); // drop trailing blank lines
                 input.remove();
+                if (!content.trim()) return; // empty → don't create a node
                 this.scene.saveMoveHistory();
                 const id = this.scene.addText(this.startPos.x, this.startPos.y, content, 32);
-                // Text uses the active fill and no stroke — the engine default
-                // (white fill) is invisible against the white artboard.
+                // Text defaults to a solid black fill and no stroke. The active
+                // fill (often a light shape color) or the engine default (white)
+                // would be invisible against a white artboard; black is the
+                // expected, readable default for text.
                 const style = JSON.parse(this.ui.getCurrentStyle());
+                style.fills = [{ r: 0, g: 0, b: 0, a: 1 }];
                 style.strokes = [];
                 this.scene.setNodeStyleNoHistory(id, JSON.stringify(style));
                 this.scene.engine!.clear_selection();
@@ -1239,7 +1245,8 @@ export class InputManager {
             };
 
             input.addEventListener('keydown', (ev: KeyboardEvent) => {
-                if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
+                // Enter commits; Shift+Enter (or Cmd/Ctrl+Enter) inserts a newline.
+                if (ev.key === 'Enter' && !ev.shiftKey && !ev.metaKey && !ev.ctrlKey) {
                     ev.preventDefault();
                     commit();
                 } else if (ev.key === 'Escape') {
@@ -1253,7 +1260,7 @@ export class InputManager {
 
             container.appendChild(input);
             input.focus();
-            input.select();
+            autoGrow();
         } else if (this.ui.activeTool === 'rect' || this.ui.activeTool === 'ellipse'
                    || this.ui.activeTool === 'polygon' || this.ui.activeTool === 'star'
                    || this.ui.activeTool === 'artboard') {
@@ -2976,11 +2983,8 @@ export class InputManager {
             return { x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY };
         }
         if (geo.Text) {
-            const subpaths = this.renderer.getTextPath(id);
-            if (subpaths && subpaths.length > 0) {
-                const b = this.renderer.calculatePathBounds({ subpaths });
-                return { x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY };
-            }
+            const b = this.renderer.getTextLocalBounds(id);
+            if (b) return b;
             const approxW = geo.Text.content.length * geo.Text.font_size * 0.6;
             return { x: 0, y: -geo.Text.font_size, w: approxW, h: geo.Text.font_size };
         }
