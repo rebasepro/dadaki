@@ -1,4 +1,5 @@
 import { AboutDialog } from './about_dialog';
+import { logAppEvent, registerAnalyticsSink } from './analytics';
 import { AppMenu } from './app_menu';
 import { BackupDialog } from './backup_dialog';
 import { ContextBar } from './context_bar';
@@ -6,6 +7,7 @@ import { Document } from './document';
 import { DocumentManager } from './document_manager';
 import { ExportDialog, type ExportOptions } from './export_dialog';
 import { FileService } from './file_service';
+import { createFirebaseAnalyticsSink } from './firebase_analytics';
 import { InputManager } from './input';
 import { PersistenceManager } from './persistence';
 import { Renderer } from './renderer';
@@ -15,6 +17,9 @@ import { UIEngine } from './ui';
 import { WasmScene } from './wasm_scene';
 
 async function bootstrap() {
+    // Wire analytics before anything can emit an event.
+    registerAnalyticsSink(createFirebaseAnalyticsSink());
+
     // @ts-expect-error - Loaded from script tag in index.html
     const ck = await CanvasKitInit({
         locateFile: (file: string) => `/${file}`,
@@ -185,6 +190,7 @@ async function bootstrap() {
     }
 
     console.log('Dadaki Vector Engine Initialized (Rust Core / CanvasKit)');
+    logAppEvent('app_loaded');
 }
 
 bootstrap().catch((err) => {

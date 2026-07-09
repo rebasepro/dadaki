@@ -9,6 +9,7 @@
 
 import type { Document } from './document';
 import { FileIO } from './file_io';
+import { logAppEvent } from './analytics';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
 
@@ -40,6 +41,7 @@ export class FileService {
         this.activeDoc.markSaved();
         this.activeDoc.autosave?.snapshotNow(); // checkpoint the saved state
         this.refreshChrome();
+        logAppEvent('document_saved', { format: 'dataki', type: 'save' });
     }
 
     async saveActiveAs(): Promise<void> {
@@ -51,6 +53,7 @@ export class FileService {
         this.activeDoc.markSaved();
         this.activeDoc.autosave?.snapshotNow();
         this.refreshChrome();
+        logAppEvent('document_saved', { format: 'dataki', type: 'saveAs' });
     }
 
     /** Open a file, replacing the active document's content (Phase A semantics). */

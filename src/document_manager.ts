@@ -9,6 +9,7 @@
 import { Engine, History } from '../engine/pkg/engine';
 import { Document } from './document';
 import { FileIO } from './file_io';
+import { logAppEvent } from './analytics';
 import type { FileService } from './file_service';
 import type { InputManager } from './input';
 import { AutosaveManager, type BackupEntry, PersistenceManager } from './persistence';
@@ -55,6 +56,7 @@ export class DocumentManager {
         this.docs.push(doc);
         this.activate(doc.id);
         this.persistManifest();
+        logAppEvent('document_created');
         return doc;
     }
 
@@ -74,6 +76,7 @@ export class DocumentManager {
         const doc = new Document(`${entry.name} (restored ${time})`);
         doc.pendingBytes = entry.bytes; // lazily deserialized on activate
         this.adopt(doc);
+        logAppEvent('document_opened', { source: 'backup' });
     }
 
     /** Close a document (with a dirty-confirm). Never leaves zero tabs open. */
@@ -82,6 +85,8 @@ export class DocumentManager {
         if (!doc) return;
         if (doc.dirty && !window.confirm(`"${doc.name}" has unsaved changes. Close anyway?`))
             return;
+
+        logAppEvent('document_closed');
 
         // Capture a final version snapshot before dropping the working copy, so
         // the closed document stays recoverable from the backups list.
@@ -151,6 +156,9 @@ export class DocumentManager {
         this.renderTabs();
         doc.autosave?.trigger();
         this.persistManifest();
+        
+        const ext = picked.file.name.split('.').pop() || 'unknown';
+        logAppEvent('document_opened', { source: 'picker', format: ext });
     }
 
     private async findOpenByHandle(handle: FileSystemFileHandle): Promise<Document | null> {

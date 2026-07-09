@@ -836,6 +836,7 @@ export class InputManager {
                 this.isMouseDown &&
                 (this.moveSnapshot ||
                     this.resizeSnapshot ||
+                    this.rotateSnapshot ||
                     this.previewRect ||
                     this.previewLine ||
                     this.pencilPoints ||
@@ -1243,11 +1244,19 @@ export class InputManager {
         if (this.resizeSnapshot) {
             this.scene.engine!.deserialize_scene(this.resizeSnapshot);
         }
+        if (this.rotateSnapshot) {
+            this.scene.engine!.deserialize_scene(this.rotateSnapshot);
+        }
         this.resizeHandleType = null;
         this.resizeStartBounds = null;
         this.resizeTargetIds = [];
         this.resizeSnapshot = null;
         this.liveResizeBounds = null;
+        this.rotateHandleType = null;
+        this.rotateSnapshot = null;
+        this.rotateTargetIds = [];
+        this.rotatePivot = null;
+        this.rotateSingleStartDeg = null;
         this.previewRect = null;
         this.previewLine = null;
         this.pencilPoints = null;
@@ -1289,7 +1298,12 @@ export class InputManager {
     private reapplyDragForModifiers(e: KeyboardEvent) {
         if (!this.isMouseDown || !this.lastMouseEvent) return;
         if (e.key !== 'Alt' && e.key !== 'Shift' && e.key !== 'Meta' && e.key !== 'Control') return;
-        const dragActive = this.resizeSnapshot || this.rotateSnapshot || this.moveSnapshot;
+        const dragActive =
+            this.resizeSnapshot ||
+            this.rotateSnapshot ||
+            this.moveSnapshot ||
+            this.gradientDragActive ||
+            this.draggingHandleType;
         if (!dragActive) return;
         const src = this.lastMouseEvent;
         const synthetic = {

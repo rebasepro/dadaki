@@ -10,3 +10,8 @@ tests/svg-suite/report/
 .firebase
 firebase-debug.log
 
+# Local env (Firebase config etc.) — keep .env.example tracked
+.env
+.env.local
+.env.*.local
+

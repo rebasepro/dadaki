@@ -3,6 +3,7 @@
  * Works on world-space bounds via the engine's spatial index.
  */
 import type { WasmScene } from './wasm_scene';
+import { logAppEvent } from './analytics';
 
 export type AlignMode = 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom';
 
@@ -67,6 +68,7 @@ export function alignSelection(scene: WasmScene, ids: number[], mode: AlignMode)
     }
     scene.invalidateCache();
     scene.autosave?.trigger();
+    logAppEvent('alignment_action', { mode: mode, count: ids.length, type: 'align' });
 }
 
 /** Distribute nodes with equal gaps along an axis. Needs 3+ nodes. One undo step. */
@@ -97,4 +99,5 @@ export function distributeSelection(scene: WasmScene, ids: number[], axis: 'h' |
     }
     scene.invalidateCache();
     scene.autosave?.trigger();
+    logAppEvent('alignment_action', { axis: axis, count: ids.length, type: 'distribute' });
 }

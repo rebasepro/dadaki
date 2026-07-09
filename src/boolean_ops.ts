@@ -7,6 +7,7 @@
 import type { CanvasKit, Path } from 'canvaskit-wasm';
 import type { PathPoint, Subpath } from './types';
 import type { WasmScene } from './wasm_scene';
+import { logAppEvent } from './analytics';
 
 export type BoolOp = 'union' | 'subtract' | 'intersect' | 'exclude';
 
@@ -96,7 +97,11 @@ export function applyBooleanOp(
     const styleData = scene.getNodeStyle(ids[0]);
     const styleJson = styleData ? JSON.stringify({ ...styleData, fill_rule: res.fillRule }) : null;
 
-    return scene.replaceNodesWithPath(ids, JSON.stringify(res.subpaths), styleJson);
+    const resultId = scene.replaceNodesWithPath(ids, JSON.stringify(res.subpaths), styleJson);
+    if (resultId !== null) {
+        logAppEvent('boolean_operation', { op: op, count: ids.length, type: 'destructive' });
+    }
+    return resultId;
 }
 
 /** Build a world-space CanvasKit path for a node (recursing into groups). */

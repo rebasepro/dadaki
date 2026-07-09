@@ -2,6 +2,7 @@ import type { CanvasKit } from 'canvaskit-wasm';
 import { createColorSwatch } from './color_picker';
 import type { ContextBar } from './context_bar';
 import { FileIO } from './file_io';
+import { logAppEvent } from './analytics';
 import { GradientEditController, sampleGradientColor } from './gradient_edit';
 import {
     iconCircle,
@@ -359,6 +360,67 @@ export class UIEngine {
                 chevron.classList.toggle('collapsed');
             });
         });
+
+        document.getElementById('reveal-selection-btn')?.addEventListener('click', (e) => {
+            e.stopPropagation(); // don't toggle the section collapse
+            this.revealSelection();
+        });
+    }
+
+    /**
+     * Scroll the Objects panel to the current selection (WebStorm "scroll from
+     * source" style): expand the section and every collapsing ancestor
+     * (artboard + parent groups) so the selected row is visible, then bring it
+     * into view.
+     */
+    revealSelection() {
+        if (!this.scene.engine) return;
+
+        // Prefer the selected node(s); fall back to the selected artboard.
+        let targetNode: number | null = null;
+        try {
+            const sel = Array.from(this.scene.engine.get_selection());
+            if (sel.length) targetNode = sel[sel.length - 1];
+        } catch {
+            return;
+        }
+        const targetArtboard = this.scene.renderer?.selectedArtboardId ?? null;
+        if (targetNode === null && targetArtboard === null) return;
+
+        // Make sure the Objects section itself is expanded.
+        const body = document.querySelector('[data-section-body="layers"]');
+        const chevron = document.querySelector(
+            '.panel-section-header[data-section="layers"] .chevron',
+        );
+        body?.classList.remove('collapsed');
+        chevron?.classList.remove('collapsed');
+
+        if (targetNode !== null) {
+            // Expand every collapsed ancestor group.
+            let cur = this.scene.getNodeParent(targetNode);
+            while (cur !== -1) {
+                this._collapsedGroups.delete(cur);
+                cur = this.scene.getNodeParent(cur);
+            }
+            // Expand the artboard that spatially contains the node's root ancestor.
+            let root = targetNode;
+            let p = this.scene.getNodeParent(root);
+            while (p !== -1) {
+                root = p;
+                p = this.scene.getNodeParent(root);
+            }
+            const abId = this.artboardOfNode(root, this.scene.getArtboards());
+            if (abId !== null) this._collapsedArtboards.delete(abId);
+        }
+
+        this.updateLayerList();
+
+        const sel =
+            targetNode !== null
+                ? `.layer-item[data-node-id="${targetNode}"]`
+                : `.layer-item[data-artboard-id="${targetArtboard}"]`;
+        const row = this.layerList.querySelector(sel) as HTMLElement | null;
+        row?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
 
     private initEvents() {
@@ -586,39 +648,21 @@ export class UIEngine {
 
         this.addFillBtn?.addEventListener('click', (e) => {
             e.stopPropagation();
-            const selection = this.scene.engine!.get_selection();
-            if (selection.length === 0) return;
-            const node = this.scene.getNode(selection[0]);
-            if (!node) return;
+            if (this.scene.engine!.get_selection().length === 0) return;
             forceExpand('fill');
-            const currentFills = this.getFills(node);
-            this.updateNodeStyle(node, {
-                fills: [...currentFills, { r: 0.8, g: 0.8, b: 0.8, a: 1 }],
+            // Append to EACH paint target (descends into groups), preserving
+            // every target's existing fills.
+            this.applyPaintEdit('fills', (arr) => {
+                arr.push({ r: 0.8, g: 0.8, b: 0.8, a: 1 });
             });
         });
 
         this.addStrokeBtn?.addEventListener('click', (e) => {
             e.stopPropagation();
-            const selection = this.scene.engine!.get_selection();
-            if (selection.length === 0) return;
-            const node = this.scene.getNode(selection[0]);
-            if (!node) return;
+            if (this.scene.engine!.get_selection().length === 0) return;
             forceExpand('stroke');
-            const currentStrokes = this.getStrokes(node);
-            this.updateNodeStyle(node, {
-                strokes: [
-                    ...currentStrokes,
-                    {
-                        paint: { r: 0, g: 0, b: 0, a: 1 },
-                        width: 1,
-                        cap: 0,
-                        join: 0,
-                        dash_array: [],
-                        dash_offset: 0,
-                        miter_limit: 4,
-                        alignment: StrokeAlignment.Center,
-                    },
-                ],
+            this.applyPaintEdit('strokes', (arr) => {
+                arr.push(this.makeDefaultStroke({ r: 0, g: 0, b: 0, a: 1 }));
             });
         });
 
@@ -904,6 +948,7 @@ export class UIEngine {
         this.activeTool = toolId;
         this.toolLocked = lock;
         this.toolbar?.sync(toolId);
+        logAppEvent('tool_selected', { tool: toolId, locked: lock });
 
         // Exit path/text editing when switching tools to clear dimming
         const im = this.scene.renderer?.inputManager;
@@ -1595,12 +1640,216 @@ export class UIEngine {
         'Image',
     ];
 
-    private getFills(node: SceneNode): Paint[] {
-        return node.style.fills || [];
+    /** A fresh default stroke (used by "add stroke" and mixed-override). */
+    private makeDefaultStroke(paint: Color): Stroke {
+        return {
+            paint,
+            width: 1,
+            cap: 0,
+            join: 0,
+            dash_array: [],
+            dash_offset: 0,
+            miter_limit: 4,
+            alignment: StrokeAlignment.Center,
+        } as unknown as Stroke;
     }
 
-    private getStrokes(node: SceneNode): Stroke[] {
-        return node.style.strokes || [];
+    /**
+     * Expand the current selection into the set of paintable LEAF node ids
+     * (Figma-style): descend into groups so editing fill/stroke on a group
+     * targets its shapes. Live Paint groups are treated as opaque single
+     * targets — their child colors come from painting, not `style.fills`.
+     */
+    private getPaintTargets(): number[] {
+        const out: number[] = [];
+        const seen = new Set<number>();
+        const visit = (id: number) => {
+            if (seen.has(id)) return;
+            const typeNum = this.scene.getNodeType(id);
+            const isGroup = typeNum !== undefined && UIEngine.NODE_TYPE_KEY[typeNum] === 'Group';
+            if (isGroup && !this.scene.getNodeLivePaint(id)) {
+                const children = this.scene.getNodeChildren(id);
+                if (children) for (const c of children) visit(c);
+                return;
+            }
+            seen.add(id);
+            out.push(id);
+        };
+        for (const id of this.scene.getSelection()) visit(id);
+        return out;
+    }
+
+    /** Structural equality for a Paint/Stroke (engine objects have stable key order). */
+    private eqPaint(a: unknown, b: unknown): boolean {
+        return JSON.stringify(a) === JSON.stringify(b);
+    }
+
+    /** Representative Color for a Paint (fills) or Stroke (strokes) slot. */
+    private paintRepColor(kind: 'fills' | 'strokes', value: any): Color {
+        const paint = kind === 'strokes' ? (value?.paint ?? { r: 0, g: 0, b: 0, a: 1 }) : value;
+        if (paint && isGradient(paint))
+            return paint.stops?.[0]?.color ?? { r: 0.5, g: 0.5, b: 0.5, a: 1 };
+        if (paint && !isPattern(paint)) return paint as Color;
+        return { r: 0.5, g: 0.5, b: 0.5, a: 1 };
+    }
+
+    /**
+     * Aggregate the fill/stroke arrays across all paint targets, Figma-style.
+     * `uniform` (all targets have the same count): one row per slot, each
+     * flagged `mixed` when targets disagree on that slot. `mixedCount`: the
+     * targets have differing numbers of paints, so no coherent slot mapping.
+     */
+    private aggregatePaints(
+        kind: 'fills' | 'strokes',
+    ):
+        | { mode: 'uniform'; rows: { slotIndex: number; mixed: boolean; value: any }[] }
+        | { mode: 'mixedCount'; rep: any } {
+        const arrays: any[][] = [];
+        for (const id of this.getPaintTargets()) {
+            const n = this.scene.getNode(id);
+            if (n) arrays.push(((n.style as any)[kind] as any[]) || []);
+        }
+        if (arrays.length === 0) return { mode: 'uniform', rows: [] };
+        const n0 = arrays[0].length;
+        if (!arrays.every((a) => a.length === n0)) {
+            const rep = arrays.find((a) => a.length > 0)?.[0] ?? null;
+            return { mode: 'mixedCount', rep };
+        }
+        const rows: { slotIndex: number; mixed: boolean; value: any }[] = [];
+        for (let i = 0; i < n0; i++) {
+            const v0 = arrays[0][i];
+            const mixed = !arrays.every((a) => this.eqPaint(a[i], v0));
+            rows.push({ slotIndex: i, mixed, value: v0 });
+        }
+        return { mode: 'uniform', rows };
+    }
+
+    /** True while a color-picker drag (repeated `live` applyPaintEdit calls)
+     *  owns an open history gesture that we must close on the settling edit. */
+    private _paintGestureOpen = false;
+
+    /**
+     * Apply `mutate` to EACH paint target's own `fills`/`strokes` array,
+     * preserving every target's other paints. Produces exactly ONE undo step
+     * per user edit, capturing the PRE-edit state:
+     *   - `live` (picker/scrub drag frames): open a gesture on the first frame
+     *     so a single pre-edit snapshot is taken and later frames don't flood
+     *     the undo stack. If a gesture is already open (e.g. label scrubbing),
+     *     we ride on it and let its owner close it.
+     *   - settling edit / discrete action: close our gesture if we opened one,
+     *     otherwise wrap the mutation in a transaction() (one pre-snapshot) —
+     *     but only if it actually changes something, so redundant settle
+     *     commits don't add empty undo steps. (The color picker fires onChange
+     *     twice for a drag: once on pointer-up, once on close.)
+     */
+    private applyPaintEdit(
+        kind: 'fills' | 'strokes',
+        mutate: (arr: any[], node: SceneNode) => void,
+        live = false,
+    ) {
+        const targets = this.getPaintTargets();
+        if (targets.length === 0) return;
+
+        const doMutations = () => {
+            for (const id of targets) {
+                const n = this.scene.getNode(id);
+                if (!n) continue;
+                const arr = JSON.parse(JSON.stringify((n.style as any)[kind] ?? []));
+                mutate(arr, n);
+                const newStyle = { ...n.style, [kind]: arr };
+                this.scene.setNodeStyleNoHistory(id, JSON.stringify(newStyle));
+            }
+        };
+
+        if (live) {
+            if (!this.scene.inGesture) {
+                this.scene.beginGesture(); // one pre-edit snapshot for the whole drag
+                this._paintGestureOpen = true;
+            }
+            doMutations();
+            return;
+        }
+
+        if (this._paintGestureOpen) {
+            // Settling the drag we opened: the pre-edit snapshot was taken at
+            // beginGesture, so just apply the final value and close the gesture.
+            doMutations();
+            this.scene.endGesture();
+            this._paintGestureOpen = false;
+        } else {
+            // Discrete edit (no drag): capture the pre-edit scene, apply, and
+            // only record an undo checkpoint if the engine state actually
+            // changed. Comparing the engine's OWN serialization (not our JS
+            // JSON) makes this immune to float precision (f32 vs f64) and key
+            // ordering — so the picker's redundant second onChange, or setting a
+            // paint to its current value, adds no empty undo step.
+            const before = this.scene.serializeScene();
+            doMutations();
+            const after = this.scene.serializeScene();
+            const unchanged =
+                before.length === after.length && before.every((v, i) => v === after[i]);
+            if (unchanged) return; // no-op: nothing to record
+            this.scene.pushHistoryState(before);
+        }
+        this.syncWithSelection();
+    }
+
+    /**
+     * A single "Mixed" row: an indeterminate swatch that overrides the slot
+     * (or, for `mixedCount`, the whole array) across all targets, plus a ×
+     * that removes it everywhere.
+     */
+    private buildMixedPaintRow(
+        kind: 'fills' | 'strokes',
+        rep: any,
+        commit: (mutate: (arr: any[], node: SceneNode) => void, live?: boolean) => void,
+        slotIndex?: number,
+    ): HTMLElement {
+        const row = document.createElement('div');
+        row.className = 'fill-stroke-row';
+
+        const setColor = (c: Color, live: boolean) => {
+            commit((arr) => {
+                if (slotIndex === undefined) {
+                    arr.length = 0;
+                    arr.push(kind === 'strokes' ? this.makeDefaultStroke(c) : c);
+                } else if (kind === 'strokes') {
+                    if (arr[slotIndex]) arr[slotIndex].paint = c;
+                } else {
+                    arr[slotIndex] = c;
+                }
+            }, live);
+        };
+
+        const swatch = createColorSwatch({
+            color: rep ? this.paintRepColor(kind, rep) : { r: 0.7, g: 0.7, b: 0.7, a: 1 },
+            title: 'Mixed — pick a color to set all',
+            onInput: (c) => setColor(c, true),
+            onChange: (c) => setColor(c, false),
+        });
+        swatch.el.classList.add('cp-swatch--mixed');
+        row.appendChild(swatch.el);
+
+        const label = document.createElement('span');
+        label.className = 'mixed-label';
+        label.textContent = 'Mixed';
+        row.appendChild(label);
+
+        const spacer = document.createElement('div');
+        spacer.style.flex = '1';
+        row.appendChild(spacer);
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'icon-toggle';
+        delBtn.innerHTML = '×';
+        delBtn.title = kind === 'strokes' ? 'Remove Stroke' : 'Remove Fill';
+        delBtn.onclick = () =>
+            commit((arr) => {
+                if (slotIndex === undefined) arr.length = 0;
+                else arr.splice(slotIndex, 1);
+            });
+        row.appendChild(delBtn);
+        return row;
     }
 
     /** Cache of data-URI previews for pattern tile images, keyed by image id. */
@@ -1726,26 +1975,34 @@ export class UIEngine {
             : `linear-gradient(90deg, ${stops})`;
     }
 
-    renderFillsList(node: SceneNode) {
+    renderFillsList(_node: SceneNode) {
         if (!this.fillsList) return;
         this.fillsList.innerHTML = '';
-        const fills = this.getFills(node);
-        const selId: number | undefined = this.scene.getSelection()[0];
         const ge = this.gradientEdit;
+        const targets = this.getPaintTargets();
+        const agg = this.aggregatePaints('fills');
+        // Gradient on-canvas editing only makes sense for a single leaf target;
+        // for a multi/group selection we still edit solid colors on all, but
+        // suppress gradient handles/editor (matches Figma).
+        const primaryId: number | undefined = targets.length === 1 ? targets[0] : undefined;
 
-        // Commit a mutated copy of the fills array to the engine.
-        const commit = (mutate: (f: Paint[]) => void, live = false) => {
-            const next = fills.map(
-                (f) =>
-                    (isGradient(f)
-                        ? { ...f, stops: f.stops.map((s) => ({ ...s, color: { ...s.color } })) }
-                        : { ...f }) as Paint,
-            );
-            mutate(next);
-            this.updateNodeStyle(node, { fills: next }, live);
+        // Commit: apply `mutate` to EACH target's own fills, preserving other slots.
+        const commit = (mutate: (f: Paint[], n: SceneNode) => void, live = false) => {
+            this.applyPaintEdit('fills', mutate as any, live);
         };
 
-        fills.forEach((fill: Paint, index: number) => {
+        if (agg.mode === 'mixedCount') {
+            this.fillsList.appendChild(this.buildMixedPaintRow('fills', agg.rep, commit));
+            return;
+        }
+
+        for (const rowAgg of agg.rows) {
+            const index = rowAgg.slotIndex;
+            const fill = rowAgg.value as Paint;
+            if (rowAgg.mixed) {
+                this.fillsList.appendChild(this.buildMixedPaintRow('fills', fill, commit, index));
+                continue;
+            }
             const item = document.createElement('div');
             item.className = 'fill-item';
 
@@ -1776,8 +2033,9 @@ export class UIEngine {
                 // Switching to a gradient type puts this fill into gradient-edit
                 // mode (canvas handles + panel ramp). syncSelection validates
                 // this after the commit lands.
-                if (typeSel.value !== 'solid' && selId !== undefined) ge.activate(selId, index);
-                commit((f) => {
+                if (typeSel.value !== 'solid' && primaryId !== undefined)
+                    ge.activate(primaryId, index);
+                commit((f, n) => {
                     if (typeSel.value === 'solid') {
                         f[index] = { ...seed };
                     } else {
@@ -1807,7 +2065,7 @@ export class UIEngine {
                             }
                             f[index] = g;
                         } else {
-                            f[index] = this.makeDefaultGradient(t, node, seed);
+                            f[index] = this.makeDefaultGradient(t, n, seed);
                         }
                     }
                 });
@@ -1856,16 +2114,17 @@ export class UIEngine {
                 row.appendChild(solidSpacer);
             } else {
                 // ── Gradient: clickable preview swatch (activates editing) ──
-                const isActiveGrad = ge.isActive() && ge.nodeId === selId && ge.fillIndex === index;
+                const isActiveGrad =
+                    ge.isActive() && ge.nodeId === primaryId && ge.fillIndex === index;
                 const preview = document.createElement('div');
                 preview.className = 'gradient-preview';
                 preview.classList.toggle('active', isActiveGrad);
-                preview.title = 'Edit gradient';
+                preview.title = primaryId !== undefined ? 'Edit gradient' : 'Gradient';
                 preview.style.backgroundImage = `${this.gradientPreviewCss(fill)}, ${UIEngine.CHECKER_CSS}`;
                 preview.style.backgroundSize = 'auto, 8px 8px';
                 preview.addEventListener('click', () => {
-                    if (selId === undefined) return;
-                    ge.activate(selId, index);
+                    if (primaryId === undefined) return;
+                    ge.activate(primaryId, index);
                     this.syncWithSelection({ interactive: true });
                 });
                 row.appendChild(preview);
@@ -1888,14 +2147,14 @@ export class UIEngine {
             if (
                 isGradient(fill) &&
                 ge.isActive() &&
-                ge.nodeId === selId &&
+                ge.nodeId === primaryId &&
                 ge.fillIndex === index
             ) {
                 item.appendChild(this.buildGradientEditor(fill, index, commit));
             }
 
             this.fillsList.appendChild(item);
-        });
+        }
     }
 
     /** Checkerboard layer used behind transparent gradient previews. */
@@ -1910,7 +2169,7 @@ export class UIEngine {
     private buildGradientEditor(
         fill: Gradient,
         index: number,
-        commit: (mutate: (f: Paint[]) => void, live?: boolean) => void,
+        commit: (mutate: (f: Paint[], n: SceneNode) => void, live?: boolean) => void,
     ): HTMLElement {
         const ge = this.gradientEdit;
         const editor = document.createElement('div');
@@ -2230,12 +2489,30 @@ export class UIEngine {
         return editor;
     }
 
-    renderStrokesList(node: SceneNode) {
+    renderStrokesList(_node: SceneNode) {
         if (!this.strokesList) return;
         this.strokesList.innerHTML = '';
-        const strokes = this.getStrokes(node);
+        const agg = this.aggregatePaints('strokes');
 
-        strokes.forEach((stroke: any, index: number) => {
+        // Commit: apply `mutate` to EACH target's own strokes, preserving other slots.
+        const commit = (mutate: (s: any[], n: SceneNode) => void, live = false) => {
+            this.applyPaintEdit('strokes', mutate as any, live);
+        };
+
+        if (agg.mode === 'mixedCount') {
+            this.strokesList.appendChild(this.buildMixedPaintRow('strokes', agg.rep, commit));
+            return;
+        }
+
+        for (const rowAgg of agg.rows) {
+            const index = rowAgg.slotIndex;
+            const stroke = rowAgg.value as any;
+            if (rowAgg.mixed) {
+                this.strokesList.appendChild(
+                    this.buildMixedPaintRow('strokes', stroke, commit, index),
+                );
+                continue;
+            }
             const row = document.createElement('div');
             row.className = 'fill-stroke-row';
 
@@ -2248,13 +2525,15 @@ export class UIEngine {
                       : { r: 0, g: 0, b: 0, a: 1 };
 
             const applyStrokeColor = (c: Color, live: boolean) => {
-                const newStrokes = [...strokes];
-                if (stroke.paint && isGradient(stroke.paint)) {
-                    if (stroke.paint.stops.length > 0) stroke.paint.stops[0].color = c;
-                } else {
-                    newStrokes[index].paint = c;
-                }
-                this.updateNodeStyle(node, { strokes: newStrokes }, live);
+                commit((arr) => {
+                    const s = arr[index];
+                    if (!s) return;
+                    if (s.paint && isGradient(s.paint)) {
+                        if (s.paint.stops.length > 0) s.paint.stops[0].color = c;
+                    } else {
+                        s.paint = c;
+                    }
+                }, live);
             };
 
             // The hex value is edited inside the picker popover, not shown inline.
@@ -2285,14 +2564,18 @@ export class UIEngine {
             wInput.step = '0.5';
             wInput.min = '0';
 
-            const updateStrokeWidth = () => {
-                const newStrokes = [...strokes];
-                newStrokes[index].width = parseFloat(wInput.value) || 0;
-                this.updateNodeStyle(node, { strokes: newStrokes }, true);
+            // `live` keeps intermediate frames (scrub via makeScrubbable, or
+            // keystrokes) inside one gesture; the 'change' (settle) closes it so
+            // the edit is a single undo step.
+            const updateStrokeWidth = (live = true) => {
+                const w = parseFloat(wInput.value) || 0;
+                commit((arr) => {
+                    if (arr[index]) arr[index].width = w;
+                }, live);
             };
 
-            wInput.addEventListener('input', updateStrokeWidth);
-            wInput.addEventListener('change', updateStrokeWidth);
+            wInput.addEventListener('input', () => updateStrokeWidth(true));
+            wInput.addEventListener('change', () => updateStrokeWidth(false));
 
             this.makeScrubbable(wLabel, wInput, updateStrokeWidth);
 
@@ -2310,19 +2593,20 @@ export class UIEngine {
             `;
             alignSelect.value = stroke.alignment || 'Center';
             alignSelect.addEventListener('change', () => {
-                const newStrokes = [...strokes];
-                newStrokes[index].alignment = alignSelect.value as unknown as StrokeAlignment;
-                this.updateNodeStyle(node, { strokes: newStrokes });
+                commit((arr) => {
+                    if (arr[index])
+                        arr[index].alignment = alignSelect.value as unknown as StrokeAlignment;
+                });
             });
 
             const delBtn = document.createElement('button');
             delBtn.className = 'icon-toggle';
             delBtn.innerHTML = '×';
             delBtn.title = 'Remove Stroke';
-            delBtn.onclick = () => {
-                const newStrokes = strokes.filter((_: any, i: number) => i !== index);
-                this.updateNodeStyle(node, { strokes: newStrokes });
-            };
+            delBtn.onclick = () =>
+                commit((arr) => {
+                    arr.splice(index, 1);
+                });
 
             row.appendChild(colorSwatch.el);
             row.appendChild(wContainer);
@@ -2332,7 +2616,7 @@ export class UIEngine {
             row.appendChild(strokeSpacer);
             row.appendChild(delBtn);
             this.strokesList.appendChild(row);
-        });
+        }
     }
 
     private updateNodeStyle(

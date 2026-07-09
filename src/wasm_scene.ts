@@ -1,5 +1,6 @@
 import type { CanvasKit } from 'canvaskit-wasm';
 import init, { Engine, History } from '../engine/pkg/engine';
+import { logAppEvent } from './analytics';
 import type { BoolOp } from './boolean_ops';
 import {
     BOOL_OP_BY_INDEX,
@@ -193,6 +194,7 @@ export class WasmScene {
         const id = this.engine!.add_rect(x, y, w, h);
         this.invalidateCache();
         this.autosave?.trigger();
+        logAppEvent('object_created', { type: 'rect' });
         return id;
     }
 
@@ -201,6 +203,7 @@ export class WasmScene {
         const id = this.engine!.add_ellipse(cx, cy, rx, ry);
         this.invalidateCache();
         this.autosave?.trigger();
+        logAppEvent('object_created', { type: 'ellipse' });
         return id;
     }
 
@@ -209,6 +212,7 @@ export class WasmScene {
         const id = this.engine!.add_path(pointsJson);
         this.invalidateCache();
         this.autosave?.trigger();
+        logAppEvent('object_created', { type: 'path' });
         return id;
     }
 
@@ -217,6 +221,7 @@ export class WasmScene {
         const id = this.engine!.add_polygon(cx, cy, radius, sides);
         this.invalidateCache();
         this.autosave?.trigger();
+        logAppEvent('object_created', { type: 'polygon' });
         return id;
     }
 
@@ -225,6 +230,7 @@ export class WasmScene {
         const id = this.engine!.add_star(cx, cy, outerR, innerR, points);
         this.invalidateCache();
         this.autosave?.trigger();
+        logAppEvent('object_created', { type: 'star' });
         return id;
     }
 
@@ -240,6 +246,7 @@ export class WasmScene {
         this.engine!.set_node_style(id, styleJson);
         this.invalidateCache();
         this.autosave?.trigger();
+        logAppEvent('property_changed', { property: 'style' });
     }
 
     /** Apply a style change without pushing history. Used for live preview during
@@ -302,6 +309,7 @@ export class WasmScene {
         this.engine!.set_node_effects(id, effectsJson);
         this.invalidateCache();
         this.autosave?.trigger();
+        logAppEvent('property_changed', { property: 'effects' });
     }
 
     getNodeEffects(id: number): string {
@@ -432,6 +440,26 @@ export class WasmScene {
             this.invalidateCache();
             this.autosave?.trigger();
         }
+    }
+
+    /** True while a transaction() or beginGesture()/endGesture() bracket is
+     *  open — callers use this to avoid opening a redundant nested gesture. */
+    get inGesture(): boolean {
+        return this._inTransaction;
+    }
+
+    /** Serialize the current scene — for explicit change detection / checkpoints. */
+    serializeScene(): Uint8Array {
+        return this.engine!.serialize_scene();
+    }
+
+    /** Push an explicit serialized state as an undo checkpoint (e.g. the
+     *  PRE-edit state captured before a discrete mutation). No-op while a
+     *  gesture/transaction owns history. */
+    pushHistoryState(state: Uint8Array) {
+        if (this._inTransaction) return;
+        this.history!.push_state(state);
+        this.autosave?.trigger();
     }
 
     private saveHistory() {

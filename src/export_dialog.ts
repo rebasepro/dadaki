@@ -5,7 +5,7 @@
  * optional `artboardId` slot so Phase C can add an artboard picker without
  * reworking the call sites.
  */
-
+import { logAppEvent } from './analytics';
 import { escapeHtml } from './svg_utils';
 
 export interface ExportOptions {
@@ -118,12 +118,14 @@ export class ExportDialog {
             () => {
                 const raw = this.artboardSelect.value;
                 this.close();
-                this.onExport({
+                const opts: ExportOptions = {
                     format: this.format,
                     scale: this.scale,
                     artboardId: raw === 'all' ? 'all' : parseInt(raw, 10),
                     transparent: this.transparentCheckbox.checked,
-                });
+                };
+                logAppEvent('export_completed', { format: opts.format, scale: opts.scale, target: raw === 'all' ? 'canvas' : 'artboard' });
+                this.onExport(opts);
             },
         );
     }
@@ -135,6 +137,7 @@ export class ExportDialog {
             arts.map((a) => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('') +
             `<option value="all">Entire canvas</option>`;
         this.overlay.style.display = 'flex';
+        logAppEvent('export_started');
     }
 
     close(): void {

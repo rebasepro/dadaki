@@ -33,6 +33,7 @@
   "dependencies": {
     "@types/opentype.js": "^1.3.10",
     "canvaskit-wasm": "0.39.1",
+    "firebase": "^12.15.0",
     "opentype.js": "^1.3.4",
     "puppeteer": "^25.3.0"
   }

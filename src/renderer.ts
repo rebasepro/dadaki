@@ -1834,9 +1834,26 @@ export class Renderer {
             if (selection.length > 5 && !live) continue;
 
             if (nodeTypeNum === 3) {
-                // Group
-                const [gMinX, gMinY, gMaxX, gMaxY] = bounds;
-                canvas.drawRect(this.ck.LTRBRect(gMinX, gMinY, gMaxX, gMaxY), op.selOutline);
+                // Group: draw the outline oriented under the group's own
+                // transform (its local-bounds rect), so it rotates/skews with
+                // the group like every other node type — matching the handles,
+                // which come from the oriented selection frame. Falling back to
+                // the axis-aligned world bounds would make the box "adapt"
+                // instead of rotate.
+                const lb = this.inputManager?.getNodeLocalBounds(id);
+                if (lb) {
+                    const transform = this.scene.getTransform(id);
+                    canvas.save();
+                    canvas.concat(transform);
+                    canvas.drawRect(
+                        this.ck.LTRBRect(lb.x, lb.y, lb.x + lb.w, lb.y + lb.h),
+                        op.selOutline,
+                    );
+                    canvas.restore();
+                } else {
+                    const [gMinX, gMinY, gMaxX, gMaxY] = bounds;
+                    canvas.drawRect(this.ck.LTRBRect(gMinX, gMinY, gMaxX, gMaxY), op.selOutline);
+                }
             } else {
                 const transform = this.scene.getTransform(id);
                 canvas.save();

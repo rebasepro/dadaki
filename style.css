@@ -834,6 +834,28 @@ body, html {
     flex: 1;
 }
 
+.reveal-selection-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    margin: -2px 0;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: 4px;
+    opacity: 0.6;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+    flex-shrink: 0;
+}
+
+.reveal-selection-btn:hover {
+    opacity: 1;
+    color: var(--text-main);
+    background: rgba(255,255,255,0.06);
+}
+
 .panel-section-body {
     padding: 2px 10px 8px;
     overflow: hidden;
@@ -1230,6 +1252,33 @@ body.scrubbing * {
     width: var(--color-swatch-w);
     min-width: var(--color-swatch-w);
     height: var(--color-swatch-h);
+}
+
+/* Multi/group selection where targets disagree on this slot: the swatch keeps a
+   representative color but gets a diagonal slash to read as indeterminate, and a
+   "Mixed" caption. Picking a color overrides all targets. */
+.fill-stroke-row .cp-swatch--mixed {
+    position: relative;
+    overflow: hidden;
+}
+.fill-stroke-row .cp-swatch--mixed::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        135deg,
+        transparent calc(50% - 1px),
+        var(--text-dim, #888) calc(50% - 1px),
+        var(--text-dim, #888) calc(50% + 1px),
+        transparent calc(50% + 1px)
+    );
+    pointer-events: none;
+}
+.fill-stroke-row .mixed-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-style: italic;
+    margin-left: 2px;
 }
 
 .fill-stroke-row .prop-select {
