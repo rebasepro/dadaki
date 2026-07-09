@@ -26,6 +26,7 @@ import { alignSelection, distributeSelection } from './align';
 import type { AlignMode } from './align';
 import { applyBooleanOp } from './boolean_ops';
 import type { BoolOp } from './boolean_ops';
+import { createColorSwatch, colorToHex, parseHex } from './color_picker';
 import {
     iconPencil, iconTrash, iconCopy,
     iconAlignLeft, iconAlignCenterH, iconAlignRight,
@@ -538,12 +539,14 @@ export class ContextBar {
         wrapper.className = 'cb-swatch-wrapper';
         wrapper.setAttribute('data-tooltip', `Default ${label}`);
 
-        const swatch = document.createElement('input');
-        swatch.type = 'color';
-        swatch.className = 'cb-swatch';
-        swatch.value = currentValue;
-        swatch.addEventListener('input', () => onChange(swatch.value));
-        swatch.addEventListener('change', () => onChange(swatch.value));
+        const initial = parseHex(currentValue) ?? { r: 0, g: 0, b: 0, a: 1 };
+        const { el: swatch } = createColorSwatch({
+            color: initial,
+            alpha: false,
+            title: `Default ${label}`,
+            className: 'cb-swatch',
+            onInput: (c) => onChange(colorToHex(c, false)),
+        });
 
         wrapper.appendChild(swatch);
 

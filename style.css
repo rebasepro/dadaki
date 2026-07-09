@@ -2097,25 +2097,13 @@ body.scrubbing * {
     line-height: 1;
 }
 
-.cb-swatch {
+.cp-swatch.cb-swatch {
     width: 20px;
     height: 20px;
     border: 1.5px solid var(--border-light);
     border-radius: 4px;
     padding: 0;
     cursor: pointer;
-    -webkit-appearance: none;
-    appearance: none;
-    background: none;
-}
-
-.cb-swatch::-webkit-color-swatch-wrapper {
-    padding: 0;
-}
-
-.cb-swatch::-webkit-color-swatch {
-    border: none;
-    border-radius: 2px;
 }
 
 .cb-select {
@@ -2222,3 +2210,194 @@ body.scrubbing * {
     border-color: var(--accent);
     color: #fff;
 }
+
+/* ─── Color Picker ─────────────────────────────────────────────────────── */
+
+/* Swatch button — replaces <input type="color">. Sized to slot into the
+   existing .color-input / .cb-swatch layouts. */
+.cp-swatch {
+    width: 32px;
+    height: 26px;
+    min-width: 32px;
+    padding: 0;
+    border: 1px solid var(--border-light);
+    border-radius: 5px;
+    cursor: pointer;
+    box-sizing: border-box;
+    transition: border-color 0.1s, transform 0.05s;
+}
+.cp-swatch:hover { border-color: var(--text-dim); }
+.cp-swatch:active { transform: scale(0.96); }
+
+.cp-popover {
+    position: fixed;
+    z-index: 10000;
+    width: 244px;
+    padding: 12px;
+    box-sizing: border-box;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+    font-size: 11px;
+    color: var(--text-main);
+    user-select: none;
+}
+
+/* Saturation / value square */
+.cp-sv {
+    position: relative;
+    width: 100%;
+    height: 150px;
+    border-radius: 6px;
+    cursor: crosshair;
+    touch-action: none;
+}
+.cp-sv-thumb {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #fff;
+    border-radius: 50%;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+}
+
+/* Slider row: hue + alpha on the left, eyedropper + preview on the right */
+.cp-sliders {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-top: 12px;
+}
+.cp-slider-col { flex: 1; display: flex; flex-direction: column; gap: 10px; }
+.cp-slider-row { display: flex; }
+
+.cp-hue, .cp-alpha {
+    position: relative;
+    flex: 1;
+    height: 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    touch-action: none;
+}
+.cp-hue {
+    background: linear-gradient(to right,
+        #f00 0%, #ff0 17%, #0f0 33%, #0ff 50%, #00f 67%, #f0f 83%, #f00 100%);
+}
+.cp-alpha {
+    background: repeating-conic-gradient(#bdbdbd 0% 25%, #fff 0% 50%) 0 0 / 12px 12px;
+}
+.cp-alpha-fill { position: absolute; inset: 0; border-radius: 6px; }
+.cp-slider-thumb {
+    position: absolute;
+    top: 50%;
+    width: 14px;
+    height: 14px;
+    background: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.35);
+    border-radius: 50%;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+}
+
+.cp-side { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.cp-eyedropper {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-input);
+    color: var(--text-dim);
+    border: 1px solid var(--border-light);
+    border-radius: 5px;
+    cursor: pointer;
+}
+.cp-eyedropper:hover { color: var(--accent); border-color: var(--accent); }
+.cp-preview {
+    width: 26px;
+    height: 26px;
+    border-radius: 5px;
+    border: 1px solid var(--border-light);
+}
+
+/* Numeric fields */
+.cp-inputs {
+    display: flex;
+    gap: 6px;
+    margin-top: 12px;
+}
+.cp-field {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    min-width: 0;
+}
+.cp-field:first-child { flex: 1.6; }
+.cp-field-label { color: var(--text-label); font-size: 9px; letter-spacing: 0.03em; }
+.cp-hex, .cp-num {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-main);
+    font-size: 11px;
+    text-align: center;
+    padding: 4px 2px;
+    outline: none;
+    font-family: inherit;
+}
+.cp-hex { text-transform: uppercase; }
+.cp-hex:focus, .cp-num:focus { border-color: var(--accent); }
+
+/* Recent + saved sections */
+.cp-section { margin-top: 12px; }
+.cp-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+.cp-section-title {
+    color: var(--text-label);
+    font-size: 9px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+.cp-swatch-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    min-height: 18px;
+}
+.cp-chip {
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 4px;
+    cursor: pointer;
+    box-sizing: border-box;
+}
+.cp-chip:hover { border-color: var(--accent); transform: scale(1.08); }
+.cp-empty { color: var(--text-dim); font-size: 11px; }
+.cp-add-swatch {
+    width: 18px;
+    height: 18px;
+    line-height: 1;
+    padding: 0;
+    background: var(--bg-input);
+    color: var(--text-dim);
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+}
+.cp-add-swatch:hover { color: var(--accent); border-color: var(--accent); }
