@@ -19,6 +19,7 @@ function escapeHtml(s: string): string {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 import { GradientEditController, sampleGradientColor } from './gradient_edit';
+import { createColorSwatch } from './color_picker';
 
 /** Element tags a <clipPath> may legally contain (basic shapes, text, use).
  *  image/switch/symbol/etc. are invalid clip children and are ignored. */
@@ -1351,24 +1352,26 @@ export class UIEngine {
                 row.appendChild(preview);
             } else if (!isGradient(fill)) {
                 // ── Solid: color swatch + hex ──
-                const colorInput = document.createElement('input');
-                colorInput.type = 'color';
-                colorInput.className = 'color-input';
-                colorInput.value = this.rgbToHex(fill);
+                const solid = fill as Color;
                 const hexInput = document.createElement('input');
                 hexInput.type = 'text';
                 hexInput.className = 'prop-input';
                 hexInput.style.cssText = 'width:60px;flex:0 0 60px';
-                hexInput.value = this.rgbToHex(fill).toUpperCase();
-                colorInput.addEventListener('input', () => {
-                    hexInput.value = colorInput.value.toUpperCase();
-                    commit(f => { f[index] = this.hexToRgb(colorInput.value); }, true);
+                hexInput.value = this.rgbToHex(solid).toUpperCase();
+                const swatch = createColorSwatch({
+                    color: solid,
+                    title: 'Fill color',
+                    onInput: (c) => { hexInput.value = this.rgbToHex(c).toUpperCase(); commit(f => { f[index] = c; }, true); },
+                    onChange: (c) => { hexInput.value = this.rgbToHex(c).toUpperCase(); commit(f => { f[index] = c; }); },
                 });
                 hexInput.addEventListener('change', () => {
                     const val = hexInput.value.startsWith('#') ? hexInput.value : '#' + hexInput.value;
-                    if (/^#[0-9A-F]{6}$/i.test(val)) { colorInput.value = val; commit(f => { f[index] = this.hexToRgb(val); }); }
+                    if (/^#[0-9A-F]{6}$/i.test(val)) {
+                        const c = { ...this.hexToRgb(val), a: solid.a ?? 1 };
+                        swatch.setColor(c); commit(f => { f[index] = c; });
+                    }
                 });
-                row.appendChild(colorInput);
+                row.appendChild(swatch.el);
                 row.appendChild(hexInput);
             } else {
                 // ── Gradient: clickable preview swatch (activates editing) ──
@@ -1526,27 +1529,32 @@ export class UIEngine {
         const stopRow = document.createElement('div');
         stopRow.className = 'gradient-stop-row';
 
-        const sw = document.createElement('input');
-        sw.type = 'color';
-        sw.className = 'color-input';
-        sw.value = this.rgbToHex(stop.color);
         const hexInput = document.createElement('input');
         hexInput.type = 'text';
         hexInput.className = 'prop-input';
         hexInput.style.cssText = 'width:56px;flex:0 0 56px';
         hexInput.value = this.rgbToHex(stop.color).toUpperCase();
-        sw.addEventListener('input', () => {
-            const c = this.hexToRgb(sw.value);
-            hexInput.value = sw.value.toUpperCase();
-            commit(f => { const st = (f[index] as Gradient).stops[si]; st.color = { ...c, a: st.color.a }; }, true);
+        // Stop alpha lives in its own numeric field below, so the picker edits
+        // RGB only and preserves the stop's current alpha.
+        const sw = createColorSwatch({
+            color: { ...stop.color, a: 1 },
+            alpha: false,
+            title: 'Stop color',
+            onInput: (c) => {
+                hexInput.value = this.rgbToHex(c).toUpperCase();
+                commit(f => { const st = (f[index] as Gradient).stops[si]; st.color = { ...c, a: st.color.a }; }, true);
+            },
+            onChange: (c) => {
+                hexInput.value = this.rgbToHex(c).toUpperCase();
+                commit(f => { const st = (f[index] as Gradient).stops[si]; st.color = { ...c, a: st.color.a }; });
+                this.syncWithSelection();
+            },
         });
-        // Live drags skip re-render; refresh previews when the picker closes.
-        sw.addEventListener('change', () => this.syncWithSelection());
         hexInput.addEventListener('change', () => {
             const val = hexInput.value.startsWith('#') ? hexInput.value : '#' + hexInput.value;
             if (/^#[0-9A-F]{6}$/i.test(val)) {
-                sw.value = val;
                 const c = this.hexToRgb(val);
+                sw.setColor({ ...c, a: 1 });
                 commit(f => { const st = (f[index] as Gradient).stops[si]; st.color = { ...c, a: st.color.a }; });
             }
         });
@@ -1585,7 +1593,7 @@ export class UIEngine {
             commit(f => { (f[index] as Gradient).stops.splice(si, 1); });
         };
 
-        stopRow.appendChild(sw);
+        stopRow.appendChild(sw.el);
         stopRow.appendChild(hexInput);
         stopRow.appendChild(pos);
         stopRow.appendChild(alpha);
@@ -1653,13 +1661,9 @@ export class UIEngine {
             const row = document.createElement('div');
             row.className = 'fill-stroke-row';
             
-            const colorInput = document.createElement('input');
-            colorInput.type = 'color';
-            colorInput.className = 'color-input';
             const currentPaint = stroke.paint || {r:0, g:0, b:0, a:1};
             const currentColor = isGradient(currentPaint) && currentPaint.stops.length > 0 ? currentPaint.stops[0].color : (!isGradient(currentPaint) ? currentPaint : {r:0, g:0, b:0, a:1});
-            colorInput.value = this.rgbToHex(currentColor);
-            
+
             const hexInput = document.createElement('input');
             hexInput.type = 'text';
             hexInput.className = 'prop-input';
@@ -1667,34 +1671,29 @@ export class UIEngine {
             hexInput.style.flex = '0 0 60px';
             hexInput.value = this.rgbToHex(currentColor).toUpperCase();
 
-            colorInput.addEventListener('input', () => {
+            const applyStrokeColor = (c: Color, live: boolean) => {
                 const newStrokes = [...strokes];
-                const c = this.hexToRgb(colorInput.value);
-                hexInput.value = colorInput.value.toUpperCase();
                 if (stroke.paint && isGradient(stroke.paint)) {
-                    if (stroke.paint.stops.length > 0) {
-                        stroke.paint.stops[0].color = c;
-                    }
+                    if (stroke.paint.stops.length > 0) stroke.paint.stops[0].color = c;
                 } else {
                     newStrokes[index].paint = c;
                 }
-                this.updateNodeStyle(node, { strokes: newStrokes }, true);
+                this.updateNodeStyle(node, { strokes: newStrokes }, live);
+            };
+
+            const colorSwatch = createColorSwatch({
+                color: currentColor,
+                title: 'Stroke color',
+                onInput: (c) => { hexInput.value = this.rgbToHex(c).toUpperCase(); applyStrokeColor(c, true); },
+                onChange: (c) => { hexInput.value = this.rgbToHex(c).toUpperCase(); applyStrokeColor(c, false); },
             });
 
             hexInput.addEventListener('change', () => {
                 const val = hexInput.value.startsWith('#') ? hexInput.value : '#' + hexInput.value;
                 if (/^#[0-9A-F]{6}$/i.test(val)) {
-                    colorInput.value = val;
-                    const newStrokes = [...strokes];
-                    const c = this.hexToRgb(val);
-                    if (stroke.paint && isGradient(stroke.paint)) {
-                        if (stroke.paint.stops.length > 0) {
-                            stroke.paint.stops[0].color = c;
-                        }
-                    } else {
-                        newStrokes[index].paint = c;
-                    }
-                    this.updateNodeStyle(node, { strokes: newStrokes });
+                    const c = { ...this.hexToRgb(val), a: currentColor.a ?? 1 };
+                    colorSwatch.setColor(c);
+                    applyStrokeColor(c, false);
                 }
             });
 
@@ -1737,7 +1736,7 @@ export class UIEngine {
                 this.updateNodeStyle(node, { strokes: newStrokes });
             };
 
-            row.appendChild(colorInput);
+            row.appendChild(colorSwatch.el);
             row.appendChild(hexInput);
             row.appendChild(wInput);
             row.appendChild(alignSelect);
@@ -2549,17 +2548,23 @@ export class UIEngine {
                 // Color + opacity share the first row.
                 const colorRow = document.createElement('div');
                 colorRow.className = 'effect-row';
-                const color = document.createElement('input');
-                color.type = 'color';
-                color.className = 'color-input';
-                color.value = rgbToHex({ r: d.color.r, g: d.color.g, b: d.color.b });
-                color.title = 'Shadow color';
-                withGesture(color, () => {
-                    const c = hexToRgb(color.value);
-                    d.color.r = c.r; d.color.g = c.g; d.color.b = c.b;
-                    commit();
+                let shadowGesture = false;
+                const applyShadow = (c: Color) => { d.color.r = c.r; d.color.g = c.g; d.color.b = c.b; commit(); };
+                const color = createColorSwatch({
+                    color: { r: d.color.r, g: d.color.g, b: d.color.b, a: 1 },
+                    alpha: false, // opacity has its own field on this row
+                    title: 'Shadow color',
+                    onInput: (c) => {
+                        if (!shadowGesture) { this.scene.beginGesture(); shadowGesture = true; }
+                        applyShadow(c);
+                    },
+                    onChange: (c) => {
+                        if (!shadowGesture) { this.scene.beginGesture(); shadowGesture = true; }
+                        applyShadow(c);
+                        this.scene.endGesture(); shadowGesture = false;
+                    },
                 });
-                colorRow.appendChild(color);
+                colorRow.appendChild(color.el);
                 colorRow.appendChild(numField('Opacity', Math.round((d.color.a ?? 0) * 100),
                     v => d.color.a = Math.max(0, Math.min(1, v / 100)), { min: 0, max: 100, suffix: '%' }));
                 body.appendChild(colorRow);
