@@ -1288,6 +1288,30 @@ body.scrubbing * {
     border-radius: 5px;
 }
 
+/* Secondary stroke row: Join + Cap, each a small label beside a select that
+   flexes to share the row width. */
+.stroke-opts-row {
+    gap: 8px;
+    height: 26px;
+}
+.stroke-opts-row .stroke-opt {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+}
+.stroke-opts-row .stroke-opt-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    flex: 0 0 auto;
+}
+.stroke-opts-row .stroke-opt .prop-select {
+    flex: 1;
+    min-width: 0;
+}
+
 .fill-stroke-row .label-short {
     font-size: 10px;
     color: var(--text-dim);

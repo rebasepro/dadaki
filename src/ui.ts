@@ -2616,6 +2616,69 @@ export class UIEngine {
             row.appendChild(strokeSpacer);
             row.appendChild(delBtn);
             this.strokesList.appendChild(row);
+
+            // ── Join / Cap row ──
+            // Join controls corners (Miter is pointy → Round/Bevel to soften);
+            // Cap controls open-path endpoints. Renderer maps: cap 0/1/2 =
+            // Butt/Round/Square, join 0/1/2 = Miter/Round/Bevel.
+            const makeStrokeSelect = (
+                label: string,
+                title: string,
+                opts: [number, string][],
+                current: number,
+                apply: (v: number) => void,
+            ) => {
+                const group = document.createElement('label');
+                group.className = 'stroke-opt';
+                group.title = title;
+                const lab = document.createElement('span');
+                lab.className = 'stroke-opt-label';
+                lab.textContent = label;
+                const sel = document.createElement('select');
+                sel.className = 'prop-select';
+                sel.innerHTML = opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
+                sel.value = String(current ?? opts[0][0]);
+                sel.addEventListener('change', () => apply(Number.parseInt(sel.value, 10)));
+                group.appendChild(lab);
+                group.appendChild(sel);
+                return group;
+            };
+
+            const optsRow = document.createElement('div');
+            optsRow.className = 'fill-stroke-row stroke-opts-row';
+            optsRow.appendChild(
+                makeStrokeSelect(
+                    'Join',
+                    'Corner join — Miter is pointy; use Round or Bevel to soften',
+                    [
+                        [0, 'Miter'],
+                        [1, 'Round'],
+                        [2, 'Bevel'],
+                    ],
+                    stroke.join ?? 0,
+                    (v) =>
+                        commit((arr) => {
+                            if (arr[index]) arr[index].join = v;
+                        }),
+                ),
+            );
+            optsRow.appendChild(
+                makeStrokeSelect(
+                    'Cap',
+                    'Line end cap for open paths',
+                    [
+                        [0, 'Butt'],
+                        [1, 'Round'],
+                        [2, 'Square'],
+                    ],
+                    stroke.cap ?? 0,
+                    (v) =>
+                        commit((arr) => {
+                            if (arr[index]) arr[index].cap = v;
+                        }),
+                ),
+            );
+            this.strokesList.appendChild(optsRow);
         }
     }
 

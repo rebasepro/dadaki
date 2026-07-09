@@ -403,6 +403,7 @@ export class WasmScene {
             this.engine!.deserialize_scene(prevState);
             this.invalidateCache();
             this.autosave?.trigger();
+            logAppEvent('history_action', { action: 'undo' });
         }
     }
 
@@ -413,6 +414,7 @@ export class WasmScene {
             this.engine!.deserialize_scene(nextState);
             this.invalidateCache();
             this.autosave?.trigger();
+            logAppEvent('history_action', { action: 'redo' });
         }
     }
 
