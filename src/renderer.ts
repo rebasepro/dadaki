@@ -159,6 +159,33 @@ export class Renderer {
     private _effectFilterCache: Map<string, ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null> = new Map();
     private _effectPaint: Paint | null = null;
 
+    // CanvasKit blend-mode lookup, indexed by our style enum (0 = Normal).
+    // Built lazily once `this.ck` is available; shared by group + node passes.
+    private _ckBlendModes: any[] | null = null;
+    private ckBlendModes(): any[] {
+        if (!this._ckBlendModes) {
+            this._ckBlendModes = [
+                this.ck.BlendMode.SrcOver,    // 0: Normal
+                this.ck.BlendMode.Multiply,   // 1
+                this.ck.BlendMode.Screen,     // 2
+                this.ck.BlendMode.Overlay,    // 3
+                this.ck.BlendMode.Darken,     // 4
+                this.ck.BlendMode.Lighten,    // 5
+                this.ck.BlendMode.ColorDodge, // 6
+                this.ck.BlendMode.ColorBurn,  // 7
+                this.ck.BlendMode.HardLight,  // 8
+                this.ck.BlendMode.SoftLight,  // 9
+                this.ck.BlendMode.Difference, // 10
+                this.ck.BlendMode.Exclusion,  // 11
+                this.ck.BlendMode.Hue,        // 12
+                this.ck.BlendMode.Saturation, // 13
+                this.ck.BlendMode.Color,      // 14
+                this.ck.BlendMode.Luminosity, // 15
+            ];
+        }
+        return this._ckBlendModes;
+    }
+
     // ─── Filled faces cache ───
 
     // ─── Cached overlay paints (created once, reused every frame) ───
@@ -596,10 +623,18 @@ export class Renderer {
 
             if (cmdType === 1) { // CMD_START_GROUP
                 const opacity = reader.f32();
-                if (opacity < 1.0) {
+                const groupFlags = reader.u32();
+                const groupBlend = (groupFlags >>> 16) & 0xFF;
+                // A non-Normal blend mode requires an isolation layer so the
+                // group composites as a single unit against the backdrop (like
+                // opacity does), otherwise the group's blend would never apply.
+                if (opacity < 1.0 || groupBlend > 0) {
                     p.setAlphaf(opacity);
+                    const bm = this.ckBlendModes();
+                    if (groupBlend > 0 && groupBlend < bm.length) p.setBlendMode(bm[groupBlend]);
                     canvas.saveLayer(p);
                     p.setAlphaf(1.0);
+                    p.setBlendMode(this.ck.BlendMode.SrcOver);
                 } else {
                     canvas.save();
                 }
@@ -824,24 +859,7 @@ export class Renderer {
                 const geoSize = reader.view.getUint32(startGeoOffset, true);
 
                 // Apply blend mode (shared across fill + stroke passes)
-                const ckBlendModes = [
-                    this.ck.BlendMode.SrcOver,    // 0: Normal
-                    this.ck.BlendMode.Multiply,   // 1
-                    this.ck.BlendMode.Screen,     // 2
-                    this.ck.BlendMode.Overlay,    // 3
-                    this.ck.BlendMode.Darken,     // 4
-                    this.ck.BlendMode.Lighten,    // 5
-                    this.ck.BlendMode.ColorDodge, // 6
-                    this.ck.BlendMode.ColorBurn,  // 7
-                    this.ck.BlendMode.HardLight,  // 8
-                    this.ck.BlendMode.SoftLight,  // 9
-                    this.ck.BlendMode.Difference, // 10
-                    this.ck.BlendMode.Exclusion,  // 11
-                    this.ck.BlendMode.Hue,        // 12
-                    this.ck.BlendMode.Saturation, // 13
-                    this.ck.BlendMode.Color,      // 14
-                    this.ck.BlendMode.Luminosity, // 15
-                ];
+                const ckBlendModes = this.ckBlendModes();
                 if (blendMode > 0 && blendMode < ckBlendModes.length) {
                     p.setBlendMode(ckBlendModes[blendMode]);
                 }

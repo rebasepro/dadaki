@@ -236,9 +236,7 @@ class ColorPicker {
         this.alphaRow.appendChild(this.alphaTrack);
         sliderCol.appendChild(this.alphaRow);
 
-        sliders.appendChild(sliderCol);
-
-        // Preview / eyedropper column
+        // Preview / eyedropper column — sits to the LEFT of the sliders.
         const side = el('div', 'cp-side');
         const eye = document.createElement('button');
         eye.type = 'button';
@@ -248,9 +246,11 @@ class ColorPicker {
         eye.style.display = supportsEyeDropper() ? '' : 'none';
         eye.addEventListener('click', () => this.pickFromScreen());
         this.preview = el('div', 'cp-preview');
-        side.appendChild(eye);
         side.appendChild(this.preview);
+        side.appendChild(eye);
+
         sliders.appendChild(side);
+        sliders.appendChild(sliderCol);
 
         this.root.appendChild(sliders);
 
@@ -382,6 +382,12 @@ class ColorPicker {
     private handleOutside(e: MouseEvent) {
         const t = e.target as Node;
         if (this.root.contains(t) || (this.anchor && this.anchor.contains(t))) return;
+        // A click outside should ONLY close the picker. Swallow the event so it
+        // doesn't also reach the canvas (deselecting the shape) or start a drag.
+        // This works because the listener runs in the capture phase (see open()),
+        // ahead of the canvas's own mousedown handler in the target/bubble phase.
+        e.stopPropagation();
+        e.stopImmediatePropagation();
         this.close();
     }
 
@@ -584,4 +590,6 @@ function supportsEyeDropper(): boolean {
     return typeof (window as any).EyeDropper === 'function';
 }
 
-const EYE_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22l1-4 12-12 3 3L6 21l-4 1z"/><path d="M15 6l3 3"/><path d="M17.5 3.5a2.12 2.12 0 0 1 3 3L18 9l-3-3 2.5-2.5z"/></svg>';
+// Canonical pipette / eyedropper: squared bulb (top-right), shaft, and a
+// two-stroke dripping nib (bottom-left) so it reads unmistakably as a dropper.
+const EYE_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m2 22 1-1h3l9-9"/><path d="M3 21v-3l9-9"/><path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L21 9l-3-3Z"/><path d="m14 7 3 3"/></svg>';

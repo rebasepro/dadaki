@@ -4,6 +4,14 @@
  */
 import type { CanvasKit } from 'canvaskit-wasm';
 
+/**
+ * Family assigned to newly created text. Needed because CanvasKit's RefDefault
+ * typeface is not a sans-serif, so text created with an empty family renders in
+ * a font that doesn't match the HTML edit overlay's `sans-serif` preview. Using
+ * a concrete, loadable family makes the preview and the committed node agree.
+ */
+export const DEFAULT_TEXT_FONT = 'Inter';
+
 /** Curated list of available Google Fonts. */
 export const GOOGLE_FONTS = [
     'Inter', 'Roboto', 'Open Sans', 'Lato', 'Montserrat', 'Poppins', 'Nunito',

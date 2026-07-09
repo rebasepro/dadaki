@@ -862,27 +862,29 @@ export class UIEngine {
         this.applyStylePanelToSelection(false);
     }
 
-    /** Apply the Opacity + Blend panel widgets to the selection.
-     *  These are overlaid onto each node's OWN style so that fills, strokes and
-     *  other per-node properties are preserved — we must not replace the whole
-     *  style with the global "current style", which would clobber each shape's
-     *  paint (and, when no current style exists yet, stamp the gray+stroke
-     *  default onto it). The values are also remembered on the current style so
-     *  newly drawn shapes inherit them. */
+    /** Apply the Opacity + Blend panel widgets.
+     *  With a selection: overlay opacity/blend onto each node's OWN style so
+     *  fills, strokes and other per-node properties are preserved (we must not
+     *  replace the whole style with the global "current style", which would
+     *  clobber each shape's paint). Editing an existing object must NOT leak
+     *  into the new-shape default, or newly drawn objects would inherit this
+     *  object's opacity/blend ("picks up the appearance of the last one").
+     *  With no selection the panel is editing that default, so record it. */
     private applyStylePanelToSelection(withHistory: boolean) {
         const opacity = (parseFloat(this.opacityInput?.value) || 100) / 100;
         const blend_mode = this.blendMode ? parseInt(this.blendMode.value) || 0 : 0;
 
-        // Remember for newly drawn shapes.
-        try {
-            const s = JSON.parse(this._currentStyleJson || "{}");
-            s.opacity = opacity;
-            s.blend_mode = blend_mode;
-            this._currentStyleJson = JSON.stringify(s);
-        } catch { }
-
         const selection = this.scene.engine!.get_selection();
-        if (selection.length === 0) return;
+        if (selection.length === 0) {
+            // Editing the default for the next shape (nothing selected).
+            try {
+                const s = JSON.parse(this._currentStyleJson || "{}");
+                s.opacity = opacity;
+                s.blend_mode = blend_mode;
+                this._currentStyleJson = JSON.stringify(s);
+            } catch { }
+            return;
+        }
         for (const id of selection) {
             const node = this.scene.getNode(id);
             if (!node) continue;
@@ -4685,17 +4687,20 @@ export class UIEngine {
             }
         });
 
-        // Dismiss on click-outside
+        // Dismiss on click-outside. Runs in the capture phase and swallows the
+        // event so the dismissing click ONLY closes the menu — it must not also
+        // reach the canvas (which would deselect) or any other handler.
         this._dismissContextMenu = (e: MouseEvent) => {
-            if (!this.contextMenuEl.contains(e.target as Node)) {
-                this.hideContextMenu();
-            }
+            if (this.contextMenuEl.contains(e.target as Node)) return;
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            this.hideContextMenu();
         };
         this._dismissContextMenuKey = (e: KeyboardEvent) => {
             if (e.key === 'Escape') this.hideContextMenu();
         };
         setTimeout(() => {
-            window.addEventListener('mousedown', this._dismissContextMenu!);
+            window.addEventListener('mousedown', this._dismissContextMenu!, true);
             window.addEventListener('keydown', this._dismissContextMenuKey!);
         }, 0);
     }
@@ -4705,7 +4710,7 @@ export class UIEngine {
         this.contextMenuEl.innerHTML = '';
         this._contextMenuCallback = null;
         if (this._dismissContextMenu) {
-            window.removeEventListener('mousedown', this._dismissContextMenu);
+            window.removeEventListener('mousedown', this._dismissContextMenu, true);
             this._dismissContextMenu = null;
         }
         if (this._dismissContextMenuKey) {

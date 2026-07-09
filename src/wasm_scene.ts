@@ -243,6 +243,13 @@ export class WasmScene {
         this.invalidateCache();
     }
 
+    /** Set typography properties without pushing an undo entry (used when
+     *  finalizing a just-created text node, whose creation already saved one). */
+    setTextPropertiesNoHistory(id: number, fontFamily: string, textAlign: number, lineHeight: number) {
+        this.engine!.set_text_properties(id, fontFamily, textAlign, lineHeight);
+        this.invalidateCache();
+    }
+
 
 
     setNodeVisible(id: number, visible: boolean) {

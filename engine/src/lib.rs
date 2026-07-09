@@ -861,6 +861,13 @@ pub struct Engine {
     spatial_index: RTree<SpatialNode>,
     node_to_spatial: HashMap<u32, SpatialNode>,
     dirty_flags: HashMap<u32, bool>,
+    /// Ids of nodes flagged as Live Paint groups. Cached so the "is anything a
+    /// Live Paint group / is this node inside one" checks are O(1)/O(#groups)
+    /// instead of scanning every node — those checks run per node on every
+    /// mutation (mark_dirty) and per node during render-buffer rebuild, so a
+    /// naive scan made both O(n²). Kept in sync at the mutation sites that can
+    /// change the flag and rebuilt wholesale on snapshot load.
+    live_paint_groups: HashSet<u32>,
     render_buffer: Vec<u8>,
 }
 
@@ -943,6 +950,7 @@ impl Engine {
             spatial_index: RTree::new(),
             node_to_spatial: HashMap::new(),
             dirty_flags: HashMap::new(),
+            live_paint_groups: HashSet::new(),
             render_buffer: Vec::new(),
         }
     }
@@ -1106,6 +1114,10 @@ impl Engine {
             self.render_buffer.extend_from_slice(&CMD_START_GROUP.to_le_bytes());
             self.render_buffer.extend_from_slice(&id.to_le_bytes());
             self.render_buffer.extend_from_slice(&node.style.opacity.to_le_bytes());
+            // Group-level blend mode (packed like DRAW_NODE's style_flags) so the
+            // group composites as a unit with its blend mode, not just its opacity.
+            let style_flags: u32 = ((node.style.blend_mode as u32) << 16) | ((node.style.fill_rule as u32) << 24);
+            self.render_buffer.extend_from_slice(&style_flags.to_le_bytes());
             end_record(&mut self.render_buffer, rec);
             *total_nodes += 1;
 
@@ -1342,6 +1354,32 @@ impl Engine {
     }
 
     pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32) -> u32 {
+        let id = self.insert_rect_node(x, y, w, h);
+        self.update_spatial_index(id);
+        id
+    }
+
+    /// Batch-create rectangles from a JSON array of `[x, y, w, h]` tuples,
+    /// returning the new node ids in order. Unlike calling `add_rect` in a
+    /// loop, the spatial index is rebuilt once via `bulk_load` at the end
+    /// rather than per node — turning O(n²) bulk creation into O(n log n).
+    /// Used by bulk importers and the dev stress harness.
+    pub fn add_rects(&mut self, rects_json: &str) -> Vec<u32> {
+        let rects: Vec<[f32; 4]> = serde_json::from_str(rects_json).unwrap_or_default();
+        let mut ids = Vec::with_capacity(rects.len());
+        for [x, y, w, h] in rects {
+            ids.push(self.insert_rect_node(x, y, w, h));
+        }
+        // Single bulk spatial rebuild instead of a per-node incremental insert.
+        self.update_all_spatial_indices();
+        ids
+    }
+
+    /// Create a default-styled rectangle node and attach it at the root,
+    /// updating its global transform and dirty flag but NOT the spatial index.
+    /// Shared by `add_rect` (which indexes the one node) and `add_rects` (which
+    /// bulk-rebuilds the index once for the whole batch).
+    fn insert_rect_node(&mut self, x: f32, y: f32, w: f32, h: f32) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -1373,7 +1411,6 @@ impl Engine {
         self.scene.nodes.insert(id, node);
         self.scene.root_nodes.push(id);
         self.update_node_global_transform(id);
-        self.update_spatial_index(id);
         self.mark_dirty(id);
         id
     }
@@ -1666,10 +1703,18 @@ impl Engine {
 
     /// Mark (or unmark) a Group node as a Live Paint group. No-op on non-groups.
     pub fn set_node_live_paint(&mut self, id: u32, live_paint: bool) {
+        let mut is_lp = false;
         if let Some(node) = self.scene.nodes.get_mut(&id) {
             if node.node_type == NodeType::Group {
                 node.live_paint = live_paint;
             }
+            is_lp = node.live_paint;
+        }
+        // Keep the O(1) group cache in sync with the node's actual flag.
+        if is_lp {
+            self.live_paint_groups.insert(id);
+        } else {
+            self.live_paint_groups.remove(&id);
         }
         // Flagging or un-flagging a group changes which groups the network
         // tracks, so always force a rebuild (un-flagging wouldn't trip the
@@ -1709,7 +1754,19 @@ impl Engine {
         if let Some(old_node) = self.node_to_spatial.remove(&id) {
             self.spatial_index.remove(&old_node);
         }
+        if let Some(spatial_node) = self.compute_spatial_node(id) {
+            self.spatial_index.insert(spatial_node);
+            self.node_to_spatial.insert(id, spatial_node);
+        }
+    }
 
+    /// Compute a node's spatial-index AABB entry without mutating the index.
+    /// Group bounds union descendant entries read from `node_to_spatial`, so
+    /// callers must ensure a group's children are already recorded there before
+    /// computing the group. Returns `None` when the node has no representable
+    /// bounds (missing transform, or a non-empty group whose descendants
+    /// produced no valid AABB).
+    fn compute_spatial_node(&self, id: u32) -> Option<SpatialNode> {
         let is_group = self.scene.nodes.get(&id)
             .map(|n| matches!(n.node_type, NodeType::Group))
             .unwrap_or(false);
@@ -1721,15 +1778,11 @@ impl Engine {
                 .unwrap_or_default();
             if children.is_empty() {
                 // Empty group — use a point AABB at the group's position
-                if let Some(transform_bytes) = self.global_transforms.get(&id) {
-                    let transform = Mat3::from_cols_array(transform_bytes);
-                    let p = transform.transform_point2(Vec2::ZERO);
-                    let aabb = AABB::from_corners([p.x, p.y], [p.x, p.y]);
-                    let spatial_node = SpatialNode { id, aabb };
-                    self.spatial_index.insert(spatial_node);
-                    self.node_to_spatial.insert(id, spatial_node);
-                }
-                return;
+                let transform_bytes = self.global_transforms.get(&id)?;
+                let transform = Mat3::from_cols_array(transform_bytes);
+                let p = transform.transform_point2(Vec2::ZERO);
+                let aabb = AABB::from_corners([p.x, p.y], [p.x, p.y]);
+                return Some(SpatialNode { id, aabb });
             }
             let mut min_x = f32::MAX;
             let mut min_y = f32::MAX;
@@ -1738,14 +1791,14 @@ impl Engine {
             self.collect_descendant_bounds(id, &mut min_x, &mut min_y, &mut max_x, &mut max_y);
             if min_x <= max_x && min_y <= max_y {
                 let aabb = AABB::from_corners([min_x, min_y], [max_x, max_y]);
-                let spatial_node = SpatialNode { id, aabb };
-                self.spatial_index.insert(spatial_node);
-                self.node_to_spatial.insert(id, spatial_node);
+                return Some(SpatialNode { id, aabb });
             }
-            return;
+            return None;
         }
 
-        if let (Some(node), Some(transform_bytes)) = (self.scene.nodes.get(&id), self.global_transforms.get(&id)) {
+        let node = self.scene.nodes.get(&id)?;
+        let transform_bytes = self.global_transforms.get(&id)?;
+        {
             let transform = Mat3::from_cols_array(transform_bytes);
             let aabb = match node.geometry {
                 Geometry::Rect { width, height } | Geometry::Image { width, height, .. } => {
@@ -1801,10 +1854,8 @@ impl Engine {
                     AABB::from_corners([p.x, p.y - font_size], [p.x + approx_w, p.y])
                 }
             };
-            
-            let spatial_node = SpatialNode { id, aabb };
-            self.spatial_index.insert(spatial_node);
-            self.node_to_spatial.insert(id, spatial_node);
+
+            Some(SpatialNode { id, aabb })
         }
     }
 
@@ -1834,22 +1885,33 @@ impl Engine {
         self.spatial_index = RTree::new();
         self.node_to_spatial.clear();
         // Process nodes bottom-up (leaves before groups) so that group bounds
-        // can read child entries from node_to_spatial.
+        // can read child entries from node_to_spatial, collecting every entry
+        // and then packing the R-tree in one `bulk_load`. Inserting nodes one
+        // at a time is O(n) per insert (so O(n²) for a full rebuild); bulk_load
+        // builds a balanced tree in O(n log n), which is what makes creating or
+        // loading tens of thousands of shapes tractable.
         let root_ids: Vec<u32> = self.scene.root_nodes.clone();
+        let mut entries: Vec<SpatialNode> = Vec::with_capacity(self.scene.nodes.len());
         for id in root_ids {
-            self.update_spatial_index_bottom_up(id);
+            self.collect_spatial_bottom_up(id, &mut entries);
         }
+        self.spatial_index = RTree::bulk_load(entries);
     }
 
-    /// Recursively update spatial indices bottom-up: children first, then parent.
-    fn update_spatial_index_bottom_up(&mut self, id: u32) {
+    /// Bottom-up traversal that records each node's spatial entry in
+    /// `node_to_spatial` (so parent groups can union their descendants) and
+    /// appends it to `out` for a single `bulk_load`. Does not touch the R-tree.
+    fn collect_spatial_bottom_up(&mut self, id: u32, out: &mut Vec<SpatialNode>) {
         let children: Vec<u32> = self.scene.nodes.get(&id)
             .map(|n| n.children.clone())
             .unwrap_or_default();
         for child_id in children {
-            self.update_spatial_index_bottom_up(child_id);
+            self.collect_spatial_bottom_up(child_id, out);
         }
-        self.update_spatial_index(id);
+        if let Some(spatial_node) = self.compute_spatial_node(id) {
+            self.node_to_spatial.insert(id, spatial_node);
+            out.push(spatial_node);
+        }
     }
 
     pub fn set_node_name(&mut self, id: u32, name: &str) {
@@ -1864,6 +1926,8 @@ impl Engine {
         if self.is_in_any_live_paint(id) {
             self.scene.vector_network.dirty = true;
         }
+        // Drop from the group cache; descendants are cleared by the recursion below.
+        self.live_paint_groups.remove(&id);
         if let Some(node) = self.scene.nodes.remove(&id) {
             if let Some(parent_id) = node.parent {
                 if let Some(parent) = self.scene.nodes.get_mut(&parent_id) {
@@ -1902,6 +1966,7 @@ impl Engine {
                 );
                 self.update_all_global_transforms();
                 self.update_all_spatial_indices();
+                self.rebuild_live_paint_cache();
                 true
             }
             None => {
@@ -3166,6 +3231,10 @@ impl Engine {
             new_node.children = Vec::new();
             new_node.parent = None;
 
+            // Clones keep the source's live_paint flag, so mirror it into the cache.
+            if new_node.live_paint {
+                self.live_paint_groups.insert(new_id);
+            }
             self.scene.nodes.insert(new_id, new_node);
 
             // Recursively clone children and reparent them
@@ -3938,23 +4007,32 @@ impl Engine {
 
     /// Ids of every node flagged as a Live Paint group, ascending (stable order).
     fn live_paint_group_ids(&self) -> Vec<u32> {
-        let mut v: Vec<u32> = self.scene.nodes.iter()
-            .filter(|(_, n)| n.live_paint)
-            .map(|(&id, _)| id)
-            .collect();
+        let mut v: Vec<u32> = self.live_paint_groups.iter().copied().collect();
         v.sort_unstable();
         v
     }
 
     /// Whether any node in the scene is a Live Paint group.
     fn has_live_paint(&self) -> bool {
-        self.scene.nodes.values().any(|n| n.live_paint)
+        !self.live_paint_groups.is_empty()
     }
 
     /// Whether `id` is a Live Paint group or a descendant of one.
     fn is_in_any_live_paint(&self, id: u32) -> bool {
-        self.live_paint_group_ids().iter()
-            .any(|&g| g == id || self.is_descendant_of(id, g))
+        if self.live_paint_groups.is_empty() {
+            return false;
+        }
+        self.live_paint_groups.contains(&id)
+            || self.live_paint_groups.iter().any(|&g| self.is_descendant_of(id, g))
+    }
+
+    /// Recompute the Live Paint group cache from scratch. Called after bulk
+    /// scene replacement (snapshot load), where per-node maintenance doesn't apply.
+    fn rebuild_live_paint_cache(&mut self) {
+        self.live_paint_groups = self.scene.nodes.iter()
+            .filter(|(_, n)| n.live_paint)
+            .map(|(&id, _)| id)
+            .collect();
     }
 
     /// The fill of the topmost source shape whose interior contains `face`
@@ -4201,6 +4279,7 @@ impl Engine {
                 self.next_id = next_id;
                 self.update_all_global_transforms();
                 self.update_all_spatial_indices();
+                self.rebuild_live_paint_cache();
                 true
             }
             None => false,
@@ -4221,6 +4300,7 @@ impl Engine {
                 self.next_id = next_id;
                 self.update_all_global_transforms();
                 self.update_all_spatial_indices();
+                self.rebuild_live_paint_cache();
                 true
             }
             None => false,

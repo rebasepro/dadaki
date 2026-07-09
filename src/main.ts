@@ -156,6 +156,11 @@ async function bootstrap() {
             fileService, documentManager, backupDialog,
             persistence: PersistenceManager,
             get doc() { return documentManager.active(); },
+            /** Shape stress harness — see src/dev_stress.ts. */
+            stress: async (opts?: import('./dev_stress').StressOptions) => {
+                const { runStress } = await import('./dev_stress');
+                return runStress({ scene: wasmScene, renderer, wasm: wasmScene.wasm }, opts);
+            },
         };
     }
 

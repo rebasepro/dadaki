@@ -6,7 +6,7 @@ import { SnapEngine, type SnapGuide } from './snapping';
 import type { WasmScene } from './wasm_scene';
 import type { PenPathPoint, Subpath, Artboard } from './types';
 import { outlineStroke } from './outline_stroke';
-import { ensureFontCSS } from './fonts';
+import { ensureFontCSS, loadGoogleFontData, DEFAULT_TEXT_FONT } from './fonts';
 import { textNodeToSubpaths } from './text_outlines';
 import {
     addAnchorPoint,
@@ -1575,13 +1575,23 @@ export class InputManager {
         } else if (this.ui.activeTool === 'text') {
             // Create an inline text overlay at the click point, using the same
             // glued/auto-sizing overlay as double-click editing.
+            // Suppress the default mousedown focus change: the canvas is
+            // focusable (tabindex="-1"), so without this the browser refocuses
+            // it right after this handler, blurring — and thus committing and
+            // removing — the textarea we're about to focus below.
+            e.preventDefault();
             const worldX = this.startPos.x;
             const worldY = this.startPos.y; // overlay box top = click point
             const fontSize = 32;
+            // Load the default text font so the overlay preview (CSS) and the
+            // committed node (CanvasKit) render the same typeface. Fire-and-forget:
+            // the renderer repaints via onFontLoaded once the TTF arrives.
+            ensureFontCSS(DEFAULT_TEXT_FONT);
+            loadGoogleFontData(DEFAULT_TEXT_FONT);
             this.spawnTextOverlay({
                 world: { x: worldX, y: worldY },
                 fontSize,
-                fontFamily: 'sans-serif',
+                fontFamily: `${DEFAULT_TEXT_FONT}, sans-serif`,
                 lineHeight: 1.2,
                 color: '#000',
                 value: '',
@@ -1592,6 +1602,9 @@ export class InputManager {
                     // The paragraph renders with its top at (origin.y - fontSize);
                     // offset the origin so the glyphs land where the box was.
                     const id = this.scene.addText(worldX, worldY + fontSize, content, fontSize);
+                    // Assign the same family the overlay previewed so the on-canvas
+                    // render matches (no extra undo entry — addText already saved one).
+                    this.scene.setTextPropertiesNoHistory(id, DEFAULT_TEXT_FONT, 0, 1.2);
                     // Text defaults to a solid black fill and no stroke. The active
                     // fill (often a light shape color) or the engine default (white)
                     // would be invisible against a white artboard; black is the
