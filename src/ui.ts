@@ -1829,8 +1829,10 @@ export class UIEngine {
             const hexInput = document.createElement('input');
             hexInput.type = 'text';
             hexInput.className = 'prop-input';
-            hexInput.style.width = '60px';
-            hexInput.style.flex = '0 0 60px';
+            // Flexible so the row never overflows the 232px inspector; everything
+            // else in the row is fixed-width, hex absorbs the remaining space.
+            hexInput.style.flex = '1 1 0';
+            hexInput.style.minWidth = '0';
             hexInput.value = this.rgbToHex(currentColor).toUpperCase();
 
             const applyStrokeColor = (c: Color, live: boolean) => {
@@ -1861,8 +1863,8 @@ export class UIEngine {
 
             const wContainer = document.createElement('div');
             wContainer.className = 'dim-input';
-            wContainer.style.width = '52px';
-            wContainer.style.flex = '0 0 52px';
+            wContainer.style.width = '48px';
+            wContainer.style.flex = '0 0 48px';
             wContainer.title = 'Stroke thickness';
 
             const wLabel = document.createElement('span');
@@ -1891,8 +1893,8 @@ export class UIEngine {
 
             const alignSelect = document.createElement('select');
             alignSelect.className = 'prop-select';
-            alignSelect.style.width = '60px';
-            alignSelect.style.flex = '0 0 60px';
+            alignSelect.style.width = '52px';
+            alignSelect.style.flex = '0 0 52px';
             alignSelect.innerHTML = `
                 <option value="Center">Ctr</option>
                 <option value="Inner">In</option>

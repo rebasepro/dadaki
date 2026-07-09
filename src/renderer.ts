@@ -2153,8 +2153,50 @@ export class Renderer {
                 const p = points[i];
                 path.cubicTo(prev.cp2x, prev.cp2y, p.cp1x, p.cp1y, p.x, p.y);
             }
+            // While closing, preview the segment that joins the last anchor back
+            // to the first so the user sees the closing curve as they drag it.
+            if (this.inputManager?.penPathClosed) {
+                const last = points[points.length - 1];
+                const first = points[0];
+                path.cubicTo(last.cp2x, last.cp2y, first.cp1x, first.cp1y, first.x, first.y);
+            }
             canvas.drawPath(path, strokePaint);
             path.delete();
+        }
+
+        // Rubber-band preview: the segment the next click would add — from the
+        // last anchor to the hovered cursor (Illustrator-style). Snaps shut to
+        // the first anchor when a click would close. Only shown while hovering.
+        const hover = this.inputManager?.penHoverPos;
+        if (hover && !this.inputManager?.penPathClosed) {
+            const last = points[points.length - 1];
+            const rubber = new this.ck.Path();
+            rubber.moveTo(last.x, last.y);
+            if (this.inputManager?.penHoverClosing && points.length > 1) {
+                const first = points[0];
+                rubber.cubicTo(last.cp2x, last.cp2y, first.cp1x, first.cp1y, first.x, first.y);
+            } else {
+                rubber.cubicTo(last.cp2x, last.cp2y, hover.x, hover.y, hover.x, hover.y);
+            }
+            const rubberPaint = new this.ck.Paint();
+            rubberPaint.setColor(this.ck.Color(0, 162, 255, 0.5));
+            rubberPaint.setStyle(this.ck.PaintStyle.Stroke);
+            rubberPaint.setStrokeWidth(1.5 / this.zoom);
+            canvas.drawPath(rubber, rubberPaint);
+            rubberPaint.delete();
+            rubber.delete();
+        }
+
+        // Close indicator: a ring around the first anchor when a click would
+        // close the path (matches Illustrator's "○" close cursor).
+        if (this.inputManager?.penHoverClosing && points.length > 1) {
+            const first = points[0];
+            const ringPaint = new this.ck.Paint();
+            ringPaint.setColor(this.ck.Color(0, 162, 255, 1.0));
+            ringPaint.setStyle(this.ck.PaintStyle.Stroke);
+            ringPaint.setStrokeWidth(1.5 / this.zoom);
+            canvas.drawCircle(first.x, first.y, 6 / this.zoom, ringPaint);
+            ringPaint.delete();
         }
 
         const dotPaint = new this.ck.Paint();

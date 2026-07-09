@@ -12,6 +12,7 @@ import { TabStrip } from './tab_strip';
 import { DocumentManager } from './document_manager';
 import { BackupDialog } from './backup_dialog';
 import { PersistenceManager } from './persistence';
+import { AboutDialog } from './about_dialog';
 
 async function bootstrap() {
     // @ts-ignore - Loaded from script tag in index.html
@@ -102,6 +103,9 @@ async function bootstrap() {
         remove: (id) => PersistenceManager.deleteBackup(id),
     });
 
+    // About dialog
+    const aboutDialog = new AboutDialog();
+
     // App menu (top-left)
     const appMenuBtn = document.getElementById('app-menu-btn') as HTMLButtonElement;
     new AppMenu(appMenuBtn, {
@@ -113,6 +117,7 @@ async function bootstrap() {
         onExport: () => exportDialog.open(),
         onAddArtboard: () => ui.addArtboard(),
         onBackups: () => backupDialog.open().catch(console.error),
+        onAbout: () => aboutDialog.open(),
     });
 
     // Warn before leaving if any open document has unsaved changes. Skipped in

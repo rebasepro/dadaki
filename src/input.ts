@@ -134,6 +134,10 @@ export class InputManager {
     metaKey: boolean = false;
     ctrlKey: boolean = false;
 
+    /** Last mousemove event, so a modifier keypress mid-drag can reapply the
+     *  transform at the current cursor without waiting for the next mouse move. */
+    private lastMouseEvent: MouseEvent | null = null;
+
     // --- Move drag state (snapshot-restore, like resize) ---
     /** Snapshot of scene state taken at drag start so we can restore & reapply each frame. */
     moveSnapshot: Uint8Array | null = null;
@@ -554,6 +558,9 @@ export class InputManager {
             this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
         }
 
+        // Alt/Shift pressed mid-drag must reapply the transform immediately.
+        this.reapplyDragForModifiers(e);
+
         // Space: hold for hand tool (pan-drag)
         if (e.key === ' ') {
             e.preventDefault(); // stop page scroll
@@ -756,7 +763,15 @@ export class InputManager {
                 this.exitEditMode();
                 this.ui.setActiveTool('selection');
             } else if (this.currentPathPoints.length > 0) {
-                this.finalizePenPath();
+                // Cancel and discard in-progress pen path (matches Context Bar cancel button)
+                this.currentPathPoints = [];
+                this.penPathClosed = false;
+                this.penClosingDrag = false;
+                this.ui.contextBar?.refresh();
+                this.renderer.requestRender();
+            } else if (this.ui.activeTool !== 'selection') {
+                // Disarm armed creation/drawing tool back to Selection
+                this.ui.setActiveTool('selection');
             } else {
                 // Check if we're inside a group — if so, select the parent group instead of clearing
                 const selection = this.scene.engine!.get_selection();
@@ -1154,6 +1169,30 @@ export class InputManager {
             this.metaKey = e.metaKey; this.ctrlKey = e.ctrlKey;
             this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
         }
+        this.reapplyDragForModifiers(e);
+    }
+
+    /** Alt/Shift/Cmd/Ctrl change the outcome of an in-progress resize, rotate,
+     *  or move (resize-from-center, aspect lock, clone, axis constraint, snap
+     *  bypass). Those paths only re-evaluate on mouse movement, so a modifier
+     *  pressed or released while the cursor is still would otherwise not take
+     *  effect until the next move. Replay the last mousemove with the updated
+     *  modifier state so the transform updates the instant the key changes. */
+    private reapplyDragForModifiers(e: KeyboardEvent) {
+        if (!this.isMouseDown || !this.lastMouseEvent) return;
+        if (e.key !== 'Alt' && e.key !== 'Shift' && e.key !== 'Meta' && e.key !== 'Control') return;
+        const dragActive = this.resizeSnapshot || this.rotateSnapshot || this.moveSnapshot;
+        if (!dragActive) return;
+        const src = this.lastMouseEvent;
+        const synthetic = {
+            clientX: src.clientX,
+            clientY: src.clientY,
+            shiftKey: e.shiftKey,
+            altKey: e.altKey,
+            metaKey: e.metaKey,
+            ctrlKey: e.ctrlKey,
+        } as MouseEvent;
+        this.onMouseMove(synthetic);
     }
 
     getPos(e: MouseEvent) {
@@ -1429,6 +1468,9 @@ export class InputManager {
         this.startPos = this.getPos(e);
         this.currentPos = { ...this.startPos };
         this.hoverNodeId = null;
+        // Hide the pen rubber-band while a press is in progress.
+        this.penHoverPos = null;
+        this.penHoverClosing = false;
 
         // Space held (or middle mouse): pan the viewport instead of using the tool
         if (this.isSpacePan || e.button === 1) {
@@ -1617,6 +1659,9 @@ export class InputManager {
                     this.scene.selectNode(id, false);
                     this.ui.updateLayerList();
                     this.ui.syncWithSelection();
+                    // One-shot: back to Selection like the shape tools, unless
+                    // the text tool was locked (double-click) for multiple adds.
+                    this.maybeRevertTool();
                 },
             });
         } else if (this.ui.activeTool === 'rect' || this.ui.activeTool === 'ellipse'
@@ -2618,15 +2663,42 @@ export class InputManager {
 
     /** Whether the current pen path was closed by clicking near the first point. */
     penPathClosed: boolean = false;
+    /** While closing the path: a handle drag targets the first anchor, and the
+     *  path is finalized on mouse-up (so the closing point behaves like any
+     *  other — click to close with a corner, or drag to pull a bezier handle). */
+    penClosingDrag: boolean = false;
+    /** Latches true once a pen mouse-down turns into a real handle drag (cursor
+     *  moved past PEN_HANDLE_DEAD_ZONE screen-px). Until then a press stays a
+     *  crisp corner, so a shaky click doesn't pull a stray handle. */
+    penHandleDragging: boolean = false;
+    /** Snapped cursor position while hovering with the pen (for the rubber-band
+     *  preview segment); null when not hovering. */
+    penHoverPos: { x: number; y: number } | null = null;
+    /** True when the hover cursor is close enough to the first anchor that a
+     *  click would close the path (drives the close-indicator ring). */
+    penHoverClosing: boolean = false;
+
+    /** Screen-space radius (px) for hitting the first anchor to close the path. */
+    static readonly PEN_CLOSE_RADIUS = 10;
+    /** Screen-space distance (px) the cursor must travel before a pen press is
+     *  treated as a handle drag rather than a plain click. */
+    static readonly PEN_HANDLE_DEAD_ZONE = 4;
 
     handlePenDown(pos: { x: number; y: number }) {
-        // If we have existing points, check if clicking near the first point to close the path
+        this.penHandleDragging = false;
+        // If we have existing points, check if clicking near the first point to
+        // close the path. Threshold is in screen pixels (zoom-independent), so
+        // the close target feels the same at any zoom level.
         if (this.currentPathPoints.length > 1) {
             const first = this.currentPathPoints[0];
             const dist = Math.hypot(pos.x - first.x, pos.y - first.y);
-            if (dist < 10) {
+            if (dist < InputManager.PEN_CLOSE_RADIUS / this.renderer.zoom) {
+                // Close the path, but keep it live so the user can drag out a
+                // bezier handle on the closing anchor. Finalized on mouse-up.
                 this.penPathClosed = true;
-                this.finalizePenPath();
+                this.penClosingDrag = true;
+                this.isDraggingHandle = true;
+                this.ui.contextBar?.refresh();
                 return;
             }
         }
@@ -2657,9 +2729,13 @@ export class InputManager {
             this.scene.selectNode(newId, false);
             this.ui.syncWithSelection();
             this.ui.updateLayerList();
+            // One-shot: a completed path returns to Selection like the shape
+            // tools, unless the pen was locked (double-click) for multiple paths.
+            this.maybeRevertTool();
         }
         this.currentPathPoints = [];
         this.penPathClosed = false;
+        this.penClosingDrag = false;
         this.ui.contextBar?.refresh();
     }
 
@@ -2681,6 +2757,7 @@ export class InputManager {
     }
 
     onMouseMove(e: MouseEvent) {
+        this.lastMouseEvent = e;
         const lastPos = this.currentPos;
         this.currentPos = this.getPos(e);
         this.shiftKey = e.shiftKey;
@@ -2788,6 +2865,30 @@ export class InputManager {
         } else {
             this.scissorsHoverPoint = null;
             this.hoverSegment = null;
+        }
+
+        // Pen tool hover: track the (snapped) cursor for the rubber-band preview
+        // segment, and flag when a click would close the path (close-indicator
+        // ring). Uses the same snapping the anchor placement uses on mouse-down.
+        if (!this.isMouseDown && this.ui.activeTool === 'pen') {
+            let hp = this.currentPos;
+            if (!e.metaKey && !e.ctrlKey) {
+                this.snap.begin(this.scene, []);
+                const s = this.snap.snapPoint(hp.x, hp.y, 8 / this.renderer.zoom);
+                this.snap.end();
+                hp = { x: s.x, y: s.y };
+            }
+            this.penHoverPos = hp;
+            this.penHoverClosing = false;
+            if (this.currentPathPoints.length > 1) {
+                const first = this.currentPathPoints[0];
+                const d = Math.hypot(hp.x - first.x, hp.y - first.y);
+                this.penHoverClosing = d < InputManager.PEN_CLOSE_RADIUS / this.renderer.zoom;
+            }
+            this.canvas.style.cursor = 'crosshair';
+        } else if (this.penHoverPos !== null) {
+            this.penHoverPos = null;
+            this.penHoverClosing = false;
         }
 
         // Pre-drag snap preview: for tools that snap their origin, show the snap
@@ -3274,9 +3375,21 @@ export class InputManager {
 
         // Pen tool: adjust control handles while dragging after placing an anchor
         if (this.ui.activeTool === 'pen' && this.isDraggingHandle && this.currentPathPoints.length > 0) {
-            const lastPoint = this.currentPathPoints[this.currentPathPoints.length - 1];
-            let hdx = this.currentPos.x - lastPoint.x;
-            let hdy = this.currentPos.y - lastPoint.y;
+            // Dead-zone: ignore sub-threshold jitter so a click stays a crisp
+            // corner. Once past it, latch into drag mode for the rest of the press.
+            if (!this.penHandleDragging) {
+                const moved = Math.hypot(this.currentPos.x - this.startPos.x,
+                                         this.currentPos.y - this.startPos.y) * this.renderer.zoom;
+                if (moved < InputManager.PEN_HANDLE_DEAD_ZONE) return;
+                this.penHandleDragging = true;
+            }
+            // When closing the path, the drag shapes the handle of the first
+            // anchor (the point we're joining back to); otherwise the last one.
+            const anchor = this.penClosingDrag
+                ? this.currentPathPoints[0]
+                : this.currentPathPoints[this.currentPathPoints.length - 1];
+            let hdx = this.currentPos.x - anchor.x;
+            let hdy = this.currentPos.y - anchor.y;
 
             // Shift: snap handle to 45° angles
             if (e.shiftKey) {
@@ -3285,12 +3398,12 @@ export class InputManager {
                 hdy = snapped.dy;
             }
 
-            lastPoint.cp2x = lastPoint.x + hdx;
-            lastPoint.cp2y = lastPoint.y + hdy;
+            anchor.cp2x = anchor.x + hdx;
+            anchor.cp2y = anchor.y + hdy;
             // Alt: break tangent — only move outgoing handle, don't mirror
             if (!e.altKey) {
-                lastPoint.cp1x = lastPoint.x - hdx;
-                lastPoint.cp1y = lastPoint.y - hdy;
+                anchor.cp1x = anchor.x - hdx;
+                anchor.cp1y = anchor.y - hdy;
             }
         }
 
@@ -3372,8 +3485,16 @@ export class InputManager {
         this.isMouseDown = false;
         this.dragMode = 'none';
         this.isDraggingHandle = false;
+        this.penHandleDragging = false;
         this.snap.end();
         this.activeSnapGuides = [];
+
+        // Finish a path that was just closed on the first anchor. Deferred to
+        // mouse-up so the click could pull a bezier handle off the closing point.
+        if (this.penClosingDrag) {
+            this.finalizePenPath();
+            return;
+        }
 
         // End artboard move/resize drag
         if (this.artboardDrag) {
@@ -3526,7 +3647,7 @@ export class InputManager {
                 this.ui.syncWithSelection();
                 this.ui.refreshArtboardPanel();
                 this.ui.updateLayerList();
-                this.ui.setActiveTool('selection');
+                this.maybeRevertTool();
             } else {
                 let newId: number | undefined;
                 if (tool === 'rect') {

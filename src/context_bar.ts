@@ -427,6 +427,7 @@ export class ContextBar {
 
         this.el.appendChild(this.createButton('Cancel', '✕', () => {
             this.input.currentPathPoints = [];
+            this.input.renderer.requestRender();
             this.refresh();
         }, true, '⎋'));
     }
