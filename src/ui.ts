@@ -165,6 +165,12 @@ export class UIEngine {
     exportPaneSuffix: HTMLInputElement;
     exportPaneTransparent: HTMLInputElement;
     exportPaneBtn: HTMLButtonElement;
+    exportPaneSizeRow: HTMLElement | null = null;
+    exportPaneWidth: HTMLInputElement | null = null;
+    exportPaneHeight: HTMLInputElement | null = null;
+    exportPaneRatioLock: HTMLButtonElement | null = null;
+    /** When true (default), custom-size W/H stay tied to the export aspect ratio. */
+    private exportRatioLocked = true;
 
     // Context menu
     contextMenuEl: HTMLElement;
@@ -237,6 +243,12 @@ export class UIEngine {
             'export-pane-transparent',
         ) as HTMLInputElement;
         this.exportPaneBtn = document.getElementById('export-pane-btn') as HTMLButtonElement;
+        this.exportPaneSizeRow = document.getElementById('export-pane-size-row');
+        this.exportPaneWidth = document.getElementById('export-pane-width') as HTMLInputElement;
+        this.exportPaneHeight = document.getElementById('export-pane-height') as HTMLInputElement;
+        this.exportPaneRatioLock = document.getElementById(
+            'export-pane-ratio-lock',
+        ) as HTMLButtonElement;
 
         this.initEvents();
         this.initCollapsibleSections();
@@ -357,7 +369,26 @@ export class UIEngine {
             const isSVG = this.exportPaneFormat.value === 'svg';
             if (this.exportPaneScale) this.exportPaneScale.disabled = isSVG;
             if (this.exportPaneTransparent) this.exportPaneTransparent.disabled = isSVG;
+            // Custom pixel size is a raster-only concept — hide it for SVG.
+            this.syncExportSizeRow();
         });
+
+        // Show/prefill the custom-size row when the "Custom…" scale is chosen.
+        this.exportPaneScale?.addEventListener('change', () => this.syncExportSizeRow());
+
+        // Aspect-ratio lock toggle for the custom size.
+        this.exportPaneRatioLock?.addEventListener('click', () => {
+            this.exportRatioLocked = !this.exportRatioLocked;
+            this.exportPaneRatioLock?.classList.toggle('active', this.exportRatioLocked);
+            if (this.exportPaneRatioLock)
+                this.exportPaneRatioLock.title = this.exportRatioLocked
+                    ? 'Unlock aspect ratio'
+                    : 'Lock aspect ratio';
+        });
+
+        // Keep W/H tied to the export aspect ratio while locked.
+        this.exportPaneWidth?.addEventListener('input', () => this.onExportSizeInput('w'));
+        this.exportPaneHeight?.addEventListener('input', () => this.onExportSizeInput('h'));
 
         this.exportPaneBtn?.addEventListener('click', () => {
             this.exportSelection();
@@ -773,6 +804,72 @@ export class UIEngine {
             } else {
                 exportBtn.innerText = `Export selection (${selection.length})`;
             }
+        }
+
+        // Re-prefill the custom size to the new target's natural pixels so the
+        // fields track the selection while the panel is in custom mode.
+        this.syncExportSizeRow();
+    }
+
+    /** Natural pixel dimensions of the current export target (artboard, selection, or canvas). */
+    private currentExportPixelSize(): { w: number; h: number } | null {
+        const selection = Array.from(this.scene.engine?.get_selection() ?? []);
+        const artboardId = this.scene.renderer?.selectedArtboardId ?? null;
+        const ab =
+            artboardId !== null
+                ? this.scene.getArtboards().find((a) => a.id === artboardId)
+                : undefined;
+        if (ab) return { w: ab.w, h: ab.h };
+        if (selection.length > 0) {
+            let minX = Infinity,
+                minY = Infinity,
+                maxX = -Infinity,
+                maxY = -Infinity;
+            for (const id of selection) {
+                const b = this.scene.getNodeBounds(id);
+                if (b) {
+                    minX = Math.min(minX, b[0]);
+                    minY = Math.min(minY, b[1]);
+                    maxX = Math.max(maxX, b[2]);
+                    maxY = Math.max(maxY, b[3]);
+                }
+            }
+            if (minX !== Infinity) return { w: maxX - minX, h: maxY - minY };
+            return null;
+        }
+        return {
+            w: this.scene.engine?.get_document_width() ?? 1000,
+            h: this.scene.engine?.get_document_height() ?? 1000,
+        };
+    }
+
+    /** Show the custom-size row when "Custom…" is picked (PNG only) and prefill W/H. */
+    private syncExportSizeRow() {
+        const row = this.exportPaneSizeRow;
+        if (!row) return;
+        const isCustom =
+            this.exportPaneScale?.value === 'custom' && this.exportPaneFormat?.value !== 'svg';
+        row.style.display = isCustom ? '' : 'none';
+        if (!isCustom) return;
+
+        const size = this.currentExportPixelSize();
+        if (!size || size.w <= 0 || size.h <= 0) return;
+        if (this.exportPaneWidth) this.exportPaneWidth.value = String(Math.round(size.w));
+        if (this.exportPaneHeight) this.exportPaneHeight.value = String(Math.round(size.h));
+    }
+
+    /** While the ratio is locked, mirror an edit on one axis onto the other. */
+    private onExportSizeInput(edited: 'w' | 'h') {
+        if (!this.exportRatioLocked) return;
+        const size = this.currentExportPixelSize();
+        if (!size || size.w <= 0 || size.h <= 0) return;
+        const aspect = size.w / size.h;
+        if (edited === 'w' && this.exportPaneWidth && this.exportPaneHeight) {
+            const w = parseFloat(this.exportPaneWidth.value);
+            if (w > 0) this.exportPaneHeight.value = String(Math.max(1, Math.round(w / aspect)));
+        } else if (edited === 'h' && this.exportPaneWidth && this.exportPaneHeight) {
+            const h = parseFloat(this.exportPaneHeight.value);
+            if (h > 0) this.exportPaneWidth.value = String(Math.max(1, Math.round(h * aspect)));
         }
     }
 
@@ -3354,10 +3451,26 @@ export class UIEngine {
         const suffixInput = this.exportPaneSuffix;
         const transparentInput = this.exportPaneTransparent;
 
-        const scale = parseFloat(scaleSelect?.value || '1');
         const format = (formatSelect?.value || 'png') as 'png' | 'svg';
+        const scaleValue = scaleSelect?.value || '1';
+        // "Custom…" drives an explicit output size instead of a scale multiplier.
+        const isCustomSize = scaleValue === 'custom' && format === 'png';
+        const scale = isCustomSize ? 1 : parseFloat(scaleValue) || 1;
         const suffix = suffixInput?.value || '';
         const transparent = transparentInput ? transparentInput.checked : true;
+
+        const MAX_EXPORT_DIM = 8192;
+        let outSize: { w: number; h: number } | undefined;
+        if (isCustomSize) {
+            const w = Math.round(parseFloat(this.exportPaneWidth?.value || '0'));
+            const h = Math.round(parseFloat(this.exportPaneHeight?.value || '0'));
+            if (w > 0 && h > 0) {
+                outSize = {
+                    w: Math.min(w, MAX_EXPORT_DIM),
+                    h: Math.min(h, MAX_EXPORT_DIM),
+                };
+            }
+        }
 
         const selection = Array.from(this.scene.engine?.get_selection() ?? []);
         const artboardId = this.scene.renderer?.selectedArtboardId ?? null;
@@ -3474,7 +3587,7 @@ export class UIEngine {
                 }
 
                 // Call the regular working artboard/canvas PNG exporter inside CanvasKit
-                blob = this.scene.renderer?.exportPNG(scale, bounds, background);
+                blob = this.scene.renderer?.exportPNG(scale, bounds, background, outSize);
 
                 // Restore original visibility flags instantly
                 for (const id of Object.keys(originalVisibility).map(Number)) {
@@ -3482,7 +3595,7 @@ export class UIEngine {
                 }
             } else {
                 // Artboard / Canvas exports use Skia/CanvasKit renderer directly
-                blob = this.scene.renderer?.exportPNG(scale, bounds, background);
+                blob = this.scene.renderer?.exportPNG(scale, bounds, background, outSize);
             }
 
             if (blob) {

@@ -4788,7 +4788,10 @@ export class InputManager {
 
         const id = selection[0];
         const node = this.scene.getNode(id);
-        if (!node?.geometry.Rect) return null;
+        // Groups report a placeholder Rect{0,0}; require positive dimensions so
+        // only real rectangles expose draggable corner-radius handles.
+        if (!node?.geometry.Rect || node.geometry.Rect.width <= 0 || node.geometry.Rect.height <= 0)
+            return null;
 
         const rect = node.geometry.Rect;
         const radius = node.style.corner_radius || 0;

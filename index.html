@@ -433,6 +433,7 @@
                                 <option value="2">2×</option>
                                 <option value="3">3×</option>
                                 <option value="4">4×</option>
+                                <option value="custom">Custom…</option>
                             </select>
                             <span class="header-spacer"></span>
                             <span class="label" style="margin-left: 10px;">Format</span>
@@ -440,6 +441,16 @@
                                 <option value="png">PNG</option>
                                 <option value="svg">SVG</option>
                             </select>
+                        </div>
+                        <div class="prop-row" id="export-pane-size-row" style="display: none;">
+                            <span class="label">W</span>
+                            <input type="number" id="export-pane-width" class="prop-input" min="1" max="8192" step="1" style="width: 62px; flex: 0 0 62px;">
+                            <button id="export-pane-ratio-lock" class="dim-icon-btn active" title="Lock aspect ratio" style="margin: 0 4px;">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                            </button>
+                            <span class="label">H</span>
+                            <input type="number" id="export-pane-height" class="prop-input" min="1" max="8192" step="1" style="width: 62px; flex: 0 0 62px;">
+                            <span class="label" style="margin-left: 4px;">px</span>
                         </div>
                         <div class="prop-row" id="export-pane-options-row">
                             <span class="label">Suffix</span>

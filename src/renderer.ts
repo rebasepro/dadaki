@@ -166,6 +166,14 @@ export class Renderer {
     private _exportBounds: { x: number; y: number; w: number; h: number } | null = null;
     /** Solid background to fill behind exported content (null = transparent). */
     private _exportBackground: { r: number; g: number; b: number; a: number } | null = null;
+    /**
+     * True while rendering the supersampled export pass. Fill/stroke anti-aliasing
+     * is disabled so adjacent shapes tile perfectly at the supersampled
+     * resolution; the final high-quality downscale reintroduces clean edge
+     * anti-aliasing (SSAA). This is what removes the hairline "seam" between two
+     * abutting fills that a single-sample, per-shape-AA raster leaves behind.
+     */
+    private _exportNoAA = false;
 
     // ─── Path object cache (avoid rebuilding CanvasKit paths every frame) ───
     private _pathCache: Map<
@@ -698,7 +706,11 @@ export class Renderer {
         const commandCount = reader.u32();
         if (!this.paint) this.paint = new this.ck.Paint();
         const p = this.paint;
-        p.setAntiAlias(true);
+        // Anti-aliasing is disabled only for the supersampled export pass, where
+        // the downscale supplies the AA (SSAA) and abutting fills must tile
+        // exactly to avoid seams. On-screen and 1× export keep analytic AA.
+        const contentAA = !this._exportNoAA;
+        p.setAntiAlias(contentAA);
 
         // Compute the dim target once per frame. getEditingDimTarget self-heals a
         // stale id (edited node removed by undo/delete), so dimming can never stick.
@@ -787,7 +799,7 @@ export class Renderer {
                 const faceCount = reader.u32();
                 p.setStyle(this.ck.PaintStyle.Fill);
                 p.setShader(null);
-                p.setAntiAlias(true);
+                p.setAntiAlias(contentAA);
                 for (let fi = 0; fi < faceCount; fi++) {
                     const r = reader.f32(),
                         gg = reader.f32(),
@@ -803,7 +815,7 @@ export class Renderer {
                 const edgeCount = reader.u32();
                 p.setStyle(this.ck.PaintStyle.Stroke);
                 p.setShader(null);
-                p.setAntiAlias(true);
+                p.setAntiAlias(contentAA);
                 p.setStrokeCap(this.ck.StrokeCap.Round);
                 p.setStrokeJoin(this.ck.StrokeJoin.Round);
                 for (let ei = 0; ei < edgeCount; ei++) {
@@ -1291,11 +1303,19 @@ export class Renderer {
      * background and no editor chrome, reusing the normal draw path via the
      * `_exporting` flag. Returns a PNG Blob (or null if the surface can't be
      * created).
+     *
+     * The content is rendered SUPERSAMPLED with fill anti-aliasing disabled,
+     * then downscaled with a high-quality cubic filter (SSAA). This is what a
+     * plain 1-sample raster can't do: two shapes sharing a border tile exactly
+     * at the supersampled resolution (no per-shape AA coverage deficit), so the
+     * downscale produces a clean, fully-opaque edge with no hairline seam —
+     * matching what the GPU-anti-aliased on-screen canvas shows.
      */
     exportPNG(
         scale = 2,
         bounds?: { x: number; y: number; w: number; h: number },
         background?: { r: number; g: number; b: number; a: number },
+        outSize?: { w: number; h: number },
     ): Blob | null {
         if (!this.scene.engine || !this.surface) return null;
         const b = bounds ?? {
@@ -1304,30 +1324,91 @@ export class Renderer {
             w: this.scene.engine.get_document_width(),
             h: this.scene.engine.get_document_height(),
         };
-        const W = Math.max(1, Math.round(b.w * scale));
-        const H = Math.max(1, Math.round(b.h * scale));
 
-        const surface = this.ck.MakeSurface(W, H);
-        if (!surface) return null;
+        const MAX_DIM = 8192;
+        const MAX_PIXELS = 40_000_000;
+
+        // Target output pixels. An explicit outSize wins over the scale factor
+        // and may carry a different aspect ratio than the source (ratio unlocked).
+        const W = Math.max(1, Math.min(MAX_DIM, Math.round(outSize ? outSize.w : b.w * scale)));
+        const H = Math.max(1, Math.min(MAX_DIM, Math.round(outSize ? outSize.h : b.h * scale)));
+
+        // Per-axis output scale (px per source unit). Equal on the scale path;
+        // may differ for a custom size with the ratio unlocked.
+        const sx = W / b.w;
+        const sy = H / b.h;
+        // Render uniformly at the finer axis so neither is under-sampled, then
+        // resample to exactly W×H in one cubic step (stretches when non-uniform).
+        const renderScale = Math.max(sx, sy);
+        const renderW = Math.max(1, Math.round(b.w * renderScale));
+        const renderH = Math.max(1, Math.round(b.h * renderScale));
+
+        // Pick the largest supersample factor that stays within sane surface
+        // limits (memory + max dimension). Falls back to 1× (no supersampling,
+        // analytic AA) for very large exports.
+        let ss = 4;
+        while (
+            ss > 1 &&
+            (renderW * ss > MAX_DIM ||
+                renderH * ss > MAX_DIM ||
+                renderW * ss * (renderH * ss) > MAX_PIXELS)
+        ) {
+            ss--;
+        }
+
+        const bigW = renderW * ss;
+        const bigH = renderH * ss;
+        const bigSurface = this.ck.MakeSurface(bigW, bigH);
+        if (!bigSurface) return null;
 
         // Swap in export state and reuse render(), then restore. The pan offsets
         // the export origin so an off-origin artboard is cropped correctly.
         const savedSurface = this.surface;
         const savedZoom = this.zoom;
         const savedPan = { x: this.pan.x, y: this.pan.y };
-        this.surface = surface as unknown as Surface;
-        this.zoom = scale;
-        this.pan = { x: -b.x * scale, y: -b.y * scale };
+        this.surface = bigSurface as unknown as Surface;
+        this.zoom = renderScale * ss;
+        this.pan = { x: -b.x * renderScale * ss, y: -b.y * renderScale * ss };
         this._exporting = true;
         this._exportBounds = b;
         this._exportBackground = background ?? null;
+        this._exportNoAA = ss > 1; // AA off only when the downscale will restore it
 
         let blob: Blob | null = null;
         try {
             this.render();
-            const img = surface.makeImageSnapshot();
-            const bytes = img.encodeToBytes(); // defaults to PNG
-            img.delete();
+
+            // Resample the supersampled render to the exact target with a
+            // Mitchell cubic filter. Straight copy only when the dimensions
+            // already match (uniform scale, ss === 1).
+            const bigImg = bigSurface.makeImageSnapshot();
+            let bytes: Uint8Array | null;
+            if (bigW !== W || bigH !== H) {
+                const dstSurface = this.ck.MakeSurface(W, H);
+                if (!dstSurface) {
+                    bigImg.delete();
+                    return null;
+                }
+                const dcanvas = dstSurface.getCanvas();
+                dcanvas.clear(this.ck.TRANSPARENT);
+                const dpaint = new this.ck.Paint();
+                dcanvas.drawImageRectCubic(
+                    bigImg,
+                    this.ck.LTRBRect(0, 0, bigW, bigH),
+                    this.ck.LTRBRect(0, 0, W, H),
+                    1 / 3,
+                    1 / 3,
+                    dpaint,
+                );
+                const outImg = dstSurface.makeImageSnapshot();
+                bytes = outImg.encodeToBytes(); // defaults to PNG
+                outImg.delete();
+                dpaint.delete();
+                dstSurface.delete();
+            } else {
+                bytes = bigImg.encodeToBytes();
+            }
+            bigImg.delete();
             // Cast: CanvasKit's Uint8Array<ArrayBufferLike> isn't inferred as a
             // BlobPart under newer TS libs, but it is a valid one at runtime.
             if (bytes) blob = new Blob([bytes as unknown as BlobPart], { type: 'image/png' });
@@ -1335,10 +1416,11 @@ export class Renderer {
             this._exporting = false;
             this._exportBounds = null;
             this._exportBackground = null;
+            this._exportNoAA = false;
             this.surface = savedSurface;
             this.zoom = savedZoom;
             this.pan = savedPan;
-            surface.delete();
+            bigSurface.delete();
             this.requestRender(); // repaint the on-screen surface
         }
         return blob;
@@ -1869,7 +1951,15 @@ export class Renderer {
         if (selection.length === 1 && !live && !isNodeEditing) {
             const id = selection[0];
             const node = this.scene.getNode(id);
-            if (node?.geometry.Rect) {
+            // Only real rectangles get corner-radius handles. Groups (and other
+            // container nodes) report a placeholder Rect{0,0}; guarding on
+            // positive dimensions stops that empty rect from drawing a phantom
+            // handle stack at the frame's top-left corner.
+            if (
+                node?.geometry.Rect &&
+                node.geometry.Rect.width > 0 &&
+                node.geometry.Rect.height > 0
+            ) {
                 const style = node.style;
                 const rect = node.geometry.Rect;
                 const radius = style.corner_radius || 0;
