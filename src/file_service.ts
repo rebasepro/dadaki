@@ -6,10 +6,11 @@
  * (title, breadcrumb, tab strip) after each operation. FileIO stays pure; this
  * layer carries the state.
  */
-import { FileIO } from './file_io';
-import type { WasmScene } from './wasm_scene';
-import type { UIEngine } from './ui';
+
 import type { Document } from './document';
+import { FileIO } from './file_io';
+import type { UIEngine } from './ui';
+import type { WasmScene } from './wasm_scene';
 
 export class FileService {
     constructor(

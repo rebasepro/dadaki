@@ -3,9 +3,10 @@
  * Converts scene data to an SVG document string without requiring WasmScene or UIEngine.
  * This separation enables testing without WASM and reuse in other contexts.
  */
-import type { SceneNode, NodeStyle, Paint } from './types';
+
+import { escapeXml, matrixToSVGTransform, rgbToHex } from './svg_utils';
+import type { NodeStyle, Paint, SceneNode } from './types';
 import { isGradient, isPattern } from './types';
-import { rgbToHex, escapeXml, matrixToSVGTransform } from './svg_utils';
 
 // ─── Lookup Tables ──────────────────────────────────────────────────────────
 
@@ -14,9 +15,22 @@ const JOIN_MAP = ['miter', 'round', 'bevel'] as const;
 const FILL_RULE_MAP = ['nonzero', 'evenodd'] as const;
 
 export const BLEND_MODE_MAP = [
-    'normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten',
-    'color-dodge', 'color-burn', 'hard-light', 'soft-light',
-    'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity',
+    'normal',
+    'multiply',
+    'screen',
+    'overlay',
+    'darken',
+    'lighten',
+    'color-dodge',
+    'color-burn',
+    'hard-light',
+    'soft-light',
+    'difference',
+    'exclusion',
+    'hue',
+    'saturation',
+    'color',
+    'luminosity',
 ] as const;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -101,7 +115,18 @@ export interface SVGExportInput {
  * Gradient defs are collected during rendering and prepended into a <defs> block.
  */
 export function buildSVGFromData(input: SVGExportInput): string {
-    const { docWidth, docHeight, nodes, rootNodeIds, localTransforms, filledFaces, livePaint, imageDataUris, viewBox, background } = input;
+    const {
+        docWidth,
+        docHeight,
+        nodes,
+        rootNodeIds,
+        localTransforms,
+        filledFaces,
+        livePaint,
+        imageDataUris,
+        viewBox,
+        background,
+    } = input;
 
     // ─── Live Paint compositing (mirrors the render writer) ──────────────────
     // When per-group render data is present, faces draw under each group's
@@ -120,19 +145,27 @@ export function buildSVGFromData(input: SVGExportInput): string {
     }
 
     /** Build a closed `d` from an exact-bézier outline, else the polygon. */
-    const faceToPathD = (outline: OutlinePt[] | undefined, boundary: [number, number][] | undefined): string => {
+    const faceToPathD = (
+        outline: OutlinePt[] | undefined,
+        boundary: [number, number][] | undefined,
+    ): string => {
         if (outline && outline.length >= 2) {
             const o = outline;
             let d = `M ${o[0].x} ${o[0].y}`;
             for (let i = 0; i < o.length - 1; i++) {
-                const a = o[i], b = o[i + 1];
+                const a = o[i],
+                    b = o[i + 1];
                 d += ` C ${a.cp2[0]} ${a.cp2[1]} ${b.cp1[0]} ${b.cp1[1]} ${b.x} ${b.y}`;
             }
-            const a = o[o.length - 1], b = o[0];
+            const a = o[o.length - 1],
+                b = o[0];
             d += ` C ${a.cp2[0]} ${a.cp2[1]} ${b.cp1[0]} ${b.cp1[1]} ${b.x} ${b.y} Z`;
             return d;
         }
-        return (boundary ?? []).map((p, i) => (i === 0 ? 'M' : 'L') + ` ${p[0]} ${p[1]}`).join(' ') + ' Z';
+        return (
+            (boundary ?? []).map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0]} ${p[1]}`).join(' ') +
+            ' Z'
+        );
     };
 
     /** Build an OPEN `d` from an outline (painted edges are strokes, not filled). */
@@ -140,7 +173,8 @@ export function buildSVGFromData(input: SVGExportInput): string {
         if (o.length < 2) return '';
         let d = `M ${o[0].x} ${o[0].y}`;
         for (let i = 0; i < o.length - 1; i++) {
-            const a = o[i], b = o[i + 1];
+            const a = o[i],
+                b = o[i + 1];
             d += ` C ${a.cp2[0]} ${a.cp2[1]} ${b.cp1[0]} ${b.cp1[1]} ${b.x} ${b.y}`;
         }
         return d;
@@ -149,22 +183,29 @@ export function buildSVGFromData(input: SVGExportInput): string {
     const lpFacesSvg = (groupId: number): string => {
         const faces = facesByGroup.get(groupId);
         if (!faces || faces.length === 0) return '';
-        return faces.map(f =>
-            `<path d="${faceToPathD(f.outline, f.boundary)}" fill="${rgbToHex(f.fill)}" ` +
-            `fill-opacity="${f.fill.a}" stroke="none" />`
-        ).join('');
+        return faces
+            .map(
+                (f) =>
+                    `<path d="${faceToPathD(f.outline, f.boundary)}" fill="${rgbToHex(f.fill)}" ` +
+                    `fill-opacity="${f.fill.a}" stroke="none" />`,
+            )
+            .join('');
     };
 
     const lpEdgesSvg = (groupId: number): string => {
         const edges = edgesByGroup.get(groupId);
         if (!edges || edges.length === 0) return '';
-        return edges.map(e => {
-            const d = edgeToPathD(e.outline);
-            if (!d) return '';
-            return `<path d="${d}" fill="none" stroke="${rgbToHex(e.color)}" ` +
-                `stroke-opacity="${e.color.a}" stroke-width="${e.width}" ` +
-                `stroke-linecap="round" stroke-linejoin="round" />`;
-        }).join('');
+        return edges
+            .map((e) => {
+                const d = edgeToPathD(e.outline);
+                if (!d) return '';
+                return (
+                    `<path d="${d}" fill="none" stroke="${rgbToHex(e.color)}" ` +
+                    `stroke-opacity="${e.color.a}" stroke-width="${e.width}" ` +
+                    `stroke-linecap="round" stroke-linejoin="round" />`
+                );
+            })
+            .join('');
     };
 
     const vb = viewBox ?? { x: 0, y: 0, w: docWidth, h: docHeight };
@@ -195,20 +236,30 @@ export function buildSVGFromData(input: SVGExportInput): string {
     /** Build a <filter> def for a node's effects, returning its id (or null). */
     const buildFilterDef = (effects: NonNullable<NodeStyle['effects']>): string | null => {
         if (!effects || effects.length === 0) return null;
-        const prims = effects.map(eff => {
-            if ('Blur' in eff) {
-                return `<feGaussianBlur stdDeviation="${eff.Blur.radius}" />`;
-            }
-            if ('ColorMatrix' in eff) {
-                return `<feColorMatrix type="matrix" values="${eff.ColorMatrix.matrix.join(' ')}" />`;
-            }
-            const d = eff.DropShadow;
-            const flood = `#${[d.color.r, d.color.g, d.color.b].map(c => Math.round(c * 255).toString(16).padStart(2, '0')).join('')}`;
-            return `<feDropShadow dx="${d.dx}" dy="${d.dy}" stdDeviation="${d.blur}" flood-color="${flood}" flood-opacity="${d.color.a}" />`;
-        }).join('');
+        const prims = effects
+            .map((eff) => {
+                if ('Blur' in eff) {
+                    return `<feGaussianBlur stdDeviation="${eff.Blur.radius}" />`;
+                }
+                if ('ColorMatrix' in eff) {
+                    return `<feColorMatrix type="matrix" values="${eff.ColorMatrix.matrix.join(' ')}" />`;
+                }
+                const d = eff.DropShadow;
+                const flood = `#${[d.color.r, d.color.g, d.color.b]
+                    .map((c) =>
+                        Math.round(c * 255)
+                            .toString(16)
+                            .padStart(2, '0'),
+                    )
+                    .join('')}`;
+                return `<feDropShadow dx="${d.dx}" dy="${d.dy}" stdDeviation="${d.blur}" flood-color="${flood}" flood-opacity="${d.color.a}" />`;
+            })
+            .join('');
         const id = `filter${filterIdCounter++}`;
         // Check if any ColorMatrix effect uses sRGB (non-default) color space.
-        const hasSrgbCM = effects.some(eff => 'ColorMatrix' in eff && eff.ColorMatrix.linear_rgb === false);
+        const hasSrgbCM = effects.some(
+            (eff) => 'ColorMatrix' in eff && eff.ColorMatrix.linear_rgb === false,
+        );
         const cifAttr = hasSrgbCM ? ' color-interpolation-filters="sRGB"' : '';
         // No explicit region: our native effects have no region concept, so we
         // rely on SVG's default filter region (-10%..120% of the bbox), which
@@ -227,12 +278,15 @@ export function buildSVGFromData(input: SVGExportInput): string {
             const href = imageDataUris?.[paint.image_id];
             if (!href) return 'none';
             const id = `pat${patternIdCounter++}`;
-            const t = paint.transform && paint.transform.length === 6
-                ? ` patternTransform="matrix(${paint.transform.join(' ')})"` : '';
+            const t =
+                paint.transform && paint.transform.length === 6
+                    ? ` patternTransform="matrix(${paint.transform.join(' ')})"`
+                    : '';
             patternDefs.push(
                 `<pattern id="${id}" patternUnits="userSpaceOnUse" width="${paint.width}" height="${paint.height}"${t}>` +
-                `<image href="${href}" x="0" y="0" width="${paint.width}" height="${paint.height}" preserveAspectRatio="none" />` +
-                `</pattern>`);
+                    `<image href="${href}" x="0" y="0" width="${paint.width}" height="${paint.height}" preserveAspectRatio="none" />` +
+                    `</pattern>`,
+            );
             return `url(#${id})`;
         }
         if (!isGradient(paint)) {
@@ -241,37 +295,48 @@ export function buildSVGFromData(input: SVGExportInput): string {
         // Gradient — create a <defs> entry
         const gradId = `grad${gradientIdCounter++}`;
         const toHex = (c: { r: number; g: number; b: number; a: number }) => {
-            const r = Math.round(c.r * 255).toString(16).padStart(2, '0');
-            const g = Math.round(c.g * 255).toString(16).padStart(2, '0');
-            const b = Math.round(c.b * 255).toString(16).padStart(2, '0');
+            const r = Math.round(c.r * 255)
+                .toString(16)
+                .padStart(2, '0');
+            const g = Math.round(c.g * 255)
+                .toString(16)
+                .padStart(2, '0');
+            const b = Math.round(c.b * 255)
+                .toString(16)
+                .padStart(2, '0');
             return `#${r}${g}${b}`;
         };
-        const stops = paint.stops.map(s =>
-            `<stop offset="${s.offset}" stop-color="${toHex(s.color)}" stop-opacity="${s.color.a}" />`
-        ).join('');
+        const stops = paint.stops
+            .map(
+                (s) =>
+                    `<stop offset="${s.offset}" stop-color="${toHex(s.color)}" stop-opacity="${s.color.a}" />`,
+            )
+            .join('');
 
         // spreadMethod: 0 = pad (default, omitted), 1 = repeat, 2 = reflect.
-        const spreadAttr = paint.spread === 1 ? ' spreadMethod="repeat"'
-            : paint.spread === 2 ? ' spreadMethod="reflect"' : '';
+        const spreadAttr =
+            paint.spread === 1
+                ? ' spreadMethod="repeat"'
+                : paint.spread === 2
+                  ? ' spreadMethod="reflect"'
+                  : '';
 
         if (paint.gradient_type === 'Linear') {
             gradientDefs.push(
                 `<linearGradient id="${gradId}" x1="${paint.start_x}" y1="${paint.start_y}" ` +
-                `x2="${paint.end_x}" y2="${paint.end_y}" gradientUnits="userSpaceOnUse"${spreadAttr}>` +
-                `${stops}</linearGradient>`
+                    `x2="${paint.end_x}" y2="${paint.end_y}" gradientUnits="userSpaceOnUse"${spreadAttr}>` +
+                    `${stops}</linearGradient>`,
             );
         } else {
             const radius = Math.hypot(paint.end_x - paint.start_x, paint.end_y - paint.start_y);
             // Radial focal point (fx/fy/fr): emit only when it differs from the
             // center, so concentric gradients stay clean.
             const f = paint.focal;
-            const focalAttr = f
-                ? ` fx="${f.x}" fy="${f.y}"${f.r ? ` fr="${f.r}"` : ''}`
-                : '';
+            const focalAttr = f ? ` fx="${f.x}" fy="${f.y}"${f.r ? ` fr="${f.r}"` : ''}` : '';
             gradientDefs.push(
                 `<radialGradient id="${gradId}" cx="${paint.start_x}" cy="${paint.start_y}" ` +
-                `r="${radius}" gradientUnits="userSpaceOnUse"${focalAttr}${spreadAttr}>` +
-                `${stops}</radialGradient>`
+                    `r="${radius}" gradientUnits="userSpaceOnUse"${focalAttr}${spreadAttr}>` +
+                    `${stops}</radialGradient>`,
             );
         }
         return `url(#${gradId})`;
@@ -282,13 +347,29 @@ export function buildSVGFromData(input: SVGExportInput): string {
      *  fallback to legacy scalar fields for older documents. */
     const buildStyleAttrs = (style: NodeStyle, suppressFill = false): string => {
         // Resolve canonical fill/stroke from arrays, falling back to legacy fields
-        const fills = suppressFill ? [] : (style.fills && style.fills.length > 0 ? style.fills : (style.fill ? [style.fill] : []));
-        const strokeEntries = style.strokes && style.strokes.length > 0 ? style.strokes : (style.stroke ? [{
-            paint: style.stroke, width: style.stroke_width ?? 0,
-            cap: style.stroke_cap ?? 0, join: style.stroke_join ?? 0,
-            dash_array: style.dash_array ?? [], dash_offset: style.dash_offset ?? 0,
-            miter_limit: style.miter_limit ?? 4
-        }] : []);
+        const fills = suppressFill
+            ? []
+            : style.fills && style.fills.length > 0
+              ? style.fills
+              : style.fill
+                ? [style.fill]
+                : [];
+        const strokeEntries =
+            style.strokes && style.strokes.length > 0
+                ? style.strokes
+                : style.stroke
+                  ? [
+                        {
+                            paint: style.stroke,
+                            width: style.stroke_width ?? 0,
+                            cap: style.stroke_cap ?? 0,
+                            join: style.stroke_join ?? 0,
+                            dash_array: style.dash_array ?? [],
+                            dash_offset: style.dash_offset ?? 0,
+                            miter_limit: style.miter_limit ?? 4,
+                        },
+                    ]
+                  : [];
 
         const fillPaint = fills.length > 0 ? fills[0] : null;
         const sk = strokeEntries.length > 0 ? strokeEntries[0] : null;
@@ -353,12 +434,15 @@ export function buildSVGFromData(input: SVGExportInput): string {
         while (ci < siblings.length) {
             const childId = siblings[ci];
             const child = nodes[childId];
-            const isMaskChild = !!(child && child.is_mask && child.visible);
+            const isMaskChild = !!(child?.is_mask && child.visible);
             let hasContentAbove = false;
             if (isMaskChild) {
                 for (let j = ci + 1; j < siblings.length; j++) {
                     const c = nodes[siblings[j]];
-                    if (c && c.visible && !c.is_mask) { hasContentAbove = true; break; }
+                    if (c?.visible && !c.is_mask) {
+                        hasContentAbove = true;
+                        break;
+                    }
                 }
             }
             if (isMaskChild && hasContentAbove) {
@@ -368,13 +452,14 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 const maskTypeVal = mt === 1 ? 'luminance' : 'alpha';
                 maskDefs.push(
                     `<mask id="${maskId}" mask-type="${maskTypeVal}" style="mask-type:${maskTypeVal}">` +
-                    `${renderNodeToSVG(childId, suppressFill)}</mask>`);
+                        `${renderNodeToSVG(childId, suppressFill)}</mask>`,
+                );
                 // Gather content siblings up to the next mask.
                 let contentSvg = '';
                 let j = ci + 1;
                 for (; j < siblings.length; j++) {
                     const c = nodes[siblings[j]];
-                    if (c && c.is_mask && c.visible) break;
+                    if (c?.is_mask && c.visible) break;
                     contentSvg += renderNodeToSVG(siblings[j], suppressFill);
                 }
                 out += `<g mask="url(#${maskId})">${contentSvg}</g>`;
@@ -468,9 +553,16 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 nodeSvg += `<path d="${d.trim()}" ${attrs} />`;
             } else if (geo.Text) {
                 const textAnchorMap = ['start', 'middle', 'end'];
-                const fontFamily = geo.Text.font_family ? ` font-family="${escapeXml(geo.Text.font_family)}"` : '';
-                const textAnchor = geo.Text.text_align ? ` text-anchor="${textAnchorMap[geo.Text.text_align] || 'start'}"` : '';
-                const lineHeightAttr = geo.Text.line_height && geo.Text.line_height !== 1.2 ? ` line-height="${geo.Text.line_height}"` : '';
+                const fontFamily = geo.Text.font_family
+                    ? ` font-family="${escapeXml(geo.Text.font_family)}"`
+                    : '';
+                const textAnchor = geo.Text.text_align
+                    ? ` text-anchor="${textAnchorMap[geo.Text.text_align] || 'start'}"`
+                    : '';
+                const lineHeightAttr =
+                    geo.Text.line_height && geo.Text.line_height !== 1.2
+                        ? ` line-height="${geo.Text.line_height}"`
+                        : '';
                 const fw = geo.Text.font_weight ?? 400;
                 const weightAttr = fw !== 400 ? ` font-weight="${fw}"` : '';
                 const styleAttr = geo.Text.italic ? ` font-style="italic"` : '';
@@ -510,15 +602,20 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 const o = face.outline;
                 d = `M ${o[0].x} ${o[0].y}`;
                 for (let i = 0; i < o.length - 1; i++) {
-                    const a = o[i], b = o[i + 1];
+                    const a = o[i],
+                        b = o[i + 1];
                     d += ` C ${a.cp2[0]} ${a.cp2[1]} ${b.cp1[0]} ${b.cp1[1]} ${b.x} ${b.y}`;
                 }
-                const a = o[o.length - 1], b = o[0];
+                const a = o[o.length - 1],
+                    b = o[0];
                 d += ` C ${a.cp2[0]} ${a.cp2[1]} ${b.cp1[0]} ${b.cp1[1]} ${b.x} ${b.y} Z`;
             } else {
-                d = face.boundary.map((p: [number, number], i: number) =>
-                    (i === 0 ? 'M' : 'L') + ` ${p[0]} ${p[1]}`
-                ).join(' ') + ' Z';
+                d = `${face.boundary
+                    .map(
+                        (p: [number, number], i: number) =>
+                            `${i === 0 ? 'M' : 'L'} ${p[0]} ${p[1]}`,
+                    )
+                    .join(' ')} Z`;
             }
             const hex = rgbToHex(face.fill);
             svg += `<path d="${d}" fill="${hex}" fill-opacity="${face.fill.a}" stroke="none" data-face-id="${face.id}" />`;
@@ -526,7 +623,12 @@ export function buildSVGFromData(input: SVGExportInput): string {
     }
 
     // Insert <defs> (gradients + masks + filters + patterns) if any were collected
-    if (gradientDefs.length > 0 || maskDefs.length > 0 || filterDefs.length > 0 || patternDefs.length > 0) {
+    if (
+        gradientDefs.length > 0 ||
+        maskDefs.length > 0 ||
+        filterDefs.length > 0 ||
+        patternDefs.length > 0
+    ) {
         const defsBlock = `<defs>${gradientDefs.join('')}${maskDefs.join('')}${filterDefs.join('')}${patternDefs.join('')}</defs>`;
         // Insert after the opening <svg ...> tag
         const insertIdx = svg.indexOf('>') + 1;

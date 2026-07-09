@@ -2,6 +2,7 @@ import type { Canvas, CanvasKit, Paint, Path, Surface } from 'canvaskit-wasm';
 
 /** A Live Paint outline point: anchor + incoming/outgoing bézier handles. */
 type OutlinePt = { x: number; y: number; cp1: number[]; cp2: number[] };
+
 import { buildFontProvider, isFontLoaded, loadGoogleFontData, onFontLoaded } from './fonts';
 
 /** Helper for efficient zero-copy parsing of the WASM binary render buffer. */
@@ -14,11 +15,27 @@ class BinaryReader {
         this.view = view;
     }
 
-    u8() { const v = this.view.getUint8(this.offset); this.offset += 1; return v; }
-    u16() { const v = this.view.getUint16(this.offset, true); this.offset += 2; return v; }
-    u32() { const v = this.view.getUint32(this.offset, true); this.offset += 4; return v; }
-    f32() { const v = this.view.getFloat32(this.offset, true); this.offset += 4; return v; }
-    
+    u8() {
+        const v = this.view.getUint8(this.offset);
+        this.offset += 1;
+        return v;
+    }
+    u16() {
+        const v = this.view.getUint16(this.offset, true);
+        this.offset += 2;
+        return v;
+    }
+    u32() {
+        const v = this.view.getUint32(this.offset, true);
+        this.offset += 4;
+        return v;
+    }
+    f32() {
+        const v = this.view.getFloat32(this.offset, true);
+        this.offset += 4;
+        return v;
+    }
+
     f32Array(n: number): Float32Array {
         // The protocol keeps every field 4-byte aligned relative to the buffer
         // start, so a zero-copy view works whenever the WASM allocation itself
@@ -45,9 +62,9 @@ class BinaryReader {
     }
 }
 
-import type { WasmScene } from './wasm_scene';
 import type { InputManager } from './input';
 import type { Artboard } from './types';
+import type { WasmScene } from './wasm_scene';
 
 /** Resize-handle direction for an artboard. */
 export type ArtboardHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
@@ -63,8 +80,13 @@ const EXPECTED_RENDER_PROTOCOL_VERSION = 10; // v10: in-stream Live Paint faces/
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {
     kind: number; // 0 = blur, 1 = drop shadow, 2 = color matrix
-    radius: number; dx: number; dy: number;
-    r: number; g: number; b: number; a: number;
+    radius: number;
+    dx: number;
+    dy: number;
+    r: number;
+    g: number;
+    b: number;
+    a: number;
     matrix?: number[]; // 20 floats, for kind 2
     linearRGB?: boolean; // for kind 2: apply matrix in linearRGB space
 }
@@ -75,7 +97,7 @@ export class Renderer {
      *  isn't available in this build). Falls back to an em-based estimate. */
     getTextLocalBounds(id: number): { x: number; y: number; w: number; h: number } | null {
         const node = this.scene.getNode(id);
-        if (!node || !node.geometry.Text) return null;
+        if (!node?.geometry.Text) return null;
         const geo = node.geometry.Text;
         const fontSize = geo.font_size;
         const lineHeight = geo.line_height || 1.2;
@@ -91,7 +113,9 @@ export class Renderer {
                 if (w > width) width = w;
             }
             font.delete();
-        } catch { width = 0; }
+        } catch {
+            width = 0;
+        }
         if (width <= 0) width = Math.max(1, geo.content.length) * fontSize * 0.6;
         const h = fontSize + (lines.length - 1) * fontSize * lineHeight;
         // Alignment anchors the text around the origin (center → -w/2, right → -w).
@@ -126,7 +150,9 @@ export class Renderer {
     private _protocolDesyncWarned = false;
     /** Node id of the text being edited inline (skipped while its overlay is up). */
     editingTextId: number | null = null;
-    private get _editingTextId(): number | null { return this.editingTextId; }
+    private get _editingTextId(): number | null {
+        return this.editingTextId;
+    }
     /** Dedicated SrcIn paint for compositing masked-content layers. */
     private _maskPaint: Paint | null = null;
     /** Stack of mask_type values (0 = alpha, 1 = luminance) matching the
@@ -142,21 +168,32 @@ export class Renderer {
     private _exportBackground: { r: number; g: number; b: number; a: number } | null = null;
 
     // ─── Path object cache (avoid rebuilding CanvasKit paths every frame) ───
-    private _pathCache: Map<number, { path: ReturnType<CanvasKit['Path']['prototype']['copy']>; fillRule: number }> = new Map();
+    private _pathCache: Map<
+        number,
+        { path: ReturnType<CanvasKit['Path']['prototype']['copy']>; fillRule: number }
+    > = new Map();
 
     // ─── Gradient shader cache ───
-    private _gradientCache: Map<string, ReturnType<CanvasKit['Shader']['MakeLinearGradient']>> = new Map();
+    private _gradientCache: Map<string, ReturnType<CanvasKit['Shader']['MakeLinearGradient']>> =
+        new Map();
     // Decoded images keyed by engine image id. Images are immutable and
     // content-addressed, so an id maps to stable bytes for the life of a
     // document — the cache survives edits/undo and is only cleared on a full
     // document replacement (clearImageCache), where ids may be reused.
-    private _imageCache: Map<number, ReturnType<CanvasKit['MakeImageFromEncoded']> | null> = new Map();
+    private _imageCache: Map<number, ReturnType<CanvasKit['MakeImageFromEncoded']> | null> =
+        new Map();
     private _imagePaint: Paint | null = null;
     // Repeating image shaders for pattern fills, keyed by pattern signature.
-    private _patternShaderCache: Map<string, ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null> = new Map();
+    private _patternShaderCache: Map<
+        string,
+        ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null
+    > = new Map();
     // Effect (blur/shadow) ImageFilters, cached by effect signature — built once
     // and reused across frames (cleared on invalidateRenderCaches).
-    private _effectFilterCache: Map<string, ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null> = new Map();
+    private _effectFilterCache: Map<
+        string,
+        ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null
+    > = new Map();
     private _effectPaint: Paint | null = null;
 
     // CanvasKit blend-mode lookup, indexed by our style enum (0 = Normal).
@@ -165,21 +202,21 @@ export class Renderer {
     private ckBlendModes(): any[] {
         if (!this._ckBlendModes) {
             this._ckBlendModes = [
-                this.ck.BlendMode.SrcOver,    // 0: Normal
-                this.ck.BlendMode.Multiply,   // 1
-                this.ck.BlendMode.Screen,     // 2
-                this.ck.BlendMode.Overlay,    // 3
-                this.ck.BlendMode.Darken,     // 4
-                this.ck.BlendMode.Lighten,    // 5
+                this.ck.BlendMode.SrcOver, // 0: Normal
+                this.ck.BlendMode.Multiply, // 1
+                this.ck.BlendMode.Screen, // 2
+                this.ck.BlendMode.Overlay, // 3
+                this.ck.BlendMode.Darken, // 4
+                this.ck.BlendMode.Lighten, // 5
                 this.ck.BlendMode.ColorDodge, // 6
-                this.ck.BlendMode.ColorBurn,  // 7
-                this.ck.BlendMode.HardLight,  // 8
-                this.ck.BlendMode.SoftLight,  // 9
+                this.ck.BlendMode.ColorBurn, // 7
+                this.ck.BlendMode.HardLight, // 8
+                this.ck.BlendMode.SoftLight, // 9
                 this.ck.BlendMode.Difference, // 10
-                this.ck.BlendMode.Exclusion,  // 11
-                this.ck.BlendMode.Hue,        // 12
+                this.ck.BlendMode.Exclusion, // 11
+                this.ck.BlendMode.Hue, // 12
                 this.ck.BlendMode.Saturation, // 13
-                this.ck.BlendMode.Color,      // 14
+                this.ck.BlendMode.Color, // 14
                 this.ck.BlendMode.Luminosity, // 15
             ];
         }
@@ -227,9 +264,13 @@ export class Renderer {
      *  Used by the inline text-edit overlay to stay glued over the glyphs. */
     private viewChangeCbs: Array<() => void> = [];
     /** Register a callback fired on every zoom/pan change. */
-    onViewChange(cb: () => void) { this.viewChangeCbs.push(cb); }
+    onViewChange(cb: () => void) {
+        this.viewChangeCbs.push(cb);
+    }
     /** Notify view-change subscribers. Call after mutating zoom/pan directly. */
-    notifyViewChange() { for (const cb of this.viewChangeCbs) cb(); }
+    notifyViewChange() {
+        for (const cb of this.viewChangeCbs) cb();
+    }
 
     /** Invalidate all cached rendering resources. Call when the scene mutates. */
     invalidateRenderCaches() {
@@ -260,8 +301,15 @@ export class Renderer {
 
     /** Build (or fetch a cached) ImageFilter chain for a node's effects.
      *  Effects stack: each filter takes the previous as input. */
-    private getEffectFilter(effects: EffectRecord[]): ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null {
-        const key = effects.map(e => `${e.kind}:${e.radius},${e.dx},${e.dy},${e.r},${e.g},${e.b},${e.a},${e.matrix?.join(',') ?? ''},${e.linearRGB ? 'L' : 'S'}`).join('|');
+    private getEffectFilter(
+        effects: EffectRecord[],
+    ): ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null {
+        const key = effects
+            .map(
+                (e) =>
+                    `${e.kind}:${e.radius},${e.dx},${e.dy},${e.r},${e.g},${e.b},${e.a},${e.matrix?.join(',') ?? ''},${e.linearRGB ? 'L' : 'S'}`,
+            )
+            .join('|');
         const cached = this._effectFilterCache.get(key);
         if (cached !== undefined) return cached;
         let filter: ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null = null;
@@ -280,7 +328,10 @@ export class Renderer {
                     // Compose: sRGB→linear → matrix → linear→sRGB
                     const toLinear = this.ck.ColorFilter.MakeSRGBToLinearGamma();
                     const toSRGB = this.ck.ColorFilter.MakeLinearToSRGBGamma();
-                    const linearMatrix = this.ck.ColorFilter.MakeCompose(toSRGB, this.ck.ColorFilter.MakeCompose(cf, toLinear));
+                    const linearMatrix = this.ck.ColorFilter.MakeCompose(
+                        toSRGB,
+                        this.ck.ColorFilter.MakeCompose(cf, toLinear),
+                    );
                     filter = this.ck.ImageFilter.MakeColorFilter(linearMatrix, filter);
                 } else {
                     filter = this.ck.ImageFilter.MakeColorFilter(cf, filter);
@@ -308,7 +359,7 @@ export class Renderer {
         let img = this._imageCache.get(imageId);
         if (img === undefined) {
             const bytes = this.scene.engine?.get_image_bytes(imageId);
-            img = (bytes && bytes.length > 0) ? this.ck.MakeImageFromEncoded(bytes) : null;
+            img = bytes && bytes.length > 0 ? this.ck.MakeImageFromEncoded(bytes) : null;
             this._imageCache.set(imageId, img ?? null);
         }
         return img;
@@ -317,20 +368,29 @@ export class Renderer {
     /** Repeating image shader for a pattern fill: tiles the image over
      *  `width`×`height` local units, then applies the pattern transform
      *  ([a,b,c,d,e,f]) as the shader's local matrix. Cached by signature. */
-    private getPatternShader(imageId: number, width: number, height: number, transform: number[]): ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null {
+    private getPatternShader(
+        imageId: number,
+        width: number,
+        height: number,
+        transform: number[],
+    ): ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null {
         const key = `${imageId}|${width}|${height}|${transform.join(',')}`;
         const cached = this._patternShaderCache.get(key);
         if (cached !== undefined) return cached;
         const img = this.getImage(imageId);
         let shader: ReturnType<CanvasKit['Shader']['MakeLinearGradient']> | null = null;
         if (img && img.width() > 0 && img.height() > 0 && width > 0 && height > 0) {
-            const sx = width / img.width(), sy = height / img.height();
+            const sx = width / img.width(),
+                sy = height / img.height();
             const [a, b, c, d, e, f] = transform;
             // localMatrix = patternTransform · scale(image px → tile units), row-major 3x3.
             const m = [a * sx, c * sy, e, b * sx, d * sy, f, 0, 0, 1];
             shader = img.makeShaderOptions(
-                this.ck.TileMode.Repeat, this.ck.TileMode.Repeat,
-                this.ck.FilterMode.Linear, this.ck.MipmapMode.None, m,
+                this.ck.TileMode.Repeat,
+                this.ck.TileMode.Repeat,
+                this.ck.FilterMode.Linear,
+                this.ck.MipmapMode.None,
+                m,
             );
         }
         this._patternShaderCache.set(key, shader);
@@ -390,10 +450,17 @@ export class Renderer {
         artboardStroke.setColor(ck.Color(80, 80, 80, 1.0));
         artboardStroke.setStyle(ck.PaintStyle.Stroke);
 
-        this._overlayPaints = { selOutline, selHandleFill, selHandleStroke, hoverOutline, gridPaint, artboardFill, artboardStroke };
+        this._overlayPaints = {
+            selOutline,
+            selHandleFill,
+            selHandleStroke,
+            hoverOutline,
+            gridPaint,
+            artboardFill,
+            artboardStroke,
+        };
         return this._overlayPaints;
     }
-
 
     private initGL() {
         // CanvasKit's GetWebGLContext/MakeGrContext aren't in public typings
@@ -433,31 +500,35 @@ export class Renderer {
             const dpr = window.devicePixelRatio;
             this.canvas.width = this.canvas.clientWidth * dpr;
             this.canvas.height = this.canvas.clientHeight * dpr;
-            
+
             if (this.surface) {
                 this.surface.delete();
             }
-            
+
             const ckExt = this.ck as unknown as Record<string, CallableFunction>;
             const ckRaw = this.ck as unknown as Record<string, Record<string, unknown>>;
             this.surface = ckExt.MakeOnScreenGLSurface(
                 this.grContext,
                 this.canvas.width,
                 this.canvas.height,
-                ckRaw.ColorSpace ? ckRaw.ColorSpace.SRGB : null
+                ckRaw.ColorSpace ? ckRaw.ColorSpace.SRGB : null,
             ) as Surface | null;
-            
+
             // Fallback for different CanvasKit versions
             if (!this.surface && ckExt.MakeRenderTarget) {
-                this.surface = ckExt.MakeRenderTarget(this.glContext, this.canvas.width, this.canvas.height) as Surface | null;
+                this.surface = ckExt.MakeRenderTarget(
+                    this.glContext,
+                    this.canvas.width,
+                    this.canvas.height,
+                ) as Surface | null;
             }
             if (!this.surface) {
                 this.surface = this.ck.MakeWebGLCanvasSurface(this.canvas);
             }
-            
+
             this.render();
         } catch (e) {
-            console.error("Failed to resize surface:", e);
+            console.error('Failed to resize surface:', e);
         }
     }
 
@@ -467,10 +538,7 @@ export class Renderer {
         if (viewW <= 0 || viewH <= 0) return;
 
         const margin = 48; // css px on each side
-        const scale = Math.min(
-            (viewW - margin * 2) / docW,
-            (viewH - margin * 2) / docH,
-        );
+        const scale = Math.min((viewW - margin * 2) / docW, (viewH - margin * 2) / docH);
         this.zoom = Math.max(0.02, Math.min(4, scale));
         // Center the content bounds (which may start at a non-zero origin when
         // there are multiple artboards) in the viewport.
@@ -497,7 +565,8 @@ export class Renderer {
     setZoomCentered(newZoom: number) {
         const viewW = this.canvas.clientWidth;
         const viewH = this.canvas.clientHeight;
-        const cx = viewW / 2, cy = viewH / 2;
+        const cx = viewW / 2,
+            cy = viewH / 2;
         const worldX = (cx - this.pan.x) / this.zoom;
         const worldY = (cy - this.pan.y) / this.zoom;
         this.zoom = Math.max(0.01, Math.min(100, newZoom));
@@ -540,7 +609,7 @@ export class Renderer {
         // scale is folded into this.zoom) with a transparent background and no
         // editor chrome (grid, artboard, selection, guides).
         const exporting = this._exporting;
-        const dpr = exporting ? 1 : (window.devicePixelRatio || 1);
+        const dpr = exporting ? 1 : window.devicePixelRatio || 1;
 
         if (exporting) {
             canvas.clear(this.ck.TRANSPARENT);
@@ -558,9 +627,14 @@ export class Renderer {
             const bg = this._exportBackground;
             const eb = this._exportBounds;
             const p = new this.ck.Paint();
-            p.setColor(this.ck.Color(
-                Math.round(bg.r * 255), Math.round(bg.g * 255), Math.round(bg.b * 255), bg.a,
-            ));
+            p.setColor(
+                this.ck.Color(
+                    Math.round(bg.r * 255),
+                    Math.round(bg.g * 255),
+                    Math.round(bg.b * 255),
+                    bg.a,
+                ),
+            );
             p.setStyle(this.ck.PaintStyle.Fill);
             canvas.drawRect(this.ck.LTRBRect(eb.x, eb.y, eb.x + eb.w, eb.y + eb.h), p);
             p.delete();
@@ -572,7 +646,12 @@ export class Renderer {
         // renders regardless of screen size or artboard origin.
         let viewportMinX: number, viewportMinY: number, viewportMaxX: number, viewportMaxY: number;
         if (exporting) {
-            const b = this._exportBounds ?? { x: 0, y: 0, w: this.scene.engine.get_document_width(), h: this.scene.engine.get_document_height() };
+            const b = this._exportBounds ?? {
+                x: 0,
+                y: 0,
+                w: this.scene.engine.get_document_width(),
+                h: this.scene.engine.get_document_height(),
+            };
             viewportMinX = b.x;
             viewportMinY = b.y;
             viewportMaxX = b.x + b.w;
@@ -584,8 +663,17 @@ export class Renderer {
             viewportMaxY = (this.canvas.height / dpr - this.pan.y) / this.zoom;
         }
 
+        // Re-evaluate any Boolean Group whose operands changed since last frame,
+        // so the cached outline the stream draws is current. Cheap when idle.
+        this.scene.recomputeDirtyBooleanGroups(this.ck);
+
         // Draw Scene Objects via binary command stream (Phase 3: No JSON Tax)
-        const visibleIds = this.scene.getVisibleNodes(viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
+        const visibleIds = this.scene.getVisibleNodes(
+            viewportMinX,
+            viewportMinY,
+            viewportMaxX,
+            viewportMaxY,
+        );
         const view = this.scene.getRenderData(visibleIds);
         const reader = new BinaryReader(view);
 
@@ -596,13 +684,15 @@ export class Renderer {
         if (magic !== RENDER_PROTOCOL_MAGIC) {
             throw new Error(
                 `Render buffer magic 0x${magic.toString(16)} != 0x${RENDER_PROTOCOL_MAGIC.toString(16)}. ` +
-                `engine/pkg is stale or corrupt — rebuild the wasm engine.`);
+                    `engine/pkg is stale or corrupt — rebuild the wasm engine.`,
+            );
         }
         const protocolVersion = reader.u32();
         if (protocolVersion !== EXPECTED_RENDER_PROTOCOL_VERSION) {
             throw new Error(
                 `Render protocol version ${protocolVersion} != expected ${EXPECTED_RENDER_PROTOCOL_VERSION}. ` +
-                `Rebuild the wasm engine after engine/src changes, or update renderer.ts to match.`);
+                    `Rebuild the wasm engine after engine/src changes, or update renderer.ts to match.`,
+            );
         }
 
         const commandCount = reader.u32();
@@ -621,10 +711,11 @@ export class Renderer {
             const cmdType = reader.u32();
             const nodeId = reader.u32();
 
-            if (cmdType === 1) { // CMD_START_GROUP
+            if (cmdType === 1) {
+                // CMD_START_GROUP
                 const opacity = reader.f32();
                 const groupFlags = reader.u32();
-                const groupBlend = (groupFlags >>> 16) & 0xFF;
+                const groupBlend = (groupFlags >>> 16) & 0xff;
                 // A non-Normal blend mode requires an isolation layer so the
                 // group composites as a single unit against the backdrop (like
                 // opacity does), otherwise the group's blend would never apply.
@@ -638,9 +729,11 @@ export class Renderer {
                 } else {
                     canvas.save();
                 }
-            } else if (cmdType === 3) { // CMD_END_GROUP
+            } else if (cmdType === 3) {
+                // CMD_END_GROUP
                 canvas.restore();
-            } else if (cmdType === 4) { // CMD_BEGIN_MASK
+            } else if (cmdType === 4) {
+                // CMD_BEGIN_MASK
                 // Read mask_type: 0 = alpha, 1 = luminance (v8+).
                 const maskType = reader.u32();
                 this._maskTypeStack.push(maskType);
@@ -655,13 +748,10 @@ export class Renderer {
                         // SVG luminance mask: A' = 0.2126·R + 0.7152·G + 0.0722·B
                         // (R,G,B are premultiplied, so we also account for source alpha).
                         const lumaMatrix = [
-                            0, 0, 0, 0, 0,
-                            0, 0, 0, 0, 0,
-                            0, 0, 0, 0, 0,
-                            0.2126, 0.7152, 0.0722, 0, 0,
+                            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.2126, 0.7152, 0.0722, 0,
+                            0,
                         ];
-                        this._lumaPaint.setColorFilter(
-                            this.ck.ColorFilter.MakeMatrix(lumaMatrix));
+                        this._lumaPaint.setColorFilter(this.ck.ColorFilter.MakeMatrix(lumaMatrix));
                     }
                     canvas.saveLayer(this._lumaPaint);
                 } else {
@@ -669,9 +759,12 @@ export class Renderer {
                     // Isolated layer accumulating the mask shape's coverage.
                     canvas.saveLayer();
                 }
-            } else if (cmdType === 5) { // CMD_BEGIN_MASKED_CONTENT
-                const maskType = this._maskTypeStack.length > 0
-                    ? this._maskTypeStack[this._maskTypeStack.length - 1] : 0;
+            } else if (cmdType === 5) {
+                // CMD_BEGIN_MASKED_CONTENT
+                const maskType =
+                    this._maskTypeStack.length > 0
+                        ? this._maskTypeStack[this._maskTypeStack.length - 1]
+                        : 0;
                 if (maskType === 1) {
                     // Restore the luma layer: mask shapes are composited through
                     // the luminance→alpha filter into the outer layer.
@@ -684,23 +777,29 @@ export class Renderer {
                 if (!this._maskPaint) this._maskPaint = new this.ck.Paint();
                 this._maskPaint.setBlendMode(this.ck.BlendMode.SrcIn);
                 canvas.saveLayer(this._maskPaint);
-            } else if (cmdType === 6) { // CMD_END_MASK
+            } else if (cmdType === 6) {
+                // CMD_END_MASK
                 if (this._maskTypeStack.length > 0) this._maskTypeStack.pop();
                 canvas.restore(); // content → mask/outer layer (SrcIn)
                 canvas.restore(); // masked result → canvas
-            } else if (cmdType === 7) { // CMD_LP_FACES (Live Paint face fills)
+            } else if (cmdType === 7) {
+                // CMD_LP_FACES (Live Paint face fills)
                 const faceCount = reader.u32();
                 p.setStyle(this.ck.PaintStyle.Fill);
                 p.setShader(null);
                 p.setAntiAlias(true);
                 for (let fi = 0; fi < faceCount; fi++) {
-                    const r = reader.f32(), gg = reader.f32(), bb = reader.f32(), aa = reader.f32();
+                    const r = reader.f32(),
+                        gg = reader.f32(),
+                        bb = reader.f32(),
+                        aa = reader.f32();
                     const path = this.readOutlinePath(reader, true);
                     p.setColor(this.ck.Color4f(r, gg, bb, aa));
                     canvas.drawPath(path, p);
                     path.delete();
                 }
-            } else if (cmdType === 8) { // CMD_LP_EDGES (Live Paint painted edges)
+            } else if (cmdType === 8) {
+                // CMD_LP_EDGES (Live Paint painted edges)
                 const edgeCount = reader.u32();
                 p.setStyle(this.ck.PaintStyle.Stroke);
                 p.setShader(null);
@@ -708,7 +807,10 @@ export class Renderer {
                 p.setStrokeCap(this.ck.StrokeCap.Round);
                 p.setStrokeJoin(this.ck.StrokeJoin.Round);
                 for (let ei = 0; ei < edgeCount; ei++) {
-                    const r = reader.f32(), gg = reader.f32(), bb = reader.f32(), aa = reader.f32();
+                    const r = reader.f32(),
+                        gg = reader.f32(),
+                        bb = reader.f32(),
+                        aa = reader.f32();
                     const width = reader.f32();
                     const path = this.readOutlinePath(reader, false);
                     p.setColor(this.ck.Color4f(r, gg, bb, aa));
@@ -718,30 +820,47 @@ export class Renderer {
                 }
                 p.setStrokeCap(this.ck.StrokeCap.Butt);
                 p.setStrokeJoin(this.ck.StrokeJoin.Miter);
-            } else if (cmdType === 2) { // CMD_DRAW_NODE
+            } else if (cmdType === 2) {
+                // CMD_DRAW_NODE
                 const nodeType = reader.u32();
                 const matrix = reader.f32Array(9);
-                
-                // Dim non-edited nodes in path edit mode
-                const nodeAlpha = (dimTarget !== null && nodeId !== dimTarget) ? 0.3 : 1.0;
+
+                // Dim non-edited nodes in path edit mode. While the pen tool is
+                // extending an existing open path (endpoint continuation), hide the
+                // source node entirely — the blue pen preview stands in for it, so
+                // it isn't doubled.
+                const nodeAlpha =
+                    this.inputManager?.penSourceNodeId === nodeId
+                        ? 0
+                        : dimTarget !== null && nodeId !== dimTarget
+                          ? 0.3
+                          : 1.0;
 
                 // ─── Read Fills ─────────────────
                 const fillCount = reader.u32();
                 const fills: any[] = [];
                 for (let i = 0; i < fillCount; i++) {
                     const fillType = reader.u32();
-                    if (fillType === 1) { // Solid
+                    if (fillType === 1) {
+                        // Solid
                         fills.push({
                             type: 1,
-                            r: reader.f32(), g: reader.f32(), b: reader.f32(), a: reader.f32()
+                            r: reader.f32(),
+                            g: reader.f32(),
+                            b: reader.f32(),
+                            a: reader.f32(),
                         });
-                    } else if (fillType === 2 || fillType === 3) { // Gradient
+                    } else if (fillType === 2 || fillType === 3) {
+                        // Gradient
                         const stopCount = reader.u32();
                         const stops = [];
                         for (let s = 0; s < stopCount; s++) {
                             stops.push({
                                 offset: reader.f32(),
-                                r: reader.f32(), g: reader.f32(), b: reader.f32(), a: reader.f32(),
+                                r: reader.f32(),
+                                g: reader.f32(),
+                                b: reader.f32(),
+                                a: reader.f32(),
                             });
                         }
                         fills.push({
@@ -752,13 +871,21 @@ export class Renderer {
                             spread: reader.u32(),
                             focal: [reader.f32(), reader.f32(), reader.f32()], // fx, fy, fr
                         });
-                    } else if (fillType === 4) { // Pattern
+                    } else if (fillType === 4) {
+                        // Pattern
                         fills.push({
                             type: 4,
                             imageId: reader.u32(),
                             width: reader.f32(),
                             height: reader.f32(),
-                            transform: [reader.f32(), reader.f32(), reader.f32(), reader.f32(), reader.f32(), reader.f32()],
+                            transform: [
+                                reader.f32(),
+                                reader.f32(),
+                                reader.f32(),
+                                reader.f32(),
+                                reader.f32(),
+                                reader.f32(),
+                            ],
                         });
                     } else {
                         fills.push({ type: 0 });
@@ -771,18 +898,26 @@ export class Renderer {
                 for (let i = 0; i < strokeCount; i++) {
                     const strokeType = reader.u32();
                     let paint: any = { type: 0 };
-                    if (strokeType === 1) { // Solid
+                    if (strokeType === 1) {
+                        // Solid
                         paint = {
                             type: 1,
-                            r: reader.f32(), g: reader.f32(), b: reader.f32(), a: reader.f32()
+                            r: reader.f32(),
+                            g: reader.f32(),
+                            b: reader.f32(),
+                            a: reader.f32(),
                         };
-                    } else if (strokeType === 2 || strokeType === 3) { // Gradient
+                    } else if (strokeType === 2 || strokeType === 3) {
+                        // Gradient
                         const stopCount = reader.u32();
                         const stops = [];
                         for (let s = 0; s < stopCount; s++) {
                             stops.push({
                                 offset: reader.f32(),
-                                r: reader.f32(), g: reader.f32(), b: reader.f32(), a: reader.f32(),
+                                r: reader.f32(),
+                                g: reader.f32(),
+                                b: reader.f32(),
+                                a: reader.f32(),
                             });
                         }
                         paint = {
@@ -793,13 +928,21 @@ export class Renderer {
                             spread: reader.u32(),
                             focal: [reader.f32(), reader.f32(), reader.f32()], // fx, fy, fr
                         };
-                    } else if (strokeType === 4) { // Pattern
+                    } else if (strokeType === 4) {
+                        // Pattern
                         paint = {
                             type: 4,
                             imageId: reader.u32(),
                             width: reader.f32(),
                             height: reader.f32(),
-                            transform: [reader.f32(), reader.f32(), reader.f32(), reader.f32(), reader.f32(), reader.f32()],
+                            transform: [
+                                reader.f32(),
+                                reader.f32(),
+                                reader.f32(),
+                                reader.f32(),
+                                reader.f32(),
+                                reader.f32(),
+                            ],
                         };
                     }
                     strokes.push({
@@ -811,14 +954,14 @@ export class Renderer {
                         dashOff: reader.f32(),
                         dashPhase: reader.f32(),
                         miterLimit: reader.f32(),
-                        alignment: reader.u32()
+                        alignment: reader.u32(),
                     });
                 }
 
                 const cornerRadius = reader.f32();
                 const styleFlags = reader.u32();
-                const blendMode  = (styleFlags >>> 16) & 0xFF;
-                const fillRule   = (styleFlags >>> 24) & 0xFF;
+                const blendMode = (styleFlags >>> 16) & 0xff;
+                const fillRule = (styleFlags >>> 24) & 0xff;
 
                 // Effects block: count + self-describing records (payload size
                 // fixed per kind). Read before geometry so offsets stay aligned.
@@ -826,16 +969,50 @@ export class Renderer {
                 const effects: EffectRecord[] = [];
                 for (let e = 0; e < effectCount; e++) {
                     const kind = reader.u32();
-                    if (kind === 0) { // Blur
-                        effects.push({ kind, radius: reader.f32(), dx: 0, dy: 0, r: 0, g: 0, b: 0, a: 0 });
-                    } else if (kind === 1) { // DropShadow: dx,dy,blur,r,g,b,a
-                        const dx = reader.f32(), dy = reader.f32(), radius = reader.f32();
-                        effects.push({ kind, radius, dx, dy, r: reader.f32(), g: reader.f32(), b: reader.f32(), a: reader.f32() });
-                    } else if (kind === 2) { // ColorMatrix: 20 floats + 1 u32 (linearRGB flag)
+                    if (kind === 0) {
+                        // Blur
+                        effects.push({
+                            kind,
+                            radius: reader.f32(),
+                            dx: 0,
+                            dy: 0,
+                            r: 0,
+                            g: 0,
+                            b: 0,
+                            a: 0,
+                        });
+                    } else if (kind === 1) {
+                        // DropShadow: dx,dy,blur,r,g,b,a
+                        const dx = reader.f32(),
+                            dy = reader.f32(),
+                            radius = reader.f32();
+                        effects.push({
+                            kind,
+                            radius,
+                            dx,
+                            dy,
+                            r: reader.f32(),
+                            g: reader.f32(),
+                            b: reader.f32(),
+                            a: reader.f32(),
+                        });
+                    } else if (kind === 2) {
+                        // ColorMatrix: 20 floats + 1 u32 (linearRGB flag)
                         const matrix: number[] = [];
                         for (let i = 0; i < 20; i++) matrix.push(reader.f32());
                         const linearRGB = reader.u32() !== 0;
-                        effects.push({ kind, radius: 0, dx: 0, dy: 0, r: 0, g: 0, b: 0, a: 0, matrix, linearRGB });
+                        effects.push({
+                            kind,
+                            radius: 0,
+                            dx: 0,
+                            dy: 0,
+                            r: 0,
+                            g: 0,
+                            b: 0,
+                            a: 0,
+                            matrix,
+                            linearRGB,
+                        });
                     }
                 }
 
@@ -873,9 +1050,9 @@ export class Renderer {
                     const imageId = reader.u32();
                     this.drawImageNode(canvas, imageId, iw, ih, nodeAlpha);
                     reader.offset = startGeoOffset + 4 + geoSize;
-                } else
+                }
                 // Fill Pass(es)
-                if (fills.length === 0 && strokes.length === 0) {
+                else if (fills.length === 0 && strokes.length === 0) {
                     reader.offset += 4 + geoSize; // Skip geometry if totally invisible
                 } else {
                     for (const fill of fills) {
@@ -886,45 +1063,94 @@ export class Renderer {
                             p.setShader(null);
                         } else if (fill.type === 2 || fill.type === 3) {
                             const fillShader = this.getOrCreateGradientShader(
-                                fill.type, fill.stops, fill.start, fill.end, nodeAlpha, fill.spread, fill.focal
+                                fill.type,
+                                fill.stops,
+                                fill.start,
+                                fill.end,
+                                nodeAlpha,
+                                fill.spread,
+                                fill.focal,
                             );
                             p.setShader(fillShader);
                         } else if (fill.type === 4) {
                             p.setColor(this.ck.Color4f(1, 1, 1, nodeAlpha)); // alpha via color
-                            p.setShader(this.getPatternShader(fill.imageId, fill.width, fill.height, fill.transform));
+                            p.setShader(
+                                this.getPatternShader(
+                                    fill.imageId,
+                                    fill.width,
+                                    fill.height,
+                                    fill.transform,
+                                ),
+                            );
                         }
                         p.setStyle(this.ck.PaintStyle.Fill);
-                        this.drawBinaryGeometry(canvas, nodeType, reader, p, cornerRadius, fillRule, nodeId);
+                        this.drawBinaryGeometry(
+                            canvas,
+                            nodeType,
+                            reader,
+                            p,
+                            cornerRadius,
+                            fillRule,
+                            nodeId,
+                        );
                         p.setShader(null);
                     }
                     if (fills.length === 0) {
-                         // Skip geometry once if there were no fills, so strokes can rewind
-                         reader.offset += 4 + geoSize;
+                        // Skip geometry once if there were no fills, so strokes can rewind
+                        reader.offset += 4 + geoSize;
                     }
 
                     // Stroke Pass(es)
-                    const ckCaps = [this.ck.StrokeCap.Butt, this.ck.StrokeCap.Round, this.ck.StrokeCap.Square];
-                    const ckJoins = [this.ck.StrokeJoin.Miter, this.ck.StrokeJoin.Round, this.ck.StrokeJoin.Bevel];
+                    const ckCaps = [
+                        this.ck.StrokeCap.Butt,
+                        this.ck.StrokeCap.Round,
+                        this.ck.StrokeCap.Square,
+                    ];
+                    const ckJoins = [
+                        this.ck.StrokeJoin.Miter,
+                        this.ck.StrokeJoin.Round,
+                        this.ck.StrokeJoin.Bevel,
+                    ];
 
                     for (const st of strokes) {
                         if (st.paint.type === 0 || st.width <= 0) continue;
                         reader.offset = startGeoOffset; // Rewind geometry reader
-                        
+
                         if (st.paint.type === 1) {
-                            p.setColor(this.ck.Color4f(st.paint.r, st.paint.g, st.paint.b, st.paint.a * nodeAlpha));
+                            p.setColor(
+                                this.ck.Color4f(
+                                    st.paint.r,
+                                    st.paint.g,
+                                    st.paint.b,
+                                    st.paint.a * nodeAlpha,
+                                ),
+                            );
                             p.setShader(null);
                         } else if (st.paint.type === 2 || st.paint.type === 3) {
                             const strokeShader = this.getOrCreateGradientShader(
-                                st.paint.type, st.paint.stops, st.paint.start, st.paint.end, nodeAlpha, st.paint.spread, st.paint.focal
+                                st.paint.type,
+                                st.paint.stops,
+                                st.paint.start,
+                                st.paint.end,
+                                nodeAlpha,
+                                st.paint.spread,
+                                st.paint.focal,
                             );
                             p.setShader(strokeShader);
                         } else if (st.paint.type === 4) {
                             p.setColor(this.ck.Color4f(1, 1, 1, nodeAlpha));
-                            p.setShader(this.getPatternShader(st.paint.imageId, st.paint.width, st.paint.height, st.paint.transform));
+                            p.setShader(
+                                this.getPatternShader(
+                                    st.paint.imageId,
+                                    st.paint.width,
+                                    st.paint.height,
+                                    st.paint.transform,
+                                ),
+                            );
                         }
 
                         p.setStyle(this.ck.PaintStyle.Stroke);
-                        
+
                         // 0: Center, 1: Inner, 2: Outer
                         if (st.alignment === 0) {
                             p.setStrokeWidth(st.width);
@@ -939,18 +1165,28 @@ export class Renderer {
 
                         let dashEffect = null;
                         if (st.dashOn > 0) {
-                            dashEffect = this.ck.PathEffect.MakeDash([st.dashOn, st.dashOff], st.dashPhase);
+                            dashEffect = this.ck.PathEffect.MakeDash(
+                                [st.dashOn, st.dashOff],
+                                st.dashPhase,
+                            );
                             p.setPathEffect(dashEffect);
                         }
 
                         if (st.alignment === 1 || st.alignment === 2) {
                             // Need to parse geometry path to clip
-                            const tempPath = this.getBinaryGeometryPath(nodeType, reader, cornerRadius, nodeId);
+                            const tempPath = this.getBinaryGeometryPath(
+                                nodeType,
+                                reader,
+                                cornerRadius,
+                                nodeId,
+                            );
                             if (tempPath) {
                                 canvas.save();
-                                if (st.alignment === 1) { // Inner
+                                if (st.alignment === 1) {
+                                    // Inner
                                     canvas.clipPath(tempPath, this.ck.ClipOp.Intersect, true);
-                                } else if (st.alignment === 2) { // Outer
+                                } else if (st.alignment === 2) {
+                                    // Outer
                                     canvas.clipPath(tempPath, this.ck.ClipOp.Difference, true);
                                 }
                                 canvas.drawPath(tempPath, p);
@@ -959,7 +1195,15 @@ export class Renderer {
                             }
                         } else {
                             // Standard draw
-                            this.drawBinaryGeometry(canvas, nodeType, reader, p, cornerRadius, undefined, nodeId);
+                            this.drawBinaryGeometry(
+                                canvas,
+                                nodeType,
+                                reader,
+                                p,
+                                cornerRadius,
+                                undefined,
+                                nodeId,
+                            );
                         }
 
                         if (dashEffect) {
@@ -968,7 +1212,7 @@ export class Renderer {
                         }
                         p.setShader(null);
                     }
-                    
+
                     if (strokes.length === 0 && fills.length > 0) {
                         // Keep reader at the end of geometry
                         reader.offset = startGeoOffset + 4 + geoSize;
@@ -996,8 +1240,9 @@ export class Renderer {
                 if (!this._protocolDesyncWarned) {
                     console.error(
                         `Render protocol desync at command ${i} (cmdType=${cmdType}, node=${nodeId}): ` +
-                        `consumed ${consumed} bytes but record declared ${recordLen}. ` +
-                        `Writer/reader layout skew — engine/pkg is likely stale.`);
+                            `consumed ${consumed} bytes but record declared ${recordLen}. ` +
+                            `Writer/reader layout skew — engine/pkg is likely stale.`,
+                    );
                     this._protocolDesyncWarned = true;
                 }
                 reader.offset = recordStart + recordLen;
@@ -1053,7 +1298,12 @@ export class Renderer {
         background?: { r: number; g: number; b: number; a: number },
     ): Blob | null {
         if (!this.scene.engine || !this.surface) return null;
-        const b = bounds ?? { x: 0, y: 0, w: this.scene.engine.get_document_width(), h: this.scene.engine.get_document_height() };
+        const b = bounds ?? {
+            x: 0,
+            y: 0,
+            w: this.scene.engine.get_document_width(),
+            h: this.scene.engine.get_document_height(),
+        };
         const W = Math.max(1, Math.round(b.w * scale));
         const H = Math.max(1, Math.round(b.h * scale));
 
@@ -1106,6 +1356,12 @@ export class Renderer {
         /** Radial focal point [fx, fy, fr]; defaults to the center circle. */
         focal: [number, number, number] = [start[0], start[1], 0],
     ): ReturnType<CanvasKit['Shader']['MakeLinearGradient']> {
+        // Stops are stored in insertion order (the editor appends new stops and
+        // mutates offsets in place without re-sorting). Skia's gradient builders
+        // require monotonically non-decreasing offsets, so sort a copy here —
+        // matching the sorted preview in the fill panel.
+        stops = [...stops].sort((a, b) => a.offset - b.offset);
+
         // Build a compact cache key from gradient parameters
         let key = `${gradType}|${start[0]},${start[1]}|${end[0]},${end[1]}|${nodeAlpha}|${spread}|${focal.join(',')}`;
         for (const s of stops) {
@@ -1115,32 +1371,47 @@ export class Renderer {
         if (cached) return cached;
 
         // spreadMethod → Skia TileMode: pad→Clamp, repeat→Repeat, reflect→Mirror.
-        const tileMode = spread === 1 ? this.ck.TileMode.Repeat
-            : spread === 2 ? this.ck.TileMode.Mirror
-            : this.ck.TileMode.Clamp;
-        const colors = stops.map(s => this.ck.Color4f(s.r, s.g, s.b, s.a * nodeAlpha));
-        const offsets = stops.map(s => s.offset);
+        const tileMode =
+            spread === 1
+                ? this.ck.TileMode.Repeat
+                : spread === 2
+                  ? this.ck.TileMode.Mirror
+                  : this.ck.TileMode.Clamp;
+        const colors = stops.map((s) => this.ck.Color4f(s.r, s.g, s.b, s.a * nodeAlpha));
+        const offsets = stops.map((s) => s.offset);
         let shader: ReturnType<CanvasKit['Shader']['MakeLinearGradient']>;
-        if (gradType === 2) { // Linear
-            shader = this.ck.Shader.MakeLinearGradient(
-                start, end, colors, offsets, tileMode,
-            );
-        } else { // Radial — focal point is the start circle (fx, fy, fr), the
+        if (gradType === 2) {
+            // Linear
+            shader = this.ck.Shader.MakeLinearGradient(start, end, colors, offsets, tileMode);
+        } else {
+            // Radial — focal point is the start circle (fx, fy, fr), the
             // center circle is (start, radius). Concentric when focal = center.
             const radius = Math.hypot(end[0] - start[0], end[1] - start[1]);
             shader = this.ck.Shader.MakeTwoPointConicalGradient(
-                [focal[0], focal[1]], focal[2], start, radius, colors, offsets, tileMode,
+                [focal[0], focal[1]],
+                focal[2],
+                start,
+                radius,
+                colors,
+                offsets,
+                tileMode,
             );
         }
         this._gradientCache.set(key, shader);
         return shader;
     }
 
-    private getBinaryGeometryPath(type: number, reader: BinaryReader, cornerRadius: number = 0, nodeId: number = 0) {
+    private getBinaryGeometryPath(
+        type: number,
+        reader: BinaryReader,
+        cornerRadius: number = 0,
+        nodeId: number = 0,
+    ) {
         const path = new this.ck.Path();
         reader.u32(); // skip size
 
-        if (type === 1) { // Rect
+        if (type === 1) {
+            // Rect
             const w = reader.f32();
             const h = reader.f32();
             if (cornerRadius > 0) {
@@ -1149,13 +1420,15 @@ export class Renderer {
             } else {
                 path.addRect(this.ck.LTRBRect(0, 0, w, h));
             }
-        } else if (type === 2) { // Ellipse
+        } else if (type === 2) {
+            // Ellipse
             const rx = reader.f32();
             const ry = reader.f32();
             path.addOval(this.ck.LTRBRect(-rx, -ry, rx, ry));
-        } else if (type === 0) { // Path
+        } else if (type === 0) {
+            // Path
             const numSubpaths = reader.u32();
-            
+
             // Check cache
             const cached = this._pathCache.get(nodeId);
             if (cached && nodeId > 0) {
@@ -1172,16 +1445,22 @@ export class Renderer {
                 const closed = reader.u32() === 1;
                 const numPoints = reader.u32();
                 let prevCP2: [number, number] | null = null;
-                let firstX = 0, firstY = 0, firstCP1: [number, number] = [0, 0];
+                let firstX = 0,
+                    firstY = 0,
+                    firstCP1: [number, number] = [0, 0];
 
                 for (let p = 0; p < numPoints; p++) {
-                    const x = reader.f32(); const y = reader.f32();
-                    const cp1x = reader.f32(); const cp1y = reader.f32();
-                    const cp2x = reader.f32(); const cp2y = reader.f32();
-                    
+                    const x = reader.f32();
+                    const y = reader.f32();
+                    const cp1x = reader.f32();
+                    const cp1y = reader.f32();
+                    const cp2x = reader.f32();
+                    const cp2y = reader.f32();
+
                     if (p === 0) {
                         path.moveTo(x, y);
-                        firstX = x; firstY = y;
+                        firstX = x;
+                        firstY = y;
                         firstCP1 = [cp1x, cp1y];
                     } else if (prevCP2) {
                         path.cubicTo(prevCP2[0], prevCP2[1], cp1x, cp1y, x, y);
@@ -1195,7 +1474,8 @@ export class Renderer {
                     path.close();
                 }
             }
-        } else if (type === 4) { // Text
+        } else if (type === 4) {
+            // Text
             reader.f32(); // fontSize
             reader.u32(); // textAlign
             reader.f32(); // lineHeight
@@ -1210,10 +1490,19 @@ export class Renderer {
         return path;
     }
 
-    private drawBinaryGeometry(canvas: Canvas, type: number, reader: BinaryReader, paint: Paint, cornerRadius: number = 0, fillRule: number = 0, nodeId: number = 0) {
+    private drawBinaryGeometry(
+        canvas: Canvas,
+        type: number,
+        reader: BinaryReader,
+        paint: Paint,
+        cornerRadius: number = 0,
+        fillRule: number = 0,
+        nodeId: number = 0,
+    ) {
         reader.u32(); // skip size
 
-        if (type === 1) { // Rect
+        if (type === 1) {
+            // Rect
             const w = reader.f32();
             const h = reader.f32();
             if (cornerRadius > 0) {
@@ -1223,11 +1512,13 @@ export class Renderer {
             } else {
                 canvas.drawRect(this.ck.LTRBRect(0, 0, w, h), paint);
             }
-        } else if (type === 2) { // Ellipse
+        } else if (type === 2) {
+            // Ellipse
             const rx = reader.f32();
             const ry = reader.f32();
             canvas.drawOval(this.ck.LTRBRect(-rx, -ry, rx, ry), paint);
-        } else if (type === 0) { // Path
+        } else if (type === 0) {
+            // Path
             const numSubpaths = reader.u32();
 
             // Check path cache first
@@ -1255,16 +1546,22 @@ export class Renderer {
                 const closed = reader.u32() === 1;
                 const numPoints = reader.u32();
                 let prevCP2: [number, number] | null = null;
-                let firstX = 0, firstY = 0, firstCP1: [number, number] = [0, 0];
+                let firstX = 0,
+                    firstY = 0,
+                    firstCP1: [number, number] = [0, 0];
 
                 for (let p = 0; p < numPoints; p++) {
-                    const x = reader.f32(); const y = reader.f32();
-                    const cp1x = reader.f32(); const cp1y = reader.f32();
-                    const cp2x = reader.f32(); const cp2y = reader.f32();
-                    
+                    const x = reader.f32();
+                    const y = reader.f32();
+                    const cp1x = reader.f32();
+                    const cp1y = reader.f32();
+                    const cp2x = reader.f32();
+                    const cp2y = reader.f32();
+
                     if (p === 0) {
                         path.moveTo(x, y);
-                        firstX = x; firstY = y;
+                        firstX = x;
+                        firstY = y;
                         firstCP1 = [cp1x, cp1y];
                     } else if (prevCP2) {
                         path.cubicTo(prevCP2[0], prevCP2[1], cp1x, cp1y, x, y);
@@ -1289,11 +1586,12 @@ export class Renderer {
                 this._pathCache.set(nodeId, { path: path.copy(), fillRule });
             }
             path.delete();
-        } else if (type === 4) { // Text
+        } else if (type === 4) {
+            // Text
             const fontSize = reader.f32();
-            const textAlign = reader.u32();   // 0=Left, 1=Center, 2=Right
-            const lineHeight = reader.f32();  // multiplier
-            const fontWeight = reader.u32();  // 100–900
+            const textAlign = reader.u32(); // 0=Left, 1=Center, 2=Right
+            const lineHeight = reader.f32(); // multiplier
+            const fontWeight = reader.u32(); // 100–900
             const italic = reader.u32() !== 0;
             const letterSpacing = reader.f32();
             const fontFamily = reader.string();
@@ -1304,17 +1602,25 @@ export class Renderer {
             if (this._editingTextId === nodeId) return;
 
             // Map text_align to CanvasKit TextAlign enum
-            const ckTextAlign = textAlign === 1 ? this.ck.TextAlign.Center
-                : textAlign === 2 ? this.ck.TextAlign.Right
-                : this.ck.TextAlign.Left;
+            const ckTextAlign =
+                textAlign === 1
+                    ? this.ck.TextAlign.Center
+                    : textAlign === 2
+                      ? this.ck.TextAlign.Right
+                      : this.ck.TextAlign.Left;
 
             // Map font weight/style to CanvasKit enums (falls back gracefully
             // when the loaded font lacks the requested variant).
-            const ckWeight = fontWeight >= 700 ? this.ck.FontWeight.Bold
-                : fontWeight >= 600 ? this.ck.FontWeight.SemiBold
-                : fontWeight >= 500 ? this.ck.FontWeight.Medium
-                : fontWeight <= 300 ? this.ck.FontWeight.Light
-                : this.ck.FontWeight.Normal;
+            const ckWeight =
+                fontWeight >= 700
+                    ? this.ck.FontWeight.Bold
+                    : fontWeight >= 600
+                      ? this.ck.FontWeight.SemiBold
+                      : fontWeight >= 500
+                        ? this.ck.FontWeight.Medium
+                        : fontWeight <= 300
+                          ? this.ck.FontWeight.Light
+                          : this.ck.FontWeight.Normal;
             const ckSlant = italic ? this.ck.FontSlant.Italic : this.ck.FontSlant.Upright;
 
             // Extract current fill color from paint for the paragraph text style
@@ -1327,7 +1633,12 @@ export class Renderer {
             try {
                 const paraStyle = new this.ck.ParagraphStyle({
                     textStyle: {
-                        color: this.ck.Color4f(paintColor[0], paintColor[1], paintColor[2], paintColor[3]),
+                        color: this.ck.Color4f(
+                            paintColor[0],
+                            paintColor[1],
+                            paintColor[2],
+                            paintColor[3],
+                        ),
                         fontSize: fontSize,
                         fontFamilies: fontFamilies,
                         heightMultiplier: lineHeight,
@@ -1337,13 +1648,18 @@ export class Renderer {
                     textAlign: ckTextAlign,
                 });
 
-                let builder;
-                if (fontProvider && fontFamily) {
-                    builder = this.ck.ParagraphBuilder.MakeFromFontProvider(paraStyle, fontProvider);
-                } else {
-                    const defaultFontMgr = this.ck.FontMgr.RefDefault();
-                    builder = this.ck.ParagraphBuilder.Make(paraStyle, defaultFontMgr);
+                if (!fontProvider) {
+                    // No fonts are loaded, and CanvasKit 0.39 exposes no default
+                    // FontMgr, so the Paragraph API can't be used here. Defer to
+                    // the TextBlob fallback below.
+                    throw new Error('no font provider available');
                 }
+                // The paraStyle already lists a 'sans-serif' fallback, so the
+                // provider handles missing/empty font families gracefully.
+                const builder = this.ck.ParagraphBuilder.MakeFromFontProvider(
+                    paraStyle,
+                    fontProvider,
+                );
 
                 builder.addText(content);
                 const para = builder.build();
@@ -1399,6 +1715,10 @@ export class Renderer {
     }
 
     private renderSelectionOverlay(canvas: Canvas, dpr: number) {
+        // The transform box + resize handles are a selection-tool affordance.
+        // Hide them for creation/editing tools (pen, rect, direct, …) so a
+        // still-selected shape doesn't keep showing handles while you draw.
+        if (this.inputManager && this.inputManager.ui.activeTool !== 'selection') return;
         const selection = this.scene.getSelection();
         if (selection.length === 0) return;
 
@@ -1412,7 +1732,10 @@ export class Renderer {
         const op = this.ensureOverlayPaints();
         op.selOutline.setStrokeWidth(1.0 / this.zoom);
 
-        let totalMinX = Infinity, totalMinY = Infinity, totalMaxX = -Infinity, totalMaxY = -Infinity;
+        let totalMinX = Infinity,
+            totalMinY = Infinity,
+            totalMaxX = -Infinity,
+            totalMaxY = -Infinity;
 
         // Draw individual outlines
         for (const id of selection) {
@@ -1428,28 +1751,51 @@ export class Renderer {
             // Skip individual outlines for multi-selection to avoid clutter/lag
             if (selection.length > 5 && !live) continue;
 
-            if (nodeTypeNum === 3) { // Group
+            if (nodeTypeNum === 3) {
+                // Group
                 const [gMinX, gMinY, gMaxX, gMaxY] = bounds;
                 canvas.drawRect(this.ck.LTRBRect(gMinX, gMinY, gMaxX, gMaxY), op.selOutline);
             } else {
                 const transform = this.scene.getTransform(id);
                 canvas.save();
                 canvas.concat(transform);
-                
+
                 const geo = this.scene.getNodeGeometry(id);
                 if (geo.Rect) {
-                    canvas.drawRect(this.ck.LTRBRect(0, 0, geo.Rect.width, geo.Rect.height), op.selOutline);
+                    canvas.drawRect(
+                        this.ck.LTRBRect(0, 0, geo.Rect.width, geo.Rect.height),
+                        op.selOutline,
+                    );
                 } else if (geo.Ellipse) {
-                    canvas.drawOval(this.ck.LTRBRect(-geo.Ellipse.radius_x, -geo.Ellipse.radius_y, geo.Ellipse.radius_x, geo.Ellipse.radius_y), op.selOutline);
+                    canvas.drawOval(
+                        this.ck.LTRBRect(
+                            -geo.Ellipse.radius_x,
+                            -geo.Ellipse.radius_y,
+                            geo.Ellipse.radius_x,
+                            geo.Ellipse.radius_y,
+                        ),
+                        op.selOutline,
+                    );
                 } else if (geo.Path) {
                     // Use the resolved (corner-radius-rounded) outline so the
                     // outline matches the rendered shape and the resize handles.
                     const resolved = this.scene.getResolvedSubpaths(id);
                     const pathBounds = this.calculatePathBounds({ subpaths: resolved });
-                    canvas.drawRect(this.ck.LTRBRect(pathBounds.minX, pathBounds.minY, pathBounds.maxX, pathBounds.maxY), op.selOutline);
+                    canvas.drawRect(
+                        this.ck.LTRBRect(
+                            pathBounds.minX,
+                            pathBounds.minY,
+                            pathBounds.maxX,
+                            pathBounds.maxY,
+                        ),
+                        op.selOutline,
+                    );
                 } else if (geo.Text) {
                     const approxW = geo.Text.content.length * geo.Text.font_size * 0.6;
-                    canvas.drawRect(this.ck.LTRBRect(0, -geo.Text.font_size, approxW, 0), op.selOutline);
+                    canvas.drawRect(
+                        this.ck.LTRBRect(0, -geo.Text.font_size, approxW, 0),
+                        op.selOutline,
+                    );
                 }
                 canvas.restore();
             }
@@ -1461,7 +1807,8 @@ export class Renderer {
         let frame = this.inputManager?.getSelectionFrame() ?? null;
         if (!frame && totalMaxX > totalMinX && totalMaxY > totalMinY) {
             frame = {
-                w: totalMaxX - totalMinX, h: totalMaxY - totalMinY,
+                w: totalMaxX - totalMinX,
+                h: totalMaxY - totalMinY,
                 m: { a: 1, b: 0, c: 0, d: 1, e: totalMinX, f: totalMinY },
             };
         }
@@ -1470,7 +1817,10 @@ export class Renderer {
         const isNodeEditing = this.inputManager?.editingNodeId != null;
         if (frame && frame.w > 0 && frame.h > 0 && !isNodeEditing) {
             const m = frame.m;
-            const pt = (fx: number, fy: number) => ({ x: m.a * fx + m.c * fy + m.e, y: m.b * fx + m.d * fy + m.f });
+            const pt = (fx: number, fy: number) => ({
+                x: m.a * fx + m.c * fy + m.e,
+                y: m.b * fx + m.d * fy + m.f,
+            });
             const corners = [pt(0, 0), pt(frame.w, 0), pt(frame.w, frame.h), pt(0, frame.h)];
 
             if (selection.length > 1 || live) {
@@ -1483,11 +1833,17 @@ export class Renderer {
             }
 
             const hSize = 4 / this.zoom;
-            const midW = frame.w / 2, midH = frame.h / 2;
+            const midW = frame.w / 2,
+                midH = frame.h / 2;
             const handlePositions = [
-                pt(0, 0), pt(midW, 0), pt(frame.w, 0),
-                pt(0, midH),           pt(frame.w, midH),
-                pt(0, frame.h), pt(midW, frame.h), pt(frame.w, frame.h),
+                pt(0, 0),
+                pt(midW, 0),
+                pt(frame.w, 0),
+                pt(0, midH),
+                pt(frame.w, midH),
+                pt(0, frame.h),
+                pt(midW, frame.h),
+                pt(frame.w, frame.h),
             ];
             // Handle squares tilt with the frame
             const angleDeg = Math.atan2(m.b, m.a) * (180 / Math.PI);
@@ -1497,8 +1853,14 @@ export class Renderer {
             for (const { x: hx, y: hy } of handlePositions) {
                 canvas.save();
                 canvas.rotate(angleDeg, hx, hy);
-                canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), op.selHandleFill);
-                canvas.drawRect(this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize), op.selHandleStroke);
+                canvas.drawRect(
+                    this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize),
+                    op.selHandleFill,
+                );
+                canvas.drawRect(
+                    this.ck.LTRBRect(hx - hSize, hy - hSize, hx + hSize, hy + hSize),
+                    op.selHandleStroke,
+                );
                 canvas.restore();
             }
         }
@@ -1507,7 +1869,7 @@ export class Renderer {
         if (selection.length === 1 && !live && !isNodeEditing) {
             const id = selection[0];
             const node = this.scene.getNode(id);
-            if (node && node.geometry.Rect) {
+            if (node?.geometry.Rect) {
                 const style = node.style;
                 const rect = node.geometry.Rect;
                 const radius = style.corner_radius || 0;
@@ -1515,18 +1877,18 @@ export class Renderer {
 
                 canvas.save();
                 canvas.concat(transform);
-                
+
                 // Draw 4 handles inside the corners
                 // Use a minimum visual offset so they are always draggable
                 const visualMin = 14 / this.zoom;
                 const rx = Math.min(Math.max(radius, visualMin), rect.width / 2);
                 const ry = Math.min(Math.max(radius, visualMin), rect.height / 2);
-                
+
                 const handlePos = [
                     [rx, ry],
                     [rect.width - rx, ry],
                     [rect.width - rx, rect.height - ry],
-                    [rx, rect.height - ry]
+                    [rx, rect.height - ry],
                 ];
 
                 const hSize = 3.5 / this.zoom;
@@ -1549,9 +1911,9 @@ export class Renderer {
      */
     private drawGradientOverlay(canvas: Canvas, dpr: number) {
         const im = this.inputManager;
-        if (!im || im.ui.activeTool !== 'selection' || im.editingNodeId !== null) return;
+        if (im?.ui.activeTool !== 'selection' || im.editingNodeId !== null) return;
         const ge = im.ui.gradientEdit;
-        if (!ge || !ge.isActive()) return;
+        if (!ge?.isActive()) return;
         const selection = this.scene.getSelection();
         if (selection.length !== 1 || selection[0] !== ge.nodeId) return;
         const grad = ge.gradient();
@@ -1635,7 +1997,7 @@ export class Renderer {
         canvas.drawCircle(p0.x, p0.y, 8 / z, white);
 
         // End handle: square, rotated to the axis (radial: the radius handle)
-        const angleDeg = Math.atan2(p1.y - p0.y, p1.x - p0.x) * 180 / Math.PI;
+        const angleDeg = (Math.atan2(p1.y - p0.y, p1.x - p0.x) * 180) / Math.PI;
         const hs = 6 / z;
         canvas.save();
         canvas.rotate(angleDeg, p1.x, p1.y);
@@ -1651,8 +2013,16 @@ export class Renderer {
         canvas.restore();
     }
 
-    calculatePathBounds(path: { subpaths: Array<{ points: Array<{ x: number; y: number; cp1: [number, number]; cp2: [number, number] }>; closed: boolean }> }) {
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    calculatePathBounds(path: {
+        subpaths: Array<{
+            points: Array<{ x: number; y: number; cp1: [number, number]; cp2: [number, number] }>;
+            closed: boolean;
+        }>;
+    }) {
+        let minX = Infinity,
+            minY = Infinity,
+            maxX = -Infinity,
+            maxY = -Infinity;
         let hasPoints = false;
         for (const sp of path.subpaths) {
             const pts = sp.points;
@@ -1669,18 +2039,40 @@ export class Renderer {
                 const a = pts[i - 1];
                 const b = pts[i];
                 this.flattenCubicBounds(
-                    a.x, a.y, a.cp2[0], a.cp2[1],
-                    b.cp1[0], b.cp1[1], b.x, b.y,
-                    (x, y) => { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); }
+                    a.x,
+                    a.y,
+                    a.cp2[0],
+                    a.cp2[1],
+                    b.cp1[0],
+                    b.cp1[1],
+                    b.x,
+                    b.y,
+                    (x, y) => {
+                        minX = Math.min(minX, x);
+                        minY = Math.min(minY, y);
+                        maxX = Math.max(maxX, x);
+                        maxY = Math.max(maxY, y);
+                    },
                 );
             }
             if (sp.closed && n >= 2) {
                 const a = pts[n - 1];
                 const b = pts[0];
                 this.flattenCubicBounds(
-                    a.x, a.y, a.cp2[0], a.cp2[1],
-                    b.cp1[0], b.cp1[1], b.x, b.y,
-                    (x, y) => { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); }
+                    a.x,
+                    a.y,
+                    a.cp2[0],
+                    a.cp2[1],
+                    b.cp1[0],
+                    b.cp1[1],
+                    b.x,
+                    b.y,
+                    (x, y) => {
+                        minX = Math.min(minX, x);
+                        minY = Math.min(minY, y);
+                        maxX = Math.max(maxX, x);
+                        maxY = Math.max(maxY, y);
+                    },
                 );
             }
         }
@@ -1689,13 +2081,20 @@ export class Renderer {
 
     /** Subdivide a cubic Bézier and call cb for sampled points along the curve. */
     private flattenCubicBounds(
-        x0: number, y0: number, x1: number, y1: number,
-        x2: number, y2: number, x3: number, y3: number,
-        cb: (x: number, y: number) => void
+        x0: number,
+        y0: number,
+        x1: number,
+        y1: number,
+        x2: number,
+        y2: number,
+        x3: number,
+        y3: number,
+        cb: (x: number, y: number) => void,
     ) {
         // Adaptive subdivision: split until segments are flat enough
-        const stack: [number, number, number, number, number, number, number, number][] =
-            [[x0, y0, x1, y1, x2, y2, x3, y3]];
+        const stack: [number, number, number, number, number, number, number, number][] = [
+            [x0, y0, x1, y1, x2, y2, x3, y3],
+        ];
         const tolerance = 0.5;
         while (stack.length > 0) {
             const [ax, ay, bx, by, cx, cy, dx, dy] = stack.pop()!;
@@ -1709,12 +2108,18 @@ export class Renderer {
                 cb(dx, dy);
             } else {
                 // De Casteljau split at t=0.5
-                const abx = (ax + bx) / 2, aby = (ay + by) / 2;
-                const bcx = (bx + cx) / 2, bcy = (by + cy) / 2;
-                const cdx = (cx + dx) / 2, cdy = (cy + dy) / 2;
-                const abcx = (abx + bcx) / 2, abcy = (aby + bcy) / 2;
-                const bcdx = (bcx + cdx) / 2, bcdy = (bcy + cdy) / 2;
-                const mx = (abcx + bcdx) / 2, my = (abcy + bcdy) / 2;
+                const abx = (ax + bx) / 2,
+                    aby = (ay + by) / 2;
+                const bcx = (bx + cx) / 2,
+                    bcy = (by + cy) / 2;
+                const cdx = (cx + dx) / 2,
+                    cdy = (cy + dy) / 2;
+                const abcx = (abx + bcx) / 2,
+                    abcy = (aby + bcy) / 2;
+                const bcdx = (bcx + cdx) / 2,
+                    bcdy = (bcy + cdy) / 2;
+                const mx = (abcx + bcdx) / 2,
+                    my = (abcy + bcdy) / 2;
                 // Push second half first so first half is processed next
                 stack.push([mx, my, bcdx, bcdy, cdx, cdy, dx, dy]);
                 stack.push([ax, ay, abx, aby, abcx, abcy, mx, my]);
@@ -1750,7 +2155,9 @@ export class Renderer {
     }
 
     /** Screen-constant size (world units) for artboard resize handles. */
-    private artboardHandleWorld(): number { return 4 / this.zoom; }
+    private artboardHandleWorld(): number {
+        return 4 / this.zoom;
+    }
 
     drawArtboards(canvas: Canvas) {
         const op = this.ensureOverlayPaints();
@@ -1758,13 +2165,18 @@ export class Renderer {
 
         for (const ab of artboards) {
             // Background fill (per-artboard color).
-            op.artboardFill.setColor(this.ck.Color(
-                Math.round(ab.background.r * 255),
-                Math.round(ab.background.g * 255),
-                Math.round(ab.background.b * 255),
-                ab.background.a,
-            ));
-            canvas.drawRect(this.ck.LTRBRect(ab.x, ab.y, ab.x + ab.w, ab.y + ab.h), op.artboardFill);
+            op.artboardFill.setColor(
+                this.ck.Color(
+                    Math.round(ab.background.r * 255),
+                    Math.round(ab.background.g * 255),
+                    Math.round(ab.background.b * 255),
+                    ab.background.a,
+                ),
+            );
+            canvas.drawRect(
+                this.ck.LTRBRect(ab.x, ab.y, ab.x + ab.w, ab.y + ab.h),
+                op.artboardFill,
+            );
 
             // Border — accent when selected, gray otherwise.
             const selected = ab.id === this.selectedArtboardId;
@@ -1785,7 +2197,9 @@ export class Renderer {
         const size = px / this.zoom;
         const font = new this.ck.Font(null, size);
         const paint = new this.ck.Paint();
-        paint.setColor(selected ? this.ck.Color(0, 162, 255, 1.0) : this.ck.Color(150, 150, 150, 1.0));
+        paint.setColor(
+            selected ? this.ck.Color(0, 162, 255, 1.0) : this.ck.Color(150, 150, 150, 1.0),
+        );
         paint.setAntiAlias(true);
         const blob = this.ck.TextBlob.MakeFromText(ab.name, font);
         if (blob) {
@@ -1810,11 +2224,17 @@ export class Renderer {
     /** The 8 resize-handle centers (world space): NW,N,NE,E,SE,S,SW,W. */
     private artboardHandlePositions(ab: Artboard): [number, number][] {
         const { x, y, w, h } = ab;
-        const cx = x + w / 2, cy = y + h / 2;
+        const cx = x + w / 2,
+            cy = y + h / 2;
         return [
-            [x, y], [cx, y], [x + w, y],
-            [x + w, cy], [x + w, y + h], [cx, y + h],
-            [x, y + h], [x, cy],
+            [x, y],
+            [cx, y],
+            [x + w, y],
+            [x + w, cy],
+            [x + w, y + h],
+            [cx, y + h],
+            [x, y + h],
+            [x, cy],
         ];
     }
 
@@ -1823,7 +2243,7 @@ export class Renderer {
     /** Hit-test the resize handles of the selected artboard. */
     artboardHandleHitTest(wx: number, wy: number): { id: number; handle: ArtboardHandle } | null {
         if (this.selectedArtboardId === null) return null;
-        const ab = this.scene.getArtboards().find(a => a.id === this.selectedArtboardId);
+        const ab = this.scene.getArtboards().find((a) => a.id === this.selectedArtboardId);
         if (!ab) return null;
         const s = this.artboardHandleWorld() * 1.8; // a bit more forgiving than the visual
         const pos = this.artboardHandlePositions(ab);
@@ -1860,17 +2280,22 @@ export class Renderer {
     getArtboardsBounds(): { x: number; y: number; w: number; h: number } {
         const arts = this.scene.getArtboards();
         if (arts.length === 0) return { x: 0, y: 0, w: 1000, h: 1000 };
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        let minX = Infinity,
+            minY = Infinity,
+            maxX = -Infinity,
+            maxY = -Infinity;
         for (const a of arts) {
-            minX = Math.min(minX, a.x); minY = Math.min(minY, a.y);
-            maxX = Math.max(maxX, a.x + a.w); maxY = Math.max(maxY, a.y + a.h);
+            minX = Math.min(minX, a.x);
+            minY = Math.min(minY, a.y);
+            maxX = Math.max(maxX, a.x + a.w);
+            maxY = Math.max(maxY, a.y + a.h);
         }
         return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
     }
 
     private drawDirectEditHandles(canvas: Canvas, dpr: number) {
         const im = this.inputManager;
-        if (!im || !im.editingPoints || im.editingNodeId === null || !im.editingTransform) return;
+        if (!im?.editingPoints || im.editingNodeId === null || !im.editingTransform) return;
 
         const points = im.editingPoints;
         const t = im.editingTransform;
@@ -1912,7 +2337,7 @@ export class Renderer {
             const sp = points[h.subpathIndex];
             const p1 = sp.points[h.segmentIndex];
             const p2 = sp.points[(h.segmentIndex + 1) % sp.points.length];
-            
+
             // Only draw if not closed or not at the end
             if (sp.closed || h.segmentIndex < sp.points.length - 1) {
                 const highlightPaint = new this.ck.Paint();
@@ -1921,15 +2346,27 @@ export class Renderer {
                 highlightPaint.setStrokeWidth(lineWidth * 3);
 
                 const path = new this.ck.Path();
-                const a1 = { x: t[0] * p1.x + t[1] * p1.y + t[2], y: t[3] * p1.x + t[4] * p1.y + t[5] };
-                const c1 = { x: t[0] * p1.cp2[0] + t[1] * p1.cp2[1] + t[2], y: t[3] * p1.cp2[0] + t[4] * p1.cp2[1] + t[5] };
-                const c2 = { x: t[0] * p2.cp1[0] + t[1] * p2.cp1[1] + t[2], y: t[3] * p2.cp1[0] + t[4] * p2.cp1[1] + t[5] };
-                const a2 = { x: t[0] * p2.x + t[1] * p2.y + t[2], y: t[3] * p2.x + t[4] * p2.y + t[5] };
-                
+                const a1 = {
+                    x: t[0] * p1.x + t[1] * p1.y + t[2],
+                    y: t[3] * p1.x + t[4] * p1.y + t[5],
+                };
+                const c1 = {
+                    x: t[0] * p1.cp2[0] + t[1] * p1.cp2[1] + t[2],
+                    y: t[3] * p1.cp2[0] + t[4] * p1.cp2[1] + t[5],
+                };
+                const c2 = {
+                    x: t[0] * p2.cp1[0] + t[1] * p2.cp1[1] + t[2],
+                    y: t[3] * p2.cp1[0] + t[4] * p2.cp1[1] + t[5],
+                };
+                const a2 = {
+                    x: t[0] * p2.x + t[1] * p2.y + t[2],
+                    y: t[3] * p2.x + t[4] * p2.y + t[5],
+                };
+
                 path.moveTo(a1.x, a1.y);
                 path.cubicTo(c1.x, c1.y, c2.x, c2.y, a2.x, a2.y);
                 canvas.drawPath(path, highlightPaint);
-                
+
                 path.delete();
                 highlightPaint.delete();
             }
@@ -1970,7 +2407,7 @@ export class Renderer {
     /** Draw a preview dot for the scissors / add-point hover. */
     private drawScissorsPreview(canvas: Canvas, dpr: number) {
         const im = this.inputManager;
-        if (!im || !im.scissorsHoverPoint) return;
+        if (!im?.scissorsHoverPoint) return;
 
         const { x, y } = im.scissorsHoverPoint;
 
@@ -2069,7 +2506,7 @@ export class Renderer {
         if (tool === 'polygon') {
             const sides = 6;
             for (let i = 0; i < sides; i++) {
-                const angle = (i * 2 * Math.PI / sides) - Math.PI / 2;
+                const angle = (i * 2 * Math.PI) / sides - Math.PI / 2;
                 const px = cx + r * Math.cos(angle);
                 const py = cy + r * Math.sin(angle);
                 if (i === 0) path.moveTo(px, py);
@@ -2081,7 +2518,7 @@ export class Renderer {
             const outerR = r;
             const innerR = r * 0.4;
             for (let i = 0; i < points * 2; i++) {
-                const angle = (i * Math.PI / points) - Math.PI / 2;
+                const angle = (i * Math.PI) / points - Math.PI / 2;
                 const cr = i % 2 === 0 ? outerR : innerR;
                 const px = cx + cr * Math.cos(angle);
                 const py = cy + cr * Math.sin(angle);
@@ -2137,6 +2574,18 @@ export class Renderer {
     }
 
     private drawPenPreview(canvas: Canvas) {
+        // Continuation indicator: when the idle pen hovers a free endpoint of an
+        // existing open path, ring it so the user knows a click would extend it.
+        const adopt = this.inputManager?.penHoverAdopt;
+        if (adopt) {
+            const ap = new this.ck.Paint();
+            ap.setColor(this.ck.Color(0, 162, 255, 1.0));
+            ap.setStyle(this.ck.PaintStyle.Stroke);
+            ap.setStrokeWidth(1.5 / this.zoom);
+            canvas.drawCircle(adopt.x, adopt.y, 6 / this.zoom, ap);
+            ap.delete();
+        }
+
         const points = this.inputManager?.currentPathPoints;
         if (!points || points.length === 0) return;
 
@@ -2224,11 +2673,17 @@ export class Renderer {
 
             dotPaint.setColor(this.ck.Color(255, 255, 255, 1.0));
             dotPaint.setStyle(this.ck.PaintStyle.Fill);
-            canvas.drawRect(this.ck.LTRBRect(p.x - dotSize, p.y - dotSize, p.x + dotSize, p.y + dotSize), dotPaint);
+            canvas.drawRect(
+                this.ck.LTRBRect(p.x - dotSize, p.y - dotSize, p.x + dotSize, p.y + dotSize),
+                dotPaint,
+            );
             dotPaint.setColor(this.ck.Color(0, 162, 255, 1.0));
             dotPaint.setStyle(this.ck.PaintStyle.Stroke);
             dotPaint.setStrokeWidth(1 / this.zoom);
-            canvas.drawRect(this.ck.LTRBRect(p.x - dotSize, p.y - dotSize, p.x + dotSize, p.y + dotSize), dotPaint);
+            canvas.drawRect(
+                this.ck.LTRBRect(p.x - dotSize, p.y - dotSize, p.x + dotSize, p.y + dotSize),
+                dotPaint,
+            );
         }
 
         handleLinePaint.delete();
@@ -2243,7 +2698,12 @@ export class Renderer {
         const n = reader.u32();
         const pts: OutlinePt[] = [];
         for (let i = 0; i < n; i++) {
-            pts.push({ x: reader.f32(), y: reader.f32(), cp1: [reader.f32(), reader.f32()], cp2: [reader.f32(), reader.f32()] });
+            pts.push({
+                x: reader.f32(),
+                y: reader.f32(),
+                cp1: [reader.f32(), reader.f32()],
+                cp2: [reader.f32(), reader.f32()],
+            });
         }
         return this.pathFromOutline(pts, closed);
     }
@@ -2255,11 +2715,13 @@ export class Renderer {
         if (!outline.length) return path;
         path.moveTo(outline[0].x, outline[0].y);
         for (let i = 0; i < outline.length - 1; i++) {
-            const a = outline[i], b = outline[i + 1];
+            const a = outline[i],
+                b = outline[i + 1];
             path.cubicTo(a.cp2[0], a.cp2[1], b.cp1[0], b.cp1[1], b.x, b.y);
         }
         if (closed && outline.length >= 2) {
-            const a = outline[outline.length - 1], b = outline[0];
+            const a = outline[outline.length - 1],
+                b = outline[0];
             path.cubicTo(a.cp2[0], a.cp2[1], b.cp1[0], b.cp1[1], b.x, b.y);
             path.close();
         }
@@ -2277,7 +2739,9 @@ export class Renderer {
         }
         if (this.hoverFaceId < 0 || !this.scene.engine) return;
         try {
-            const outline = JSON.parse(this.scene.engine.get_face_boundary(this.hoverFaceId)) as OutlinePt[];
+            const outline = JSON.parse(
+                this.scene.engine.get_face_boundary(this.hoverFaceId),
+            ) as OutlinePt[];
             if (!outline || outline.length < 2) return;
             const path = this.pathFromOutline(outline, true);
 
@@ -2299,7 +2763,9 @@ export class Renderer {
 
     private drawEdgeHover(canvas: Canvas) {
         try {
-            const outline = JSON.parse(this.scene.engine!.get_edge_polyline(this.hoverEdgeId)) as OutlinePt[];
+            const outline = JSON.parse(
+                this.scene.engine!.get_edge_polyline(this.hoverEdgeId),
+            ) as OutlinePt[];
             if (!outline || outline.length < 2) return;
             const path = this.pathFromOutline(outline, false);
 

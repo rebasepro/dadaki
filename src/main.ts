@@ -1,23 +1,23 @@
-import { Renderer } from './renderer';
-import { UIEngine } from './ui';
-import { InputManager } from './input';
-import { WasmScene } from './wasm_scene';
-import { ContextBar } from './context_bar';
-import { Toolbar } from './toolbar';
-import { Document } from './document';
-import { FileService } from './file_service';
-import { AppMenu } from './app_menu';
-import { ExportDialog, type ExportOptions } from './export_dialog';
-import { TabStrip } from './tab_strip';
-import { DocumentManager } from './document_manager';
-import { BackupDialog } from './backup_dialog';
-import { PersistenceManager } from './persistence';
 import { AboutDialog } from './about_dialog';
+import { AppMenu } from './app_menu';
+import { BackupDialog } from './backup_dialog';
+import { ContextBar } from './context_bar';
+import { Document } from './document';
+import { DocumentManager } from './document_manager';
+import { ExportDialog, type ExportOptions } from './export_dialog';
+import { FileService } from './file_service';
+import { InputManager } from './input';
+import { PersistenceManager } from './persistence';
+import { Renderer } from './renderer';
+import { TabStrip } from './tab_strip';
+import { Toolbar } from './toolbar';
+import { UIEngine } from './ui';
+import { WasmScene } from './wasm_scene';
 
 async function bootstrap() {
-    // @ts-ignore - Loaded from script tag in index.html
+    // @ts-expect-error - Loaded from script tag in index.html
     const ck = await CanvasKitInit({
-        locateFile: (file: string) => `/${file}`
+        locateFile: (file: string) => `/${file}`,
     });
 
     const wasmScene = new WasmScene(ck);
@@ -30,7 +30,6 @@ async function bootstrap() {
     const input = new InputManager(canvas, wasmScene, ui, renderer);
     renderer.inputManager = input;
     (window as any).app = { scene: wasmScene, input: input, ui: ui, renderer: renderer, ck: ck };
-
 
     // Tool rail — grouped tools with flyouts
     const toolbarEl = document.getElementById('toolbar') as HTMLElement;
@@ -69,7 +68,12 @@ async function bootstrap() {
     });
 
     const documentManager = new DocumentManager(
-        wasmScene, ui, input, renderer, fileService, tabStrip,
+        wasmScene,
+        ui,
+        input,
+        renderer,
+        fileService,
+        tabStrip,
         () => fileService.refreshChrome(),
     );
     input.fileService = fileService;
@@ -77,22 +81,25 @@ async function bootstrap() {
 
     // Export dialog + button. Resolves the chosen artboard (or whole canvas)
     // into export bounds + optional background.
-    const exportDialog = new ExportDialog((opts: ExportOptions) => {
-        const arts = wasmScene.getArtboards();
-        let bounds: { x: number; y: number; w: number; h: number } | undefined;
-        let background: { r: number; g: number; b: number; a: number } | undefined;
-        if (opts.artboardId === 'all') {
-            bounds = renderer.getArtboardsBounds();
-        } else {
-            const ab = arts.find(a => a.id === opts.artboardId) ?? arts[0];
-            if (ab) {
-                bounds = { x: ab.x, y: ab.y, w: ab.w, h: ab.h };
-                if (!opts.transparent) background = ab.background;
+    const exportDialog = new ExportDialog(
+        (opts: ExportOptions) => {
+            const arts = wasmScene.getArtboards();
+            let bounds: { x: number; y: number; w: number; h: number } | undefined;
+            let background: { r: number; g: number; b: number; a: number } | undefined;
+            if (opts.artboardId === 'all') {
+                bounds = renderer.getArtboardsBounds();
+            } else {
+                const ab = arts.find((a) => a.id === opts.artboardId) ?? arts[0];
+                if (ab) {
+                    bounds = { x: ab.x, y: ab.y, w: ab.w, h: ab.h };
+                    if (!opts.transparent) background = ab.background;
+                }
             }
-        }
-        if (opts.format === 'png') ui.exportPNG(opts.scale, bounds, background);
-        else ui.exportSVG(bounds, background);
-    }, () => wasmScene.getArtboards().map(a => ({ id: a.id, name: a.name })));
+            if (opts.format === 'png') ui.exportPNG(opts.scale, bounds, background);
+            else ui.exportSVG(bounds, background);
+        },
+        () => wasmScene.getArtboards().map((a) => ({ id: a.id, name: a.name })),
+    );
     input.openExportDialog = () => exportDialog.open();
     document.getElementById('export-btn')?.addEventListener('click', () => exportDialog.open());
 
@@ -124,7 +131,7 @@ async function bootstrap() {
     // dev — HMR reloads constantly and the prompt is just noise there.
     if (!import.meta.env.DEV) {
         window.addEventListener('beforeunload', (e) => {
-            if (documentManager.all().some(d => d.dirty)) {
+            if (documentManager.all().some((d) => d.dirty)) {
                 e.preventDefault();
                 e.returnValue = '';
             }
@@ -157,10 +164,18 @@ async function bootstrap() {
     // Dev-only handle for debugging and automated testing
     if (import.meta.env.DEV) {
         (window as unknown as Record<string, unknown>).__editor = {
-            scene: wasmScene, ui, input, renderer, contextBar,
-            fileService, documentManager, backupDialog,
+            scene: wasmScene,
+            ui,
+            input,
+            renderer,
+            contextBar,
+            fileService,
+            documentManager,
+            backupDialog,
             persistence: PersistenceManager,
-            get doc() { return documentManager.active(); },
+            get doc() {
+                return documentManager.active();
+            },
             /** Shape stress harness — see src/dev_stress.ts. */
             stress: async (opts?: import('./dev_stress').StressOptions) => {
                 const { runStress } = await import('./dev_stress');
@@ -172,6 +187,6 @@ async function bootstrap() {
     console.log('Dadaki Vector Engine Initialized (Rust Core / CanvasKit)');
 }
 
-bootstrap().catch(err => {
+bootstrap().catch((err) => {
     console.error('Failed to initialize engine:', err);
 });

@@ -14,10 +14,23 @@ export const DEFAULT_TEXT_FONT = 'Inter';
 
 /** Curated list of available Google Fonts. */
 export const GOOGLE_FONTS = [
-    'Inter', 'Roboto', 'Open Sans', 'Lato', 'Montserrat', 'Poppins', 'Nunito',
-    'Playfair Display', 'Merriweather', 'Lora', 'PT Serif',
-    'JetBrains Mono', 'Fira Code', 'Source Code Pro',
-    'Bebas Neue', 'Oswald', 'Raleway',
+    'Inter',
+    'Roboto',
+    'Open Sans',
+    'Lato',
+    'Montserrat',
+    'Poppins',
+    'Nunito',
+    'Playfair Display',
+    'Merriweather',
+    'Lora',
+    'PT Serif',
+    'JetBrains Mono',
+    'Fira Code',
+    'Source Code Pro',
+    'Bebas Neue',
+    'Oswald',
+    'Raleway',
 ];
 
 /** Cache of loaded font ArrayBuffers per family (regular + bold TTFs). */
@@ -74,12 +87,15 @@ export async function loadGoogleFontData(fontFamily: string): Promise<ArrayBuffe
         // decode (renders tofu). The fontsource CDN serves plain TTF that
         // CanvasKit registers correctly. Grab regular (400) and bold (700).
         const id = fontsourceId(fontFamily);
-        const url = (w: number) => `https://cdn.jsdelivr.net/fontsource/fonts/${id}@latest/latin-${w}-normal.ttf`;
+        const url = (w: number) =>
+            `https://cdn.jsdelivr.net/fontsource/fonts/${id}@latest/latin-${w}-normal.ttf`;
         const fetchTtf = async (w: number): Promise<ArrayBuffer | null> => {
             try {
                 const resp = await fetch(url(w));
                 return resp.ok ? await resp.arrayBuffer() : null;
-            } catch { return null; }
+            } catch {
+                return null;
+            }
         };
         const [regular, bold] = await Promise.all([fetchTtf(400), fetchTtf(700)]);
         if (!regular) throw new Error('no TTF for regular weight');
@@ -103,7 +119,9 @@ export async function loadGoogleFontData(fontFamily: string): Promise<ArrayBuffe
  * Build a CanvasKit TypefaceFontProvider with all currently loaded fonts.
  * Returns null if no custom fonts have been loaded yet.
  */
-export function buildFontProvider(ck: CanvasKit): ReturnType<CanvasKit['TypefaceFontProvider']['Make']> | null {
+export function buildFontProvider(
+    ck: CanvasKit,
+): ReturnType<CanvasKit['TypefaceFontProvider']['Make']> | null {
     if (fontDataCache.size === 0) return null;
     const provider = ck.TypefaceFontProvider.Make();
     for (const [name, buffers] of fontDataCache) {

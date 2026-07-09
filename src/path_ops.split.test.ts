@@ -1,9 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import {
-    splitPathAtSegment,
-    splitPathAtPoint,
-    evalCubic,
-} from './path_ops';
+import { describe, expect, it } from 'vitest';
+import { evalCubic, splitPathAtPoint, splitPathAtSegment } from './path_ops';
 import type { PathPoint, Subpath } from './types';
 
 /** Corner-style anchor (retracted handles) at (x, y). */
@@ -33,8 +29,8 @@ describe('splitPathAtSegment', () => {
         expect(result[0].closed).toBe(false);
         expect(result[1].closed).toBe(false);
         // First half ends at the cut, second half begins there.
-        expect(result[0].points.map(p => p.x)).toEqual([0, 5]);
-        expect(result[1].points.map(p => p.x)).toEqual([5, 10, 20]);
+        expect(result[0].points.map((p) => p.x)).toEqual([0, 5]);
+        expect(result[1].points.map((p) => p.x)).toEqual([5, 10, 20]);
     });
 
     it('opens a closed subpath at the cut point without dropping geometry', () => {
@@ -112,8 +108,8 @@ describe('splitPathAtPoint', () => {
         const sp = [open(pt(0, 0), pt(10, 0), pt(20, 0), pt(30, 0))];
         const result = splitPathAtPoint(sp, 0, 1);
         expect(result.length).toBe(2);
-        expect(result[0].points.map(p => p.x)).toEqual([0, 10]);
-        expect(result[1].points.map(p => p.x)).toEqual([10, 20, 30]);
+        expect(result[0].points.map((p) => p.x)).toEqual([0, 10]);
+        expect(result[1].points.map((p) => p.x)).toEqual([10, 20, 30]);
         // No geometry lost: 4 originals + 1 duplicated split anchor.
         expect(totalPoints(result)).toBe(5);
     });

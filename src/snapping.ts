@@ -72,7 +72,9 @@ export class SnapEngine {
         // Collect edges/centers/anchors from every LEAF shape, recursing into
         // groups so nested shapes (e.g. an expanded Live Paint group) each snap
         // as themselves — not just to their parent group's overall box.
-        const canAnchors = typeof scene.getResolvedSubpaths === 'function' && typeof scene.getTransform === 'function';
+        const canAnchors =
+            typeof scene.getResolvedSubpaths === 'function' &&
+            typeof scene.getTransform === 'function';
         const collect = (id: number) => {
             if (!scene.getNodeVisible(id)) return; // skips a hidden group's whole subtree
             const children = scene.getNodeChildren ? scene.getNodeChildren(id) : [];
@@ -122,7 +124,10 @@ export class SnapEngine {
         let bestDist = threshold;
         for (const p of this.points) {
             const d = Math.hypot(p.x - x, p.y - y);
-            if (d < bestDist) { bestDist = d; best = p; }
+            if (d < bestDist) {
+                bestDist = d;
+                best = p;
+            }
         }
         return best;
     }
@@ -184,14 +189,25 @@ export class SnapEngine {
     }
 
     /** Snap a single point (shape-creation corner, dragged resize edge). */
-    snapPoint(x: number, y: number, threshold: number): { x: number; y: number; guides: SnapGuide[] } {
+    snapPoint(
+        x: number,
+        y: number,
+        threshold: number,
+    ): { x: number; y: number; guides: SnapGuide[] } {
         const guides: SnapGuide[] = [];
         if (!this.active) return { x, y, guides };
 
         // A true anchor wins over independent edge snapping so endpoints chain.
         const anchor = this.nearestPoint(x, y, threshold);
         if (anchor) {
-            return { x: anchor.x, y: anchor.y, guides: [{ axis: 'x', pos: anchor.x }, { axis: 'y', pos: anchor.y }] };
+            return {
+                x: anchor.x,
+                y: anchor.y,
+                guides: [
+                    { axis: 'x', pos: anchor.x },
+                    { axis: 'y', pos: anchor.y },
+                ],
+            };
         }
 
         const tx = this.nearest(this.xTargets, x, threshold);
@@ -208,7 +224,11 @@ export class SnapEngine {
     }
 
     /** Snap a single axis value. Returns the snapped value and guide, or null if no snap. */
-    snapAxis(axis: 'x' | 'y', value: number, threshold: number): { value: number; guide: SnapGuide } | null {
+    snapAxis(
+        axis: 'x' | 'y',
+        value: number,
+        threshold: number,
+    ): { value: number; guide: SnapGuide } | null {
         if (!this.active) return null;
         const t = this.nearest(axis === 'x' ? this.xTargets : this.yTargets, value, threshold);
         if (t === null) return null;

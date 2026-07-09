@@ -1,29 +1,75 @@
 import type { CanvasKit } from 'canvaskit-wasm';
-import type { WasmScene } from './wasm_scene';
-import { FileIO } from './file_io';
-import type { Color, NodeStyle, Gradient, GradientStop, SceneNode, Paint, Stroke, Artboard } from './types';
-import { isGradient, isPattern, StrokeAlignment } from './types';
-import { hexToRgb, rgbToHex, parseSVGPathD as parseSVGPathDUtil, parseSVGTransform, composeMatrices, transformPoint, identityMatrix, resolveGradientColor, resolveGradient, parseCssColor, parsePreserveAspectRatio, translateMatrix, scaleMatrix, parseSvgLength } from './svg_utils';
-import type { GradientGeo } from './svg_utils';
-import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
-import { parseSvgStylesheet, matchedCssStyles } from './svg_css';
-import type { CssDecl } from './svg_css';
-import type { SVGExportInput, FilledFace, LivePaintRenderData } from './svg_export';
-import type { SVGSubpath, SVGGradientData } from './svg_utils';
-import type { ContextBar } from './context_bar';
-import type { Toolbar } from './toolbar';
-import { iconFolder, iconSquare, iconCircle, iconPenTool, iconType, iconHexagon, iconEye, iconEyeOff, iconLock, iconUnlock, iconFlipH, iconFlipV, iconFlatten, iconRotateCW, iconRotateCCW, iconFrame } from './icons';
-
-/** Minimal HTML escaper for names rendered via innerHTML templates. */
-function escapeHtml(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-import { GradientEditController, sampleGradientColor } from './gradient_edit';
 import { createColorSwatch } from './color_picker';
+import type { ContextBar } from './context_bar';
+import { FileIO } from './file_io';
+import { GradientEditController, sampleGradientColor } from './gradient_edit';
+import {
+    iconCircle,
+    iconEye,
+    iconEyeOff,
+    iconFlatten,
+    iconFlipH,
+    iconFlipV,
+    iconFolder,
+    iconFrame,
+    iconHexagon,
+    iconLock,
+    iconPenTool,
+    iconRotateCCW,
+    iconRotateCW,
+    iconSquare,
+    iconType,
+    iconUnlock,
+} from './icons';
+import type { CssDecl } from './svg_css';
+import { matchedCssStyles, parseSvgStylesheet } from './svg_css';
+import type { FilledFace, LivePaintRenderData, SVGExportInput } from './svg_export';
+import { BLEND_MODE_MAP, buildSVGFromData } from './svg_export';
+import type { GradientGeo, SVGGradientData, SVGSubpath } from './svg_utils';
+import {
+    composeMatrices,
+    escapeHtml,
+    hexToRgb,
+    identityMatrix,
+    parseCssColor,
+    parsePreserveAspectRatio,
+    parseSVGPathD as parseSVGPathDUtil,
+    parseSVGTransform,
+    parseSvgLength,
+    resolveGradient,
+    resolveGradientColor,
+    rgbToHex,
+    scaleMatrix,
+    transformPoint,
+    translateMatrix,
+} from './svg_utils';
+import type { Toolbar } from './toolbar';
+import type {
+    Artboard,
+    Color,
+    Gradient,
+    GradientStop,
+    NodeStyle,
+    Paint,
+    SceneNode,
+    Stroke,
+} from './types';
+import { isGradient, isPattern, StrokeAlignment } from './types';
+import type { WasmScene } from './wasm_scene';
 
 /** Element tags a <clipPath> may legally contain (basic shapes, text, use).
  *  image/switch/symbol/etc. are invalid clip children and are ignored. */
-const CLIP_CHILD_TAGS = new Set(['path', 'rect', 'circle', 'ellipse', 'polygon', 'polyline', 'line', 'text', 'use']);
+const CLIP_CHILD_TAGS = new Set([
+    'path',
+    'rect',
+    'circle',
+    'ellipse',
+    'polygon',
+    'polyline',
+    'line',
+    'text',
+    'use',
+]);
 
 export class UIEngine {
     ck: CanvasKit;
@@ -48,22 +94,31 @@ export class UIEngine {
 
     /** Named 4×5 color-matrix presets for the Color effect (row-major 20 floats). */
     private static readonly COLOR_PRESETS: Record<string, number[]> = {
-        grayscale: [0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0, 0, 0, 1, 0],
-        sepia: [0.393, 0.769, 0.189, 0, 0, 0.349, 0.686, 0.168, 0, 0, 0.272, 0.534, 0.131, 0, 0, 0, 0, 0, 1, 0],
+        grayscale: [
+            0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0,
+            0, 0, 0, 0, 1, 0,
+        ],
+        sepia: [
+            0.393, 0.769, 0.189, 0, 0, 0.349, 0.686, 0.168, 0, 0, 0.272, 0.534, 0.131, 0, 0, 0, 0,
+            0, 1, 0,
+        ],
         invert: [-1, 0, 0, 0, 1, 0, -1, 0, 0, 1, 0, 0, -1, 0, 1, 0, 0, 0, 1, 0],
-        saturate: [0.6063, 0.3575, 0.0361, 0, 0, 0.1065, 0.8575, 0.0361, 0, 0, 0.1065, 0.3575, 0.5361, 0, 0, 0, 0, 0, 1, 0], // ~1.8×
+        saturate: [
+            0.6063, 0.3575, 0.0361, 0, 0, 0.1065, 0.8575, 0.0361, 0, 0, 0.1065, 0.3575, 0.5361, 0,
+            0, 0, 0, 0, 1, 0,
+        ], // ~1.8×
     };
 
     // Static lookup tables (avoid re-creation each call)
     private static readonly ICON_MAP: Record<string, () => string> = {
-        'Group': () => iconFolder(14),
-        'Rect': () => iconSquare(14),
-        'Ellipse': () => iconCircle(14),
-        'Path': () => iconPenTool(14),
-        'Text': () => iconType(14),
-        'Image': () => iconSquare(14),
+        Group: () => iconFolder(14),
+        Rect: () => iconSquare(14),
+        Ellipse: () => iconCircle(14),
+        Path: () => iconPenTool(14),
+        Text: () => iconType(14),
+        Image: () => iconSquare(14),
     };
-    
+
     // DOM Elements — basic
     opacityInput: HTMLInputElement;
     layerList: HTMLElement;
@@ -75,7 +130,6 @@ export class UIEngine {
 
     addFillBtn: HTMLButtonElement;
     addStrokeBtn: HTMLButtonElement;
-
 
     // DOM Elements — extended
     blendMode: HTMLSelectElement;
@@ -141,10 +195,8 @@ export class UIEngine {
         this.fillsList = document.getElementById('fills-list') as HTMLElement;
         this.strokesList = document.getElementById('strokes-list') as HTMLElement;
 
-        
         this.addFillBtn = document.getElementById('add-fill-btn') as HTMLButtonElement;
         this.addStrokeBtn = document.getElementById('add-stroke-btn') as HTMLButtonElement;
-
 
         // Initialize DOM refs — extended
         this.blendMode = document.getElementById('blend-mode') as HTMLSelectElement;
@@ -181,7 +233,9 @@ export class UIEngine {
         this.exportPaneScale = document.getElementById('export-pane-scale') as HTMLSelectElement;
         this.exportPaneFormat = document.getElementById('export-pane-format') as HTMLSelectElement;
         this.exportPaneSuffix = document.getElementById('export-pane-suffix') as HTMLInputElement;
-        this.exportPaneTransparent = document.getElementById('export-pane-transparent') as HTMLInputElement;
+        this.exportPaneTransparent = document.getElementById(
+            'export-pane-transparent',
+        ) as HTMLInputElement;
         this.exportPaneBtn = document.getElementById('export-pane-btn') as HTMLButtonElement;
 
         this.initEvents();
@@ -200,9 +254,11 @@ export class UIEngine {
             if (input.disabled) return;
             const isAb = input.id.startsWith('ab-');
             if (!isAb && this.scene.engine!.get_selection().length === 0) return;
-            
+
             e.preventDefault();
-            try { label.setPointerCapture(e.pointerId); } catch { }
+            try {
+                label.setPointerCapture(e.pointerId);
+            } catch {}
 
             const startX = e.clientX;
             const startVal = parseFloat(input.value) || 0;
@@ -251,7 +307,7 @@ export class UIEngine {
      *  field adjusts its value (Shift = ×10). One undo snapshot per gesture;
      *  live edits apply without history. A plain click focuses the field. */
     private initScrubbing() {
-        document.querySelectorAll<HTMLElement>('.dim-label[data-scrub]').forEach(label => {
+        document.querySelectorAll<HTMLElement>('.dim-label[data-scrub]').forEach((label) => {
             const input = document.getElementById(label.dataset.scrub!) as HTMLInputElement | null;
             if (!input) return;
 
@@ -260,7 +316,11 @@ export class UIEngine {
                     this.applyArtboardBounds();
                 } else if (input === this.cornerRadius) {
                     this.applyCornerRadiusToSelection();
-                } else if (input === this.textFontSize || input === this.textLineHeight || input === this.textLetterSpacing) {
+                } else if (
+                    input === this.textFontSize ||
+                    input === this.textLineHeight ||
+                    input === this.textLetterSpacing
+                ) {
                     this.updateTextPropertiesNoHistory();
                 } else if (input === this.opacityInput) {
                     this._currentStyleJson = this.buildCurrentStyleJson();
@@ -275,7 +335,7 @@ export class UIEngine {
     }
 
     private initCollapsibleSections() {
-        document.querySelectorAll('.panel-section-header').forEach(header => {
+        document.querySelectorAll('.panel-section-header').forEach((header) => {
             header.addEventListener('click', () => {
                 const sectionName = (header as HTMLElement).dataset.section;
                 if (!sectionName) return;
@@ -304,9 +364,7 @@ export class UIEngine {
         });
 
         // Style properties — coalesced undo: one snapshot per gesture
-        const styleInputs = [
-            this.opacityInput, this.blendMode,
-        ];
+        const styleInputs = [this.opacityInput, this.blendMode];
         for (const el of styleInputs) {
             if (el) {
                 // Take a single history snapshot on the first 'input' of a gesture,
@@ -355,7 +413,16 @@ export class UIEngine {
         }
 
         // Typography properties
-        const typographyInputs = [this.textContentInput, this.textFontFamily, this.textFontSize, this.textLineHeight, this.textAlign, this.textWeight, this.textItalic, this.textLetterSpacing];
+        const typographyInputs = [
+            this.textContentInput,
+            this.textFontFamily,
+            this.textFontSize,
+            this.textLineHeight,
+            this.textAlign,
+            this.textWeight,
+            this.textItalic,
+            this.textLetterSpacing,
+        ];
         for (const el of typographyInputs) {
             if (el) {
                 el.addEventListener('input', () => {
@@ -377,7 +444,17 @@ export class UIEngine {
         }
 
         // Transform properties
-        const transformInputs = [this.propX, this.propY, this.propW, this.propH, this.propRotation, this.propSkewX, this.propSkewY, this.propScaleX, this.propScaleY];
+        const transformInputs = [
+            this.propX,
+            this.propY,
+            this.propW,
+            this.propH,
+            this.propRotation,
+            this.propSkewX,
+            this.propSkewY,
+            this.propScaleX,
+            this.propScaleY,
+        ];
         for (const el of transformInputs) {
             if (el) el.addEventListener('change', () => this.updateTransform());
         }
@@ -385,16 +462,16 @@ export class UIEngine {
         // Shift+Arrow = ±10 * step on all dimension fields (Figma convention).
         // Setting the value and dispatching 'change' reuses each field's handler.
         const allScrubbableInputs = [
-            ...transformInputs, 
-            this.cornerRadius, 
-            this.textFontSize, 
-            this.textLineHeight, 
-            this.textLetterSpacing, 
+            ...transformInputs,
+            this.cornerRadius,
+            this.textFontSize,
+            this.textLineHeight,
+            this.textLetterSpacing,
             this.opacityInput,
             document.getElementById('ab-x') as HTMLInputElement,
             document.getElementById('ab-y') as HTMLInputElement,
             document.getElementById('ab-w') as HTMLInputElement,
-            document.getElementById('ab-h') as HTMLInputElement
+            document.getElementById('ab-h') as HTMLInputElement,
         ];
         for (const el of allScrubbableInputs) {
             if (!el) continue;
@@ -405,7 +482,10 @@ export class UIEngine {
                 const max = el.max !== '' ? parseFloat(el.max) : Infinity;
                 const cur = parseFloat(el.value) || 0;
                 const step = el.step !== '' ? parseFloat(el.step) : 1;
-                const val = Math.max(min, Math.min(max, cur + (e.key === 'ArrowUp' ? 10 : -10) * step));
+                const val = Math.max(
+                    min,
+                    Math.min(max, cur + (e.key === 'ArrowUp' ? 10 : -10) * step),
+                );
                 el.value = String(Math.round(val * 100) / 100);
                 el.dispatchEvent(new Event('change'));
             });
@@ -416,7 +496,9 @@ export class UIEngine {
         aspectBtn?.addEventListener('click', () => {
             this.aspectLocked = !this.aspectLocked;
             aspectBtn.classList.toggle('active', this.aspectLocked);
-            aspectBtn.title = this.aspectLocked ? 'Remove proportion constraint' : 'Constrain proportions';
+            aspectBtn.title = this.aspectLocked
+                ? 'Remove proportion constraint'
+                : 'Constrain proportions';
         });
 
         this.initScrubbing();
@@ -430,7 +512,9 @@ export class UIEngine {
             btn.addEventListener('click', () => {
                 const sel = this.scene.engine!.get_selection();
                 if (sel.length === 0) return;
-                this.scene.transaction(() => { for (const id of sel) fn(id); });
+                this.scene.transaction(() => {
+                    for (const id of sel) fn(id);
+                });
                 this.syncWithSelection();
             });
         };
@@ -438,14 +522,14 @@ export class UIEngine {
         // into display values like 450°.
         const rotateBy = (id: number, delta: number) => {
             const tc = this.scene.getNodeTransformComponents(id);
-            const deg = ((tc.rotation_deg + delta + 180) % 360 + 360) % 360 - 180;
+            const deg = ((((tc.rotation_deg + delta + 180) % 360) + 360) % 360) - 180;
             this.scene.engine!.set_node_rotation(id, deg);
         };
-        bindAction('rotate-ccw-btn', iconRotateCCW(12), id => rotateBy(id, -90));
-        bindAction('rotate-cw-btn', iconRotateCW(12), id => rotateBy(id, 90));
-        bindAction('flip-h-btn', iconFlipH(12), id => this.scene.flipNodeH(id));
-        bindAction('flip-v-btn', iconFlipV(12), id => this.scene.flipNodeV(id));
-        bindAction('flatten-btn', iconFlatten(12), id => this.scene.flattenTransform(id));
+        bindAction('rotate-ccw-btn', iconRotateCCW(12), (id) => rotateBy(id, -90));
+        bindAction('rotate-cw-btn', iconRotateCW(12), (id) => rotateBy(id, 90));
+        bindAction('flip-h-btn', iconFlipH(12), (id) => this.scene.flipNodeH(id));
+        bindAction('flip-v-btn', iconFlipV(12), (id) => this.scene.flipNodeV(id));
+        bindAction('flatten-btn', iconFlatten(12), (id) => this.scene.flattenTransform(id));
 
         // Visibility toggle
         this.toggleVisible?.addEventListener('click', () => {
@@ -457,12 +541,13 @@ export class UIEngine {
             this.toggleNodeLocked();
         });
 
-
         const forceExpand = (sectionName: string) => {
             const body = document.querySelector(`[data-section-body="${sectionName}"]`);
-            const header = document.querySelector(`.panel-section-header[data-section="${sectionName}"]`);
+            const header = document.querySelector(
+                `.panel-section-header[data-section="${sectionName}"]`,
+            );
             const chevron = header?.querySelector('.chevron');
-            if (body && body.classList.contains('collapsed')) {
+            if (body?.classList.contains('collapsed')) {
                 body.classList.remove('collapsed');
                 chevron?.classList.remove('collapsed');
             }
@@ -476,7 +561,9 @@ export class UIEngine {
             if (!node) return;
             forceExpand('fill');
             const currentFills = this.getFills(node);
-            this.updateNodeStyle(node, { fills: [...currentFills, { r: 0.8, g: 0.8, b: 0.8, a: 1 }] });
+            this.updateNodeStyle(node, {
+                fills: [...currentFills, { r: 0.8, g: 0.8, b: 0.8, a: 1 }],
+            });
         });
 
         this.addStrokeBtn?.addEventListener('click', (e) => {
@@ -487,18 +574,22 @@ export class UIEngine {
             if (!node) return;
             forceExpand('stroke');
             const currentStrokes = this.getStrokes(node);
-            this.updateNodeStyle(node, { strokes: [...currentStrokes, {
-                paint: { r: 0, g: 0, b: 0, a: 1 },
-                width: 1,
-                cap: 0,
-                join: 0,
-                dash_array: [],
-                dash_offset: 0,
-                miter_limit: 4,
-                alignment: StrokeAlignment.Center
-            }] });
+            this.updateNodeStyle(node, {
+                strokes: [
+                    ...currentStrokes,
+                    {
+                        paint: { r: 0, g: 0, b: 0, a: 1 },
+                        width: 1,
+                        cap: 0,
+                        join: 0,
+                        dash_array: [],
+                        dash_offset: 0,
+                        miter_limit: 4,
+                        alignment: StrokeAlignment.Center,
+                    },
+                ],
+            });
         });
-
 
         // Undo / Redo (header — global actions, deliberately not in the context bar)
         document.getElementById('undo-btn')?.addEventListener('click', () => {
@@ -526,12 +617,18 @@ export class UIEngine {
 
     private applyArtboardBounds() {
         const selectedId = this.scene.renderer?.selectedArtboardId ?? null;
-        const ab = this.scene.getArtboards().find(a => a.id === selectedId);
+        const ab = this.scene.getArtboards().find((a) => a.id === selectedId);
         if (!ab) return;
         const x = parseFloat((document.getElementById('ab-x') as HTMLInputElement).value) || 0;
         const y = parseFloat((document.getElementById('ab-y') as HTMLInputElement).value) || 0;
-        const w = Math.max(1, parseFloat((document.getElementById('ab-w') as HTMLInputElement).value) || 1);
-        const h = Math.max(1, parseFloat((document.getElementById('ab-h') as HTMLInputElement).value) || 1);
+        const w = Math.max(
+            1,
+            parseFloat((document.getElementById('ab-w') as HTMLInputElement).value) || 1,
+        );
+        const h = Math.max(
+            1,
+            parseFloat((document.getElementById('ab-h') as HTMLInputElement).value) || 1,
+        );
         this.scene.setArtboardBounds(ab.id, x, y, w, h);
         this.scene.renderer?.requestRender();
     }
@@ -539,10 +636,12 @@ export class UIEngine {
     /** Wire the artboard properties panel inputs (once, from bindEvents). */
     private bindArtboardPanel() {
         const selectedId = () => this.scene.renderer?.selectedArtboardId ?? null;
-        const current = () => this.scene.getArtboards().find(a => a.id === selectedId());
+        const current = () => this.scene.getArtboards().find((a) => a.id === selectedId());
 
         for (const id of ['ab-x', 'ab-y', 'ab-w', 'ab-h']) {
-            document.getElementById(id)?.addEventListener('change', () => this.applyArtboardBounds());
+            document
+                .getElementById(id)
+                ?.addEventListener('change', () => this.applyArtboardBounds());
         }
         document.getElementById('ab-name')?.addEventListener('change', (e) => {
             const ab = current();
@@ -561,7 +660,13 @@ export class UIEngine {
             if (!ab) return;
             const transparent = (e.target as HTMLInputElement).checked;
             if (transparent) {
-                this.scene.setArtboardBackground(ab.id, ab.background.r, ab.background.g, ab.background.b, 0);
+                this.scene.setArtboardBackground(
+                    ab.id,
+                    ab.background.r,
+                    ab.background.g,
+                    ab.background.b,
+                    0,
+                );
             } else {
                 const c = hexToRgb((document.getElementById('ab-bg') as HTMLInputElement).value);
                 this.scene.setArtboardBackground(ab.id, c.r, c.g, c.b, 1);
@@ -606,7 +711,7 @@ export class UIEngine {
         if (!section) return;
         const empty = document.getElementById('props-empty');
         const id = this.scene.renderer?.selectedArtboardId ?? null;
-        const ab = id !== null ? this.scene.getArtboards().find(a => a.id === id) : undefined;
+        const ab = id !== null ? this.scene.getArtboards().find((a) => a.id === id) : undefined;
 
         this.updateExportPanel();
 
@@ -643,7 +748,10 @@ export class UIEngine {
 
         const selection = this.scene.engine?.get_selection() ?? [];
         const artboardId = this.scene.renderer?.selectedArtboardId ?? null;
-        const ab = artboardId !== null ? this.scene.getArtboards().find(a => a.id === artboardId) : undefined;
+        const ab =
+            artboardId !== null
+                ? this.scene.getArtboards().find((a) => a.id === artboardId)
+                : undefined;
 
         // If nothing is selected, hide the panel completely.
         if (!ab && selection.length === 0) {
@@ -748,15 +856,23 @@ export class UIEngine {
     // selected shapes (that was the "color swatch changes all shapes" bug).
     private _livePaintFill: Color = { r: 0.2, g: 0.55, b: 0.9, a: 1 };
     private _livePaintStroke: Color = { r: 0, g: 0, b: 0, a: 1 };
-    getLivePaintFill(): Color { return { ...this._livePaintFill }; }
-    getLivePaintStroke(): Color { return { ...this._livePaintStroke }; }
-    setLivePaintFill(hex: string) { this._livePaintFill = this.hexToRgb(hex); }
-    setLivePaintStroke(hex: string) { this._livePaintStroke = this.hexToRgb(hex); }
+    getLivePaintFill(): Color {
+        return { ...this._livePaintFill };
+    }
+    getLivePaintStroke(): Color {
+        return { ...this._livePaintStroke };
+    }
+    setLivePaintFill(hex: string) {
+        this._livePaintFill = hexToRgb(hex);
+    }
+    setLivePaintStroke(hex: string) {
+        this._livePaintStroke = hexToRgb(hex);
+    }
 
     /** Get the current fill color from the UI as {r, g, b, a} in 0-1 range. */
 
     updateActiveFillColor(hex: string) {
-        const c = this.hexToRgb(hex);
+        const c = hexToRgb(hex);
         const selection = this.scene.engine!.get_selection();
         if (selection.length > 0) {
             const node = this.scene.getNode(selection[0]);
@@ -764,13 +880,14 @@ export class UIEngine {
                 const newFills = node.style.fills ? [...node.style.fills] : [];
                 if (newFills.length === 0) newFills.push(c);
                 else if (!isGradient(newFills[0])) newFills[0] = c;
-                else if ((newFills[0] as Gradient).stops.length > 0) (newFills[0] as Gradient).stops[0].color = c;
+                else if ((newFills[0] as Gradient).stops.length > 0)
+                    (newFills[0] as Gradient).stops[0].color = c;
                 this.updateNodeStyle(node, { fills: newFills });
             }
         } else {
             // Update default style if nothing selected
             try {
-                const s = JSON.parse(this._currentStyleJson || "{}");
+                const s = JSON.parse(this._currentStyleJson || '{}');
                 if (!s.fills) s.fills = [];
                 if (s.fills.length === 0) s.fills.push(c);
                 else s.fills[0] = c;
@@ -784,7 +901,8 @@ export class UIEngine {
         try {
             const s = JSON.parse(this.getCurrentStyle());
             if (s.strokes && s.strokes.length > 0 && s.strokes[0].paint) {
-                if (isGradient(s.strokes[0].paint) && s.strokes[0].paint.stops.length > 0) return s.strokes[0].paint.stops[0].color;
+                if (isGradient(s.strokes[0].paint) && s.strokes[0].paint.stops.length > 0)
+                    return s.strokes[0].paint.stops[0].color;
                 if (!isGradient(s.strokes[0].paint)) return s.strokes[0].paint;
             }
         } catch {}
@@ -792,35 +910,57 @@ export class UIEngine {
     }
 
     updateActiveStrokeColor(hex: string) {
-        const c = this.hexToRgb(hex);
+        const c = hexToRgb(hex);
         const selection = this.scene.engine!.get_selection();
         if (selection.length > 0) {
             const node = this.scene.getNode(selection[0]);
             if (node) {
                 const newStrokes = node.style.strokes ? [...node.style.strokes] : [];
-                if (newStrokes.length === 0) newStrokes.push({ paint: c, width: 1, cap: 0, join: 0, dash_array: [], dash_offset: 0, miter_limit: 4, alignment: StrokeAlignment.Center });
-                else if (newStrokes[0].paint && !isGradient(newStrokes[0].paint)) newStrokes[0].paint = c;
-                else if ((newStrokes[0].paint as Gradient).stops.length > 0) (newStrokes[0].paint as Gradient).stops[0].color = c;
+                if (newStrokes.length === 0)
+                    newStrokes.push({
+                        paint: c,
+                        width: 1,
+                        cap: 0,
+                        join: 0,
+                        dash_array: [],
+                        dash_offset: 0,
+                        miter_limit: 4,
+                        alignment: StrokeAlignment.Center,
+                    });
+                else if (newStrokes[0].paint && !isGradient(newStrokes[0].paint))
+                    newStrokes[0].paint = c;
+                else if ((newStrokes[0].paint as Gradient).stops.length > 0)
+                    (newStrokes[0].paint as Gradient).stops[0].color = c;
                 this.updateNodeStyle(node, { strokes: newStrokes });
             }
         } else {
             try {
-                const s = JSON.parse(this._currentStyleJson || "{}");
+                const s = JSON.parse(this._currentStyleJson || '{}');
                 if (!s.strokes) s.strokes = [];
-                if (s.strokes.length === 0) s.strokes.push({ paint: c, width: 1, cap: 0, join: 0, dash_array: [], dash_offset: 0, miter_limit: 4, alignment: StrokeAlignment.Center });
+                if (s.strokes.length === 0)
+                    s.strokes.push({
+                        paint: c,
+                        width: 1,
+                        cap: 0,
+                        join: 0,
+                        dash_array: [],
+                        dash_offset: 0,
+                        miter_limit: 4,
+                        alignment: StrokeAlignment.Center,
+                    });
                 else s.strokes[0].paint = c;
                 this._currentStyleJson = JSON.stringify(s);
             } catch {}
         }
         this.contextBar?.refresh();
     }
-    
+
     getActiveFillColor(): Color {
         try {
             const s = JSON.parse(this.getCurrentStyle());
             if (s.fills && s.fills.length > 0) return s.fills[0];
         } catch {}
-        return { r: 66/255, g: 133/255, b: 244/255, a: 1 };
+        return { r: 66 / 255, g: 133 / 255, b: 244 / 255, a: 1 };
     }
 
     private toggleNodeVisibility() {
@@ -872,17 +1012,17 @@ export class UIEngine {
      *  With no selection the panel is editing that default, so record it. */
     private applyStylePanelToSelection(withHistory: boolean) {
         const opacity = (parseFloat(this.opacityInput?.value) || 100) / 100;
-        const blend_mode = this.blendMode ? parseInt(this.blendMode.value) || 0 : 0;
+        const blend_mode = this.blendMode ? parseInt(this.blendMode.value, 10) || 0 : 0;
 
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) {
             // Editing the default for the next shape (nothing selected).
             try {
-                const s = JSON.parse(this._currentStyleJson || "{}");
+                const s = JSON.parse(this._currentStyleJson || '{}');
                 s.opacity = opacity;
                 s.blend_mode = blend_mode;
                 this._currentStyleJson = JSON.stringify(s);
-            } catch { }
+            } catch {}
             return;
         }
         for (const id of selection) {
@@ -901,7 +1041,9 @@ export class UIEngine {
     applyCornerRadiusToSelection() {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
-        const radius = this.cornerRadius ? Math.max(0, parseFloat(this.cornerRadius.value) || 0) : 0;
+        const radius = this.cornerRadius
+            ? Math.max(0, parseFloat(this.cornerRadius.value) || 0)
+            : 0;
         const im = this.scene.renderer?.inputManager;
 
         for (const id of selection) {
@@ -936,13 +1078,27 @@ export class UIEngine {
 
     /** Build a style JSON string from the current UI panel values. */
     private buildCurrentStyleJson(): string {
-        return this._currentStyleJson || JSON.stringify({
-            fills: [{ r: 0.8, g: 0.8, b: 0.8, a: 1.0 }],
-            strokes: [{ paint: { r: 0, g: 0, b: 0, a: 1.0 }, width: 2, cap: 0, join: 0, dash_array: [], dash_offset: 0, miter_limit: 4, alignment: StrokeAlignment.Center }],
-            opacity: (parseFloat(this.opacityInput?.value) || 100) / 100,
-            blend_mode: this.blendMode ? parseInt(this.blendMode.value) || 0 : 0,
-            corner_radius: this.cornerRadius ? parseFloat(this.cornerRadius.value) || 0 : 0,
-        });
+        return (
+            this._currentStyleJson ||
+            JSON.stringify({
+                fills: [{ r: 0.8, g: 0.8, b: 0.8, a: 1.0 }],
+                strokes: [
+                    {
+                        paint: { r: 0, g: 0, b: 0, a: 1.0 },
+                        width: 2,
+                        cap: 0,
+                        join: 0,
+                        dash_array: [],
+                        dash_offset: 0,
+                        miter_limit: 4,
+                        alignment: StrokeAlignment.Center,
+                    },
+                ],
+                opacity: (parseFloat(this.opacityInput?.value) || 100) / 100,
+                blend_mode: this.blendMode ? parseInt(this.blendMode.value, 10) || 0 : 0,
+                corner_radius: this.cornerRadius ? parseFloat(this.cornerRadius.value) || 0 : 0,
+            })
+        );
     }
 
     /** Get the current ("last used") style as a JSON string.
@@ -1004,7 +1160,10 @@ export class UIEngine {
         const parentId = this.scene.getNodeParent(id);
         if (parentId < 0) return [wdx, wdy]; // top-level: parent is identity
         const p = this.scene.getTransform(parentId); // row-major global
-        const a = p[0], b = p[1], c = p[3], d = p[4];
+        const a = p[0],
+            b = p[1],
+            c = p[3],
+            d = p[4];
         const det = a * d - b * c;
         if (Math.abs(det) < 1e-9) return [wdx, wdy];
         return [(d * wdx - b * wdy) / det, (-c * wdx + a * wdy) / det];
@@ -1021,10 +1180,17 @@ export class UIEngine {
         // Only write the components the user actually edited. Writing back
         // untouched fields would quantize the exact stored values to the
         // rounded display strings (and spuriously resize on rotation edits).
-        const anyEdit = [this.propX, this.propY, this.propW, this.propH,
-            this.propRotation, this.propSkewX, this.propSkewY,
-            this.propScaleX, this.propScaleY]
-            .some(i => this.fieldEdited(i));
+        const anyEdit = [
+            this.propX,
+            this.propY,
+            this.propW,
+            this.propH,
+            this.propRotation,
+            this.propSkewX,
+            this.propSkewY,
+            this.propScaleX,
+            this.propScaleY,
+        ].some((i) => this.fieldEdited(i));
         if (!anyEdit) return;
 
         const applyEdits = () => {
@@ -1034,9 +1200,11 @@ export class UIEngine {
             if (this.fieldEdited(this.propX) || this.fieldEdited(this.propY)) {
                 const b = this.scene.getNodeBounds(id);
                 const worldDx = this.fieldEdited(this.propX)
-                    ? (parseFloat(this.propX!.value) || 0) - b[0] : 0;
+                    ? (parseFloat(this.propX!.value) || 0) - b[0]
+                    : 0;
                 const worldDy = this.fieldEdited(this.propY)
-                    ? (parseFloat(this.propY!.value) || 0) - b[1] : 0;
+                    ? (parseFloat(this.propY!.value) || 0) - b[1]
+                    : 0;
                 const [ldx, ldy] = this.worldDeltaToLocal(id, worldDx, worldDy);
                 this.scene.moveNode(id, ldx, ldy);
             }
@@ -1046,9 +1214,11 @@ export class UIEngine {
             if (this.fieldEdited(this.propW) || this.fieldEdited(this.propH)) {
                 const cur = this.getNodeDisplaySize(node, id);
                 let newW = this.fieldEdited(this.propW)
-                    ? (parseFloat(this.propW!.value) || 0) : (cur?.w ?? 0);
+                    ? parseFloat(this.propW!.value) || 0
+                    : (cur?.w ?? 0);
                 let newH = this.fieldEdited(this.propH)
-                    ? (parseFloat(this.propH!.value) || 0) : (cur?.h ?? 0);
+                    ? parseFloat(this.propH!.value) || 0
+                    : (cur?.h ?? 0);
                 // Proportion constraint: editing one axis scales the other.
                 if (this.aspectLocked && cur && cur.w > 0 && cur.h > 0) {
                     if (this.fieldEdited(this.propW) && !this.fieldEdited(this.propH)) {
@@ -1069,9 +1239,11 @@ export class UIEngine {
             if (this.fieldEdited(this.propSkewX) || this.fieldEdited(this.propSkewY)) {
                 const tc = this.scene.getNodeTransformComponents(id);
                 const skewX = this.fieldEdited(this.propSkewX)
-                    ? (parseFloat(this.propSkewX!.value) || 0) : tc.skew_x_deg;
+                    ? parseFloat(this.propSkewX!.value) || 0
+                    : tc.skew_x_deg;
                 const skewY = this.fieldEdited(this.propSkewY)
-                    ? (parseFloat(this.propSkewY!.value) || 0) : tc.skew_y_deg;
+                    ? parseFloat(this.propSkewY!.value) || 0
+                    : tc.skew_y_deg;
                 this.scene.engine!.set_node_skew(id, skewX, skewY);
             }
             if (this.fieldEdited(this.propScaleX) || this.fieldEdited(this.propScaleY)) {
@@ -1084,9 +1256,11 @@ export class UIEngine {
                     return Math.abs(v) > 0.001 ? v : cur;
                 };
                 const sx = this.fieldEdited(this.propScaleX)
-                    ? parseScale(this.propScaleX!, tc.scale_x) : tc.scale_x;
+                    ? parseScale(this.propScaleX!, tc.scale_x)
+                    : tc.scale_x;
                 const sy = this.fieldEdited(this.propScaleY)
-                    ? parseScale(this.propScaleY!, tc.scale_y) : tc.scale_y;
+                    ? parseScale(this.propScaleY!, tc.scale_y)
+                    : tc.scale_y;
                 this.scene.engine!.set_node_scale(id, sx, sy);
             }
         };
@@ -1113,7 +1287,11 @@ export class UIEngine {
         // Node selection and artboard selection are mutually exclusive: selecting
         // a node clears any selected artboard. Then reconcile which property
         // sections are visible (Frame vs node properties).
-        if (selection.length > 0 && this.scene.renderer && this.scene.renderer.selectedArtboardId !== null) {
+        if (
+            selection.length > 0 &&
+            this.scene.renderer &&
+            this.scene.renderer.selectedArtboardId !== null
+        ) {
             this.scene.renderer.selectedArtboardId = null;
         }
         this.refreshArtboardPanel();
@@ -1125,7 +1303,7 @@ export class UIEngine {
             }
             return;
         }
-        
+
         const node = this.scene.getNode(selection[0]);
         if (!node) {
             this.clearPropertyPanel();
@@ -1137,7 +1315,9 @@ export class UIEngine {
         }
         const style = node.style;
 
-        this.opacityInput.value = ((style.opacity !== undefined ? style.opacity : 1) * 100).toFixed(0);
+        this.opacityInput.value = ((style.opacity !== undefined ? style.opacity : 1) * 100).toFixed(
+            0,
+        );
         if (this.blendMode) this.blendMode.value = (style.blend_mode || 0).toString();
 
         // Effects list (single-selection only)
@@ -1154,7 +1334,8 @@ export class UIEngine {
             if (node.geometry.Rect) {
                 this.cornerRadius.value = (style.corner_radius || 0).toString();
             } else if (node.geometry.Path) {
-                const editingThis = im?.editingNodeId === selection[0] && (im?.selectedPoints?.size ?? 0) > 0;
+                const editingThis =
+                    im?.editingNodeId === selection[0] && (im?.selectedPoints?.size ?? 0) > 0;
                 const radii: number[] = [];
                 const subs = node.geometry.Path.subpaths;
                 for (let si = 0; si < subs.length; si++) {
@@ -1164,7 +1345,8 @@ export class UIEngine {
                         }
                     }
                 }
-                const uniform = radii.length > 0 && radii.every(r => Math.abs(r - radii[0]) < 1e-3);
+                const uniform =
+                    radii.length > 0 && radii.every((r) => Math.abs(r - radii[0]) < 1e-3);
                 this.cornerRadius.value = uniform ? String(radii[0]) : '';
                 if (!uniform) this.cornerRadius.placeholder = 'Mixed';
             } else {
@@ -1173,7 +1355,8 @@ export class UIEngine {
         }
         cornerRadiusCell?.classList.toggle('disabled', !radiusSupported);
 
-        if (this.toggleVisible) this.toggleVisible.classList.toggle('active', node.visible !== false);
+        if (this.toggleVisible)
+            this.toggleVisible.classList.toggle('active', node.visible !== false);
         if (this.toggleLocked) this.toggleLocked.classList.toggle('active', node.locked === true);
 
         // X/Y show the top-left of the world-space bounding box (Figma-style),
@@ -1194,10 +1377,14 @@ export class UIEngine {
         {
             const tc = this.scene.getNodeTransformComponents(selection[0]);
             this.syncField(this.propRotation, Math.round(tc.rotation_deg).toString());
-            this.syncField(this.propSkewX,
-                Math.abs(tc.skew_x_deg) < 0.05 ? '0' : tc.skew_x_deg.toFixed(1));
-            this.syncField(this.propSkewY,
-                Math.abs(tc.skew_y_deg) < 0.05 ? '0' : tc.skew_y_deg.toFixed(1));
+            this.syncField(
+                this.propSkewX,
+                Math.abs(tc.skew_x_deg) < 0.05 ? '0' : tc.skew_x_deg.toFixed(1),
+            );
+            this.syncField(
+                this.propSkewY,
+                Math.abs(tc.skew_y_deg) < 0.05 ? '0' : tc.skew_y_deg.toFixed(1),
+            );
             this.syncField(this.propScaleX, String(Math.round(tc.scale_x * 100)));
             this.syncField(this.propScaleY, String(Math.round(tc.scale_y * 100)));
         }
@@ -1213,23 +1400,26 @@ export class UIEngine {
             if (this.textContentInput && document.activeElement !== this.textContentInput) {
                 this.textContentInput.value = node.geometry.Text.content || '';
             }
-            if (this.textFontFamily) this.textFontFamily.value = node.geometry.Text.font_family || '';
-            if (this.textFontSize) this.textFontSize.value = String(node.geometry.Text.font_size || 32);
-            if (this.textLineHeight) this.textLineHeight.value = String(node.geometry.Text.line_height || 1.2);
+            if (this.textFontFamily)
+                this.textFontFamily.value = node.geometry.Text.font_family || '';
+            if (this.textFontSize)
+                this.textFontSize.value = String(node.geometry.Text.font_size || 32);
+            if (this.textLineHeight)
+                this.textLineHeight.value = String(node.geometry.Text.line_height || 1.2);
             if (this.textAlign) this.textAlign.value = String(node.geometry.Text.text_align || 0);
-            if (this.textWeight) this.textWeight.value = String(node.geometry.Text.font_weight || 400);
+            if (this.textWeight)
+                this.textWeight.value = String(node.geometry.Text.font_weight || 400);
             if (this.textItalic) this.textItalic.value = node.geometry.Text.italic ? '1' : '0';
-            if (this.textLetterSpacing) this.textLetterSpacing.value = String(node.geometry.Text.letter_spacing || 0);
+            if (this.textLetterSpacing)
+                this.textLetterSpacing.value = String(node.geometry.Text.letter_spacing || 0);
         } else {
             if (this.typographySection) this.typographySection.style.display = 'none';
         }
-        
+
         // Render dynamic lists
         this.renderFillsList(node);
         this.renderStrokesList(node);
-
     }
-
 
     /** Clear the property panel (when nothing is selected). Show the CURRENT style (what a newly drawn
      *  shape will get) in the style controls and blank the transform fields. */
@@ -1238,7 +1428,7 @@ export class UIEngine {
             const s = JSON.parse(this.getCurrentStyle());
             this.opacityInput.value = String(Math.round((s.opacity ?? 1) * 100));
             if (this.blendMode) this.blendMode.value = String(s.blend_mode ?? 0);
-        } catch { }
+        } catch {}
         if (this.propX) this.propX.value = '';
         if (this.propY) this.propY.value = '';
         if (this.propW) this.propW.value = '';
@@ -1257,10 +1447,9 @@ export class UIEngine {
         if (this.toggleLocked) this.toggleLocked.classList.remove('active');
         if (this.typographySection) this.typographySection.style.display = 'none';
         document.getElementById('corner-radius-cell')?.classList.add('disabled');
-        
+
         if (this.fillsList) this.fillsList.innerHTML = '';
         if (this.strokesList) this.strokesList.innerHTML = '';
-
     }
 
     /** Apply typography properties from the side panel to the selected text node. */
@@ -1278,16 +1467,18 @@ export class UIEngine {
 
         // Update font size via setTextContent
         // NOTE: we need a way to set properties without history for live preview
-        // Let's add set_text_properties_no_history to engine if needed, 
+        // Let's add set_text_properties_no_history to engine if needed,
         // or just use the current one and assume history was already saved by the listener.
-        
+
         const fontWeight = parseInt(this.textWeight?.value ?? '400', 10);
         const italic = (this.textItalic?.value ?? '0') === '1';
         const letterSpacing = parseFloat(this.textLetterSpacing?.value ?? '0') || 0;
 
         // Content from the panel field (populated on selection, so it reflects
         // the node's text unless the user edited it here).
-        const content = this.textContentInput ? this.textContentInput.value : node.geometry.Text.content;
+        const content = this.textContentInput
+            ? this.textContentInput.value
+            : node.geometry.Text.content;
         this.scene.engine!.set_text_content(id, content, fontSize);
         this.scene.engine!.set_text_properties(id, fontFamily, textAlign, lineHeight);
         this.scene.engine!.set_text_style(id, fontWeight, italic, letterSpacing);
@@ -1298,8 +1489,14 @@ export class UIEngine {
 
     /** Map from numeric node type (engine enum) to string key for icon lookup.
      *  0=Path, 1=Rect, 2=Ellipse, 3=Group, 4=Text */
-    private static readonly NODE_TYPE_KEY: readonly string[] = ['Path', 'Rect', 'Ellipse', 'Group', 'Text', 'Image'];
-
+    private static readonly NODE_TYPE_KEY: readonly string[] = [
+        'Path',
+        'Rect',
+        'Ellipse',
+        'Group',
+        'Text',
+        'Image',
+    ];
 
     private getFills(node: SceneNode): Paint[] {
         return node.style.fills || [];
@@ -1309,11 +1506,11 @@ export class UIEngine {
         return node.style.strokes || [];
     }
 
-        /** Cache of data-URI previews for pattern tile images, keyed by image id. */
-        private _patternPreviewCache = new Map<number, string | null>();
+    /** Cache of data-URI previews for pattern tile images, keyed by image id. */
+    private _patternPreviewCache = new Map<number, string | null>();
 
-        /** A data-URI preview for a pattern's tile image (from the engine's bytes). */
-        private _patternPreviewUri(imageId: number): string | null {
+    /** A data-URI preview for a pattern's tile image (from the engine's bytes). */
+    private _patternPreviewUri(imageId: number): string | null {
         if (this._patternPreviewCache.has(imageId)) return this._patternPreviewCache.get(imageId)!;
         let uri: string | null = null;
         try {
@@ -1324,69 +1521,115 @@ export class UIEngine {
                 for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
                 uri = `data:${mime};base64,${btoa(bin)}`;
             }
-        } catch { /* noop */ }
+        } catch {
+            /* noop */
+        }
         this._patternPreviewCache.set(imageId, uri);
         return uri;
     }
 
-        /** Local-space bounding box of a node's geometry, used to place default
-         *  gradient endpoints so a new gradient spans the shape. */
-        private nodeLocalExtent(node: SceneNode): { minX: number; minY: number; maxX: number; maxY: number } {
+    /** Local-space bounding box of a node's geometry, used to place default
+     *  gradient endpoints so a new gradient spans the shape. */
+    private nodeLocalExtent(node: SceneNode): {
+        minX: number;
+        minY: number;
+        maxX: number;
+        maxY: number;
+    } {
         const g = node.geometry;
         if (g.Rect) return { minX: 0, minY: 0, maxX: g.Rect.width, maxY: g.Rect.height };
         if (g.Image) return { minX: 0, minY: 0, maxX: g.Image.width, maxY: g.Image.height };
-        if (g.Ellipse) return { minX: -g.Ellipse.radius_x, minY: -g.Ellipse.radius_y, maxX: g.Ellipse.radius_x, maxY: g.Ellipse.radius_y };
+        if (g.Ellipse)
+            return {
+                minX: -g.Ellipse.radius_x,
+                minY: -g.Ellipse.radius_y,
+                maxX: g.Ellipse.radius_x,
+                maxY: g.Ellipse.radius_y,
+            };
         if (g.Path) {
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            for (const sp of g.Path.subpaths) for (const p of sp.points) {
-                minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-                maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
-            }
+            let minX = Infinity,
+                minY = Infinity,
+                maxX = -Infinity,
+                maxY = -Infinity;
+            for (const sp of g.Path.subpaths)
+                for (const p of sp.points) {
+                    minX = Math.min(minX, p.x);
+                    minY = Math.min(minY, p.y);
+                    maxX = Math.max(maxX, p.x);
+                    maxY = Math.max(maxY, p.y);
+                }
             if (minX <= maxX) return { minX, minY, maxX, maxY };
         }
-        if (g.Text) { const fs = g.Text.font_size || 16; return { minX: 0, minY: -fs, maxX: (g.Text.content.length * fs * 0.6) || fs, maxY: 0 }; }
+        if (g.Text) {
+            const fs = g.Text.font_size || 16;
+            return { minX: 0, minY: -fs, maxX: g.Text.content.length * fs * 0.6 || fs, maxY: 0 };
+        }
         return { minX: 0, minY: 0, maxX: 100, maxY: 100 };
     }
 
-        /** Rotate a gradient's axis to `angleDeg` around its midpoint,
-         *  preserving the axis length (so custom endpoints keep their span). */
-        private static rotateGradientTo(grad: Gradient, angleDeg: number): void {
-        const cx = (grad.start_x + grad.end_x) / 2, cy = (grad.start_y + grad.end_y) / 2;
+    /** Rotate a gradient's axis to `angleDeg` around its midpoint,
+     *  preserving the axis length (so custom endpoints keep their span). */
+    private static rotateGradientTo(grad: Gradient, angleDeg: number): void {
+        const cx = (grad.start_x + grad.end_x) / 2,
+            cy = (grad.start_y + grad.end_y) / 2;
         const half = Math.hypot(grad.end_x - grad.start_x, grad.end_y - grad.start_y) / 2;
-        const a = angleDeg * Math.PI / 180;
-        const dx = Math.cos(a) * half, dy = Math.sin(a) * half;
-        grad.start_x = cx - dx; grad.start_y = cy - dy;
-        grad.end_x = cx + dx; grad.end_y = cy + dy;
+        const a = (angleDeg * Math.PI) / 180;
+        const dx = Math.cos(a) * half,
+            dy = Math.sin(a) * half;
+        grad.start_x = cx - dx;
+        grad.start_y = cy - dy;
+        grad.end_x = cx + dx;
+        grad.end_y = cy + dy;
     }
 
-        /** Current angle (deg) of a gradient's axis in node-local space. */
-        private static gradientAngle(grad: Gradient): number {
-        return Math.atan2(grad.end_y - grad.start_y, grad.end_x - grad.start_x) * 180 / Math.PI;
+    /** Current angle (deg) of a gradient's axis in node-local space. */
+    private static gradientAngle(grad: Gradient): number {
+        return (Math.atan2(grad.end_y - grad.start_y, grad.end_x - grad.start_x) * 180) / Math.PI;
     }
 
-        /** Build a default 2-stop gradient (seed color → transparent) spanning the node. */
-        private makeDefaultGradient(type: 'Linear' | 'Radial', node: SceneNode, seed: Color): Gradient {
+    /** Build a default 2-stop gradient (seed color → transparent) spanning the node. */
+    private makeDefaultGradient(type: 'Linear' | 'Radial', node: SceneNode, seed: Color): Gradient {
         const e = this.nodeLocalExtent(node);
-        const cx = (e.minX + e.maxX) / 2, cy = (e.minY + e.maxY) / 2;
+        const cx = (e.minX + e.maxX) / 2,
+            cy = (e.minY + e.maxY) / 2;
         const stops: GradientStop[] = [
             { offset: 0, color: { r: seed.r, g: seed.g, b: seed.b, a: seed.a ?? 1 } },
             { offset: 1, color: { r: seed.r, g: seed.g, b: seed.b, a: 0 } },
         ];
-        if (type === 'Linear') return { gradient_type: 'Linear', stops, start_x: e.minX, start_y: cy, end_x: e.maxX, end_y: cy };
-        return { gradient_type: 'Radial', stops, start_x: cx, start_y: cy, end_x: e.maxX, end_y: cy };
+        if (type === 'Linear')
+            return {
+                gradient_type: 'Linear',
+                stops,
+                start_x: e.minX,
+                start_y: cy,
+                end_x: e.maxX,
+                end_y: cy,
+            };
+        return {
+            gradient_type: 'Radial',
+            stops,
+            start_x: cx,
+            start_y: cy,
+            end_x: e.maxX,
+            end_y: cy,
+        };
     }
 
-        /** CSS gradient string for a swatch/preview from a Gradient's stops. */
-        private gradientPreviewCss(grad: Gradient): string {
-        const stops = [...grad.stops].sort((a, b) => a.offset - b.offset)
-            .map(s => `rgba(${Math.round(s.color.r * 255)},${Math.round(s.color.g * 255)},${Math.round(s.color.b * 255)},${s.color.a}) ${Math.round(s.offset * 100)}%`)
+    /** CSS gradient string for a swatch/preview from a Gradient's stops. */
+    private gradientPreviewCss(grad: Gradient): string {
+        const stops = [...grad.stops]
+            .sort((a, b) => a.offset - b.offset)
+            .map(
+                (s) =>
+                    `rgba(${Math.round(s.color.r * 255)},${Math.round(s.color.g * 255)},${Math.round(s.color.b * 255)},${s.color.a}) ${Math.round(s.offset * 100)}%`,
+            )
             .join(', ');
         return grad.gradient_type === 'Radial'
             ? `radial-gradient(circle, ${stops})`
             : `linear-gradient(90deg, ${stops})`;
     }
 
-        renderFillsList(node: SceneNode) {
+    renderFillsList(node: SceneNode) {
         if (!this.fillsList) return;
         this.fillsList.innerHTML = '';
         const fills = this.getFills(node);
@@ -1395,7 +1638,12 @@ export class UIEngine {
 
         // Commit a mutated copy of the fills array to the engine.
         const commit = (mutate: (f: Paint[]) => void, live = false) => {
-            const next = fills.map(f => (isGradient(f) ? { ...f, stops: f.stops.map(s => ({ ...s, color: { ...s.color } })) } : { ...f }) as Paint);
+            const next = fills.map(
+                (f) =>
+                    (isGradient(f)
+                        ? { ...f, stops: f.stops.map((s) => ({ ...s, color: { ...s.color } })) }
+                        : { ...f }) as Paint,
+            );
             mutate(next);
             this.updateNodeStyle(node, { fills: next }, live);
         };
@@ -1411,29 +1659,45 @@ export class UIEngine {
             // pattern fills — patterns can only be created via SVG import).
             const typeSel = document.createElement('select');
             typeSel.className = 'prop-select fill-type-select';
-            typeSel.innerHTML = `<option value="solid">Solid</option><option value="linear">Linear</option><option value="radial">Radial</option>`
-                + (isPattern(fill) ? `<option value="pattern">Pattern</option>` : '');
-            typeSel.value = isPattern(fill) ? 'pattern' : isGradient(fill) ? (fill.gradient_type === 'Radial' ? 'radial' : 'linear') : 'solid';
+            typeSel.innerHTML =
+                `<option value="solid">Solid</option><option value="linear">Linear</option><option value="radial">Radial</option>` +
+                (isPattern(fill) ? `<option value="pattern">Pattern</option>` : '');
+            typeSel.value = isPattern(fill)
+                ? 'pattern'
+                : isGradient(fill)
+                  ? fill.gradient_type === 'Radial'
+                      ? 'radial'
+                      : 'linear'
+                  : 'solid';
             typeSel.addEventListener('change', () => {
                 if (typeSel.value === 'pattern') return; // can't switch TO pattern from the UI
-                const seed: Color = isGradient(fill) ? (fill.stops[0]?.color ?? { r: 0.5, g: 0.5, b: 0.5, a: 1 })
-                    : isPattern(fill) ? { r: 0.5, g: 0.5, b: 0.5, a: 1 } : fill as Color;
+                const seed: Color = isGradient(fill)
+                    ? (fill.stops[0]?.color ?? { r: 0.5, g: 0.5, b: 0.5, a: 1 })
+                    : isPattern(fill)
+                      ? { r: 0.5, g: 0.5, b: 0.5, a: 1 }
+                      : (fill as Color);
                 // Switching to a gradient type puts this fill into gradient-edit
                 // mode (canvas handles + panel ramp). syncSelection validates
                 // this after the commit lands.
                 if (typeSel.value !== 'solid' && selId !== undefined) ge.activate(selId, index);
-                commit(f => {
+                commit((f) => {
                     if (typeSel.value === 'solid') {
                         f[index] = { ...seed };
                     } else {
-                        const t: 'Linear' | 'Radial' = typeSel.value === 'radial' ? 'Radial' : 'Linear';
+                        const t: 'Linear' | 'Radial' =
+                            typeSel.value === 'radial' ? 'Radial' : 'Linear';
                         // Preserve stops AND axis placement when switching between gradient types.
                         if (isGradient(fill)) {
                             const g: Gradient = {
                                 gradient_type: t,
-                                stops: fill.stops.map(s => ({ offset: s.offset, color: { ...s.color } })),
-                                start_x: fill.start_x, start_y: fill.start_y,
-                                end_x: fill.end_x, end_y: fill.end_y,
+                                stops: fill.stops.map((s) => ({
+                                    offset: s.offset,
+                                    color: { ...s.color },
+                                })),
+                                start_x: fill.start_x,
+                                start_y: fill.start_y,
+                                end_x: fill.end_x,
+                                end_y: fill.end_y,
                             };
                             if (t === 'Radial' && fill.gradient_type === 'Linear') {
                                 // Radial center = the linear axis midpoint
@@ -1470,28 +1734,29 @@ export class UIEngine {
                 }
                 row.appendChild(preview);
             } else if (!isGradient(fill)) {
-                // ── Solid: color swatch + hex ──
+                // ── Solid: color swatch (the hex value is edited inside the
+                //    picker popover, not shown inline) ──
                 const solid = fill as Color;
-                const hexInput = document.createElement('input');
-                hexInput.type = 'text';
-                hexInput.className = 'prop-input';
-                hexInput.style.cssText = 'width:60px;flex:0 0 60px';
-                hexInput.value = this.rgbToHex(solid).toUpperCase();
                 const swatch = createColorSwatch({
                     color: solid,
                     title: 'Fill color',
-                    onInput: (c) => { hexInput.value = this.rgbToHex(c).toUpperCase(); commit(f => { f[index] = c; }, true); },
-                    onChange: (c) => { hexInput.value = this.rgbToHex(c).toUpperCase(); commit(f => { f[index] = c; }); },
-                });
-                hexInput.addEventListener('change', () => {
-                    const val = hexInput.value.startsWith('#') ? hexInput.value : '#' + hexInput.value;
-                    if (/^#[0-9A-F]{6}$/i.test(val)) {
-                        const c = { ...this.hexToRgb(val), a: solid.a ?? 1 };
-                        swatch.setColor(c); commit(f => { f[index] = c; });
-                    }
+                    onInput: (c) => {
+                        commit((f) => {
+                            f[index] = c;
+                        }, true);
+                    },
+                    onChange: (c) => {
+                        commit((f) => {
+                            f[index] = c;
+                        });
+                    },
                 });
                 row.appendChild(swatch.el);
-                row.appendChild(hexInput);
+                // Fixed-width swatch → a flex spacer pushes the delete button to
+                // the far right (gradient/pattern previews flex to fill instead).
+                const solidSpacer = document.createElement('div');
+                solidSpacer.style.flex = '1';
+                row.appendChild(solidSpacer);
             } else {
                 // ── Gradient: clickable preview swatch (activates editing) ──
                 const isActiveGrad = ge.isActive() && ge.nodeId === selId && ge.fillIndex === index;
@@ -1509,22 +1774,26 @@ export class UIEngine {
                 row.appendChild(preview);
             }
 
-            const spacer = document.createElement('div');
-            spacer.style.flex = '1';
-            row.appendChild(spacer);
-
             const delBtn = document.createElement('button');
             delBtn.className = 'icon-toggle';
             delBtn.innerHTML = '×';
             delBtn.title = 'Remove Fill';
-            delBtn.onclick = () => commit(f => { f.splice(index, 1); });
+            delBtn.onclick = () =>
+                commit((f) => {
+                    f.splice(index, 1);
+                });
             row.appendChild(delBtn);
 
             item.appendChild(row);
 
             // ── Gradient editor (ramp + selected stop + actions) — only for
             //    the fill currently in gradient-edit mode ──
-            if (isGradient(fill) && ge.isActive() && ge.nodeId === selId && ge.fillIndex === index) {
+            if (
+                isGradient(fill) &&
+                ge.isActive() &&
+                ge.nodeId === selId &&
+                ge.fillIndex === index
+            ) {
                 item.appendChild(this.buildGradientEditor(fill, index, commit));
             }
 
@@ -1533,7 +1802,8 @@ export class UIEngine {
     }
 
     /** Checkerboard layer used behind transparent gradient previews. */
-    private static readonly CHECKER_CSS = 'repeating-conic-gradient(#c8c8c8 0% 25%, #ffffff 0% 50%)';
+    private static readonly CHECKER_CSS =
+        'repeating-conic-gradient(#c8c8c8 0% 25%, #ffffff 0% 50%)';
 
     /**
      * Figma-style gradient editor: a ramp with draggable stop chips (click to
@@ -1549,15 +1819,21 @@ export class UIEngine {
         const editor = document.createElement('div');
         editor.className = 'gradient-editor';
 
-        const cloneStops = (stops: GradientStop[]) => stops.map(s => ({ offset: s.offset, color: { ...s.color } }));
-        const rgbCss = (c: Color) => `rgb(${Math.round(c.r * 255)},${Math.round(c.g * 255)},${Math.round(c.b * 255)})`;
+        const cloneStops = (stops: GradientStop[]) =>
+            stops.map((s) => ({ offset: s.offset, color: { ...s.color } }));
+        const rgbCss = (c: Color) =>
+            `rgb(${Math.round(c.r * 255)},${Math.round(c.g * 255)},${Math.round(c.b * 255)})`;
 
         // ── Ramp with draggable stop chips ──
         const ramp = document.createElement('div');
         ramp.className = 'gradient-ramp';
         const setRampBg = (g: Gradient) => {
-            const stops = [...g.stops].sort((a, b) => a.offset - b.offset)
-                .map(s => `rgba(${Math.round(s.color.r * 255)},${Math.round(s.color.g * 255)},${Math.round(s.color.b * 255)},${s.color.a ?? 1}) ${(s.offset * 100).toFixed(1)}%`)
+            const stops = [...g.stops]
+                .sort((a, b) => a.offset - b.offset)
+                .map(
+                    (s) =>
+                        `rgba(${Math.round(s.color.r * 255)},${Math.round(s.color.g * 255)},${Math.round(s.color.b * 255)},${s.color.a ?? 1}) ${(s.offset * 100).toFixed(1)}%`,
+                )
                 .join(', ');
             ramp.style.backgroundImage = `linear-gradient(90deg, ${stops}), ${UIEngine.CHECKER_CSS}`;
         };
@@ -1569,17 +1845,28 @@ export class UIEngine {
          *  history (one gesture = one undo step); dragging vertically away
          *  removes the stop, Figma-style. `applyNow` places the stop under
          *  the cursor immediately (used for freshly inserted stops). */
-        const dragStop = (downEv: MouseEvent, si: number, orig: GradientStop[], applyNow: boolean) => {
+        const dragStop = (
+            downEv: MouseEvent,
+            si: number,
+            orig: GradientStop[],
+            applyNow: boolean,
+        ) => {
             const rampRect = ramp.getBoundingClientRect();
             let gestureStarted = false;
             let removed = false;
             const apply = (ev: MouseEvent) => {
-                if (!gestureStarted) { this.scene.beginGesture(); gestureStarted = true; }
+                if (!gestureStarted) {
+                    this.scene.beginGesture();
+                    gestureStarted = true;
+                }
                 let t = Math.max(0, Math.min(1, (ev.clientX - rampRect.left) / rampRect.width));
                 if (ev.shiftKey) t = Math.round(t * 10) / 10; // 10% snap
-                removed = orig.length > 2 && Math.abs(ev.clientY - (rampRect.top + rampRect.height / 2)) > 40;
+                removed =
+                    orig.length > 2 &&
+                    Math.abs(ev.clientY - (rampRect.top + rampRect.height / 2)) > 40;
                 const stops = cloneStops(orig);
-                if (removed) stops.splice(si, 1); else stops[si].offset = t;
+                if (removed) stops.splice(si, 1);
+                else stops[si].offset = t;
                 ge.setStopsLive(stops);
                 setRampBg({ ...fill, stops });
                 const chip = chips[si];
@@ -1592,13 +1879,20 @@ export class UIEngine {
             const onMove = (ev: MouseEvent) => {
                 // Ignore sub-pixel jitter on a plain click so the offset
                 // doesn't drift from where the stop already sits.
-                if (!gestureStarted && Math.hypot(ev.clientX - downEv.clientX, ev.clientY - downEv.clientY) < 2) return;
+                if (
+                    !gestureStarted &&
+                    Math.hypot(ev.clientX - downEv.clientX, ev.clientY - downEv.clientY) < 2
+                )
+                    return;
                 apply(ev);
             };
             const onUp = () => {
                 window.removeEventListener('mousemove', onMove);
                 if (gestureStarted) this.scene.endGesture();
-                if (removed) { ge.stopFocused = false; ge.stopIndex = 0; }
+                if (removed) {
+                    ge.stopFocused = false;
+                    ge.stopIndex = 0;
+                }
                 this.syncWithSelection();
             };
             window.addEventListener('mousemove', onMove);
@@ -1616,14 +1910,18 @@ export class UIEngine {
                 ev.stopPropagation();
                 ge.stopIndex = i;
                 ge.stopFocused = true;
-                chips.forEach((c, ci) => c.classList.toggle('selected', ci === i));
+                chips.forEach((c, ci) => {
+                    c.classList.toggle('selected', ci === i);
+                });
                 this.scene.renderer?.requestRender(); // canvas highlights the stop
                 dragStop(ev, i, cloneStops(fill.stops), false);
             });
             chips[i] = chip;
             ramp.appendChild(chip);
         };
-        fill.stops.forEach((s, i) => makeChip(i, s));
+        fill.stops.forEach((s, i) => {
+            makeChip(i, s);
+        });
 
         // Click an empty spot on the ramp → insert a stop there and drag it
         ramp.addEventListener('mousedown', (ev) => {
@@ -1637,7 +1935,9 @@ export class UIEngine {
             ge.stopIndex = si;
             ge.stopFocused = true;
             makeChip(si, orig[si]);
-            chips.forEach((c, ci) => c.classList.toggle('selected', ci === si));
+            chips.forEach((c, ci) => {
+                c.classList.toggle('selected', ci === si);
+            });
             dragStop(ev, si, orig, true);
         });
         editor.appendChild(ramp);
@@ -1648,34 +1948,26 @@ export class UIEngine {
         const stopRow = document.createElement('div');
         stopRow.className = 'gradient-stop-row';
 
-        const hexInput = document.createElement('input');
-        hexInput.type = 'text';
-        hexInput.className = 'prop-input';
-        hexInput.style.cssText = 'width:56px;flex:0 0 56px';
-        hexInput.value = this.rgbToHex(stop.color).toUpperCase();
         // Stop alpha lives in its own numeric field below, so the picker edits
-        // RGB only and preserves the stop's current alpha.
+        // RGB only and preserves the stop's current alpha. The hex value is
+        // edited inside the picker popover, not shown inline.
         const sw = createColorSwatch({
             color: { ...stop.color, a: 1 },
             alpha: false,
             title: 'Stop color',
             onInput: (c) => {
-                hexInput.value = this.rgbToHex(c).toUpperCase();
-                commit(f => { const st = (f[index] as Gradient).stops[si]; st.color = { ...c, a: st.color.a }; }, true);
+                commit((f) => {
+                    const st = (f[index] as Gradient).stops[si];
+                    st.color = { ...c, a: st.color.a };
+                }, true);
             },
             onChange: (c) => {
-                hexInput.value = this.rgbToHex(c).toUpperCase();
-                commit(f => { const st = (f[index] as Gradient).stops[si]; st.color = { ...c, a: st.color.a }; });
+                commit((f) => {
+                    const st = (f[index] as Gradient).stops[si];
+                    st.color = { ...c, a: st.color.a };
+                });
                 this.syncWithSelection();
             },
-        });
-        hexInput.addEventListener('change', () => {
-            const val = hexInput.value.startsWith('#') ? hexInput.value : '#' + hexInput.value;
-            if (/^#[0-9A-F]{6}$/i.test(val)) {
-                const c = this.hexToRgb(val);
-                sw.setColor({ ...c, a: 1 });
-                commit(f => { const st = (f[index] as Gradient).stops[si]; st.color = { ...c, a: st.color.a }; });
-            }
         });
 
         const posContainer = document.createElement('div');
@@ -1688,12 +1980,16 @@ export class UIEngine {
         posLabel.innerHTML = `<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><path d="M6 1.5l3.5 4v5h-7v-5z"/></svg>`;
 
         const pos = document.createElement('input');
-        pos.type = 'number'; pos.min = '0'; pos.max = '100';
+        pos.type = 'number';
+        pos.min = '0';
+        pos.max = '100';
         pos.value = String(Math.round(stop.offset * 100));
 
         const updatePos = () => {
             const v = Math.max(0, Math.min(100, parseFloat(pos.value) || 0)) / 100;
-            commit(f => { (f[index] as Gradient).stops[si].offset = v; });
+            commit((f) => {
+                (f[index] as Gradient).stops[si].offset = v;
+            });
         };
 
         pos.addEventListener('change', updatePos);
@@ -1714,12 +2010,16 @@ export class UIEngine {
         alphaLabel.innerHTML = `<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><circle cx="6" cy="6" r="4.5"/><path d="M6 1.5A4.5 4.5 0 0 1 6 10.5V1.5z" fill="currentColor"/></svg>`;
 
         const alpha = document.createElement('input');
-        alpha.type = 'number'; alpha.min = '0'; alpha.max = '100';
+        alpha.type = 'number';
+        alpha.min = '0';
+        alpha.max = '100';
         alpha.value = String(Math.round((stop.color.a ?? 1) * 100));
 
         const updateAlpha = () => {
             const a = Math.max(0, Math.min(100, parseFloat(alpha.value) || 0)) / 100;
-            commit(f => { (f[index] as Gradient).stops[si].color.a = a; });
+            commit((f) => {
+                (f[index] as Gradient).stops[si].color.a = a;
+            });
         };
 
         alpha.addEventListener('change', updateAlpha);
@@ -1739,14 +2039,17 @@ export class UIEngine {
             if (fill.stops.length <= 2) return; // keep at least two
             ge.stopIndex = 0;
             ge.stopFocused = false;
-            commit(f => { (f[index] as Gradient).stops.splice(si, 1); });
+            commit((f) => {
+                (f[index] as Gradient).stops.splice(si, 1);
+            });
         };
 
         stopRow.appendChild(sw.el);
-        stopRow.appendChild(hexInput);
         stopRow.appendChild(posContainer);
         stopRow.appendChild(alphaContainer);
-        const sp = document.createElement('div'); sp.style.flex = '1'; stopRow.appendChild(sp);
+        const stopSpacer = document.createElement('div');
+        stopSpacer.style.flex = '1';
+        stopRow.appendChild(stopSpacer);
         stopRow.appendChild(delStop);
         editor.appendChild(stopRow);
 
@@ -1769,7 +2072,12 @@ export class UIEngine {
             angleInput.value = String(Math.round(UIEngine.gradientAngle(fill)));
 
             const updateAngle = () => {
-                commit(f => { UIEngine.rotateGradientTo(f[index] as Gradient, parseFloat(angleInput.value) || 0); });
+                commit((f) => {
+                    UIEngine.rotateGradientTo(
+                        f[index] as Gradient,
+                        parseFloat(angleInput.value) || 0,
+                    );
+                });
             };
 
             angleInput.addEventListener('change', updateAngle);
@@ -1780,21 +2088,27 @@ export class UIEngine {
             angleContainer.appendChild(angleLabel);
             angleContainer.appendChild(angleInput);
 
-            const deg = document.createElement('span'); deg.textContent = '°'; deg.className = 'gradient-sub-label';
+            const deg = document.createElement('span');
+            deg.textContent = '°';
+            deg.className = 'gradient-sub-label';
             actions.appendChild(angleContainer);
             actions.appendChild(deg);
         }
 
-        const sp2 = document.createElement('div'); sp2.style.flex = '1'; actions.appendChild(sp2);
+        const sp2 = document.createElement('div');
+        sp2.style.flex = '1';
+        actions.appendChild(sp2);
 
         const reverseBtn = document.createElement('button');
         reverseBtn.className = 'icon-toggle';
         reverseBtn.textContent = '⇄';
         reverseBtn.title = 'Reverse stops';
         reverseBtn.onclick = () => {
-            commit(f => {
+            commit((f) => {
                 const g = f[index] as Gradient;
-                g.stops = g.stops.map(s => ({ offset: 1 - s.offset, color: { ...s.color } })).reverse();
+                g.stops = g.stops
+                    .map((s) => ({ offset: 1 - s.offset, color: { ...s.color } }))
+                    .reverse();
             });
         };
         actions.appendChild(reverseBtn);
@@ -1805,7 +2119,12 @@ export class UIEngine {
             rotateBtn.innerHTML = iconRotateCW(11);
             rotateBtn.title = 'Rotate 90°';
             rotateBtn.onclick = () => {
-                commit(f => { UIEngine.rotateGradientTo(f[index] as Gradient, UIEngine.gradientAngle(fill) + 90); });
+                commit((f) => {
+                    UIEngine.rotateGradientTo(
+                        f[index] as Gradient,
+                        UIEngine.gradientAngle(fill) + 90,
+                    );
+                });
             };
             actions.appendChild(rotateBtn);
         }
@@ -1814,26 +2133,22 @@ export class UIEngine {
         return editor;
     }
 
-        renderStrokesList(node: SceneNode) {
+    renderStrokesList(node: SceneNode) {
         if (!this.strokesList) return;
         this.strokesList.innerHTML = '';
         const strokes = this.getStrokes(node);
-        
+
         strokes.forEach((stroke: any, index: number) => {
             const row = document.createElement('div');
             row.className = 'fill-stroke-row';
-            
-            const currentPaint = stroke.paint || {r:0, g:0, b:0, a:1};
-            const currentColor = isGradient(currentPaint) && currentPaint.stops.length > 0 ? currentPaint.stops[0].color : (!isGradient(currentPaint) ? currentPaint : {r:0, g:0, b:0, a:1});
 
-            const hexInput = document.createElement('input');
-            hexInput.type = 'text';
-            hexInput.className = 'prop-input';
-            // Flexible so the row never overflows the 232px inspector; everything
-            // else in the row is fixed-width, hex absorbs the remaining space.
-            hexInput.style.flex = '1 1 0';
-            hexInput.style.minWidth = '0';
-            hexInput.value = this.rgbToHex(currentColor).toUpperCase();
+            const currentPaint = stroke.paint || { r: 0, g: 0, b: 0, a: 1 };
+            const currentColor =
+                isGradient(currentPaint) && currentPaint.stops.length > 0
+                    ? currentPaint.stops[0].color
+                    : !isGradient(currentPaint)
+                      ? currentPaint
+                      : { r: 0, g: 0, b: 0, a: 1 };
 
             const applyStrokeColor = (c: Color, live: boolean) => {
                 const newStrokes = [...strokes];
@@ -1845,26 +2160,22 @@ export class UIEngine {
                 this.updateNodeStyle(node, { strokes: newStrokes }, live);
             };
 
+            // The hex value is edited inside the picker popover, not shown inline.
             const colorSwatch = createColorSwatch({
                 color: currentColor,
                 title: 'Stroke color',
-                onInput: (c) => { hexInput.value = this.rgbToHex(c).toUpperCase(); applyStrokeColor(c, true); },
-                onChange: (c) => { hexInput.value = this.rgbToHex(c).toUpperCase(); applyStrokeColor(c, false); },
-            });
-
-            hexInput.addEventListener('change', () => {
-                const val = hexInput.value.startsWith('#') ? hexInput.value : '#' + hexInput.value;
-                if (/^#[0-9A-F]{6}$/i.test(val)) {
-                    const c = { ...this.hexToRgb(val), a: currentColor.a ?? 1 };
-                    colorSwatch.setColor(c);
+                onInput: (c) => {
+                    applyStrokeColor(c, true);
+                },
+                onChange: (c) => {
                     applyStrokeColor(c, false);
-                }
+                },
             });
 
             const wContainer = document.createElement('div');
             wContainer.className = 'dim-input';
-            wContainer.style.width = '48px';
-            wContainer.style.flex = '0 0 48px';
+            wContainer.style.width = '44px';
+            wContainer.style.flex = '0 0 44px';
             wContainer.title = 'Stroke thickness';
 
             const wLabel = document.createElement('span');
@@ -1893,8 +2204,8 @@ export class UIEngine {
 
             const alignSelect = document.createElement('select');
             alignSelect.className = 'prop-select';
-            alignSelect.style.width = '52px';
-            alignSelect.style.flex = '0 0 52px';
+            alignSelect.style.width = '46px';
+            alignSelect.style.flex = '0 0 46px';
             alignSelect.innerHTML = `
                 <option value="Center">Ctr</option>
                 <option value="Inner">In</option>
@@ -1917,16 +2228,21 @@ export class UIEngine {
             };
 
             row.appendChild(colorSwatch.el);
-            row.appendChild(hexInput);
             row.appendChild(wContainer);
             row.appendChild(alignSelect);
+            const strokeSpacer = document.createElement('div');
+            strokeSpacer.style.flex = '1';
+            row.appendChild(strokeSpacer);
             row.appendChild(delBtn);
             this.strokesList.appendChild(row);
         });
     }
 
-
-    private updateNodeStyle(_node: SceneNode, styleOverrides: Partial<NodeStyle>, skipSync: boolean = false) {
+    private updateNodeStyle(
+        _node: SceneNode,
+        styleOverrides: Partial<NodeStyle>,
+        skipSync: boolean = false,
+    ) {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
 
@@ -1956,8 +2272,6 @@ export class UIEngine {
         if (!skipSync) this.syncWithSelection();
     }
 
-
-
     /**
      * Update the selection highlight on existing panel rows WITHOUT rebuilding
      * the DOM. Selecting a row must not rebuild the list, or the second click of
@@ -1966,13 +2280,18 @@ export class UIEngine {
     updateLayerSelection() {
         if (!this.scene.engine) return;
         let sel: Set<number>;
-        try { sel = new Set(Array.from(this.scene.engine.get_selection())); } catch { return; }
+        try {
+            sel = new Set(Array.from(this.scene.engine.get_selection()));
+        } catch {
+            return;
+        }
         const selAb = this.scene.renderer?.selectedArtboardId ?? null;
         this.layerList.querySelectorAll('.layer-item').forEach((el) => {
             const item = el as HTMLElement;
             let selected = false;
             if (item.dataset.nodeId !== undefined) selected = sel.has(Number(item.dataset.nodeId));
-            else if (item.dataset.artboardId !== undefined) selected = Number(item.dataset.artboardId) === selAb;
+            else if (item.dataset.artboardId !== undefined)
+                selected = Number(item.dataset.artboardId) === selAb;
             item.classList.toggle('selected', selected);
         });
     }
@@ -2015,9 +2334,17 @@ export class UIEngine {
             const nodeLocked = this.scene.getNodeLocked(id);
             const nodeName = this.scene.getNodeName(id);
             let nodeIsMask = false;
-            try { nodeIsMask = this.scene.getNodeIsMask(id); } catch { /* noop */ }
+            try {
+                nodeIsMask = this.scene.getNodeIsMask(id);
+            } catch {
+                /* noop */
+            }
             let nodeIsLivePaint = false;
-            try { nodeIsLivePaint = isGroup && this.scene.getNodeLivePaint(id); } catch { /* noop */ }
+            try {
+                nodeIsLivePaint = isGroup && this.scene.getNodeLivePaint(id);
+            } catch {
+                /* noop */
+            }
 
             const item = document.createElement('div');
             item.className = 'layer-item';
@@ -2046,8 +2373,12 @@ export class UIEngine {
             const visIcon = nodeVisible !== false ? iconEye(12) : iconEyeOff(12);
             const lockIcon = nodeLocked === true ? iconLock(12) : iconUnlock(12);
             // Mask badge: a small marker so mask layers are recognizable.
-            const maskBadge = nodeIsMask ? `<span class="layer-mask-badge" title="Mask">◐</span>` : '';
-            const livePaintBadge = nodeIsLivePaint ? `<span class="layer-lp-badge" title="Live Paint group">Live Paint</span>` : '';
+            const maskBadge = nodeIsMask
+                ? `<span class="layer-mask-badge" title="Mask">◐</span>`
+                : '';
+            const livePaintBadge = nodeIsLivePaint
+                ? `<span class="layer-lp-badge" title="Live Paint group">Live Paint</span>`
+                : '';
             if (nodeIsLivePaint) item.classList.add('layer-livepaint');
 
             item.innerHTML = `
@@ -2068,9 +2399,12 @@ export class UIEngine {
             row.addEventListener('click', (e) => {
                 const target = e.target as HTMLElement;
                 // Don't select if clicking chevron, visibility, or lock buttons
-                if (target.classList.contains('layer-chevron') ||
+                if (
+                    target.classList.contains('layer-chevron') ||
                     target.classList.contains('layer-vis-btn') ||
-                    target.classList.contains('layer-lock-btn')) return;
+                    target.classList.contains('layer-lock-btn')
+                )
+                    return;
                 // Leaving path-edit mode when selecting a different node clears dimming.
                 const im = this.scene.renderer?.inputManager;
                 if (im && im.editingNodeId !== null && im.editingNodeId !== id) {
@@ -2093,7 +2427,9 @@ export class UIEngine {
                 }
                 const im = this.scene.renderer?.inputManager;
                 if (im) {
-                    this.showContextMenu(e.clientX, e.clientY, (action) => im.handleContextMenuAction(action));
+                    this.showContextMenu(e.clientX, e.clientY, (action) =>
+                        im.handleContextMenuAction(action),
+                    );
                 }
             });
 
@@ -2156,8 +2492,9 @@ export class UIEngine {
             item.addEventListener('dragend', () => {
                 this._draggingLayerIds = null;
                 this._clearLayerDropIndicators();
-                this.layerList.querySelectorAll('.layer-item.dragging')
-                    .forEach(el => el.classList.remove('dragging'));
+                this.layerList.querySelectorAll('.layer-item.dragging').forEach((el) => {
+                    el.classList.remove('dragging');
+                });
             });
             item.addEventListener('dragover', (e) => {
                 const dragIds = this._draggingLayerIds;
@@ -2166,7 +2503,9 @@ export class UIEngine {
                 if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
                 const zone = this._computeLayerDropZone(row, isGroup, e);
                 this._clearLayerDropIndicators();
-                row.classList.add(zone === 'into' ? 'drop-into' : zone === 'above' ? 'drop-above' : 'drop-below');
+                row.classList.add(
+                    zone === 'into' ? 'drop-into' : zone === 'above' ? 'drop-above' : 'drop-below',
+                );
             });
             item.addEventListener('drop', (e) => {
                 const dragIds = this._draggingLayerIds;
@@ -2193,7 +2532,11 @@ export class UIEngine {
          * bounds them — in a single `.layer-mask-span` container so the whole
          * span reads as ONE bracketed unit (Figma-style), not per-row bars.
          */
-        const renderSiblings = (siblingsPaintOrder: number[], depth: number, container: HTMLElement) => {
+        const renderSiblings = (
+            siblingsPaintOrder: number[],
+            depth: number,
+            container: HTMLElement,
+        ) => {
             let span: HTMLElement | null = null;
             for (let i = siblingsPaintOrder.length - 1; i >= 0; i--) {
                 const sid = siblingsPaintOrder[i];
@@ -2244,7 +2587,11 @@ export class UIEngine {
     /** The id of the smallest artboard whose rect contains the node's bbox center, or null. */
     private artboardOfNode(rootId: number, artboards: Artboard[]): number | null {
         let b: Float32Array;
-        try { b = this.scene.getNodeBounds(rootId); } catch { return null; }
+        try {
+            b = this.scene.getNodeBounds(rootId);
+        } catch {
+            return null;
+        }
         const cx = (b[0] + b[2]) / 2;
         const cy = (b[1] + b[3]) / 2;
         let best: number | null = null;
@@ -2252,7 +2599,10 @@ export class UIEngine {
         for (const a of artboards) {
             if (cx >= a.x && cx <= a.x + a.w && cy >= a.y && cy <= a.y + a.h) {
                 const area = a.w * a.h;
-                if (area < bestArea) { bestArea = area; best = a.id; }
+                if (area < bestArea) {
+                    bestArea = area;
+                    best = a.id;
+                }
             }
         }
         return best;
@@ -2261,7 +2611,7 @@ export class UIEngine {
     /** Render an artboard as a top-level panel row (select + rename + collapse). */
     private renderArtboardRow(ab: Artboard, selected: boolean) {
         const item = document.createElement('div');
-        item.className = 'layer-item layer-artboard' + (selected ? ' selected' : '');
+        item.className = `layer-item layer-artboard${selected ? ' selected' : ''}`;
         item.dataset.artboardId = ab.id.toString();
         const collapsed = this._collapsedArtboards.has(ab.id);
 
@@ -2345,8 +2695,13 @@ export class UIEngine {
         input.addEventListener('blur', () => finish(true));
         input.addEventListener('keydown', (e) => {
             e.stopPropagation();
-            if (e.key === 'Enter') { e.preventDefault(); finish(true); }
-            else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                finish(true);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                finish(false);
+            }
         });
     }
 
@@ -2358,7 +2713,11 @@ export class UIEngine {
     private _computeMaskRoles(): Map<number, 'mask' | 'masked'> {
         const roles = new Map<number, 'mask' | 'masked'>();
         const isMask = (id: number): boolean => {
-            try { return this.scene.getNodeIsMask(id); } catch { return false; }
+            try {
+                return this.scene.getNodeIsMask(id);
+            } catch {
+                return false;
+            }
         };
         const visitChildren = (siblings: number[]) => {
             let active = false;
@@ -2366,9 +2725,13 @@ export class UIEngine {
                 const cid = siblings[i];
                 if (isMask(cid)) {
                     // Acts as a mask only if a non-mask sibling follows it.
-                    const masksSomething = siblings.slice(i + 1).some(c => !isMask(c));
-                    if (masksSomething) { active = true; roles.set(cid, 'mask'); }
-                    else { active = false; }
+                    const masksSomething = siblings.slice(i + 1).some((c) => !isMask(c));
+                    if (masksSomething) {
+                        active = true;
+                        roles.set(cid, 'mask');
+                    } else {
+                        active = false;
+                    }
                 } else if (active) {
                     roles.set(cid, 'masked');
                 }
@@ -2399,13 +2762,13 @@ export class UIEngine {
     /** A drop target is invalid if it's one of the dragged nodes or sits inside
      *  one of them (can't drop a node into its own subtree). */
     private _isInvalidDropTarget(targetId: number, draggedIds: number[]): boolean {
-        return draggedIds.some(d => d === targetId || this._isLayerDescendant(targetId, d));
+        return draggedIds.some((d) => d === targetId || this._isLayerDescendant(targetId, d));
     }
 
     /** Add the `dragging` class to every layer row in `ids`. */
     private _markDraggingLayers(ids: number[]) {
         const set = new Set(ids);
-        this.layerList.querySelectorAll('.layer-item').forEach(el => {
+        this.layerList.querySelectorAll('.layer-item').forEach((el) => {
             const nid = Number((el as HTMLElement).dataset.nodeId);
             if (set.has(nid)) el.classList.add('dragging');
         });
@@ -2428,8 +2791,9 @@ export class UIEngine {
 
     /** Remove any drag drop-indicator classes from the layer list. */
     private _clearLayerDropIndicators() {
-        this.layerList.querySelectorAll('.drop-above, .drop-below, .drop-into')
-            .forEach(el => el.classList.remove('drop-above', 'drop-below', 'drop-into'));
+        this.layerList.querySelectorAll('.drop-above, .drop-below, .drop-into').forEach((el) => {
+            el.classList.remove('drop-above', 'drop-below', 'drop-into');
+        });
     }
 
     /**
@@ -2437,7 +2801,11 @@ export class UIEngine {
      * below it, or (for group targets) inside it, based on the pointer's
      * vertical position within the row.
      */
-    private _computeLayerDropZone(row: HTMLElement, isGroup: boolean, e: DragEvent): 'above' | 'below' | 'into' {
+    private _computeLayerDropZone(
+        row: HTMLElement,
+        isGroup: boolean,
+        e: DragEvent,
+    ): 'above' | 'below' | 'into' {
         const rect = row.getBoundingClientRect();
         const f = rect.height > 0 ? (e.clientY - rect.top) / rect.height : 0.5;
         if (isGroup && f > 0.3 && f < 0.7) return 'into';
@@ -2449,14 +2817,18 @@ export class UIEngine {
      * The layer list renders top-to-bottom (highest z first), while the engine's
      * child order is bottom-up, so a visual "above" maps to a higher vec index.
      */
-    private _performLayerDrop(draggedIds: number[], targetId: number, zone: 'above' | 'below' | 'into') {
+    private _performLayerDrop(
+        draggedIds: number[],
+        targetId: number,
+        zone: 'above' | 'below' | 'into',
+    ) {
         // Drop nodes whose ancestor is also being dragged (a selected group
         // carries its children), then order them by draw order (bottom-up) so
         // their relative stacking is preserved after the move.
         const deduped = new Set(this.scene.dedupSelection(draggedIds));
         if (deduped.size === 0) return;
         if (this._isInvalidDropTarget(targetId, [...deduped])) return;
-        const ordered = this._flattenDrawOrder().filter(id => deduped.has(id));
+        const ordered = this._flattenDrawOrder().filter((id) => deduped.has(id));
         if (ordered.length === 0) return;
 
         let newParent: number | null;
@@ -2465,16 +2837,19 @@ export class UIEngine {
         if (zone === 'into') {
             // Drop as the top-most (highest z) children of the target group.
             newParent = targetId;
-            const children = Array.from(this.scene.getNodeChildren(targetId)).filter(c => !deduped.has(c));
+            const children = Array.from(this.scene.getNodeChildren(targetId)).filter(
+                (c) => !deduped.has(c),
+            );
             index = children.length;
         } else {
             // Reorder as siblings of the target.
             const tParent = this.scene.getNodeParent(targetId);
             newParent = tParent === -1 ? null : tParent;
-            const sibs = (newParent === null
-                ? Array.from(this.scene.getRootNodes())
-                : Array.from(this.scene.getNodeChildren(newParent))
-            ).filter(c => !deduped.has(c));
+            const sibs = (
+                newParent === null
+                    ? Array.from(this.scene.getRootNodes())
+                    : Array.from(this.scene.getNodeChildren(newParent))
+            ).filter((c) => !deduped.has(c));
             const tIdx = sibs.indexOf(targetId);
             if (tIdx === -1) return;
             // Visually "above" the target = higher z = after it in the bottom-up vec.
@@ -2510,8 +2885,9 @@ export class UIEngine {
 
                 // Dissolve the vacated group once it no longer holds a mask.
                 if (dissolved.has(oldParent)) continue;
-                const stillHasMask = Array.from(this.scene.getNodeChildren(oldParent))
-                    .some(k => this._safeIsMask(k));
+                const stillHasMask = Array.from(this.scene.getNodeChildren(oldParent)).some((k) =>
+                    this._safeIsMask(k),
+                );
                 if (!stillHasMask) {
                     this.scene.ungroupNode(oldParent);
                     dissolved.add(oldParent);
@@ -2529,7 +2905,11 @@ export class UIEngine {
 
     /** is_mask flag, guarded against transient missing-node errors. */
     private _safeIsMask(id: number): boolean {
-        try { return this.scene.getNodeIsMask(id); } catch { return false; }
+        try {
+            return this.scene.getNodeIsMask(id);
+        } catch {
+            return false;
+        }
     }
 
     /**
@@ -2546,7 +2926,8 @@ export class UIEngine {
             e.preventDefault();
             if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
             this._clearLayerDropIndicators();
-            this.layerList.querySelector('.layer-item:last-child .layer-item-row')
+            this.layerList
+                .querySelector('.layer-item:last-child .layer-item-row')
                 ?.classList.add('drop-below');
         });
         this.layerList.addEventListener('drop', (e) => {
@@ -2556,7 +2937,7 @@ export class UIEngine {
             this._clearLayerDropIndicators();
             this._draggingLayerIds = null;
             const deduped = new Set(this.scene.dedupSelection(dragIds));
-            const ordered = this._flattenDrawOrder().filter(id => deduped.has(id));
+            const ordered = this._flattenDrawOrder().filter((id) => deduped.has(id));
             if (ordered.length === 0) return;
             if (this.scene.reorderNodes(ordered, null, 0) > 0) {
                 this.updateLayerList();
@@ -2584,14 +2965,21 @@ export class UIEngine {
 
     /** Read the selected node's effects (parsed JSON array). */
     private getSelectedEffects(nodeId: number): any[] {
-        try { return JSON.parse(this.scene.getNodeEffects(nodeId)) || []; }
-        catch { return []; }
+        try {
+            return JSON.parse(this.scene.getNodeEffects(nodeId)) || [];
+        } catch {
+            return [];
+        }
     }
 
     /** Build a fresh effect object for the given UI type key. */
     private defaultEffect(type: 'blur' | 'shadow' | 'color'): any {
-        if (type === 'shadow') return { DropShadow: { dx: 0, dy: 4, blur: 8, color: { r: 0, g: 0, b: 0, a: 0.35 } } };
-        if (type === 'color') return { ColorMatrix: { matrix: UIEngine.COLOR_PRESETS.grayscale.slice(), linear_rgb: true } };
+        if (type === 'shadow')
+            return { DropShadow: { dx: 0, dy: 4, blur: 8, color: { r: 0, g: 0, b: 0, a: 0.35 } } };
+        if (type === 'color')
+            return {
+                ColorMatrix: { matrix: UIEngine.COLOR_PRESETS.grayscale.slice(), linear_rgb: true },
+            };
         return { Blur: { radius: 6 } };
     }
 
@@ -2640,27 +3028,37 @@ export class UIEngine {
         const withGesture = (el: HTMLElement, onInput: () => void) => {
             let active = false;
             el.addEventListener('input', () => {
-                if (!active) { this.scene.beginGesture(); active = true; }
+                if (!active) {
+                    this.scene.beginGesture();
+                    active = true;
+                }
                 onInput();
             });
             el.addEventListener('blur', () => {
-                if (active) { this.scene.endGesture(); active = false; }
+                if (active) {
+                    this.scene.endGesture();
+                    active = false;
+                }
             });
         };
 
         // A compact labeled number field (label above a small input), matching
         // the density of the fill/stroke rows.
-        const numField = (label: string, val: number, on: (v: number) => void,
-                          opts: { step?: number; min?: number; max?: number; suffix?: string } = {}) => {
+        const numField = (
+            label: string,
+            val: number,
+            on: (v: number) => void,
+            opts: { step?: number; min?: number; max?: number; suffix?: string } = {},
+        ) => {
             const field = document.createElement('div');
             field.className = 'dim-input';
             field.style.flex = '1';
             field.style.height = '24px';
-            
+
             const cap = document.createElement('span');
             cap.className = 'dim-label';
             cap.textContent = label;
-            
+
             const input = document.createElement('input');
             input.type = 'number';
             input.value = String(val);
@@ -2670,7 +3068,7 @@ export class UIEngine {
 
             const updateVal = () => {
                 let v = parseFloat(input.value);
-                if (!isFinite(v)) v = 0;
+                if (!Number.isFinite(v)) v = 0;
                 if (opts.min !== undefined) v = Math.max(opts.min, v);
                 if (opts.max !== undefined) v = Math.min(opts.max, v);
                 on(v);
@@ -2678,7 +3076,7 @@ export class UIEngine {
             };
 
             withGesture(input, updateVal);
-            
+
             this.makeScrubbable(cap, input, updateVal);
 
             field.appendChild(cap);
@@ -2736,32 +3134,52 @@ export class UIEngine {
                 const colorRow = document.createElement('div');
                 colorRow.className = 'effect-row';
                 let shadowGesture = false;
-                const applyShadow = (c: Color) => { d.color.r = c.r; d.color.g = c.g; d.color.b = c.b; commit(); };
+                const applyShadow = (c: Color) => {
+                    d.color.r = c.r;
+                    d.color.g = c.g;
+                    d.color.b = c.b;
+                    commit();
+                };
                 const color = createColorSwatch({
                     color: { r: d.color.r, g: d.color.g, b: d.color.b, a: 1 },
                     alpha: false, // opacity has its own field on this row
                     title: 'Shadow color',
                     onInput: (c) => {
-                        if (!shadowGesture) { this.scene.beginGesture(); shadowGesture = true; }
+                        if (!shadowGesture) {
+                            this.scene.beginGesture();
+                            shadowGesture = true;
+                        }
                         applyShadow(c);
                     },
                     onChange: (c) => {
-                        if (!shadowGesture) { this.scene.beginGesture(); shadowGesture = true; }
+                        if (!shadowGesture) {
+                            this.scene.beginGesture();
+                            shadowGesture = true;
+                        }
                         applyShadow(c);
-                        this.scene.endGesture(); shadowGesture = false;
+                        this.scene.endGesture();
+                        shadowGesture = false;
                     },
                 });
                 colorRow.appendChild(color.el);
-                colorRow.appendChild(numField('Opacity', Math.round((d.color.a ?? 0) * 100),
-                    v => d.color.a = Math.max(0, Math.min(1, v / 100)), { min: 0, max: 100, suffix: '%' }));
+                colorRow.appendChild(
+                    numField(
+                        'Opacity',
+                        Math.round((d.color.a ?? 0) * 100),
+                        (v) => (d.color.a = Math.max(0, Math.min(1, v / 100))),
+                        { min: 0, max: 100, suffix: '%' },
+                    ),
+                );
                 body.appendChild(colorRow);
 
                 // Offset X / Y and blur.
                 const geomRow = document.createElement('div');
                 geomRow.className = 'effect-row';
-                geomRow.appendChild(numField('X', d.dx, v => d.dx = v, { step: 1 }));
-                geomRow.appendChild(numField('Y', d.dy, v => d.dy = v, { step: 1 }));
-                geomRow.appendChild(numField('Blur', d.blur, v => d.blur = v, { step: 1, min: 0 }));
+                geomRow.appendChild(numField('X', d.dx, (v) => (d.dx = v), { step: 1 }));
+                geomRow.appendChild(numField('Y', d.dy, (v) => (d.dy = v), { step: 1 }));
+                geomRow.appendChild(
+                    numField('Blur', d.blur, (v) => (d.blur = v), { step: 1, min: 0 }),
+                );
                 body.appendChild(geomRow);
             } else if (isColor) {
                 const cm = eff.ColorMatrix;
@@ -2771,13 +3189,24 @@ export class UIEngine {
                 presetSel.className = 'prop-select';
                 presetSel.style.flex = '1';
                 const names = Object.keys(UIEngine.COLOR_PRESETS);
-                const cur = names.find(nm => UIEngine.COLOR_PRESETS[nm].every((x, i) => Math.abs(x - cm.matrix[i]) < 1e-4));
-                presetSel.innerHTML = names.map(nm => `<option value="${nm}">${nm[0].toUpperCase() + nm.slice(1)}</option>`).join('')
-                    + (cur ? '' : `<option value="__custom" selected>Custom</option>`);
+                const cur = names.find((nm) =>
+                    UIEngine.COLOR_PRESETS[nm].every((x, i) => Math.abs(x - cm.matrix[i]) < 1e-4),
+                );
+                presetSel.innerHTML =
+                    names
+                        .map(
+                            (nm) =>
+                                `<option value="${nm}">${nm[0].toUpperCase() + nm.slice(1)}</option>`,
+                        )
+                        .join('') +
+                    (cur ? '' : `<option value="__custom" selected>Custom</option>`);
                 if (cur) presetSel.value = cur;
                 presetSel.addEventListener('change', () => {
                     const preset = UIEngine.COLOR_PRESETS[presetSel.value];
-                    if (preset) { cm.matrix = preset.slice(); commit(); }
+                    if (preset) {
+                        cm.matrix = preset.slice();
+                        commit();
+                    }
                 });
                 presetRow.appendChild(presetSel);
                 body.appendChild(presetRow);
@@ -2785,7 +3214,9 @@ export class UIEngine {
                 const b = eff.Blur;
                 const blurRow = document.createElement('div');
                 blurRow.className = 'effect-row';
-                blurRow.appendChild(numField('Blur', b.radius, v => b.radius = v, { step: 1, min: 0 }));
+                blurRow.appendChild(
+                    numField('Blur', b.radius, (v) => (b.radius = v), { step: 1, min: 0 }),
+                );
                 body.appendChild(blurRow);
             }
 
@@ -2795,7 +3226,11 @@ export class UIEngine {
     }
 
     /** Export the document as a PNG raster (2× by default) and download it. */
-    exportPNG(scale = 2, bounds?: { x: number; y: number; w: number; h: number }, background?: Color) {
+    exportPNG(
+        scale = 2,
+        bounds?: { x: number; y: number; w: number; h: number },
+        background?: Color,
+    ) {
         const blob = this.scene.renderer?.exportPNG(scale, bounds, background);
         if (!blob) {
             console.error('PNG export failed (no renderer or surface unavailable)');
@@ -2810,7 +3245,11 @@ export class UIEngine {
     }
 
     /** Build a high-fidelity SVG string containing ONLY the selected shape nodes and their children. */
-    buildSVGStringForSelection(selection: number[], bounds?: { x: number; y: number; w: number; h: number }, background?: Color): string {
+    buildSVGStringForSelection(
+        selection: number[],
+        bounds?: { x: number; y: number; w: number; h: number },
+        background?: Color,
+    ): string {
         const docW = this.scene.engine?.get_document_width() ?? 1000;
         const docH = this.scene.engine?.get_document_height() ?? 1000;
 
@@ -2838,8 +3277,13 @@ export class UIEngine {
             }
 
             if (node.geometry?.Image) imageIds.add(node.geometry.Image.image_id);
-            for (const p of node.style?.fills ?? []) if (p && (p as { image_id?: number }).image_id != null) imageIds.add((p as { image_id: number }).image_id);
-            for (const st of node.style?.strokes ?? []) { const p = st?.paint as { image_id?: number } | undefined; if (p?.image_id != null) imageIds.add(p.image_id); }
+            for (const p of node.style?.fills ?? [])
+                if (p && (p as { image_id?: number }).image_id != null)
+                    imageIds.add((p as { image_id: number }).image_id);
+            for (const st of node.style?.strokes ?? []) {
+                const p = st?.paint as { image_id?: number } | undefined;
+                if (p?.image_id != null) imageIds.add(p.image_id);
+            }
             if (node.node_type === 'Group') {
                 const children = this.scene.getNodeChildren(id);
                 for (const childId of Array.from(children)) {
@@ -2870,14 +3314,20 @@ export class UIEngine {
         let filledFaces: FilledFace[] | undefined;
         if (this.scene.engine) {
             try {
-                const data = JSON.parse(this.scene.engine.get_live_paint_render_data()) as LivePaintRenderData;
+                const data = JSON.parse(
+                    this.scene.engine.get_live_paint_render_data(),
+                ) as LivePaintRenderData;
                 if (data.groups && data.groups.length > 0) livePaint = data;
-            } catch { /* no live paint */ }
+            } catch {
+                /* no live paint */
+            }
             if (!livePaint) {
                 try {
                     const parsed = JSON.parse(this.scene.engine.get_filled_faces()) as FilledFace[];
                     if (parsed.length > 0) filledFaces = parsed;
-                } catch { /* no faces */ }
+                } catch {
+                    /* no faces */
+                }
             }
         }
 
@@ -2911,11 +3361,14 @@ export class UIEngine {
 
         const selection = Array.from(this.scene.engine?.get_selection() ?? []);
         const artboardId = this.scene.renderer?.selectedArtboardId ?? null;
-        const ab = artboardId !== null ? this.scene.getArtboards().find(a => a.id === artboardId) : undefined;
+        const ab =
+            artboardId !== null
+                ? this.scene.getArtboards().find((a) => a.id === artboardId)
+                : undefined;
 
         let filename = 'export';
-        let bounds: { x: number; y: number; w: number; h: number } | undefined = undefined;
-        let background: { r: number; g: number; b: number; a: number } | undefined = undefined;
+        let bounds: { x: number; y: number; w: number; h: number } | undefined;
+        let background: { r: number; g: number; b: number; a: number } | undefined;
 
         if (ab) {
             filename = ab.name || 'artboard';
@@ -2931,7 +3384,10 @@ export class UIEngine {
             }
 
             // Calculate bounds of selection
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            let minX = Infinity,
+                minY = Infinity,
+                maxX = -Infinity,
+                maxY = -Infinity;
             for (const id of selection) {
                 const b = this.scene.getNodeBounds(id);
                 if (b) {
@@ -2954,7 +3410,7 @@ export class UIEngine {
                 x: 0,
                 y: 0,
                 w: this.scene.engine?.get_document_width() ?? 1000,
-                h: this.scene.engine?.get_document_height() ?? 1000
+                h: this.scene.engine?.get_document_height() ?? 1000,
             };
             if (!transparent) {
                 background = { r: 1, g: 1, b: 1, a: 1 };
@@ -2962,7 +3418,7 @@ export class UIEngine {
         }
 
         // Apply suffix
-        filename = filename + suffix + '.' + format;
+        filename = `${filename + suffix}.${format}`;
 
         if (format === 'svg') {
             let svgString = '';
@@ -3043,7 +3499,10 @@ export class UIEngine {
     }
 
     /** Build the full SVG document string (with embedded .dataki payload). */
-    buildSVGString(bounds?: { x: number; y: number; w: number; h: number }, background?: Color): string {
+    buildSVGString(
+        bounds?: { x: number; y: number; w: number; h: number },
+        background?: Color,
+    ): string {
         const docW = this.scene.engine?.get_document_width() ?? 1000;
         const docH = this.scene.engine?.get_document_height() ?? 1000;
 
@@ -3066,8 +3525,13 @@ export class UIEngine {
             localTransforms[id] = Array.from(this.scene.getNodeLocalTransform(id));
             if (node.geometry?.Image) imageIds.add(node.geometry.Image.image_id);
             // Pattern fills/strokes reference a tile image that must be exported too.
-            for (const p of node.style?.fills ?? []) if (p && (p as { image_id?: number }).image_id != null) imageIds.add((p as { image_id: number }).image_id);
-            for (const st of node.style?.strokes ?? []) { const p = st?.paint as { image_id?: number } | undefined; if (p?.image_id != null) imageIds.add(p.image_id); }
+            for (const p of node.style?.fills ?? [])
+                if (p && (p as { image_id?: number }).image_id != null)
+                    imageIds.add((p as { image_id: number }).image_id);
+            for (const st of node.style?.strokes ?? []) {
+                const p = st?.paint as { image_id?: number } | undefined;
+                if (p?.image_id != null) imageIds.add(p.image_id);
+            }
             if (node.node_type === 'Group') {
                 const children = this.scene.getNodeChildren(id);
                 for (const childId of Array.from(children)) {
@@ -3101,14 +3565,20 @@ export class UIEngine {
         let filledFaces: FilledFace[] | undefined;
         if (this.scene.engine) {
             try {
-                const data = JSON.parse(this.scene.engine.get_live_paint_render_data()) as LivePaintRenderData;
+                const data = JSON.parse(
+                    this.scene.engine.get_live_paint_render_data(),
+                ) as LivePaintRenderData;
                 if (data.groups && data.groups.length > 0) livePaint = data;
-            } catch { /* no live paint */ }
+            } catch {
+                /* no live paint */
+            }
             if (!livePaint) {
                 try {
                     const parsed = JSON.parse(this.scene.engine.get_filled_faces()) as FilledFace[];
                     if (parsed.length > 0) filledFaces = parsed;
-                } catch { /* no faces */ }
+                } catch {
+                    /* no faces */
+                }
             }
         }
 
@@ -3131,10 +3601,6 @@ export class UIEngine {
         }
 
         return svg;
-    }
-
-    private hexToRgb(hex: string): Color {
-        return hexToRgb(hex);
     }
 
     public rgbToHex(color: { r: number; g: number; b: number }): string {
@@ -3164,7 +3630,9 @@ export class UIEngine {
             const before = new Set(this.scene.getRootNodes());
             this.parseSVGInternal(svgText, patternImages, doc);
             if (afterImport) {
-                const newRoots = Array.from(this.scene.getRootNodes()).filter(id => !before.has(id));
+                const newRoots = Array.from(this.scene.getRootNodes()).filter(
+                    (id) => !before.has(id),
+                );
                 afterImport(newRoots);
             }
         });
@@ -3179,8 +3647,11 @@ export class UIEngine {
     private collectDefsHtml(doc: Document): string {
         const parts: string[] = [];
         for (const d of Array.from(doc.querySelectorAll('defs'))) parts.push(d.innerHTML);
-        for (const def of Array.from(doc.querySelectorAll(
-            'filter, linearGradient, radialGradient, pattern, clipPath, mask, symbol, marker, style'))) {
+        for (const def of Array.from(
+            doc.querySelectorAll(
+                'filter, linearGradient, radialGradient, pattern, clipPath, mask, symbol, marker, style',
+            ),
+        )) {
             if (!def.closest('defs')) parts.push(def.outerHTML);
         }
         return parts.join('');
@@ -3200,7 +3671,8 @@ export class UIEngine {
 
         // getBBox needs the SVG live in the document; attach a hidden clone-host.
         const host = document.createElement('div');
-        host.style.cssText = 'position:absolute;left:-99999px;top:0;width:0;height:0;overflow:hidden';
+        host.style.cssText =
+            'position:absolute;left:-99999px;top:0;width:0;height:0;overflow:hidden';
         const liveSvg = svg.cloneNode(true) as SVGSVGElement;
         host.appendChild(liveSvg);
         document.body.appendChild(host);
@@ -3210,23 +3682,52 @@ export class UIEngine {
                 const id = el.getAttribute('id');
                 // Find the matching live element for getBBox.
                 const live = id ? liveSvg.querySelector(`#${CSS.escape(id)}`) : null;
-                let bx = 0, by = 0, bw = 0, bh = 0;
+                let bx = 0,
+                    by = 0,
+                    bw = 0,
+                    bh = 0;
                 try {
                     const bb = (live as SVGGraphicsElement | null)?.getBBox?.();
-                    if (bb) { bx = bb.x; by = bb.y; bw = bb.width; bh = bb.height; }
-                } catch { /* getBBox may throw for empty geometry */ }
+                    if (bb) {
+                        bx = bb.x;
+                        by = bb.y;
+                        bw = bb.width;
+                        bh = bb.height;
+                    }
+                } catch {
+                    /* getBBox may throw for empty geometry */
+                }
                 if (bw <= 0 || bh <= 0) continue;
                 // Expand for filter overflow (blur/offset spill past the geometry).
                 const mx = Math.max(bw, bh) * 0.4 + 10;
-                bx -= mx; by -= mx; bw += 2 * mx; bh += 2 * mx;
+                bx -= mx;
+                by -= mx;
+                bw += 2 * mx;
+                bh += 2 * mx;
                 const scale = 2;
-                const tile = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
+                const tile =
+                    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
                     `width="${bw * scale}" height="${bh * scale}" viewBox="${bx} ${by} ${bw} ${bh}"><defs>${defsHtml}</defs>${el.outerHTML}</svg>`;
-                const bytes = await this.rasterizeSvgToPng(tile, Math.round(bw * scale), Math.round(bh * scale), true);
+                const bytes = await this.rasterizeSvgToPng(
+                    tile,
+                    Math.round(bw * scale),
+                    Math.round(bh * scale),
+                    true,
+                );
                 if (!bytes) continue; // blank tile → fall back to normal element rendering
                 let imageId = 0;
-                try { imageId = this.scene.engine!.register_image(bytes, 'image/png'); } catch { continue; }
-                (el as unknown as { __rasterFilter?: unknown }).__rasterFilter = { imageId, x: bx, y: by, w: bw, h: bh };
+                try {
+                    imageId = this.scene.engine!.register_image(bytes, 'image/png');
+                } catch {
+                    continue;
+                }
+                (el as unknown as { __rasterFilter?: unknown }).__rasterFilter = {
+                    imageId,
+                    x: bx,
+                    y: by,
+                    w: bw,
+                    h: bh,
+                };
             }
         } finally {
             document.body.removeChild(host);
@@ -3253,7 +3754,7 @@ export class UIEngine {
                 const svgText = await this.gunzip(parsed.bytes);
                 if (!svgText) continue;
                 parsed.bytes = new TextEncoder().encode(svgText);
-                parsed.loadUri = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgText)));
+                parsed.loadUri = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svgText)))}`;
             }
             // Browser decodes png/jpeg/gif/svg → gives us the intrinsic size.
             const img = await this.loadImage(parsed.loadUri).catch(() => null);
@@ -3272,9 +3773,14 @@ export class UIEngine {
             const hasH = !!hAttr && hAttr !== 'auto';
             let vw = hasW ? parseSvgLength(wAttr, 0) : 0;
             let vh = hasH ? parseSvgLength(hAttr, 0) : 0;
-            if (!hasW && !hasH) { vw = natW; vh = natH; }
-            else if (!hasW) { vw = vh * natW / natH; }
-            else if (!hasH) { vh = vw * natH / natW; }
+            if (!hasW && !hasH) {
+                vw = natW;
+                vh = natH;
+            } else if (!hasW) {
+                vw = (vh * natW) / natH;
+            } else if (!hasH) {
+                vh = (vw * natH) / natW;
+            }
             if (vw <= 0 || vh <= 0) continue;
 
             const par = (el.getAttribute('preserveAspectRatio') || 'xMidYMid meet').trim();
@@ -3286,24 +3792,38 @@ export class UIEngine {
             const stretch = !parsed.isSvg && (par.startsWith('none') || aspectMatches);
             let imageId: number;
             if (stretch) {
-                try { imageId = this.scene.engine!.register_image(parsed.bytes, parsed.mime); }
-                catch { continue; }
+                try {
+                    imageId = this.scene.engine!.register_image(parsed.bytes, parsed.mime);
+                } catch {
+                    continue;
+                }
             } else {
                 // Rasterize onto a viewport-sized canvas honoring
                 // preserveAspectRatio (letterbox/crop/align + clipping), or
                 // convert SVG→PNG. 2× for crispness.
                 const bytes = await this.rasterizeImageFit(img, vw, vh, natW, natH, par);
                 if (!bytes) continue;
-                try { imageId = this.scene.engine!.register_image(bytes, 'image/png'); }
-                catch { continue; }
+                try {
+                    imageId = this.scene.engine!.register_image(bytes, 'image/png');
+                } catch {
+                    continue;
+                }
             }
-            (el as unknown as { __imageFit?: unknown }).__imageFit = { imageId, x, y, w: vw, h: vh };
+            (el as unknown as { __imageFit?: unknown }).__imageFit = {
+                imageId,
+                x,
+                y,
+                w: vw,
+                h: vh,
+            };
         }
     }
 
     /** Parse a `data:` URI into raw bytes + mime + an <img>-loadable URI,
      *  transparently gunzipping `.svgz` (gzip-compressed SVG). */
-    private parseImageDataUri(href: string): { bytes: Uint8Array; mime: string; isSvg: boolean; loadUri: string } | null {
+    private parseImageDataUri(
+        href: string,
+    ): { bytes: Uint8Array; mime: string; isSvg: boolean; loadUri: string } | null {
         const m = href.match(/^data:([^;,]*)(;base64)?,(.*)$/s);
         if (!m) return null;
         let mime = (m[1] || 'image/png').toLowerCase();
@@ -3317,8 +3837,11 @@ export class UIEngine {
         }
         // gzip magic → svgz. (DecompressionStream isn't sync; handled in loadImage.)
         const isGzip = bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
-        const isSvg = mime.includes('svg') || isGzip ||
-            (mime === 'image/png' && /^\s*<(\?xml|svg)/.test(new TextDecoder().decode(bytes.slice(0, 64))));
+        const isSvg =
+            mime.includes('svg') ||
+            isGzip ||
+            (mime === 'image/png' &&
+                /^\s*<(\?xml|svg)/.test(new TextDecoder().decode(bytes.slice(0, 64))));
         if (isSvg && !mime.includes('svg')) mime = 'image/svg+xml';
         // For <img> loading we hand back the original href (browsers load svg/
         // svgz/png/jpeg data URIs directly); gzip svgz is expanded in loadImage.
@@ -3338,16 +3861,29 @@ export class UIEngine {
     /** Gunzip bytes to a UTF-8 string (for .svgz), or null on failure. */
     private async gunzip(bytes: Uint8Array): Promise<string | null> {
         try {
-            const ds = new (window as unknown as { DecompressionStream: new (f: string) => GenericTransformStream }).DecompressionStream('gzip');
+            const ds = new (
+                window as unknown as {
+                    DecompressionStream: new (f: string) => GenericTransformStream;
+                }
+            ).DecompressionStream('gzip');
             const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(ds);
             const buf = await new Response(stream).arrayBuffer();
             return new TextDecoder().decode(buf);
-        } catch { return null; }
+        } catch {
+            return null;
+        }
     }
 
     /** Draw `img` onto a `vw×vh` canvas honoring preserveAspectRatio (align +
      *  meet/slice), clipping to the viewport, and return PNG bytes. */
-    private rasterizeImageFit(img: HTMLImageElement, vw: number, vh: number, natW: number, natH: number, par: string): Promise<Uint8Array | null> {
+    private rasterizeImageFit(
+        img: HTMLImageElement,
+        vw: number,
+        vh: number,
+        natW: number,
+        natH: number,
+        par: string,
+    ): Promise<Uint8Array | null> {
         const scale = 2;
         const c = document.createElement('canvas');
         c.width = Math.max(1, Math.round(vw * scale));
@@ -3359,10 +3895,14 @@ export class UIEngine {
         const slice = tokens[1] === 'slice';
         let dw: number, dh: number, dx: number, dy: number;
         if (align === 'none') {
-            dw = vw; dh = vh; dx = 0; dy = 0;
+            dw = vw;
+            dh = vh;
+            dx = 0;
+            dy = 0;
         } else {
             const s = slice ? Math.max(vw / natW, vh / natH) : Math.min(vw / natW, vh / natH);
-            dw = natW * s; dh = natH * s;
+            dw = natW * s;
+            dh = natH * s;
             const ax = align.includes('xMax') ? 1 : align.includes('xMid') ? 0.5 : 0;
             const ay = align.includes('YMax') ? 1 : align.includes('YMid') ? 0.5 : 0;
             dx = (vw - dw) * ax;
@@ -3370,14 +3910,24 @@ export class UIEngine {
         }
         ctx.drawImage(img, dx * scale, dy * scale, dw * scale, dh * scale);
         return new Promise((resolve) => {
-            c.toBlob(async (b) => resolve(b ? new Uint8Array(await b.arrayBuffer()) : null), 'image/png');
+            c.toBlob(
+                async (b) => resolve(b ? new Uint8Array(await b.arrayBuffer()) : null),
+                'image/png',
+            );
         });
     }
 
     /** Rasterize every `<pattern>` in the doc to a tile image (via the browser's
      *  SVG renderer), registering each and returning id → tile descriptor. */
-    private async rasterizePatterns(doc: Document): Promise<Map<string, { image_id: number; width: number; height: number; transform: number[] }>> {
-        const map = new Map<string, { image_id: number; width: number; height: number; transform: number[] }>();
+    private async rasterizePatterns(
+        doc: Document,
+    ): Promise<
+        Map<string, { image_id: number; width: number; height: number; transform: number[] }>
+    > {
+        const map = new Map<
+            string,
+            { image_id: number; width: number; height: number; transform: number[] }
+        >();
         const defsHtml = this.collectDefsHtml(doc);
         for (const pat of Array.from(doc.querySelectorAll('pattern'))) {
             const id = pat.getAttribute('id');
@@ -3388,43 +3938,72 @@ export class UIEngine {
             // objectBoundingBox fractions (<=2) can't be sized without the shape.
             if (!(w > 2 && h > 2)) continue;
             const scale = 2; // rasterize at 2× for crispness
-            const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
+            const svg =
+                `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
                 `width="${w * scale}" height="${h * scale}" viewBox="0 0 ${w} ${h}"><defs>${defsHtml}</defs>${pat.innerHTML}</svg>`;
-            const bytes = await this.rasterizeSvgToPng(svg, Math.round(w * scale), Math.round(h * scale));
+            const bytes = await this.rasterizeSvgToPng(
+                svg,
+                Math.round(w * scale),
+                Math.round(h * scale),
+            );
             if (!bytes) continue;
             let imageId = 0;
-            try { imageId = this.scene.engine!.register_image(bytes, 'image/png'); } catch { continue; }
+            try {
+                imageId = this.scene.engine!.register_image(bytes, 'image/png');
+            } catch {
+                continue;
+            }
             // patternTransform (3×3 col-major) → SVG 2×3 [a,b,c,d,e,f].
             const pt = pat.getAttribute('patternTransform');
             let transform = [1, 0, 0, 1, 0, 0];
-            if (pt) { const m = parseSVGTransform(pt); transform = [m[0], m[1], m[3], m[4], m[6], m[7]]; }
+            if (pt) {
+                const m = parseSVGTransform(pt);
+                transform = [m[0], m[1], m[3], m[4], m[6], m[7]];
+            }
             map.set(id, { image_id: imageId, width: w, height: h, transform });
         }
         return map;
     }
 
     /** Render an SVG string to PNG bytes at the given pixel size (async). */
-    private rasterizeSvgToPng(svgString: string, pxW: number, pxH: number, requireContent = false): Promise<Uint8Array | null> {
+    private rasterizeSvgToPng(
+        svgString: string,
+        pxW: number,
+        pxH: number,
+        requireContent = false,
+    ): Promise<Uint8Array | null> {
         return new Promise((resolve) => {
             const img = new Image();
             img.onload = () => {
                 try {
                     const c = document.createElement('canvas');
-                    c.width = pxW; c.height = pxH;
+                    c.width = pxW;
+                    c.height = pxH;
                     const ctx = c.getContext('2d');
-                    if (!ctx) { resolve(null); return; }
+                    if (!ctx) {
+                        resolve(null);
+                        return;
+                    }
                     ctx.drawImage(img, 0, 0, pxW, pxH);
                     // When rasterizing a filtered element, a fully-transparent tile
                     // means the browser couldn't render the filter (e.g. feComposite
                     // with no in2, or degenerate no-op filters Chrome drops). In that
                     // case the fallback would be strictly worse than just rendering
                     // the element normally, so bail and let normal processing run.
-                    if (requireContent && this.canvasIsBlank(ctx, pxW, pxH)) { resolve(null); return; }
-                    c.toBlob(async (b) => resolve(b ? new Uint8Array(await b.arrayBuffer()) : null), 'image/png');
-                } catch { resolve(null); }
+                    if (requireContent && this.canvasIsBlank(ctx, pxW, pxH)) {
+                        resolve(null);
+                        return;
+                    }
+                    c.toBlob(
+                        async (b) => resolve(b ? new Uint8Array(await b.arrayBuffer()) : null),
+                        'image/png',
+                    );
+                } catch {
+                    resolve(null);
+                }
             };
             img.onerror = () => resolve(null);
-            img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgString)));
+            img.src = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svgString)))}`;
         });
     }
 
@@ -3439,10 +4018,19 @@ export class UIEngine {
                 if (data[i] > 2) return false;
             }
             return true;
-        } catch { return false; } // tainted/oversized → assume content, keep tile
+        } catch {
+            return false;
+        } // tainted/oversized → assume content, keep tile
     }
 
-    private parseSVGInternal(svgText: string, patternImages?: Map<string, { image_id: number; width: number; height: number; transform: number[] }>, docIn?: Document) {
+    private parseSVGInternal(
+        svgText: string,
+        patternImages?: Map<
+            string,
+            { image_id: number; width: number; height: number; transform: number[] }
+        >,
+        docIn?: Document,
+    ) {
         // Reuse the doc from parseSVG when given (so __rasterFilter tags on
         // elements survive); otherwise parse fresh.
         const doc = docIn ?? new DOMParser().parseFromString(svgText, 'image/svg+xml');
@@ -3453,10 +4041,15 @@ export class UIEngine {
         let vbMatrix = identityMatrix();
         const viewBox = svg.getAttribute('viewBox');
         if (viewBox) {
-            const parts = viewBox.trim().split(/[\s,]+/).map(Number);
+            const parts = viewBox
+                .trim()
+                .split(/[\s,]+/)
+                .map(Number);
             if (parts.length >= 4) {
-                const vbMinX = parts[0], vbMinY = parts[1];
-                const vbWidth = parts[2], vbHeight = parts[3];
+                const vbMinX = parts[0],
+                    vbMinY = parts[1];
+                const vbWidth = parts[2],
+                    vbHeight = parts[3];
 
                 // Determine the SVG element's intrinsic size
                 const svgWidth = parseFloat(svg.getAttribute('width') || '0');
@@ -3465,7 +4058,15 @@ export class UIEngine {
                 if (svgWidth > 0 && svgHeight > 0 && vbWidth > 0 && vbHeight > 0) {
                     // Use preserveAspectRatio to compute the correct viewBox transform
                     const par = svg.getAttribute('preserveAspectRatio');
-                    vbMatrix = parsePreserveAspectRatio(par, vbMinX, vbMinY, vbWidth, vbHeight, svgWidth, svgHeight);
+                    vbMatrix = parsePreserveAspectRatio(
+                        par,
+                        vbMinX,
+                        vbMinY,
+                        vbWidth,
+                        vbHeight,
+                        svgWidth,
+                        svgHeight,
+                    );
                 } else if (vbMinX !== 0 || vbMinY !== 0) {
                     // No explicit size — just translate away the viewBox origin
                     vbMatrix = translateMatrix(-vbMinX, -vbMinY);
@@ -3477,7 +4078,7 @@ export class UIEngine {
         }
 
         // Color parser: hex (3/4/6/8), rgb[a](), hsl[a](), named colors, url() refs
-        const parseColor = (colorStr: string | null): string | null => {
+        const _parseColor = (colorStr: string | null): string | null => {
             if (!colorStr || colorStr === 'none' || colorStr === 'transparent') return null;
             // Gradient / paint-server reference: resolve to a representative
             // solid color (real gradient import replaces this path).
@@ -3486,7 +4087,7 @@ export class UIEngine {
                 if (resolved) return resolved;
                 // SVG allows a fallback color after the url() reference
                 const fallback = colorStr.replace(/url\s*\([^)]*\)\s*/, '').trim();
-                return fallback ? parseColor(fallback) : null;
+                return fallback ? _parseColor(fallback) : null;
             }
             // Never return the raw string: hexToRgb turns unparsed values
             // (rgba(), hsl(), var(), …) into black, which reads as broken import.
@@ -3519,7 +4120,7 @@ export class UIEngine {
             if (!styleAttr) return {};
             const props: Record<string, string> = {};
             for (const decl of styleAttr.split(';')) {
-                const [key, val] = decl.split(':').map(s => s.trim());
+                const [key, val] = decl.split(':').map((s) => s.trim());
                 if (key && val) props[key] = val;
             }
             return props;
@@ -3528,9 +4129,13 @@ export class UIEngine {
         // Get attribute with cascade:
         //   !important CSS rule > inline style="" > normal CSS rule > presentation attribute
         // (inline !important is not distinguished — a rare simplification.)
-        const getStyleAttr = (el: Element, attr: string, inlineStyles: Record<string, string>): string | null => {
+        const getStyleAttr = (
+            el: Element,
+            attr: string,
+            inlineStyles: Record<string, string>,
+        ): string | null => {
             const css = getMatchedCSSStyles(el)[attr];
-            if (css && css.important) return css.value;
+            if (css?.important) return css.value;
             if (inlineStyles[attr]) return inlineStyles[attr];
             if (css) return css.value;
             return el.getAttribute(attr);
@@ -3544,14 +4149,27 @@ export class UIEngine {
 
         /** SVG presentation attributes that inherit per the spec. */
         const INHERITABLE_ATTRS = [
-            'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
-            'stroke-dasharray', 'stroke-dashoffset', 'stroke-miterlimit',
-            'opacity', 'fill-opacity', 'fill-rule', 'visibility', 'font-size',
+            'fill',
+            'stroke',
+            'stroke-width',
+            'stroke-linecap',
+            'stroke-linejoin',
+            'stroke-dasharray',
+            'stroke-dashoffset',
+            'stroke-miterlimit',
+            'opacity',
+            'fill-opacity',
+            'fill-rule',
+            'visibility',
+            'font-size',
         ];
 
         /** Read an element's own presentation attributes (explicit attr + inline style)
          *  and merge them on top of the parent's inherited styles. */
-        const collectInheritedStyles = (el: Element, parentStyles: InheritedStyles): InheritedStyles => {
+        const collectInheritedStyles = (
+            el: Element,
+            parentStyles: InheritedStyles,
+        ): InheritedStyles => {
             const merged: InheritedStyles = { ...parentStyles };
             const inlineStyles = parseInlineStyle(el);
             for (const attr of INHERITABLE_ATTRS) {
@@ -3564,7 +4182,13 @@ export class UIEngine {
         };
 
         /** Resolve an attribute value: element's own value > inherited > fallback. */
-        const resolveAttr = (el: Element, attr: string, inlineStyles: Record<string, string>, inherited: InheritedStyles, fallback: string | null = null): string | null => {
+        const resolveAttr = (
+            el: Element,
+            attr: string,
+            inlineStyles: Record<string, string>,
+            inherited: InheritedStyles,
+            fallback: string | null = null,
+        ): string | null => {
             const own = getStyleAttr(el, attr, inlineStyles);
             if (own !== null && own !== 'inherit') return own;
             if (inherited[attr] !== undefined && inherited[attr] !== null) return inherited[attr]!;
@@ -3575,7 +4199,10 @@ export class UIEngine {
         type ParsedPaint =
             | { type: 'solid'; hex: string; alpha: number }
             | { type: 'gradient'; data: SVGGradientData }
-            | { type: 'pattern'; pattern: { image_id: number; width: number; height: number; transform: number[] } };
+            | {
+                  type: 'pattern';
+                  pattern: { image_id: number; width: number; height: number; transform: number[] };
+              };
 
         /** If `paintUrl` is url(#id) referencing a rasterized <pattern>, return it. */
         const resolvePatternRef = (paintUrl: string): ParsedPaint | null => {
@@ -3584,11 +4211,16 @@ export class UIEngine {
             return p ? { type: 'pattern', pattern: p } : null;
         };
 
-        const parseFill = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles, geo?: GradientGeo): ParsedPaint | null => {
+        const parseFill = (
+            el: Element,
+            inlineStyles: Record<string, string>,
+            inherited: InheritedStyles,
+            geo?: GradientGeo,
+        ): ParsedPaint | null => {
             const fill = resolveAttr(el, 'fill', inlineStyles, inherited, '#000000');
             if (fill === 'none' || fill === 'transparent') return null;
             // Paint-server url(#...): pattern (rasterized tile) or gradient.
-            if (fill && fill.match(/url\s*\(/)) {
+            if (fill?.match(/url\s*\(/)) {
                 const pat = resolvePatternRef(fill);
                 if (pat) return pat;
                 const grad = resolveGradient(doc, fill, geo);
@@ -3599,7 +4231,12 @@ export class UIEngine {
             return parsed ? { type: 'solid', hex: parsed.hex, alpha: parsed.alpha } : null;
         };
 
-        const parseStroke = (el: Element, inlineStyles: Record<string, string>, inherited: InheritedStyles, geo?: GradientGeo): ParsedPaint | null => {
+        const parseStroke = (
+            el: Element,
+            inlineStyles: Record<string, string>,
+            inherited: InheritedStyles,
+            geo?: GradientGeo,
+        ): ParsedPaint | null => {
             const stroke = resolveAttr(el, 'stroke', inlineStyles, inherited, null);
             if (!stroke || stroke === 'none' || stroke === 'transparent') return null;
             if (stroke.match(/url\s*\(/)) {
@@ -3616,10 +4253,13 @@ export class UIEngine {
         /** Convert a ParsedPaint to the JSON format expected by the Rust engine's Paint enum.
          *  @param opacityMul  Extra opacity multiplier (e.g. fill-opacity / stroke-opacity)
          */
-        const paintToJson = (paint: ParsedPaint | null, opacityMul: number = 1): Record<string, unknown> | null => {
+        const paintToJson = (
+            paint: ParsedPaint | null,
+            opacityMul: number = 1,
+        ): Record<string, unknown> | null => {
             if (!paint) return null;
             if (paint.type === 'solid') {
-                const c = this.hexToRgb(paint.hex);
+                const c = hexToRgb(paint.hex);
                 // Multiply CSS color alpha and the SVG fill-opacity / stroke-opacity
                 c.a = paint.alpha * opacityMul;
                 return { ...c };
@@ -3631,7 +4271,7 @@ export class UIEngine {
             // Gradient: matches Rust's Gradient struct for serde(untagged) deserialization
             return {
                 gradient_type: paint.data.gradient_type,
-                stops: paint.data.stops.map(s => ({
+                stops: paint.data.stops.map((s) => ({
                     offset: s.offset,
                     color: s.color,
                 })),
@@ -3644,16 +4284,28 @@ export class UIEngine {
             };
         };
 
-        const applyStyle = (id: number, el: Element, inherited: InheritedStyles, geo?: GradientGeo) => {
+        const applyStyle = (
+            id: number,
+            el: Element,
+            inherited: InheritedStyles,
+            geo?: GradientGeo,
+        ) => {
             const inlineStyles = parseInlineStyle(el);
             const fillPaint = parseFill(el, inlineStyles, inherited, geo);
             const strokePaint = parseStroke(el, inlineStyles, inherited, geo);
-            const sw = parseSvgLength(resolveAttr(el, 'stroke-width', inlineStyles, inherited, '1'), 1);
+            const sw = parseSvgLength(
+                resolveAttr(el, 'stroke-width', inlineStyles, inherited, '1'),
+                1,
+            );
             const op = parseFloat(resolveAttr(el, 'opacity', inlineStyles, inherited, '1') || '1');
 
             // Parse fill-opacity and stroke-opacity (multiply into paint alpha)
-            const fillOpacity = parseFloat(resolveAttr(el, 'fill-opacity', inlineStyles, inherited, '1') || '1');
-            const strokeOpacity = parseFloat(resolveAttr(el, 'stroke-opacity', inlineStyles, inherited, '1') || '1');
+            const fillOpacity = parseFloat(
+                resolveAttr(el, 'fill-opacity', inlineStyles, inherited, '1') || '1',
+            );
+            const strokeOpacity = parseFloat(
+                resolveAttr(el, 'stroke-opacity', inlineStyles, inherited, '1') || '1',
+            );
 
             // Paint objects (solid {r,g,b,a} or gradient) for the engine's
             // multi-fill/multi-stroke Style. NOTE: the engine's Style requires
@@ -3665,28 +4317,36 @@ export class UIEngine {
             const strokePaintJson = paintToJson(strokePaint, strokeOpacity);
 
             // Parse stroke-linecap
-            const capStr = resolveAttr(el, 'stroke-linecap', inlineStyles, inherited, 'butt') || 'butt';
+            const capStr =
+                resolveAttr(el, 'stroke-linecap', inlineStyles, inherited, 'butt') || 'butt';
             const capMap: Record<string, number> = { butt: 0, round: 1, square: 2 };
             const strokeCap = capMap[capStr] ?? 0;
 
             // Parse stroke-linejoin
-            const joinStr = resolveAttr(el, 'stroke-linejoin', inlineStyles, inherited, 'miter') || 'miter';
+            const joinStr =
+                resolveAttr(el, 'stroke-linejoin', inlineStyles, inherited, 'miter') || 'miter';
             const joinMap: Record<string, number> = { miter: 0, round: 1, bevel: 2 };
             const strokeJoin = joinMap[joinStr] ?? 0;
 
             // Parse fill-rule
-            const fillRuleStr = resolveAttr(el, 'fill-rule', inlineStyles, inherited, 'nonzero') || 'nonzero';
+            const fillRuleStr =
+                resolveAttr(el, 'fill-rule', inlineStyles, inherited, 'nonzero') || 'nonzero';
             const fillRuleMap: Record<string, number> = { nonzero: 0, evenodd: 1 };
             const fillRule = fillRuleMap[fillRuleStr] ?? 0;
 
             // Parse miter limit
-            const miterLimit = parseFloat(resolveAttr(el, 'stroke-miterlimit', inlineStyles, inherited, '4') || '4');
+            const miterLimit = parseFloat(
+                resolveAttr(el, 'stroke-miterlimit', inlineStyles, inherited, '4') || '4',
+            );
 
             // Parse stroke-dasharray / -dashoffset
             let dashArray: number[] = [];
             const dashArr = resolveAttr(el, 'stroke-dasharray', inlineStyles, inherited, null);
             if (dashArr && dashArr !== 'none') {
-                dashArray = dashArr.split(/[,\s]+/).map(Number).filter(n => !isNaN(n));
+                dashArray = dashArr
+                    .split(/[,\s]+/)
+                    .map(Number)
+                    .filter((n) => !Number.isNaN(n));
             }
             let dashOffset = 0;
             const dashOff = resolveAttr(el, 'stroke-dashoffset', inlineStyles, inherited, null);
@@ -3701,22 +4361,28 @@ export class UIEngine {
             let blendMode = 0;
             const blendStr = inlineStyles['mix-blend-mode'];
             if (blendStr) {
-                const bmIdx = BLEND_MODE_MAP.indexOf(blendStr.trim() as typeof BLEND_MODE_MAP[number]);
+                const bmIdx = BLEND_MODE_MAP.indexOf(
+                    blendStr.trim() as (typeof BLEND_MODE_MAP)[number],
+                );
                 if (bmIdx > 0) blendMode = bmIdx;
             }
 
             const style = {
                 fills: fill ? [fill] : [],
-                strokes: strokePaintJson ? [{
-                    paint: strokePaintJson,
-                    width: sw,
-                    cap: strokeCap,
-                    join: strokeJoin,
-                    dash_array: dashArray,
-                    dash_offset: dashOffset,
-                    miter_limit: miterLimit,
-                    alignment: 'Center',
-                }] : [],
+                strokes: strokePaintJson
+                    ? [
+                          {
+                              paint: strokePaintJson,
+                              width: sw,
+                              cap: strokeCap,
+                              join: strokeJoin,
+                              dash_array: dashArray,
+                              dash_offset: dashOffset,
+                              miter_limit: miterLimit,
+                              alignment: 'Center',
+                          },
+                      ]
+                    : [],
                 opacity: op,
                 blend_mode: blendMode,
                 fill_rule: fillRule,
@@ -3741,7 +4407,12 @@ export class UIEngine {
 
         /** Helper: process children of a container element, optionally grouping results.
          *  Returns the IDs created. */
-        const processChildren = (container: Element, mat: number[], inherited: InheritedStyles, useRefStack: Set<string>) => {
+        const processChildren = (
+            container: Element,
+            mat: number[],
+            inherited: InheritedStyles,
+            useRefStack: Set<string>,
+        ) => {
             const childIds: number[] = [];
             for (const child of container.children) {
                 const beforeLen = createdIds.length;
@@ -3761,52 +4432,93 @@ export class UIEngine {
             Math.atan2(Math.sin(a1) + Math.sin(a2), Math.cos(a1) + Math.cos(a2));
 
         /** Resolve a marker-* property (or the `marker` shorthand) to a def id. */
-        const markerRef = (el: Element, prop: string, inlineStyles: Record<string, string>, inherited: InheritedStyles): string | null => {
+        const markerRef = (
+            el: Element,
+            prop: string,
+            inlineStyles: Record<string, string>,
+            inherited: InheritedStyles,
+        ): string | null => {
             const specific = resolveAttr(el, prop, inlineStyles, inherited, null);
             const shorthand = resolveAttr(el, 'marker', inlineStyles, inherited, null);
-            const v = (specific && specific !== 'none') ? specific : (shorthand && shorthand !== 'none' ? shorthand : null);
+            const v =
+                specific && specific !== 'none'
+                    ? specific
+                    : shorthand && shorthand !== 'none'
+                      ? shorthand
+                      : null;
             const m = v?.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
             return m ? m[1] : null;
         };
 
         /** Vertices (local coords) with tangent angle (radians) and marker kind. */
-        const markerVertices = (el: Element, tag: string): { x: number; y: number; angle: number; kind: 'start' | 'mid' | 'end' }[] => {
+        const markerVertices = (
+            el: Element,
+            tag: string,
+        ): { x: number; y: number; angle: number; kind: 'start' | 'mid' | 'end' }[] => {
             const anchors: { x: number; y: number; out?: number; in_?: number }[] = [];
             let closed = false;
             if (tag === 'line') {
-                anchors.push({ x: parseSvgLength(el.getAttribute('x1'), 0), y: parseSvgLength(el.getAttribute('y1'), 0) });
-                anchors.push({ x: parseSvgLength(el.getAttribute('x2'), 0), y: parseSvgLength(el.getAttribute('y2'), 0) });
+                anchors.push({
+                    x: parseSvgLength(el.getAttribute('x1'), 0),
+                    y: parseSvgLength(el.getAttribute('y1'), 0),
+                });
+                anchors.push({
+                    x: parseSvgLength(el.getAttribute('x2'), 0),
+                    y: parseSvgLength(el.getAttribute('y2'), 0),
+                });
             } else if (tag === 'polyline' || tag === 'polygon') {
-                const nums = (el.getAttribute('points') || '').trim().split(/[\s,]+/).map(Number).filter(n => !isNaN(n));
-                for (let i = 0; i + 1 < nums.length; i += 2) anchors.push({ x: nums[i], y: nums[i + 1] });
+                const nums = (el.getAttribute('points') || '')
+                    .trim()
+                    .split(/[\s,]+/)
+                    .map(Number)
+                    .filter((n) => !Number.isNaN(n));
+                for (let i = 0; i + 1 < nums.length; i += 2)
+                    anchors.push({ x: nums[i], y: nums[i + 1] });
                 closed = tag === 'polygon';
             } else if (tag === 'path') {
                 for (const sp of parseSVGPathDUtil(el.getAttribute('d') || '', 0, 0)) {
                     for (const p of sp.points) {
-                        const out = (Math.abs(p.cp2[0] - p.x) > 1e-6 || Math.abs(p.cp2[1] - p.y) > 1e-6) ? Math.atan2(p.cp2[1] - p.y, p.cp2[0] - p.x) : undefined;
-                        const in_ = (Math.abs(p.x - p.cp1[0]) > 1e-6 || Math.abs(p.y - p.cp1[1]) > 1e-6) ? Math.atan2(p.y - p.cp1[1], p.x - p.cp1[0]) : undefined;
+                        const out =
+                            Math.abs(p.cp2[0] - p.x) > 1e-6 || Math.abs(p.cp2[1] - p.y) > 1e-6
+                                ? Math.atan2(p.cp2[1] - p.y, p.cp2[0] - p.x)
+                                : undefined;
+                        const in_ =
+                            Math.abs(p.x - p.cp1[0]) > 1e-6 || Math.abs(p.y - p.cp1[1]) > 1e-6
+                                ? Math.atan2(p.y - p.cp1[1], p.x - p.cp1[0])
+                                : undefined;
                         anchors.push({ x: p.x, y: p.y, out, in_ });
                     }
                 }
             }
             const n = anchors.length;
             if (n < 1) return [];
-            const dirTo = (i: number, j: number) => Math.atan2(anchors[j].y - anchors[i].y, anchors[j].x - anchors[i].x);
-            const out: { x: number; y: number; angle: number; kind: 'start' | 'mid' | 'end' }[] = [];
+            const dirTo = (i: number, j: number) =>
+                Math.atan2(anchors[j].y - anchors[i].y, anchors[j].x - anchors[i].x);
+            const out: { x: number; y: number; angle: number; kind: 'start' | 'mid' | 'end' }[] =
+                [];
             for (let i = 0; i < n; i++) {
                 const a = anchors[i];
-                const prev = i > 0 ? i - 1 : (closed ? n - 1 : -1);
-                const next = i < n - 1 ? i + 1 : (closed ? 0 : -1);
-                const inAng = a.in_ ?? (prev >= 0 ? dirTo(prev, i) : (next >= 0 ? dirTo(i, next) : 0));
-                const outAng = a.out ?? (next >= 0 ? dirTo(i, next) : (prev >= 0 ? dirTo(prev, i) : 0));
+                const prev = i > 0 ? i - 1 : closed ? n - 1 : -1;
+                const next = i < n - 1 ? i + 1 : closed ? 0 : -1;
+                const inAng =
+                    a.in_ ?? (prev >= 0 ? dirTo(prev, i) : next >= 0 ? dirTo(i, next) : 0);
+                const outAng =
+                    a.out ?? (next >= 0 ? dirTo(i, next) : prev >= 0 ? dirTo(prev, i) : 0);
                 if (i === 0 && !closed) out.push({ x: a.x, y: a.y, angle: outAng, kind: 'start' });
-                else if (i === n - 1 && !closed) out.push({ x: a.x, y: a.y, angle: inAng, kind: 'end' });
+                else if (i === n - 1 && !closed)
+                    out.push({ x: a.x, y: a.y, angle: inAng, kind: 'end' });
                 else out.push({ x: a.x, y: a.y, angle: bisector(inAng, outAng), kind: 'mid' });
             }
             return out;
         };
 
-        const applyMarkers = (el: Element, tag: string, composedMat: number[], inherited: InheritedStyles, useRefStack: Set<string>) => {
+        const applyMarkers = (
+            el: Element,
+            tag: string,
+            composedMat: number[],
+            inherited: InheritedStyles,
+            useRefStack: Set<string>,
+        ) => {
             const inlineStyles = parseInlineStyle(el);
             const refs = {
                 start: markerRef(el, 'marker-start', inlineStyles, inherited),
@@ -3814,44 +4526,70 @@ export class UIEngine {
                 end: markerRef(el, 'marker-end', inlineStyles, inherited),
             };
             if (!refs.start && !refs.mid && !refs.end) return;
-            const strokeWidth = parseSvgLength(resolveAttr(el, 'stroke-width', inlineStyles, inherited, '1'), 1);
-            const rot = (rad: number): number[] => { const c = Math.cos(rad), s = Math.sin(rad); return [c, s, 0, -s, c, 0, 0, 0, 1]; };
+            const strokeWidth = parseSvgLength(
+                resolveAttr(el, 'stroke-width', inlineStyles, inherited, '1'),
+                1,
+            );
+            const rot = (rad: number): number[] => {
+                const c = Math.cos(rad),
+                    s = Math.sin(rad);
+                return [c, s, 0, -s, c, 0, 0, 0, 1];
+            };
 
             for (const v of markerVertices(el, tag)) {
-                const refId = v.kind === 'start' ? refs.start : v.kind === 'end' ? refs.end : refs.mid;
+                const refId =
+                    v.kind === 'start' ? refs.start : v.kind === 'end' ? refs.end : refs.mid;
                 if (!refId || useRefStack.has(refId)) continue;
                 const markerEl = doc.getElementById(refId);
-                if (!markerEl || markerEl.tagName.toLowerCase() !== 'marker') continue;
+                if (markerEl?.tagName.toLowerCase() !== 'marker') continue;
 
                 const mW = parseSvgLength(markerEl.getAttribute('markerWidth'), 3);
                 const mH = parseSvgLength(markerEl.getAttribute('markerHeight'), 3);
                 const refX = parseSvgLength(markerEl.getAttribute('refX'), 0);
                 const refY = parseSvgLength(markerEl.getAttribute('refY'), 0);
-                const scale = (markerEl.getAttribute('markerUnits') || 'strokeWidth') === 'userSpaceOnUse' ? 1 : strokeWidth;
+                const scale =
+                    (markerEl.getAttribute('markerUnits') || 'strokeWidth') === 'userSpaceOnUse'
+                        ? 1
+                        : strokeWidth;
 
                 const orient = markerEl.getAttribute('orient') || '0';
                 let angle: number;
                 if (orient === 'auto') angle = v.angle;
-                else if (orient === 'auto-start-reverse') angle = v.angle + (v.kind === 'start' ? Math.PI : 0);
-                else { const num = parseFloat(orient); angle = isNaN(num) ? 0 : num * Math.PI / 180; }
+                else if (orient === 'auto-start-reverse')
+                    angle = v.angle + (v.kind === 'start' ? Math.PI : 0);
+                else {
+                    const num = parseFloat(orient);
+                    angle = Number.isNaN(num) ? 0 : (num * Math.PI) / 180;
+                }
 
                 // Content matrix: viewBox fit + refX/refY reference point.
                 let cm: number[];
                 const vb = markerEl.getAttribute('viewBox');
-                const p = vb ? vb.trim().split(/[\s,]+/).map(Number) : null;
+                const p = vb
+                    ? vb
+                          .trim()
+                          .split(/[\s,]+/)
+                          .map(Number)
+                    : null;
                 if (p && p.length >= 4 && p[2] > 0 && p[3] > 0) {
-                    const sx = mW / p[2], sy = mH / p[3];
-                    cm = composeMatrices(translateMatrix(-(refX - p[0]) * sx, -(refY - p[1]) * sy),
-                        composeMatrices(scaleMatrix(sx, sy), translateMatrix(-p[0], -p[1])));
+                    const sx = mW / p[2],
+                        sy = mH / p[3];
+                    cm = composeMatrices(
+                        translateMatrix(-(refX - p[0]) * sx, -(refY - p[1]) * sy),
+                        composeMatrices(scaleMatrix(sx, sy), translateMatrix(-p[0], -p[1])),
+                    );
                 } else {
                     cm = translateMatrix(-refX, -refY);
                 }
 
                 // T(vertex)·R(angle)·S(scale)·cm in local space, then the element CTM.
-                const placement = composeMatrices(translateMatrix(v.x, v.y),
-                    composeMatrices(rot(angle), composeMatrices(scaleMatrix(scale, scale), cm)));
+                const placement = composeMatrices(
+                    translateMatrix(v.x, v.y),
+                    composeMatrices(rot(angle), composeMatrices(scaleMatrix(scale, scale), cm)),
+                );
                 const full = composeMatrices(composedMat, placement);
-                const stack = new Set(useRefStack); stack.add(refId);
+                const stack = new Set(useRefStack);
+                stack.add(refId);
                 // Marker content does NOT inherit the referencing element's paint
                 // (else an arrowhead would pick up the line's stroke); it uses its
                 // own styles on a clean context.
@@ -3872,10 +4610,18 @@ export class UIEngine {
                 }
                 createdIds.length = write;
                 const groupId = this.scene.groupNodes(childIds);
-                try { this.scene.engine!.set_node_name(groupId, name); } catch { /* noop */ }
+                try {
+                    this.scene.engine!.set_node_name(groupId, name);
+                } catch {
+                    /* noop */
+                }
                 createdIds.push(groupId);
             } else if (childIds.length === 1 && name) {
-                try { this.scene.engine!.set_node_name(childIds[0], name); } catch { /* noop */ }
+                try {
+                    this.scene.engine!.set_node_name(childIds[0], name);
+                } catch {
+                    /* noop */
+                }
             }
         };
 
@@ -3883,7 +4629,10 @@ export class UIEngine {
         const computeViewBoxMatrix = (el: Element): number[] => {
             const vb = el.getAttribute('viewBox');
             if (!vb) return identityMatrix();
-            const p = vb.trim().split(/[\s,]+/).map(Number);
+            const p = vb
+                .trim()
+                .split(/[\s,]+/)
+                .map(Number);
             if (p.length < 4 || p[2] <= 0 || p[3] <= 0) return identityMatrix();
             // The viewport width/height can carry absolute units (Inkscape
             // exports e.g. width="210mm"); convert to user px for the viewBox fit.
@@ -3908,24 +4657,60 @@ export class UIEngine {
         // Build a GradientGeo for a baked shape (path/line/poly): its geometry
         // lives in the composed space (node transform is identity), so the OBB
         // box is the baked bbox and userSpaceOnUse coords map via composedMat.
-        const bakedGradientGeo = (subpaths: { points: { x: number; y: number }[] }[], mat: number[]): GradientGeo => {
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            for (const sp of subpaths) for (const p of sp.points) {
-                if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
-                if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+        const bakedGradientGeo = (
+            subpaths: { points: { x: number; y: number }[] }[],
+            mat: number[],
+        ): GradientGeo => {
+            let minX = Infinity,
+                minY = Infinity,
+                maxX = -Infinity,
+                maxY = -Infinity;
+            for (const sp of subpaths)
+                for (const p of sp.points) {
+                    if (p.x < minX) minX = p.x;
+                    if (p.x > maxX) maxX = p.x;
+                    if (p.y < minY) minY = p.y;
+                    if (p.y > maxY) maxY = p.y;
+                }
+            if (!Number.isFinite(minX)) {
+                minX = 0;
+                minY = 0;
+                maxX = 0;
+                maxY = 0;
             }
-            if (!isFinite(minX)) { minX = 0; minY = 0; maxX = 0; maxY = 0; }
             return { bx: minX, by: minY, bw: maxX - minX, bh: maxY - minY, userToLocal: mat };
         };
 
-        const processElement = (el: Element, parentMat: number[], inherited: InheritedStyles, useRefStack: Set<string> = new Set(), suppressMask = false) => {
+        const processElement = (
+            el: Element,
+            parentMat: number[],
+            inherited: InheritedStyles,
+            useRefStack: Set<string> = new Set(),
+            suppressMask = false,
+        ) => {
             // localName strips any namespace prefix, so `<svg:rect>` (explicit
             // svg namespace) dispatches the same as `<rect>`.
             const tag = (el.localName || el.tagName).toLowerCase();
 
             // Skip metadata, defs, style, desc, title, clipPath
             // Note: <symbol> is NOT skipped — it is processed when referenced by <use>
-            if (['defs', 'style', 'metadata', 'desc', 'title', 'clippath', 'mask', 'pattern', 'lineargradient', 'radialgradient', 'filter', 'marker'].includes(tag)) return;
+            if (
+                [
+                    'defs',
+                    'style',
+                    'metadata',
+                    'desc',
+                    'title',
+                    'clippath',
+                    'mask',
+                    'pattern',
+                    'lineargradient',
+                    'radialgradient',
+                    'filter',
+                    'marker',
+                ].includes(tag)
+            )
+                return;
 
             // <symbol> is only renderable when referenced by <use>, not as a top-level element
             if (tag === 'symbol') return;
@@ -3936,7 +4721,7 @@ export class UIEngine {
             // exporter also wraps every hidden node in `<g display="none">`, so
             // honoring this is what makes hidden state survive a round-trip.
             const _ownInline = parseInlineStyle(el);
-            if ((el.getAttribute('display') || _ownInline['display']) === 'none') return;
+            if ((el.getAttribute('display') || _ownInline.display) === 'none') return;
 
             // A filter that is empty or references an invalid target makes the
             // element (and its subtree) not render at all (SVG semantics).
@@ -3950,15 +4735,42 @@ export class UIEngine {
             // Rasterize-fallback: an element whose filter couldn't be mapped to
             // native effects was pre-rendered to an image (see
             // rasterizeFilteredElements) — place that image instead of the shape.
-            const raster = (el as unknown as { __rasterFilter?: { imageId: number; x: number; y: number; w: number; h: number } }).__rasterFilter;
+            const raster = (
+                el as unknown as {
+                    __rasterFilter?: {
+                        imageId: number;
+                        x: number;
+                        y: number;
+                        w: number;
+                        h: number;
+                    };
+                }
+            ).__rasterFilter;
             if (raster) {
                 try {
-                    const imgNode = this.scene.engine!.add_image(0, 0, raster.w, raster.h, raster.imageId);
-                    this.scene.setNodeTransform(imgNode, composeMatrices(composedMat, translateMatrix(raster.x, raster.y)));
+                    const imgNode = this.scene.engine!.add_image(
+                        0,
+                        0,
+                        raster.w,
+                        raster.h,
+                        raster.imageId,
+                    );
+                    this.scene.setNodeTransform(
+                        imgNode,
+                        composeMatrices(composedMat, translateMatrix(raster.x, raster.y)),
+                    );
                     const nm = el.getAttribute('id') || el.getAttribute('class');
-                    if (nm) { try { this.scene.engine!.set_node_name(imgNode, nm); } catch { /* noop */ } }
+                    if (nm) {
+                        try {
+                            this.scene.engine!.set_node_name(imgNode, nm);
+                        } catch {
+                            /* noop */
+                        }
+                    }
                     createdIds.push(imgNode);
-                } catch (err) { console.warn('Filter rasterize placement failed:', err); }
+                } catch (err) {
+                    console.warn('Filter rasterize placement failed:', err);
+                }
                 return;
             }
 
@@ -3970,7 +4782,7 @@ export class UIEngine {
             // shapes are opaque, so alpha-masking reproduces clipping.
             if (!suppressMask) {
                 const ref = el.getAttribute('mask') || el.getAttribute('clip-path');
-                const refMatch = ref && ref.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
+                const refMatch = ref?.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
                 const defEl = refMatch ? doc.getElementById(refMatch[1]) : null;
                 const defTag = defEl?.tagName.toLowerCase();
                 if (defEl && (defTag === 'clippath' || defTag === 'mask')) {
@@ -3986,10 +4798,14 @@ export class UIEngine {
                         // <clipPath> only accepts basic shapes / text / use
                         // (image, switch, symbol, … are invalid clip children).
                         const dcInline = parseInlineStyle(dc);
-                        if ((dc.getAttribute('display') || dcInline['display']) === 'none') continue;
-                        if ((dc.getAttribute('visibility') || dcInline['visibility']) === 'hidden') continue;
-                        if (defTag === 'clippath' &&
-                            !CLIP_CHILD_TAGS.has((dc.localName || dc.tagName).toLowerCase())) continue;
+                        if ((dc.getAttribute('display') || dcInline.display) === 'none') continue;
+                        if ((dc.getAttribute('visibility') || dcInline.visibility) === 'hidden')
+                            continue;
+                        if (
+                            defTag === 'clippath' &&
+                            !CLIP_CHILD_TAGS.has((dc.localName || dc.tagName).toLowerCase())
+                        )
+                            continue;
                         processElement(dc, composedMat, inherited, useRefStack, true);
                     }
                     const maskIds = createdIds.slice(maskStart);
@@ -3997,7 +4813,13 @@ export class UIEngine {
                     // An empty/invalid clipPath or mask clips the element away
                     // entirely (SVG semantics) — remove the content we created.
                     if (contentIds.length > 0 && maskIds.length === 0) {
-                        for (const id of contentIds) { try { this.scene.removeNode(id); } catch { /* noop */ } }
+                        for (const id of contentIds) {
+                            try {
+                                this.scene.removeNode(id);
+                            } catch {
+                                /* noop */
+                            }
+                        }
                         const dropped = new Set(contentIds);
                         let w = 0;
                         for (let r = 0; r < createdIds.length; r++) {
@@ -4013,30 +4835,53 @@ export class UIEngine {
                         let maskNode = maskIds[0];
                         if (maskIds.length > 1) {
                             maskNode = this.scene.groupNodes(maskIds);
-                            try { this.scene.engine!.set_node_name(maskNode, 'Mask'); } catch { /* noop */ }
+                            try {
+                                this.scene.engine!.set_node_name(maskNode, 'Mask');
+                            } catch {
+                                /* noop */
+                            }
                         }
-                        try { this.scene.engine!.set_node_is_mask(maskNode, true); } catch { /* noop */ }
+                        try {
+                            this.scene.engine!.set_node_is_mask(maskNode, true);
+                        } catch {
+                            /* noop */
+                        }
                         // SVG <mask> defaults to luminance masking unless
                         // mask-type="alpha" is explicitly set. <clipPath> is
                         // always alpha (coverage).
                         if (defTag === 'mask') {
-                            const maskTypeAttr = (defEl.getAttribute('mask-type') ||
-                                defEl.style?.getPropertyValue?.('mask-type') || '').trim().toLowerCase();
+                            const maskTypeAttr = (
+                                defEl.getAttribute('mask-type') ||
+                                defEl.style?.getPropertyValue?.('mask-type') ||
+                                ''
+                            )
+                                .trim()
+                                .toLowerCase();
                             const mt = maskTypeAttr === 'alpha' ? 0 : 1; // luminance by default
-                            try { this.scene.engine!.set_node_mask_type(maskNode, mt); } catch { /* noop */ }
+                            try {
+                                this.scene.engine!.set_node_mask_type(maskNode, mt);
+                            } catch {
+                                /* noop */
+                            }
                         }
 
                         const groupId = this.scene.groupNodes([maskNode, ...contentIds]);
                         try {
-                            this.scene.engine!.set_node_name(groupId, el.getAttribute('id') || (defTag === 'mask' ? 'Masked' : 'Clipped'));
-                        } catch { /* noop */ }
+                            this.scene.engine!.set_node_name(
+                                groupId,
+                                el.getAttribute('id') || (defTag === 'mask' ? 'Masked' : 'Clipped'),
+                            );
+                        } catch {
+                            /* noop */
+                        }
 
                         // Reconcile createdIds: drop the individual content+mask
                         // shapes, push the wrapping group.
                         const consumed = new Set([...contentIds, ...maskIds]);
                         let write = 0;
                         for (let read = 0; read < createdIds.length; read++) {
-                            if (!consumed.has(createdIds[read])) createdIds[write++] = createdIds[read];
+                            if (!consumed.has(createdIds[read]))
+                                createdIds[write++] = createdIds[read];
                         }
                         createdIds.length = write;
                         createdIds.push(groupId);
@@ -4068,43 +4913,72 @@ export class UIEngine {
                 // width/height default to 100% of the viewport when omitted.
                 const wAttr = el.getAttribute('width');
                 const hAttr = el.getAttribute('height');
-                const vw = wAttr != null ? parseSvgLength(wAttr, docW, { percentBasis: docW }) : docW;
-                const vh = hAttr != null ? parseSvgLength(hAttr, docH, { percentBasis: docH }) : docH;
-                const offsetMat = (x !== 0 || y !== 0)
-                    ? composeMatrices(composedMat, translateMatrix(x, y))
-                    : composedMat;
+                const vw =
+                    wAttr != null ? parseSvgLength(wAttr, docW, { percentBasis: docW }) : docW;
+                const vh =
+                    hAttr != null ? parseSvgLength(hAttr, docH, { percentBasis: docH }) : docH;
+                const offsetMat =
+                    x !== 0 || y !== 0
+                        ? composeMatrices(composedMat, translateMatrix(x, y))
+                        : composedMat;
                 const nestedVbMat = computeViewBoxMatrix(el);
                 const nestedMat = composeMatrices(offsetMat, nestedVbMat);
                 const childIds = processChildren(el, nestedMat, mergedStyles, useRefStack);
                 const groupName = el.getAttribute('id') || 'Nested SVG';
 
-                const overflow = (el.getAttribute('overflow')
-                    || (el.getAttribute('style') || '').match(/(?:^|;)\s*overflow\s*:\s*([^;]+)/i)?.[1]
-                    || '').trim();
+                const overflow = (
+                    el.getAttribute('overflow') ||
+                    (el.getAttribute('style') || '').match(
+                        /(?:^|;)\s*overflow\s*:\s*([^;]+)/i,
+                    )?.[1] ||
+                    ''
+                ).trim();
                 const clip = overflow !== 'visible' && overflow !== 'auto' && vw > 0 && vh > 0;
                 if (clip && childIds.length > 0) {
                     // Clip via the mask system: a solid viewport rect (in PARENT
                     // space) as an alpha mask below the content.
                     const clipRect = this.scene.addRect(0, 0, vw, vh);
-                    this.scene.setNodeTransform(clipRect, composeMatrices(composedMat, translateMatrix(x, y)));
+                    this.scene.setNodeTransform(
+                        clipRect,
+                        composeMatrices(composedMat, translateMatrix(x, y)),
+                    );
                     // Clean opaque fill, no stroke (a stroke would leak past the
                     // viewport edge and fuzz the clip).
                     try {
-                        this.scene.setNodeStyleNoHistory(clipRect, JSON.stringify({
-                            fills: [{ r: 0, g: 0, b: 0, a: 1 }], strokes: [], opacity: 1,
-                            blend_mode: 0, fill_rule: 0, corner_radius: 0, effects: [],
-                        }));
-                    } catch { /* keep default style */ }
-                    try { this.scene.engine!.set_node_is_mask(clipRect, true); } catch { /* noop */ }
+                        this.scene.setNodeStyleNoHistory(
+                            clipRect,
+                            JSON.stringify({
+                                fills: [{ r: 0, g: 0, b: 0, a: 1 }],
+                                strokes: [],
+                                opacity: 1,
+                                blend_mode: 0,
+                                fill_rule: 0,
+                                corner_radius: 0,
+                                effects: [],
+                            }),
+                        );
+                    } catch {
+                        /* keep default style */
+                    }
+                    try {
+                        this.scene.engine!.set_node_is_mask(clipRect, true);
+                    } catch {
+                        /* noop */
+                    }
                     // Content ids move inside the clip group.
                     const removeSet = new Set(childIds);
                     let write = 0;
                     for (let read = 0; read < createdIds.length; read++) {
-                        if (!removeSet.has(createdIds[read])) createdIds[write++] = createdIds[read];
+                        if (!removeSet.has(createdIds[read]))
+                            createdIds[write++] = createdIds[read];
                     }
                     createdIds.length = write;
                     const groupId = this.scene.groupNodes([clipRect, ...childIds]);
-                    try { this.scene.engine!.set_node_name(groupId, groupName); } catch { /* noop */ }
+                    try {
+                        this.scene.engine!.set_node_name(groupId, groupName);
+                    } catch {
+                        /* noop */
+                    }
                     createdIds.push(groupId);
                 } else {
                     groupChildIds(childIds, groupName);
@@ -4126,8 +5000,10 @@ export class UIEngine {
 
             // Handle <use> — inline the referenced element with cycle guard
             if (tag === 'use') {
-                const href = el.getAttribute('href') || el.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
-                if (href && href.startsWith('#')) {
+                const href =
+                    el.getAttribute('href') ||
+                    el.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+                if (href?.startsWith('#')) {
                     const refId = href.slice(1);
 
                     // Cycle detection: prevent infinite recursion
@@ -4137,9 +5013,10 @@ export class UIEngine {
                     if (refEl) {
                         const useX = parseFloat(el.getAttribute('x') || '0');
                         const useY = parseFloat(el.getAttribute('y') || '0');
-                        const useMat = (useX !== 0 || useY !== 0)
-                            ? composeMatrices(composedMat, translateMatrix(useX, useY))
-                            : composedMat;
+                        const useMat =
+                            useX !== 0 || useY !== 0
+                                ? composeMatrices(composedMat, translateMatrix(useX, useY))
+                                : composedMat;
 
                         // Push this ref onto the cycle-detection stack
                         const newStack = new Set(useRefStack);
@@ -4149,15 +5026,30 @@ export class UIEngine {
                         if (refTag === 'symbol') {
                             // <symbol> acts like a nested viewport:
                             // compute viewBox transform using <use>'s width/height (or <symbol>'s)
-                            const useW = parseFloat(el.getAttribute('width') || refEl.getAttribute('width') || '0');
-                            const useH = parseFloat(el.getAttribute('height') || refEl.getAttribute('height') || '0');
+                            const useW = parseFloat(
+                                el.getAttribute('width') || refEl.getAttribute('width') || '0',
+                            );
+                            const useH = parseFloat(
+                                el.getAttribute('height') || refEl.getAttribute('height') || '0',
+                            );
                             const symVb = refEl.getAttribute('viewBox');
                             let symMat = useMat;
                             if (symVb) {
-                                const p = symVb.trim().split(/[\s,]+/).map(Number);
+                                const p = symVb
+                                    .trim()
+                                    .split(/[\s,]+/)
+                                    .map(Number);
                                 if (p.length >= 4 && p[2] > 0 && p[3] > 0 && useW > 0 && useH > 0) {
                                     const par = refEl.getAttribute('preserveAspectRatio');
-                                    const vbMat = parsePreserveAspectRatio(par, p[0], p[1], p[2], p[3], useW, useH);
+                                    const vbMat = parsePreserveAspectRatio(
+                                        par,
+                                        p[0],
+                                        p[1],
+                                        p[2],
+                                        p[3],
+                                        useW,
+                                        useH,
+                                    );
                                     symMat = composeMatrices(useMat, vbMat);
                                 } else if (p.length >= 2 && (p[0] !== 0 || p[1] !== 0)) {
                                     symMat = composeMatrices(useMat, translateMatrix(-p[0], -p[1]));
@@ -4166,7 +5058,8 @@ export class UIEngine {
                             // Process symbol's children
                             const symStyles = collectInheritedStyles(refEl, mergedStyles);
                             const childIds = processChildren(refEl, symMat, symStyles, newStack);
-                            const groupName = refEl.getAttribute('id') || el.getAttribute('id') || 'Symbol';
+                            const groupName =
+                                refEl.getAttribute('id') || el.getAttribute('id') || 'Symbol';
                             groupChildIds(childIds, groupName);
                         } else {
                             // Regular element reference (<g>, <rect>, etc.)
@@ -4206,7 +5099,13 @@ export class UIEngine {
                 nodeId = this.scene.addEllipse(0, 0, rx, ry);
                 const offsetMat = composeMatrices(composedMat, translateMatrix(cx, cy));
                 this.scene.setNodeTransform(nodeId, offsetMat);
-                gradientGeo = { bx: -rx, by: -ry, bw: 2 * rx, bh: 2 * ry, userToLocal: translateMatrix(-cx, -cy) };
+                gradientGeo = {
+                    bx: -rx,
+                    by: -ry,
+                    bw: 2 * rx,
+                    bh: 2 * ry,
+                    userToLocal: translateMatrix(-cx, -cy),
+                };
             } else if (tag === 'circle') {
                 const cx = parseSvgLength(el.getAttribute('cx'), 0);
                 const cy = parseSvgLength(el.getAttribute('cy'), 0);
@@ -4214,7 +5113,13 @@ export class UIEngine {
                 nodeId = this.scene.addEllipse(0, 0, r, r);
                 const offsetMat = composeMatrices(composedMat, translateMatrix(cx, cy));
                 this.scene.setNodeTransform(nodeId, offsetMat);
-                gradientGeo = { bx: -r, by: -r, bw: 2 * r, bh: 2 * r, userToLocal: translateMatrix(-cx, -cy) };
+                gradientGeo = {
+                    bx: -r,
+                    by: -r,
+                    bw: 2 * r,
+                    bh: 2 * r,
+                    userToLocal: translateMatrix(-cx, -cy),
+                };
             } else if (tag === 'text') {
                 // Resolve font-size through the CSS cascade. em/% are relative to
                 // the inherited (parent) font-size; absolute units (pt, mm, …)
@@ -4224,7 +5129,11 @@ export class UIEngine {
                 // font-size — the `inherited` context, NOT mergedStyles (which
                 // already folds in this element's own font-size).
                 const parentFs = parseSvgLength(inherited['font-size'], 16);
-                const fontSize = parseSvgLength(resolveAttr(el, 'font-size', inlineStyles, mergedStyles, '24'), 24, { fontSize: parentFs, percentBasis: parentFs });
+                const fontSize = parseSvgLength(
+                    resolveAttr(el, 'font-size', inlineStyles, mergedStyles, '24'),
+                    24,
+                    { fontSize: parentFs, percentBasis: parentFs },
+                );
                 const textX = parseSvgLength(el.getAttribute('x'), 0, { fontSize });
                 const textY = parseSvgLength(el.getAttribute('y'), 0, { fontSize });
 
@@ -4237,7 +5146,17 @@ export class UIEngine {
                         const tspanStyles = collectInheritedStyles(tspan, mergedStyles);
                         const tx = parseSvgLength(tspan.getAttribute('x'), textX, { fontSize });
                         const ty = parseSvgLength(tspan.getAttribute('y'), textY, { fontSize });
-                        const tfs = parseSvgLength(resolveAttr(tspan, 'font-size', tspanInline, tspanStyles, String(fontSize)), fontSize, { fontSize, percentBasis: fontSize });
+                        const tfs = parseSvgLength(
+                            resolveAttr(
+                                tspan,
+                                'font-size',
+                                tspanInline,
+                                tspanStyles,
+                                String(fontSize),
+                            ),
+                            fontSize,
+                            { fontSize, percentBasis: fontSize },
+                        );
                         const content = tspan.textContent?.trim() || '';
                         if (!content) continue;
                         const tid = this.scene.addText(0, 0, content, tfs);
@@ -4255,7 +5174,11 @@ export class UIEngine {
                     } else if (tspanIds.length === 1) {
                         const elName = el.getAttribute('id') || el.getAttribute('class');
                         if (elName) {
-                            try { this.scene.engine!.set_node_name(tspanIds[0], elName); } catch { /* noop */ }
+                            try {
+                                this.scene.engine!.set_node_name(tspanIds[0], elName);
+                            } catch {
+                                /* noop */
+                            }
                         }
                     }
                     return; // tspan IDs already added to createdIds
@@ -4284,7 +5207,10 @@ export class UIEngine {
                 gradientGeo = bakedGradientGeo(subpaths, composedMat);
             } else if (tag === 'polygon' || tag === 'polyline') {
                 const pointsStr = el.getAttribute('points') || '';
-                const coords = pointsStr.trim().split(/[\s,]+/).map(Number);
+                const coords = pointsStr
+                    .trim()
+                    .split(/[\s,]+/)
+                    .map(Number);
                 const pts = [];
                 for (let i = 0; i < coords.length - 1; i += 2) {
                     // Bake transform into point coordinates
@@ -4307,7 +5233,17 @@ export class UIEngine {
             } else if (tag === 'image') {
                 // preprocessImages (async pre-pass) decoded the image: intrinsic
                 // size, preserveAspectRatio fit, and SVG-in-image rasterization.
-                const fit = (el as unknown as { __imageFit?: { imageId: number; x: number; y: number; w: number; h: number } }).__imageFit;
+                const fit = (
+                    el as unknown as {
+                        __imageFit?: {
+                            imageId: number;
+                            x: number;
+                            y: number;
+                            w: number;
+                            h: number;
+                        };
+                    }
+                ).__imageFit;
                 if (fit) {
                     nodeId = this.scene.engine!.add_image(0, 0, fit.w, fit.h, fit.imageId);
                     const offsetMat = composeMatrices(composedMat, translateMatrix(fit.x, fit.y));
@@ -4316,13 +5252,16 @@ export class UIEngine {
                     // Fallback: preprocessImages didn't tag this one (decode/encode
                     // failed, or an image type it skipped) — register the raw
                     // data-URI bytes stretched to the box, as before.
-                    const href = el.getAttribute('href') || el.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '';
+                    const href =
+                        el.getAttribute('href') ||
+                        el.getAttributeNS('http://www.w3.org/1999/xlink', 'href') ||
+                        '';
                     const ix = parseSvgLength(el.getAttribute('x'), 0);
                     const iy = parseSvgLength(el.getAttribute('y'), 0);
                     const iw = parseSvgLength(el.getAttribute('width'), 0) || 100;
                     const ih = parseSvgLength(el.getAttribute('height'), 0) || 100;
                     const m = href.match(/^data:([^;,]*)(;base64)?,(.*)$/s);
-                    if (m && m[2]) {
+                    if (m?.[2]) {
                         const mime = m[1] || 'image/png';
                         try {
                             const binStr = atob(m[3]);
@@ -4330,10 +5269,18 @@ export class UIEngine {
                             for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
                             const imageId = this.scene.engine!.register_image(bytes, mime);
                             nodeId = this.scene.engine!.add_image(0, 0, iw, ih, imageId);
-                            this.scene.setNodeTransform(nodeId, composeMatrices(composedMat, translateMatrix(ix, iy)));
-                        } catch (err) { console.warn('Failed to import <image>:', err); }
+                            this.scene.setNodeTransform(
+                                nodeId,
+                                composeMatrices(composedMat, translateMatrix(ix, iy)),
+                            );
+                        } catch (err) {
+                            console.warn('Failed to import <image>:', err);
+                        }
                     } else if (href) {
-                        console.warn('Skipping external <image> href (unsupported):', href.slice(0, 64));
+                        console.warn(
+                            'Skipping external <image> href (unsupported):',
+                            href.slice(0, 64),
+                        );
                     }
                 }
             }
@@ -4343,14 +5290,22 @@ export class UIEngine {
                 // Set name from id attribute if present
                 const elName = el.getAttribute('id') || el.getAttribute('class');
                 if (elName) {
-                    try { this.scene.engine!.set_node_name(nodeId, elName); } catch { /* noop */ }
+                    try {
+                        this.scene.engine!.set_node_name(nodeId, elName);
+                    } catch {
+                        /* noop */
+                    }
                 }
                 // Effects: resolve filter="url(#id)" into blur/shadow/color-matrix.
                 // ('rasterize' filters are handled up-front — see below — so here
                 // we only apply natively-mappable effect arrays.)
                 const fx = this.parseFilterEffects(el, doc);
                 if (Array.isArray(fx) && fx.length) {
-                    try { this.scene.engine!.set_node_effects(nodeId, JSON.stringify(fx)); } catch { /* noop */ }
+                    try {
+                        this.scene.engine!.set_node_effects(nodeId, JSON.stringify(fx));
+                    } catch {
+                        /* noop */
+                    }
                 }
                 createdIds.push(nodeId);
 
@@ -4369,7 +5324,11 @@ export class UIEngine {
         // Auto-group all imported elements
         if (createdIds.length > 1) {
             const importGroupId = this.scene.groupNodes(createdIds);
-            try { this.scene.engine!.set_node_name(importGroupId, 'SVG Import'); } catch { /* noop */ }
+            try {
+                this.scene.engine!.set_node_name(importGroupId, 'SVG Import');
+            } catch {
+                /* noop */
+            }
             // Select the import group
             this.scene.engine!.clear_selection();
             this.scene.selectNode(importGroupId, false);
@@ -4387,7 +5346,12 @@ export class UIEngine {
     /** Apply font-weight / font-style / letter-spacing from an SVG text element
      *  (or tspan) to a created text node. Resolves attribute → inline style →
      *  inherited cascade. */
-    private applyTextStyleFromEl(nodeId: number, el: Element, inline: Record<string, string>, inherited: unknown) {
+    private applyTextStyleFromEl(
+        nodeId: number,
+        el: Element,
+        inline: Record<string, string>,
+        inherited: unknown,
+    ) {
         const inh = inherited as Record<string, string> | undefined;
         const get = (name: string): string | null =>
             el.getAttribute(name) ?? inline[name] ?? inh?.[name] ?? null;
@@ -4397,16 +5361,26 @@ export class UIEngine {
         if (fw) {
             if (fw === 'bold') weight = 700;
             else if (fw === 'normal') weight = 400;
-            else { const n = parseInt(fw, 10); if (!isNaN(n)) weight = n; }
+            else {
+                const n = parseInt(fw, 10);
+                if (!Number.isNaN(n)) weight = n;
+            }
         }
         const fs = get('font-style');
         const italic = fs === 'italic' || fs === 'oblique';
         let ls = 0;
         const lsRaw = get('letter-spacing');
-        if (lsRaw && lsRaw !== 'normal') { const n = parseFloat(lsRaw); if (!isNaN(n)) ls = n; }
+        if (lsRaw && lsRaw !== 'normal') {
+            const n = parseFloat(lsRaw);
+            if (!Number.isNaN(n)) ls = n;
+        }
 
         if (weight !== 400 || italic || ls !== 0) {
-            try { this.scene.engine!.set_text_style(nodeId, weight, italic, ls); } catch { /* noop */ }
+            try {
+                this.scene.engine!.set_text_style(nodeId, weight, italic, ls);
+            } catch {
+                /* noop */
+            }
         }
     }
 
@@ -4419,33 +5393,72 @@ export class UIEngine {
     /** The 20-float (4×5, row-major) color matrix for an feColorMatrix primitive. */
     private feColorMatrix(prim: Element): number[] {
         const type = (prim.getAttribute('type') || 'matrix').toLowerCase();
-        const vals = (prim.getAttribute('values') || '').trim().split(/[\s,]+/).map(Number).filter(n => !isNaN(n));
+        const vals = (prim.getAttribute('values') || '')
+            .trim()
+            .split(/[\s,]+/)
+            .map(Number)
+            .filter((n) => !Number.isNaN(n));
         if (type === 'matrix') {
-            return vals.length === 20 ? vals : [1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,1,0];
+            return vals.length === 20
+                ? vals
+                : [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0];
         }
         if (type === 'saturate') {
             const s = vals.length ? vals[0] : 1;
             return [
-                0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s, 0, 0,
-                0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s, 0, 0,
-                0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s, 0, 0,
-                0, 0, 0, 1, 0,
+                0.213 + 0.787 * s,
+                0.715 - 0.715 * s,
+                0.072 - 0.072 * s,
+                0,
+                0,
+                0.213 - 0.213 * s,
+                0.715 + 0.285 * s,
+                0.072 - 0.072 * s,
+                0,
+                0,
+                0.213 - 0.213 * s,
+                0.715 - 0.715 * s,
+                0.072 + 0.928 * s,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
             ];
         }
         if (type === 'huerotate') {
-            const a = (vals.length ? vals[0] : 0) * Math.PI / 180;
-            const c = Math.cos(a), s = Math.sin(a);
+            const a = ((vals.length ? vals[0] : 0) * Math.PI) / 180;
+            const c = Math.cos(a),
+                s = Math.sin(a);
             return [
-                0.213 + c * 0.787 - s * 0.213, 0.715 - c * 0.715 - s * 0.715, 0.072 - c * 0.072 + s * 0.928, 0, 0,
-                0.213 - c * 0.213 + s * 0.143, 0.715 + c * 0.285 + s * 0.140, 0.072 - c * 0.072 - s * 0.283, 0, 0,
-                0.213 - c * 0.213 - s * 0.787, 0.715 - c * 0.715 + s * 0.715, 0.072 + c * 0.928 + s * 0.072, 0, 0,
-                0, 0, 0, 1, 0,
+                0.213 + c * 0.787 - s * 0.213,
+                0.715 - c * 0.715 - s * 0.715,
+                0.072 - c * 0.072 + s * 0.928,
+                0,
+                0,
+                0.213 - c * 0.213 + s * 0.143,
+                0.715 + c * 0.285 + s * 0.14,
+                0.072 - c * 0.072 - s * 0.283,
+                0,
+                0,
+                0.213 - c * 0.213 - s * 0.787,
+                0.715 - c * 0.715 + s * 0.715,
+                0.072 + c * 0.928 + s * 0.072,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
             ];
         }
         if (type === 'luminancetoalpha') {
-            return [0,0,0,0,0, 0,0,0,0,0, 0,0,0,0,0, 0.2125, 0.7154, 0.0721, 0, 0];
+            return [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.2125, 0.7154, 0.0721, 0, 0];
         }
-        return [1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,1,0];
+        return [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0];
     }
 
     /**
@@ -4458,7 +5471,9 @@ export class UIEngine {
     private parseFilterEffects(el: Element, doc: Document): any[] | 'rasterize' | 'hide' | null {
         // `filter` may be a url(#id) reference or a CSS filter-function list,
         // on the presentation attribute or in the inline style.
-        const styleFilter = (el.getAttribute('style') || '').match(/(?:^|;)\s*filter\s*:\s*([^;]+)/i);
+        const styleFilter = (el.getAttribute('style') || '').match(
+            /(?:^|;)\s*filter\s*:\s*([^;]+)/i,
+        );
         const ref = ((styleFilter ? styleFilter[1] : el.getAttribute('filter')) || '').trim();
         if (!ref || ref === 'none') return null;
         const m = ref.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
@@ -4472,9 +5487,11 @@ export class UIEngine {
         const filterEl = doc.getElementById(m[1]);
         // An invalid filter reference (missing target or not a <filter>) makes
         // the referencing element not render at all (SVG 1.1).
-        if (!filterEl || filterEl.tagName.toLowerCase() !== 'filter') return 'hide';
+        if (filterEl?.tagName.toLowerCase() !== 'filter') return 'hide';
 
-        const primitives = Array.from(filterEl.children).filter(c => c.tagName.toLowerCase().startsWith('fe'));
+        const primitives = Array.from(filterEl.children).filter((c) =>
+            c.tagName.toLowerCase().startsWith('fe'),
+        );
         const hasHref = filterEl.hasAttribute('href') || filterEl.hasAttribute('xlink:href');
         // A filter with no primitives (and no template it inherits them from)
         // produces empty output → the element is not rendered.
@@ -4485,21 +5502,25 @@ export class UIEngine {
         // inheritance is rasterized through the browser, which implements all of
         // that (incl. region clipping) correctly.
         const regionAttrs = ['x', 'y', 'width', 'height', 'filterUnits', 'primitiveUnits'];
-        const hasRegion = regionAttrs.some(a => filterEl.hasAttribute(a));
-        const hasSubregion = primitives.some(p => ['x', 'y', 'width', 'height'].some(a => p.hasAttribute(a)));
-        const hasInputs = primitives.some(p => p.hasAttribute('in') || p.hasAttribute('in2'));
+        const hasRegion = regionAttrs.some((a) => filterEl.hasAttribute(a));
+        const hasSubregion = primitives.some((p) =>
+            ['x', 'y', 'width', 'height'].some((a) => p.hasAttribute(a)),
+        );
+        const hasInputs = primitives.some((p) => p.hasAttribute('in') || p.hasAttribute('in2'));
         if (hasHref || hasRegion || hasSubregion || hasInputs) return 'rasterize';
 
         const effects: any[] = [];
         const firstNum = (s: string | null, def = 0): number => {
             if (!s) return def;
             const v = parseFloat(s.trim().split(/[\s,]+/)[0]);
-            return isNaN(v) ? def : v;
+            return Number.isNaN(v) ? def : v;
         };
         // color-interpolation-filters: default is linearRGB per SVG spec.
         // Check the <filter> element for a blanket override, then each
         // primitive can override individually.
-        const filterCIF = (filterEl.getAttribute('color-interpolation-filters') || '').trim().toLowerCase();
+        const filterCIF = (filterEl.getAttribute('color-interpolation-filters') || '')
+            .trim()
+            .toLowerCase();
         const filterLinearRGB = filterCIF !== 'srgb'; // linearRGB or auto → true
         for (const prim of primitives) {
             const t = prim.tagName.toLowerCase();
@@ -4509,17 +5530,23 @@ export class UIEngine {
                 const flood = prim.getAttribute('flood-color') || '#000000';
                 const fo = firstNum(prim.getAttribute('flood-opacity'), 1);
                 const c = flood.startsWith('#') ? hexToRgb(flood) : { r: 0, g: 0, b: 0 };
-                effects.push({ DropShadow: {
-                    dx: firstNum(prim.getAttribute('dx')),
-                    dy: firstNum(prim.getAttribute('dy')),
-                    blur: firstNum(prim.getAttribute('stdDeviation')),
-                    color: { r: c.r, g: c.g, b: c.b, a: fo },
-                } });
+                effects.push({
+                    DropShadow: {
+                        dx: firstNum(prim.getAttribute('dx')),
+                        dy: firstNum(prim.getAttribute('dy')),
+                        blur: firstNum(prim.getAttribute('stdDeviation')),
+                        color: { r: c.r, g: c.g, b: c.b, a: fo },
+                    },
+                });
             } else if (t === 'fecolormatrix') {
                 // Per-primitive override of color-interpolation-filters.
-                const primCIF = (prim.getAttribute('color-interpolation-filters') || '').trim().toLowerCase();
+                const primCIF = (prim.getAttribute('color-interpolation-filters') || '')
+                    .trim()
+                    .toLowerCase();
                 const linearRGB = primCIF ? primCIF !== 'srgb' : filterLinearRGB;
-                effects.push({ ColorMatrix: { matrix: this.feColorMatrix(prim), linear_rgb: linearRGB } });
+                effects.push({
+                    ColorMatrix: { matrix: this.feColorMatrix(prim), linear_rgb: linearRGB },
+                });
             } else {
                 // Unsupported primitive — fall back to rasterizing the element.
                 return 'rasterize';
@@ -4539,7 +5566,6 @@ export class UIEngine {
     private parseFilterFunctions(str: string, el: Element): any[] | 'rasterize' | null {
         const effects: any[] = [];
         const re = /([a-z-]+)\s*\(([^)]*)\)/gi;
-        let match: RegExpExecArray | null;
         let sawAny = false;
         // CSS rule: if ANY function in the list is invalid, the whole `filter`
         // is treated as `none` (no filter). We signal that by returning null.
@@ -4551,22 +5577,34 @@ export class UIEngine {
             const v = parseFloat(a);
             return a.endsWith('%') ? v / 100 : v;
         };
-        while ((match = re.exec(str)) !== null) {
+        for (const match of str.matchAll(re)) {
             sawAny = true;
             const name = match[1].toLowerCase();
             const args = match[2].trim();
             if (name === 'blur') {
                 // <length> only (no %, non-negative); empty = 0.
-                if (args !== '' && !/^[+]?[\d.]+(px|pt|pc|mm|cm|in|q|em|ex|rem)?$/i.test(args)) return null;
+                if (args !== '' && !/^[+]?[\d.]+(px|pt|pc|mm|cm|in|q|em|ex|rem)?$/i.test(args))
+                    return null;
             } else if (name === 'drop-shadow') {
                 if (!this.parseDropShadowFunction(args, el)) return null;
             } else if (name === 'hue-rotate') {
                 // <angle> or unitless 0 or empty. Unitless nonzero is invalid.
-                if (args !== '' && !/^[-+]?[\d.]+(deg|grad|rad|turn)$/i.test(args) && !/^[-+]?0*\.?0*$/.test(args)) return null;
-            } else if (name === 'grayscale' || name === 'sepia' || name === 'saturate'
-                || name === 'invert' || name === 'brightness' || name === 'contrast'
-                || name === 'opacity') {
-                if (isNaN(amount(args, 1))) return null;
+                if (
+                    args !== '' &&
+                    !/^[-+]?[\d.]+(deg|grad|rad|turn)$/i.test(args) &&
+                    !/^[-+]?0*\.?0*$/.test(args)
+                )
+                    return null;
+            } else if (
+                name === 'grayscale' ||
+                name === 'sepia' ||
+                name === 'saturate' ||
+                name === 'invert' ||
+                name === 'brightness' ||
+                name === 'contrast' ||
+                name === 'opacity'
+            ) {
+                if (Number.isNaN(amount(args, 1))) return null;
             } else {
                 return null; // unknown/invalid function → whole filter is none
             }
@@ -4584,12 +5622,13 @@ export class UIEngine {
      *  when invalid (which makes the whole `filter` property `none`). */
     private parseDropShadowFunction(args: string, _el: Element): boolean {
         const tokens = args.match(/(?:rgba?|hsla?)\([^)]*\)|[^\s]+/gi) || [];
-        let numCount = 0, colorCount = 0;
+        let numCount = 0,
+            colorCount = 0;
         for (const tok of tokens) {
             if (/^[-+.\d]/.test(tok)) {
                 // Numeric token → must be a valid length (no %). Percentages and
                 // garbage make the whole drop-shadow invalid.
-                if (tok.endsWith('%') || isNaN(parseSvgLength(tok, NaN))) return false;
+                if (tok.endsWith('%') || Number.isNaN(parseSvgLength(tok, NaN))) return false;
                 numCount++;
             } else {
                 colorCount++;
@@ -4607,7 +5646,13 @@ export class UIEngine {
         // Parse at origin (no tx/ty offset — we'll transform manually)
         const subpaths = parseSVGPathDUtil(d, 0, 0);
         // Check if matrix is identity — skip transform if so
-        const isIdentity = mat[0] === 1 && mat[1] === 0 && mat[3] === 0 && mat[4] === 1 && mat[6] === 0 && mat[7] === 0;
+        const isIdentity =
+            mat[0] === 1 &&
+            mat[1] === 0 &&
+            mat[3] === 0 &&
+            mat[4] === 1 &&
+            mat[6] === 0 &&
+            mat[7] === 0;
         if (isIdentity) return subpaths;
         // Bake transform into all points and control points
         for (const sp of subpaths) {
@@ -4615,7 +5660,8 @@ export class UIEngine {
                 const [nx, ny] = transformPoint(mat, pt.x, pt.y);
                 const [nc1x, nc1y] = transformPoint(mat, pt.cp1[0], pt.cp1[1]);
                 const [nc2x, nc2y] = transformPoint(mat, pt.cp2[0], pt.cp2[1]);
-                pt.x = nx; pt.y = ny;
+                pt.x = nx;
+                pt.y = ny;
                 pt.cp1 = [nc1x, nc1y];
                 pt.cp2 = [nc2x, nc2y];
             }
@@ -4623,22 +5669,35 @@ export class UIEngine {
         return subpaths;
     }
 
-
     showContextMenu(x: number, y: number, callback: (action: string) => void) {
         this._contextMenuCallback = callback;
 
         // "Use as Mask" toggles depending on the current selection state.
         const sel = Array.from(this.scene.engine?.get_selection() ?? []);
-        const anyMask = sel.some(id => { try { return this.scene.getNodeIsMask(id); } catch { return false; } });
+        const anyMask = sel.some((id) => {
+            try {
+                return this.scene.getNodeIsMask(id);
+            } catch {
+                return false;
+            }
+        });
         const maskLabel = anyMask ? 'Release Mask' : 'Use as Mask';
 
         // Live Paint toggles: a selected Live Paint group offers Release; any
         // other selection offers Make.
-        const singleLivePaint = sel.length === 1
-            && (() => { try { return this.scene.getNodeLivePaint(sel[0]); } catch { return false; } })();
-        const livePaintItems: Array<{ label: string; action: string; shortcut: string }> = singleLivePaint
-            ? [{ label: 'Expand Live Paint', action: 'expand-live-paint', shortcut: '' }]
-            : [{ label: 'Make Live Paint', action: 'make-live-paint', shortcut: '⌘⌥X' }];
+        const singleLivePaint =
+            sel.length === 1 &&
+            (() => {
+                try {
+                    return this.scene.getNodeLivePaint(sel[0]);
+                } catch {
+                    return false;
+                }
+            })();
+        const livePaintItems: Array<{ label: string; action: string; shortcut: string }> =
+            singleLivePaint
+                ? [{ label: 'Expand Live Paint', action: 'expand-live-paint', shortcut: '' }]
+                : [{ label: 'Make Live Paint', action: 'make-live-paint', shortcut: '⌘⌥X' }];
 
         const items: Array<{ label: string; action: string; shortcut: string } | 'separator'> = [
             { label: 'Bring to Front', action: 'bring-to-front', shortcut: '⌘]' },

@@ -362,6 +362,11 @@ pub struct ProtoNode {
     /// This Group is a Live Paint group (special object).
     #[prost(bool, tag = "14")]
     pub live_paint: bool,
+    /// Non-destructive Boolean Group, stored as op+1 so proto3's 0-default means
+    /// "not a boolean group": 0 = none, 1 = union, 2 = subtract, 3 = intersect,
+    /// 4 = exclude. The cached outline is not serialized (recomputed on load).
+    #[prost(uint32, tag = "15")]
+    pub boolean_op: u32,
 }
 
 /// A preserved face fill from the vector network.
@@ -905,6 +910,7 @@ fn node_to_proto(node: &Node) -> ProtoNode {
         mask_type: node.mask_type as u32,
         clip_content: node.clip_content,
         live_paint: node.live_paint,
+        boolean_op: node.boolean_op.map(|op| op as u32 + 1).unwrap_or(0),
     }
 }
 
@@ -936,6 +942,8 @@ fn proto_to_node(pn: &ProtoNode) -> Node {
         mask_type: pn.mask_type as u8,
         clip_content: pn.clip_content,
         live_paint: pn.live_paint,
+        boolean_op: if pn.boolean_op == 0 { None } else { Some((pn.boolean_op - 1) as u8) },
+        bool_cache: Vec::new(),
     }
 }
 
@@ -1301,6 +1309,7 @@ mod tests {
                 mask_type: 0,
                 clip_content: false,
                 live_paint: false,
+                boolean_op: 0,
             }],
             root_ids: vec![1],
             next_id: 2,
@@ -1376,6 +1385,7 @@ mod tests {
             mask_type: 0,
             clip_content: false,
             live_paint: false,
+            boolean_op: 0,
         });
 
         let bytes = doc.encode_to_vec();
@@ -1445,6 +1455,8 @@ mod tests {
             mask_type: 0,
             clip_content: false,
             live_paint: false,
+            boolean_op: None,
+            bool_cache: Vec::new(),
         });
 
         let scene = Scene {

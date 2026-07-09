@@ -25,17 +25,17 @@ interface MenuEntry {
 }
 
 const ENTRIES: (MenuEntry | 'separator')[] = [
-    { label: 'New',        shortcut: '⌥⌘N', action: 'onNew' },
-    { label: 'Open…',      shortcut: '⌘O',  action: 'onOpen' },
+    { label: 'New', shortcut: '⌥⌘N', action: 'onNew' },
+    { label: 'Open…', shortcut: '⌘O', action: 'onOpen' },
     'separator',
-    { label: 'Save',       shortcut: '⌘S',  action: 'onSave' },
-    { label: 'Save As…',   shortcut: '⇧⌘S', action: 'onSaveAs' },
+    { label: 'Save', shortcut: '⌘S', action: 'onSave' },
+    { label: 'Save As…', shortcut: '⇧⌘S', action: 'onSaveAs' },
     { label: 'Version History…', action: 'onBackups' },
     'separator',
     { label: 'Add Artwork', action: 'onAddArtboard' },
     'separator',
     { label: 'Import SVG…', action: 'onImportSVG' },
-    { label: 'Export…',    shortcut: '⇧⌘E', action: 'onExport' },
+    { label: 'Export…', shortcut: '⇧⌘E', action: 'onExport' },
     'separator',
     { label: 'About Dadaki…', action: 'onAbout' },
 ];
@@ -44,7 +44,10 @@ export class AppMenu {
     private dropdown: HTMLElement;
     private isOpen = false;
 
-    constructor(private btn: HTMLButtonElement, private cb: AppMenuCallbacks) {
+    constructor(
+        private btn: HTMLButtonElement,
+        private cb: AppMenuCallbacks,
+    ) {
         this.dropdown = document.createElement('div');
         this.dropdown.className = 'app-menu-dropdown';
         this.buildItems();

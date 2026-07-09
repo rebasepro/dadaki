@@ -37,14 +37,17 @@ export interface CssRule {
  */
 export function cssSpecificity(sel: string): number {
     const ids = (sel.match(/#[\w-]+/g) || []).length;
-    const cls = (sel.match(/\.[\w-]+/g) || []).length
-        + (sel.match(/\[[^\]]*\]/g) || []).length
-        + (sel.match(/:(?!:)[\w-]+/g) || []).length; // pseudo-classes
-    const types = (sel
-        .replace(/[.#][\w-]+/g, ' ')
-        .replace(/\[[^\]]*\]/g, ' ')
-        .replace(/::?[\w-]+/g, ' ')
-        .match(/[a-zA-Z][\w-]*/g) || []).length;      // type / pseudo-element
+    const cls =
+        (sel.match(/\.[\w-]+/g) || []).length +
+        (sel.match(/\[[^\]]*\]/g) || []).length +
+        (sel.match(/:(?!:)[\w-]+/g) || []).length; // pseudo-classes
+    const types = (
+        sel
+            .replace(/[.#][\w-]+/g, ' ')
+            .replace(/\[[^\]]*\]/g, ' ')
+            .replace(/::?[\w-]+/g, ' ')
+            .match(/[a-zA-Z][\w-]*/g) || []
+    ).length; // type / pseudo-element
     return Math.min(ids, 9) * 10000 + Math.min(cls, 99) * 100 + Math.min(types, 99);
 }
 
@@ -61,8 +64,7 @@ export function parseSvgStylesheet(svgEl: Element): CssRule[] {
         // Strip comments; textContent already unwraps CDATA sections.
         const css = (styleEl.textContent || '').replace(/\/\*[\s\S]*?\*\//g, '');
         const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
-        let m: RegExpExecArray | null;
-        while ((m = ruleRe.exec(css)) !== null) {
+        for (const m of css.matchAll(ruleRe)) {
             const selectorList = m[1];
             const decls = new Map<string, CssDecl>();
             for (const decl of m[2].split(';')) {
@@ -73,7 +75,10 @@ export function parseSvgStylesheet(svgEl: Element): CssRule[] {
                 if (!prop || !value) continue;
                 let important = false;
                 const imp = value.match(/!\s*important\s*$/i);
-                if (imp) { important = true; value = value.slice(0, imp.index).trim(); }
+                if (imp) {
+                    important = true;
+                    value = value.slice(0, imp.index).trim();
+                }
                 if (value) decls.set(prop, { value, important });
             }
             if (decls.size === 0) continue;
@@ -98,15 +103,26 @@ export function matchedCssStyles(el: Element, rules: CssRule[]): Record<string, 
     const winners: Record<string, CssRule> = {};
     for (const rule of rules) {
         let matches = false;
-        try { matches = el.matches(rule.selector); } catch { matches = false; }
+        try {
+            matches = el.matches(rule.selector);
+        } catch {
+            matches = false;
+        }
         if (!matches) continue;
         for (const prop of rule.decls.keys()) {
             const cur = winners[prop];
-            if (!cur) { winners[prop] = rule; continue; }
+            if (!cur) {
+                winners[prop] = rule;
+                continue;
+            }
             const d = rule.decls.get(prop)!;
             const cd = cur.decls.get(prop)!;
-            if (d.important !== cd.important) { if (d.important) winners[prop] = rule; continue; }
-            if (rule.spec > cur.spec || (rule.spec === cur.spec && rule.order > cur.order)) winners[prop] = rule;
+            if (d.important !== cd.important) {
+                if (d.important) winners[prop] = rule;
+                continue;
+            }
+            if (rule.spec > cur.spec || (rule.spec === cur.spec && rule.order > cur.order))
+                winners[prop] = rule;
         }
     }
     const result: Record<string, CssDecl> = {};

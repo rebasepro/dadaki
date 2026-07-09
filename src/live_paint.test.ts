@@ -11,14 +11,15 @@
  *      object, not a plain group.
  */
 /// <reference types="node" />
-import { describe, it, expect, beforeAll } from 'vitest';
+
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { beforeAll, describe, expect, it } from 'vitest';
 import init, { Engine, History } from '../engine/pkg/engine';
-import { WasmScene } from './wasm_scene';
 import { getEditorContext } from './context';
 import type { InputManager } from './input';
 import type { UIEngine } from './ui';
+import { WasmScene } from './wasm_scene';
 
 beforeAll(async () => {
     await init({ module_or_path: readFileSync(resolve('engine/pkg/engine_bg.wasm')) });
@@ -103,13 +104,13 @@ describe('Live Paint — engine surface via WasmScene', () => {
         const outside = e.add_rect(500, 500, 100, 100); // outside the group
         const group = makeLP(e, [a, b]);
         expect(scene.getLivePaintGroup()).toBe(group);
-        expect(e.query_face_at(75, 75)).toBeGreaterThanOrEqual(0);       // in group
-        expect(e.query_face_at(550, 550)).toBe(-1);                      // outside → not paintable
+        expect(e.query_face_at(75, 75)).toBeGreaterThanOrEqual(0); // in group
+        expect(e.query_face_at(550, 550)).toBe(-1); // outside → not paintable
 
         // A second flagged group is its OWN network — both coexist.
         makeLP(e, [outside]);
-        expect(e.query_face_at(550, 550)).toBeGreaterThanOrEqual(0);     // now paintable
-        expect(e.query_face_at(75, 75)).toBeGreaterThanOrEqual(0);       // first group still works
+        expect(e.query_face_at(550, 550)).toBeGreaterThanOrEqual(0); // now paintable
+        expect(e.query_face_at(75, 75)).toBeGreaterThanOrEqual(0); // first group still works
     });
 
     it('a face carries an exact-bézier outline (true curves, not a polygon)', () => {
@@ -120,11 +121,16 @@ describe('Live Paint — engine surface via WasmScene', () => {
         const f = e.query_face_at(200, 200);
         scene.setFaceFill(f, 1, 0, 0, 1);
         const faces = JSON.parse(e.get_filled_faces());
-        const outline = faces[0].outline as Array<{ x: number; y: number; cp1: number[]; cp2: number[] }>;
+        const outline = faces[0].outline as Array<{
+            x: number;
+            y: number;
+            cp1: number[];
+            cp2: number[];
+        }>;
         expect(Array.isArray(outline)).toBe(true);
         expect(outline.length).toBeGreaterThanOrEqual(3);
         // Real handles ⇒ curved (a polygon would have handles coincident with anchors).
-        const curved = outline.some(p => Math.hypot(p.cp1[0] - p.x, p.cp1[1] - p.y) > 1);
+        const curved = outline.some((p) => Math.hypot(p.cp1[0] - p.x, p.cp1[1] - p.y) > 1);
         expect(curved).toBe(true);
     });
 
@@ -177,9 +183,13 @@ describe('Live Paint — editor context classification', () => {
         e.select_node(r2, true); // 2 shapes selected
 
         // Selection tool → the selection wins.
-        expect(getEditorContext(fakeUI('selection'), fakeInput(), scene).context).toBe('multi-select');
+        expect(getEditorContext(fakeUI('selection'), fakeInput(), scene).context).toBe(
+            'multi-select',
+        );
         // Paint-bucket tool → Live Paint wins even with the selection.
-        expect(getEditorContext(fakeUI('paint-bucket'), fakeInput(), scene).context).toBe('live-paint');
+        expect(getEditorContext(fakeUI('paint-bucket'), fakeInput(), scene).context).toBe(
+            'live-paint',
+        );
     });
 
     it('a selected Live Paint group reads as its own object, not a plain group', () => {
@@ -192,9 +202,13 @@ describe('Live Paint — editor context classification', () => {
         e.clear_selection();
         e.select_node(group, false);
         // Plain group first.
-        expect(getEditorContext(fakeUI('selection'), fakeInput(), scene).context).toBe('group-selected');
+        expect(getEditorContext(fakeUI('selection'), fakeInput(), scene).context).toBe(
+            'group-selected',
+        );
         // Flag it → it becomes a Live Paint object.
         scene.setNodeLivePaint(group, true);
-        expect(getEditorContext(fakeUI('selection'), fakeInput(), scene).context).toBe('live-paint-object');
+        expect(getEditorContext(fakeUI('selection'), fakeInput(), scene).context).toBe(
+            'live-paint-object',
+        );
     });
 });

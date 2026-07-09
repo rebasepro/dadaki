@@ -26,12 +26,16 @@ export class TabStrip {
     /** Last descriptor list, so a rename can re-render without the manager. */
     private _lastTabs: TabDescriptor[] = [];
 
-    constructor(private el: HTMLElement, private cb: TabStripCallbacks) {}
+    constructor(
+        private el: HTMLElement,
+        private cb: TabStripCallbacks,
+    ) {}
 
     render(tabs: TabDescriptor[]): void {
         this._lastTabs = tabs;
-        const sig = tabs.map(t => `${t.id}:${t.name}:${t.dirty ? 1 : 0}:${t.active ? 1 : 0}`).join('|')
-            + `#${tabs.length}`;
+        const sig =
+            tabs.map((t) => `${t.id}:${t.name}:${t.dirty ? 1 : 0}:${t.active ? 1 : 0}`).join('|') +
+            `#${tabs.length}`;
         if (sig === this._signature) return;
         this._signature = sig;
 
@@ -40,7 +44,7 @@ export class TabStrip {
 
         for (const t of tabs) {
             const tab = document.createElement('div');
-            tab.className = 'doc-tab' + (t.active ? ' active' : '');
+            tab.className = `doc-tab${t.active ? ' active' : ''}`;
             tab.title = t.name;
 
             const label = document.createElement('span');
@@ -48,7 +52,7 @@ export class TabStrip {
             label.textContent = t.name;
 
             const dot = document.createElement('span');
-            dot.className = 'doc-tab-dot' + (t.dirty ? ' dirty' : '');
+            dot.className = `doc-tab-dot${t.dirty ? ' dirty' : ''}`;
 
             tab.appendChild(dot);
             tab.appendChild(label);
@@ -115,8 +119,13 @@ export class TabStrip {
         input.addEventListener('blur', () => finish(true));
         input.addEventListener('keydown', (e) => {
             e.stopPropagation();
-            if (e.key === 'Enter') { e.preventDefault(); finish(true); }
-            else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                finish(true);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                finish(false);
+            }
         });
     }
 }

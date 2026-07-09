@@ -6,12 +6,9 @@
  * fill = old stroke color, stroke = none.
  */
 
-import type { CanvasKit } from 'canvaskit-wasm';
+import type { CanvasKit, Path } from 'canvaskit-wasm';
+import type { PathPoint, Subpath } from './types';
 import type { WasmScene } from './wasm_scene';
-import type { Subpath, PathPoint } from './types';
-
-/** Bézier circle constant: 4·(√2−1)/3 */
-const KAPPA = 0.5522847498;
 
 /**
  * Convert a path node's stroke into a filled outline shape.
@@ -76,52 +73,44 @@ export function outlineStroke(ck: CanvasKit, scene: WasmScene, nodeId: number): 
     const subpaths = parseCkPathToSubpaths(ck, outlined);
     outlined.delete();
     if (subpaths.length === 0) return;
-    
+
     // Update the node: geometry = outlined path, fill = old stroke, stroke = none
     scene.updatePathPoints(nodeId, JSON.stringify(subpaths));
 
-    const newStyle = { 
+    const newStyle = {
         ...style,
         fills: [stroke.paint],
-        strokes: []
+        strokes: [],
     };
     scene.setNodeStyleNoHistory(nodeId, JSON.stringify(newStyle));
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
-function buildCkPathFromSubpaths(ck: CanvasKit, ckPath: InstanceType<typeof ck.Path extends never ? never : { prototype: ReturnType<typeof ck.Path.Make> }> & { moveTo: Function; cubicTo: Function; close: Function }, subpaths: Subpath[]): void {
+function buildCkPathFromSubpaths(_ck: CanvasKit, ckPath: Path, subpaths: Subpath[]): void {
     for (const sp of subpaths) {
         if (sp.points.length < 2) continue;
         const first = sp.points[0];
-        (ckPath as ReturnType<typeof ck.Path.Make>).moveTo(first.x, first.y);
+        ckPath.moveTo(first.x, first.y);
 
         for (let i = 1; i < sp.points.length; i++) {
             const prev = sp.points[i - 1];
             const pt = sp.points[i];
-            (ckPath as ReturnType<typeof ck.Path.Make>).cubicTo(
-                prev.cp2[0], prev.cp2[1],
-                pt.cp1[0], pt.cp1[1],
-                pt.x, pt.y,
-            );
+            ckPath.cubicTo(prev.cp2[0], prev.cp2[1], pt.cp1[0], pt.cp1[1], pt.x, pt.y);
         }
 
         if (sp.closed) {
             const last = sp.points[sp.points.length - 1];
             const first = sp.points[0];
-            (ckPath as ReturnType<typeof ck.Path.Make>).cubicTo(
-                last.cp2[0], last.cp2[1],
-                first.cp1[0], first.cp1[1],
-                first.x, first.y,
-            );
-            (ckPath as ReturnType<typeof ck.Path.Make>).close();
+            ckPath.cubicTo(last.cp2[0], last.cp2[1], first.cp1[0], first.cp1[1], first.x, first.y);
+            ckPath.close();
         }
     }
 }
 
 /** Parse a CanvasKit path back into engine subpaths via toCmds(). */
-function parseCkPathToSubpaths(ck: CanvasKit, path: ReturnType<typeof ck.Path.Make>): Subpath[] {
-    const cmds = (path as { toCmds: () => number[] }).toCmds();
+function parseCkPathToSubpaths(ck: CanvasKit, path: Path): Subpath[] {
+    const cmds = path.toCmds();
 
     const ckVerbs = ck as unknown as Record<string, number>;
     const MOVE = ckVerbs.MOVE_VERB ?? 0;
@@ -131,7 +120,12 @@ function parseCkPathToSubpaths(ck: CanvasKit, path: ReturnType<typeof ck.Path.Ma
     const CUBIC = ckVerbs.CUBIC_VERB ?? 4;
     const CLOSE = ckVerbs.CLOSE_VERB ?? 5;
     const ARG_COUNT: Record<number, number> = {
-        [MOVE]: 2, [LINE]: 2, [QUAD]: 4, [CONIC]: 5, [CUBIC]: 6, [CLOSE]: 0,
+        [MOVE]: 2,
+        [LINE]: 2,
+        [QUAD]: 4,
+        [CONIC]: 5,
+        [CUBIC]: 6,
+        [CLOSE]: 0,
     };
 
     const subpaths: Subpath[] = [];
@@ -171,8 +165,10 @@ function parseCkPathToSubpaths(ck: CanvasKit, path: ReturnType<typeof ck.Path.Ma
             const prev = current[current.length - 1];
             const p0x = prev ? prev.x : args[0];
             const p0y = prev ? prev.y : args[1];
-            const qx = args[0], qy = args[1];
-            const ex = args[2], ey = args[3];
+            const qx = args[0],
+                qy = args[1];
+            const ex = args[2],
+                ey = args[3];
             const c1x = p0x + (2 / 3) * (qx - p0x);
             const c1y = p0y + (2 / 3) * (qy - p0y);
             const c2x = ex + (2 / 3) * (qx - ex);

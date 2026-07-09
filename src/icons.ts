@@ -35,18 +35,12 @@ export function iconFrame(size = 14): string {
 
 /** Square icon – for Rect nodes */
 export function iconSquare(size = 14): string {
-    return svg(
-        '<rect width="18" height="18" x="3" y="3" rx="2"/>',
-        size,
-    );
+    return svg('<rect width="18" height="18" x="3" y="3" rx="2"/>', size);
 }
 
 /** Circle icon – for Ellipse nodes */
 export function iconCircle(size = 14): string {
-    return svg(
-        '<circle cx="12" cy="12" r="10"/>',
-        size,
-    );
+    return svg('<circle cx="12" cy="12" r="10"/>', size);
 }
 
 /** Pen-tool icon – for Path nodes */
@@ -107,18 +101,12 @@ export function iconUnlock(size = 12): string {
 
 /** Undo icon */
 export function iconUndo(size = 14): string {
-    return svg(
-        '<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>',
-        size,
-    );
+    return svg('<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>', size);
 }
 
 /** Redo icon */
 export function iconRedo(size = 14): string {
-    return svg(
-        '<path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/>',
-        size,
-    );
+    return svg('<path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/>', size);
 }
 
 /** Pencil / edit icon – for Edit Path */
@@ -147,18 +135,12 @@ export function iconHome(size = 14): string {
 
 /** Chevron-right icon – for breadcrumb separator */
 export function iconChevronRight(size = 10): string {
-    return svg(
-        '<path d="m9 18 6-6-6-6"/>',
-        size,
-    );
+    return svg('<path d="m9 18 6-6-6-6"/>', size);
 }
 
 /** Dot/circle-dot icon – for path editing breadcrumb */
 export function iconCircleDot(size = 14): string {
-    return svg(
-        '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>',
-        size,
-    );
+    return svg('<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>', size);
 }
 
 // ─── Alignment icons ─────────────────────────────────────────────
@@ -238,9 +220,9 @@ export function iconDistributeV(size = 14): string {
 export function iconBoolUnion(size = 14): string {
     return svg(
         '<rect x="2" y="2" width="14" height="14" rx="4" fill="currentColor" stroke="none"/>' +
-        '<rect x="8" y="8" width="14" height="14" rx="4" fill="currentColor" stroke="none"/>' +
-        '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
-        '<rect x="8" y="8" width="14" height="14" rx="4" fill="none"/>',
+            '<rect x="8" y="8" width="14" height="14" rx="4" fill="currentColor" stroke="none"/>' +
+            '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
+            '<rect x="8" y="8" width="14" height="14" rx="4" fill="none"/>',
         size,
     );
 }
@@ -249,8 +231,8 @@ export function iconBoolUnion(size = 14): string {
 export function iconBoolSubtract(size = 14): string {
     return svg(
         '<path d="M6 2a4 4 0 0 0-4 4v8a4 4 0 0 0 4 4h2v-4a4 4 0 0 1 4-4h4V6a4 4 0 0 0-4-4H6Z" fill="currentColor" stroke="none"/>' +
-        '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
-        '<rect x="8" y="8" width="14" height="14" rx="4" fill="none" stroke-dasharray="3 2"/>',
+            '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
+            '<rect x="8" y="8" width="14" height="14" rx="4" fill="none" stroke-dasharray="3 2"/>',
         size,
     );
 }
@@ -259,8 +241,8 @@ export function iconBoolSubtract(size = 14): string {
 export function iconBoolIntersect(size = 14): string {
     return svg(
         '<path d="M12 8H8v4a4 4 0 0 0 4 4h4v-4a4 4 0 0 0-4-4Z" fill="currentColor" stroke="none"/>' +
-        '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
-        '<rect x="8" y="8" width="14" height="14" rx="4" fill="none"/>',
+            '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
+            '<rect x="8" y="8" width="14" height="14" rx="4" fill="none"/>',
         size,
     );
 }
@@ -269,10 +251,10 @@ export function iconBoolIntersect(size = 14): string {
 export function iconBoolExclude(size = 14): string {
     return svg(
         '<path d="M6 2a4 4 0 0 0-4 4v8a4 4 0 0 0 4 4h2v-4a4 4 0 0 1 4-4h4V6a4 4 0 0 0-4-4H6Z" fill="currentColor" stroke="none"/>' +
-        '<path d="M18 22a4 4 0 0 0 4-4v-8a4 4 0 0 0-4-4h-2v4a4 4 0 0 1-4 4H8v6a4 4 0 0 0 4 4h6Z" fill="currentColor" stroke="none"/>' +
-        '<path d="M12 8H8v4a4 4 0 0 0 4 4h4v-4a4 4 0 0 0-4-4Z" fill="var(--bg-panel, #2a2a2a)" stroke="none"/>' +
-        '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
-        '<rect x="8" y="8" width="14" height="14" rx="4" fill="none"/>',
+            '<path d="M18 22a4 4 0 0 0 4-4v-8a4 4 0 0 0-4-4h-2v4a4 4 0 0 1-4 4H8v6a4 4 0 0 0 4 4h6Z" fill="currentColor" stroke="none"/>' +
+            '<path d="M12 8H8v4a4 4 0 0 0 4 4h4v-4a4 4 0 0 0-4-4Z" fill="var(--bg-panel, #2a2a2a)" stroke="none"/>' +
+            '<rect x="2" y="2" width="14" height="14" rx="4" fill="none"/>' +
+            '<rect x="8" y="8" width="14" height="14" rx="4" fill="none"/>',
         size,
     );
 }
@@ -297,10 +279,7 @@ export function iconUngroup(size = 14): string {
 
 /** Enter/step-into a group */
 export function iconCornerDownRight(size = 14): string {
-    return svg(
-        '<polyline points="15 10 20 15 15 20"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/>',
-        size,
-    );
+    return svg('<polyline points="15 10 20 15 15 20"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/>', size);
 }
 
 /** Duplicate / copy */
@@ -313,18 +292,12 @@ export function iconCopy(size = 14): string {
 
 /** Plus-circle icon – Add Point */
 export function iconPlusCircle(size = 14): string {
-    return svg(
-        '<circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/>',
-        size,
-    );
+    return svg('<circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/>', size);
 }
 
 /** Minus-circle icon – Delete Point */
 export function iconMinusCircle(size = 14): string {
-    return svg(
-        '<circle cx="12" cy="12" r="10"/><path d="M8 12h8"/>',
-        size,
-    );
+    return svg('<circle cx="12" cy="12" r="10"/><path d="M8 12h8"/>', size);
 }
 
 /** Scissors icon */

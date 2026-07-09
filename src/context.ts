@@ -3,8 +3,8 @@
  * Determines the current editor state and provides metadata for the bar UI.
  */
 
-import type { UIEngine } from './ui';
 import type { InputManager } from './input';
+import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
 
 /** Possible editor contexts that drive the action bar content.
@@ -16,16 +16,16 @@ import type { WasmScene } from './wasm_scene';
  *    4. Otherwise the bar is hidden.
  */
 export type EditorContext =
-    | 'empty'           // selection tool, nothing selected — bar hidden
-    | 'tool'            // any non-selection tool active, nothing selected/in progress
-    | 'single-shape'    // one Rect/Ellipse/Path selected
-    | 'text-selected'   // one Text node selected
-    | 'group-selected'  // exactly one Group node selected
-    | 'multi-select'    // 2+ nodes selected
+    | 'empty' // selection tool, nothing selected — bar hidden
+    | 'tool' // any non-selection tool active, nothing selected/in progress
+    | 'single-shape' // one Rect/Ellipse/Path selected
+    | 'text-selected' // one Text node selected
+    | 'group-selected' // exactly one Group node selected
+    | 'multi-select' // 2+ nodes selected
     | 'live-paint-object' // a Live Paint group selected (Selection tool)
-    | 'live-paint'      // paint-bucket tool active (wins over selection)
-    | 'pen-drawing'     // input.currentPathPoints.length > 0
-    | 'path-editing';   // input.editingNodeId != null
+    | 'live-paint' // paint-bucket tool active (wins over selection)
+    | 'pen-drawing' // input.currentPathPoints.length > 0
+    | 'path-editing'; // input.editingNodeId != null
 
 /** Selected node summary for the bar. */
 export interface SelectedNodeInfo {
@@ -60,7 +60,17 @@ export interface ContextInfo {
 /** Every tool that isn't plain selection gets a 'tool' context (hint + tool
  *  options) while nothing is selected or in progress. */
 const NON_SELECTION_TOOLS = new Set([
-    'direct', 'pen', 'pencil', 'line', 'rect', 'ellipse', 'polygon', 'star', 'text', 'scissors', 'paint-bucket',
+    'direct',
+    'pen',
+    'pencil',
+    'line',
+    'rect',
+    'ellipse',
+    'polygon',
+    'star',
+    'text',
+    'scissors',
+    'paint-bucket',
 ]);
 
 /**
@@ -73,7 +83,7 @@ export function getEditorContext(ui: UIEngine, input: InputManager, scene: WasmS
 
     // Build selected node info
     const selectedNodes: SelectedNodeInfo[] = selectedIds
-        .map(id => {
+        .map((id) => {
             const node = scene.getNode(id);
             if (!node) return null;
             return { id, name: node.name, node_type: node.node_type };
@@ -81,9 +91,7 @@ export function getEditorContext(ui: UIEngine, input: InputManager, scene: WasmS
         .filter((n): n is SelectedNodeInfo => n !== null);
 
     // Compute breadcrumb for primary selection
-    const breadcrumb = selectedIds.length > 0
-        ? buildBreadcrumb(selectedIds[0], scene)
-        : [];
+    const breadcrumb = selectedIds.length > 0 ? buildBreadcrumb(selectedIds[0], scene) : [];
 
     const editingNodeId = input.editingNodeId;
     const activeTool = ui.activeTool;
@@ -111,7 +119,11 @@ export function getEditorContext(ui: UIEngine, input: InputManager, scene: WasmS
         // Live Paint is a mode: the tool wins over the current selection so the
         // bar always shows paint options (color, gaps, Make Live Paint Group).
         context = 'live-paint';
-    } else if (selectedIds.length === 1 && primaryNodeType === 'Group' && scene.getNodeLivePaint(selectedIds[0])) {
+    } else if (
+        selectedIds.length === 1 &&
+        primaryNodeType === 'Group' &&
+        scene.getNodeLivePaint(selectedIds[0])
+    ) {
         context = 'live-paint-object';
     } else if (selectedIds.length === 1 && primaryNodeType === 'Group') {
         context = 'group-selected';

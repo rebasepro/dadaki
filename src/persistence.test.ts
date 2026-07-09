@@ -3,11 +3,21 @@
  * No IndexedDB (jsdom has none) — these are the decision functions the
  * AutosaveManager / PersistenceManager delegate to.
  */
-import { describe, it, expect } from 'vitest';
-import { shouldSnapshot, backupIdsToPrune, BACKUP_THROTTLE_MS, BACKUP_CAP, type BackupEntry } from './persistence';
+import { describe, expect, it } from 'vitest';
+import {
+    BACKUP_CAP,
+    BACKUP_THROTTLE_MS,
+    type BackupEntry,
+    backupIdsToPrune,
+    shouldSnapshot,
+} from './persistence';
 
 const entry = (id: string, createdAt: number): BackupEntry => ({
-    id, docId: 'd1', name: 'Doc', bytes: new Uint8Array([1]), createdAt,
+    id,
+    docId: 'd1',
+    name: 'Doc',
+    bytes: new Uint8Array([1]),
+    createdAt,
 });
 
 describe('shouldSnapshot (throttle)', () => {

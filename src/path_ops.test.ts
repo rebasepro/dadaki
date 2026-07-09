@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { mergeSelectedAnchors } from './path_ops';
 import type { PathPoint, Subpath } from './types';
 
@@ -23,8 +23,8 @@ describe('mergeSelectedAnchors', () => {
 
     it('welds the endpoints of two open subpaths into one subpath', () => {
         const sp = [
-            open(pt(0, 0), pt(10, 0)),   // A: tail at (10, 0)
-            open(pt(20, 0), pt(30, 0)),  // B: head at (20, 0)
+            open(pt(0, 0), pt(10, 0)), // A: tail at (10, 0)
+            open(pt(20, 0), pt(30, 0)), // B: head at (20, 0)
         ];
         const result = mergeSelectedAnchors(sp, [
             { subpathIdx: 0, pointIdx: 1 }, // A end
@@ -44,8 +44,8 @@ describe('mergeSelectedAnchors', () => {
 
     it('reverses subpaths as needed to weld start-to-start', () => {
         const sp = [
-            open(pt(10, 0), pt(0, 0)),   // A: start at (10, 0)
-            open(pt(20, 0), pt(30, 0)),  // B: start at (20, 0)
+            open(pt(10, 0), pt(0, 0)), // A: start at (10, 0)
+            open(pt(20, 0), pt(30, 0)), // B: start at (20, 0)
         ];
         const result = mergeSelectedAnchors(sp, [
             { subpathIdx: 0, pointIdx: 0 },
@@ -53,15 +53,12 @@ describe('mergeSelectedAnchors', () => {
         ]);
         expect(result).not.toBeNull();
         expect(result!.length).toBe(1);
-        const xs = result![0].points.map(p => p.x);
+        const xs = result![0].points.map((p) => p.x);
         expect(xs).toEqual([0, 15, 30]);
     });
 
     it('does not weld across subpaths when a point is interior', () => {
-        const sp = [
-            open(pt(0, 0), pt(5, 5), pt(10, 0)),
-            open(pt(20, 0), pt(30, 0)),
-        ];
+        const sp = [open(pt(0, 0), pt(5, 5), pt(10, 0)), open(pt(20, 0), pt(30, 0))];
         const result = mergeSelectedAnchors(sp, [
             { subpathIdx: 0, pointIdx: 1 }, // interior
             { subpathIdx: 1, pointIdx: 0 },
@@ -91,7 +88,7 @@ describe('mergeSelectedAnchors', () => {
             { subpathIdx: 0, pointIdx: 2 },
         ]);
         expect(result).not.toBeNull();
-        const xs = result![0].points.map(p => p.x);
+        const xs = result![0].points.map((p) => p.x);
         expect(xs).toEqual([0, 15, 30]);
     });
 
@@ -120,7 +117,7 @@ describe('mergeSelectedAnchors', () => {
         expect(merged.points.length).toBe(3);
         expect(merged.closed).toBe(true);
         // The welded point averages (0,10) and (0,0)
-        expect(merged.points.some(p => p.x === 0 && p.y === 5)).toBe(true);
+        expect(merged.points.some((p) => p.x === 0 && p.y === 5)).toBe(true);
     });
 
     it('does not weld the ends of an open subpath through the gap', () => {
@@ -146,12 +143,14 @@ describe('mergeSelectedAnchors', () => {
     });
 
     it('preserves the max corner radius of merged points', () => {
-        const sp = [open(
-            pt(0, 0),
-            pt(10, 0, { corner_radius: 4 }),
-            pt(20, 0, { corner_radius: 2 }),
-            pt(30, 0),
-        )];
+        const sp = [
+            open(
+                pt(0, 0),
+                pt(10, 0, { corner_radius: 4 }),
+                pt(20, 0, { corner_radius: 2 }),
+                pt(30, 0),
+            ),
+        ];
         const result = mergeSelectedAnchors(sp, [
             { subpathIdx: 0, pointIdx: 1 },
             { subpathIdx: 0, pointIdx: 2 },
@@ -171,8 +170,8 @@ describe('mergeSelectedAnchors', () => {
             { subpathIdx: 1, pointIdx: 2 },
         ]);
         expect(result).not.toBeNull();
-        expect(result![0].points.map(p => p.x)).toEqual([5, 20, 30]);
-        expect(result![1].points.map(p => p.x)).toEqual([0, 15]);
+        expect(result![0].points.map((p) => p.x)).toEqual([5, 20, 30]);
+        expect(result![1].points.map((p) => p.x)).toEqual([0, 15]);
     });
 
     it('does not mutate the input subpaths', () => {

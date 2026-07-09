@@ -61,9 +61,9 @@ export function isPattern(paint: Paint): paint is Pattern {
 
 /** Stroke Alignment */
 export enum StrokeAlignment {
-    Center = "Center",
-    Inner = "Inner",
-    Outer = "Outer",
+    Center = 'Center',
+    Inner = 'Inner',
+    Outer = 'Outer',
 }
 
 /** Stroke definition */
@@ -125,7 +125,14 @@ export interface NodeStyle {
 /** A serde-tagged Effect (matches the engine's `Effect` enum JSON). */
 export type EffectData =
     | { Blur: { radius: number } }
-    | { DropShadow: { dx: number; dy: number; blur: number; color: { r: number; g: number; b: number; a: number } } }
+    | {
+          DropShadow: {
+              dx: number;
+              dy: number;
+              blur: number;
+              color: { r: number; g: number; b: number; a: number };
+          };
+      }
     | { ColorMatrix: { matrix: number[]; linear_rgb?: boolean } };
 
 /** A cubic Bézier path point with incoming/outgoing control points. */
@@ -272,4 +279,7 @@ export interface PenPathPoint {
     cp1y: number;
     cp2x: number;
     cp2y: number;
+    /** Preserved parametric corner radius when the point was adopted from an
+     *  existing path (endpoint continuation). Undefined for freshly placed points. */
+    corner_radius?: number;
 }

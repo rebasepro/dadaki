@@ -1,21 +1,21 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
+    arcToCubicBeziers,
+    composeMatrices,
+    escapeXml,
     hexToRgb,
+    identityMatrix,
+    matrixToSVGTransform,
+    parseCssColor,
+    parseSVGPathD,
+    parseSVGTransform,
+    parseSvgLength,
+    resolveGradient,
+    resolveGradientColor,
     rgbToHex,
     tokenizeSVGNumbers,
-    parseSVGPathD,
-    arcToCubicBeziers,
-    identityMatrix,
-    translateMatrix,
-    composeMatrices,
     transformPoint,
-    parseSVGTransform,
-    matrixToSVGTransform,
-    escapeXml,
-    resolveGradientColor,
-    parseCssColor,
-    resolveGradient,
-    parseSvgLength,
+    translateMatrix,
 } from './svg_utils';
 
 // ─── Color Conversion ───────────────────────────────────────────────────────
@@ -327,7 +327,12 @@ describe('matrixToSVGTransform', () => {
     it('round-trips through parseSVGTransform', () => {
         const original = parseSVGTransform('translate(12, 34) rotate(30) scale(1.5)');
         const reparsed = parseSVGTransform(matrixToSVGTransform(original));
-        for (const [x, y] of [[0, 0], [10, 0], [0, 10], [7, -3]] as const) {
+        for (const [x, y] of [
+            [0, 0],
+            [10, 0],
+            [0, 10],
+            [7, -3],
+        ] as const) {
             const a = transformPoint(original, x, y);
             const b = transformPoint(reparsed, x, y);
             expect(b[0]).toBeCloseTo(a[0], 4);
@@ -340,8 +345,9 @@ describe('matrixToSVGTransform', () => {
 
 describe('escapeXml', () => {
     it('escapes all five special characters', () => {
-        expect(escapeXml(`<a href="x">&'y'</a>`))
-            .toBe('&lt;a href=&quot;x&quot;&gt;&amp;&apos;y&apos;&lt;/a&gt;');
+        expect(escapeXml(`<a href="x">&'y'</a>`)).toBe(
+            '&lt;a href=&quot;x&quot;&gt;&amp;&apos;y&apos;&lt;/a&gt;',
+        );
     });
 
     it('leaves plain text unchanged', () => {
@@ -353,13 +359,16 @@ describe('escapeXml', () => {
 
 /** Minimal stub implementing the Document surface resolveGradient uses. */
 function stubGradientDoc(tagName: string, stopColor: string | null, stopStyle?: string): Document {
-    const stop = stopColor !== null || stopStyle ? {
-        getAttribute: (name: string) => {
-            if (name === 'stop-color') return stopColor;
-            if (name === 'style') return stopStyle ?? null;
-            return null;
-        },
-    } : null;
+    const stop =
+        stopColor !== null || stopStyle
+            ? {
+                  getAttribute: (name: string) => {
+                      if (name === 'stop-color') return stopColor;
+                      if (name === 'style') return stopStyle ?? null;
+                      return null;
+                  },
+              }
+            : null;
     const stops = stop ? [stop] : [];
     const gradientEl = {
         tagName,
@@ -434,8 +443,7 @@ describe('parseCssColor', () => {
 // ─── Gradient Resolution ──────────────────────────────────────────────────────
 
 describe('resolveGradient', () => {
-    const parse = (svg: string): Document =>
-        new DOMParser().parseFromString(svg, 'image/svg+xml');
+    const parse = (svg: string): Document => new DOMParser().parseFromString(svg, 'image/svg+xml');
 
     it('resolves a userSpaceOnUse linear gradient coords verbatim', () => {
         const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
@@ -479,7 +487,8 @@ describe('resolveGradient', () => {
     });
 
     it('inherits coords and stops through xlink:href template chain', () => {
-        const doc = parse(`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><defs>
+        const doc =
+            parse(`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><defs>
             <linearGradient id="base" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="80" y2="0">
               <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
             </linearGradient>
@@ -491,7 +500,8 @@ describe('resolveGradient', () => {
     });
 
     it('parses spreadMethod repeat/reflect into the engine spread code', () => {
-        const mk = (m: string) => parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
+        const mk = (m: string) =>
+            parse(`<svg xmlns="http://www.w3.org/2000/svg"><defs>
             <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="50" y2="0" spreadMethod="${m}">
               <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
             </linearGradient></defs></svg>`);
@@ -530,7 +540,13 @@ describe('resolveGradient', () => {
             <linearGradient id="g">
               <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
             </linearGradient></defs></svg>`);
-        const g = resolveGradient(doc, 'url(#g)', { bx: 0, by: 0, bw: 160, bh: 160, userToLocal: identityMatrix() })!;
+        const g = resolveGradient(doc, 'url(#g)', {
+            bx: 0,
+            by: 0,
+            bw: 160,
+            bh: 160,
+            userToLocal: identityMatrix(),
+        })!;
         expect(g.start_x).toBeCloseTo(0);
         expect(g.end_x).toBeCloseTo(160);
         expect(g.end_y).toBeCloseTo(0);
@@ -543,7 +559,13 @@ describe('resolveGradient', () => {
             <linearGradient id="g">
               <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
             </linearGradient></defs></svg>`);
-        const g = resolveGradient(doc, 'url(#g)', { bx: -40, by: -40, bw: 80, bh: 80, userToLocal: identityMatrix() })!;
+        const g = resolveGradient(doc, 'url(#g)', {
+            bx: -40,
+            by: -40,
+            bw: 80,
+            bh: 80,
+            userToLocal: identityMatrix(),
+        })!;
         expect(g.start_x).toBeCloseTo(-40);
         expect(g.end_x).toBeCloseTo(40);
     });
@@ -555,7 +577,13 @@ describe('resolveGradient', () => {
             <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="20" y1="20" x2="180" y2="20">
               <stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/>
             </linearGradient></defs></svg>`);
-        const g = resolveGradient(doc, 'url(#g)', { bx: 0, by: 0, bw: 160, bh: 160, userToLocal: translateMatrix(-20, -20) })!;
+        const g = resolveGradient(doc, 'url(#g)', {
+            bx: 0,
+            by: 0,
+            bw: 160,
+            bh: 160,
+            userToLocal: translateMatrix(-20, -20),
+        })!;
         expect(g.start_x).toBeCloseTo(0);
         expect(g.start_y).toBeCloseTo(0);
         expect(g.end_x).toBeCloseTo(160);
@@ -573,29 +601,29 @@ describe('parseSvgLength', () => {
     });
 
     it('converts absolute units to user px (96/in)', () => {
-        expect(parseSvgLength('12pt', 0)).toBeCloseTo(16);      // 12 * 96/72
+        expect(parseSvgLength('12pt', 0)).toBeCloseTo(16); // 12 * 96/72
         expect(parseSvgLength('1in', 0)).toBe(96);
-        expect(parseSvgLength('1pc', 0)).toBe(16);              // 1pc = 12pt = 16px
+        expect(parseSvgLength('1pc', 0)).toBe(16); // 1pc = 12pt = 16px
         expect(parseSvgLength('2.54cm', 0)).toBeCloseTo(96);
         expect(parseSvgLength('25.4mm', 0)).toBeCloseTo(96);
-        expect(parseSvgLength('40Q', 0)).toBeCloseTo(96 * 40 / 101.6);
+        expect(parseSvgLength('40Q', 0)).toBeCloseTo((96 * 40) / 101.6);
     });
 
     it('resolves em/ex/rem against the context font-size', () => {
         expect(parseSvgLength('2em', 0, { fontSize: 10 })).toBe(20);
-        expect(parseSvgLength('2ex', 0, { fontSize: 20 })).toBe(20);  // 2 * 20 * 0.5
+        expect(parseSvgLength('2ex', 0, { fontSize: 20 })).toBe(20); // 2 * 20 * 0.5
         expect(parseSvgLength('1.5rem', 0, { fontSize: 12, rootFontSize: 16 })).toBe(24);
-        expect(parseSvgLength('1em', 0)).toBe(16);                    // default fontSize 16
+        expect(parseSvgLength('1em', 0)).toBe(16); // default fontSize 16
     });
 
     it('resolves % against percentBasis, else returns the raw number', () => {
         expect(parseSvgLength('50%', 0, { percentBasis: 200 })).toBe(100);
-        expect(parseSvgLength('50%', 0)).toBe(50);                    // non-regressive: no basis
+        expect(parseSvgLength('50%', 0)).toBe(50); // non-regressive: no basis
     });
 
     it('is tolerant of whitespace and unknown units', () => {
-        expect(parseSvgLength('  10pt  ', 0)).toBeCloseTo(10 * 96 / 72);
-        expect(parseSvgLength('7wtf', 0)).toBe(7);                    // unknown unit → user units
+        expect(parseSvgLength('  10pt  ', 0)).toBeCloseTo((10 * 96) / 72);
+        expect(parseSvgLength('7wtf', 0)).toBe(7); // unknown unit → user units
     });
 
     it('returns the fallback for empty / invalid input', () => {

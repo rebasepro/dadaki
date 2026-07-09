@@ -6,6 +6,8 @@
  * reworking the call sites.
  */
 
+import { escapeHtml } from './svg_utils';
+
 export interface ExportOptions {
     format: 'svg' | 'png';
     /** PNG pixel scale (1×/2×/4×). Ignored for SVG. */
@@ -16,7 +18,10 @@ export interface ExportOptions {
     transparent: boolean;
 }
 
-export interface ArtboardChoice { id: number; name: string; }
+export interface ArtboardChoice {
+    id: number;
+    name: string;
+}
 
 export class ExportDialog {
     private overlay: HTMLElement;
@@ -89,21 +94,28 @@ export class ExportDialog {
 
         card.querySelectorAll<HTMLButtonElement>('.modal-seg-btn').forEach((b) => {
             b.addEventListener('click', () => {
-                this.format = (b.dataset.format as 'svg' | 'png');
-                card.querySelectorAll('.modal-seg-btn').forEach((x) => x.classList.remove('active'));
+                this.format = b.dataset.format as 'svg' | 'png';
+                card.querySelectorAll('.modal-seg-btn').forEach((x) => {
+                    x.classList.remove('active');
+                });
                 b.classList.add('active');
                 this.pngScaleRow.style.display = this.format === 'png' ? '' : 'none';
             });
         });
 
-        (card.querySelector('#export-scale') as HTMLSelectElement).addEventListener('change', (e) => {
-            this.scale = parseInt((e.target as HTMLSelectElement).value, 10) || 2;
-        });
+        (card.querySelector('#export-scale') as HTMLSelectElement).addEventListener(
+            'change',
+            (e) => {
+                this.scale = parseInt((e.target as HTMLSelectElement).value, 10) || 2;
+            },
+        );
 
-        (card.querySelector('#export-cancel') as HTMLButtonElement)
-            .addEventListener('click', () => this.close());
-        (card.querySelector('#export-confirm') as HTMLButtonElement)
-            .addEventListener('click', () => {
+        (card.querySelector('#export-cancel') as HTMLButtonElement).addEventListener('click', () =>
+            this.close(),
+        );
+        (card.querySelector('#export-confirm') as HTMLButtonElement).addEventListener(
+            'click',
+            () => {
                 const raw = this.artboardSelect.value;
                 this.close();
                 this.onExport({
@@ -112,15 +124,16 @@ export class ExportDialog {
                     artboardId: raw === 'all' ? 'all' : parseInt(raw, 10),
                     transparent: this.transparentCheckbox.checked,
                 });
-            });
+            },
+        );
     }
 
     open(): void {
         // Populate the artboard picker from the live scene each time.
         const arts = this.getArtboards();
         this.artboardSelect.innerHTML =
-            arts.map(a => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('')
-            + `<option value="all">Entire canvas</option>`;
+            arts.map((a) => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('') +
+            `<option value="all">Entire canvas</option>`;
         this.overlay.style.display = 'flex';
     }
 
@@ -131,8 +144,4 @@ export class ExportDialog {
     private isOpen(): boolean {
         return this.overlay.style.display !== 'none';
     }
-}
-
-function escapeHtml(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }

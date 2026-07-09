@@ -1,10 +1,17 @@
-import init, { Engine, History } from '../engine/pkg/engine';
-import type { AutosaveManager } from './persistence';
-import type { SceneData, Transform2D, Artboard } from './types';
 import type { CanvasKit } from 'canvaskit-wasm';
+import init, { Engine, History } from '../engine/pkg/engine';
+import type { BoolOp } from './boolean_ops';
+import {
+    BOOL_OP_BY_INDEX,
+    BOOL_OP_INDEX,
+    computeBooleanSubpaths,
+    invertAffine,
+    transformSubpaths,
+} from './boolean_ops';
 import type { Document } from './document';
-
+import type { AutosaveManager } from './persistence';
 import type { Renderer } from './renderer';
+import type { Artboard, SceneData, Subpath, Transform2D } from './types';
 
 export class WasmScene {
     engine: Engine | null = null;
@@ -144,11 +151,11 @@ export class WasmScene {
     }
 
     getRenderData(visibleIds: Uint32Array): DataView {
-        if (!this.engine || !this.wasm) throw new Error("WasmScene not initialized");
-        
+        if (!this.engine || !this.wasm) throw new Error('WasmScene not initialized');
+
         // Tell engine to update the binary render buffer
         this.engine.update_render_buffer(visibleIds);
-        
+
         const ptr = this.engine.get_render_buffer();
         const size = this.engine.get_render_buffer_size();
 
@@ -245,12 +252,15 @@ export class WasmScene {
 
     /** Set typography properties without pushing an undo entry (used when
      *  finalizing a just-created text node, whose creation already saved one). */
-    setTextPropertiesNoHistory(id: number, fontFamily: string, textAlign: number, lineHeight: number) {
+    setTextPropertiesNoHistory(
+        id: number,
+        fontFamily: string,
+        textAlign: number,
+        lineHeight: number,
+    ) {
         this.engine!.set_text_properties(id, fontFamily, textAlign, lineHeight);
         this.invalidateCache();
     }
-
-
 
     setNodeVisible(id: number, visible: boolean) {
         this.saveHistory();
@@ -300,7 +310,14 @@ export class WasmScene {
 
     /** Register encoded image bytes and place an image node centered at (cx,cy)
      *  with the given display size. One undo step. Returns the new node id. */
-    placeImage(bytes: Uint8Array, mime: string, cx: number, cy: number, w: number, h: number): number {
+    placeImage(
+        bytes: Uint8Array,
+        mime: string,
+        cx: number,
+        cy: number,
+        w: number,
+        h: number,
+    ): number {
         let id = 0;
         this.transaction(() => {
             const imageId = this.engine!.register_image(bytes, mime);
@@ -794,6 +811,133 @@ export class WasmScene {
         return this.engine?.get_node_live_paint(id) ?? false;
     }
 
+    // ─── Non-destructive Boolean Groups (Figma-style) ───────────────────────
+
+    /** The boolean op index (0=union..3=exclude) on a group, or -1 if it isn't
+     *  a Boolean Group. */
+    getBooleanOp(id: number): number {
+        return this.engine?.get_boolean_op(id) ?? -1;
+    }
+
+    /** True if the node is a non-destructive Boolean Group. */
+    isBooleanGroup(id: number): boolean {
+        return this.getBooleanOp(id) >= 0;
+    }
+
+    /**
+     * Group the given nodes (2+) into a non-destructive Boolean Group and cache
+     * its resolved outline. The group carries the bottom operand's style. Returns
+     * the new group id, or -1 if the boolean produced no geometry. Undoable.
+     */
+    makeBooleanGroup(ck: CanvasKit, ids: number[], op: BoolOp): number {
+        if (ids.length < 2) return -1;
+        // Compute the outline BEFORE grouping — operand world geometry is
+        // unchanged by grouping, and we need the bottom node's style.
+        const res = computeBooleanSubpaths(ck, this, ids, op);
+        if (!res) return -1;
+        const styleData = this.getNodeStyle(ids[0]);
+
+        this.saveHistory();
+        const groupId = this.engine!.group_nodes(JSON.stringify(ids));
+        this.engine!.set_boolean_op(groupId, BOOL_OP_INDEX[op]);
+        if (styleData) {
+            this.engine!.set_node_style(
+                groupId,
+                JSON.stringify({ ...styleData, fill_rule: res.fillRule }),
+            );
+        }
+        this.pushBoolCache(groupId, res.subpaths);
+        // Select the new group so its Boolean-Group controls surface immediately.
+        this.engine!.clear_selection();
+        this.engine!.select_node(groupId, false);
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return groupId;
+    }
+
+    /** Change the op on an existing Boolean Group and recompute. Undoable. */
+    setBooleanOp(ck: CanvasKit, groupId: number, op: BoolOp): boolean {
+        if (!this.isBooleanGroup(groupId)) return false;
+        this.saveHistory();
+        this.engine!.set_boolean_op(groupId, BOOL_OP_INDEX[op]);
+        this.recomputeBooleanGroup(ck, groupId);
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return true;
+    }
+
+    /** Turn a Boolean Group back into an ordinary group (children reappear as
+     *  independent shapes). Undoable. */
+    releaseBoolean(groupId: number): boolean {
+        if (!this.isBooleanGroup(groupId)) return false;
+        this.saveHistory();
+        this.engine!.set_boolean_op(groupId, -1);
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return true;
+    }
+
+    /**
+     * Bake a Boolean Group into a single editable Path node, dropping the operand
+     * children. Returns the new path id, or -1 on failure. Undoable.
+     */
+    flattenBoolean(ck: CanvasKit, groupId: number): number {
+        const opIdx = this.getBooleanOp(groupId);
+        if (opIdx < 0) return -1;
+        const childIds = Array.from(this.getNodeChildren(groupId));
+        const res = computeBooleanSubpaths(ck, this, childIds, BOOL_OP_BY_INDEX[opIdx]);
+        if (!res) return -1;
+        const styleData = this.getNodeStyle(groupId);
+        const styleJson = styleData
+            ? JSON.stringify({ ...styleData, fill_rule: res.fillRule })
+            : null;
+        // replaceNodesWithPath removes the group (and its children recursively)
+        // and adds one path at root carrying the world-space outline.
+        return this.replaceNodesWithPath([groupId], JSON.stringify(res.subpaths), styleJson);
+    }
+
+    /**
+     * Drain the engine's set of stale Boolean Groups and recompute each outline.
+     * Called by the renderer every frame (before it reads the render buffer) so a
+     * child edit re-evaluates the boolean live. Cheap no-op when nothing is dirty.
+     */
+    recomputeDirtyBooleanGroups(ck: CanvasKit): void {
+        if (!this.engine) return;
+        let ids: number[];
+        try {
+            ids = JSON.parse(this.engine.take_dirty_boolean_groups());
+        } catch {
+            return;
+        }
+        if (!ids.length) return;
+        for (const id of ids) this.recomputeBooleanGroup(ck, id);
+        // Derived-cache refresh, not a user edit: clear render caches so the new
+        // outline is drawn, but don't advance history/dirty state.
+        this.invalidateCache(false);
+    }
+
+    /** Recompute one Boolean Group's cached outline from its current children. */
+    private recomputeBooleanGroup(ck: CanvasKit, groupId: number): void {
+        const opIdx = this.engine!.get_boolean_op(groupId);
+        if (opIdx < 0) return;
+        const childIds = Array.from(this.getNodeChildren(groupId));
+        if (childIds.length < 2) {
+            this.engine!.set_bool_cache(groupId, '[]');
+            return;
+        }
+        const res = computeBooleanSubpaths(ck, this, childIds, BOOL_OP_BY_INDEX[opIdx]);
+        this.pushBoolCache(groupId, res ? res.subpaths : []);
+    }
+
+    /** Store a world-space outline into a group's cache, converted to the group's
+     *  local frame so it moves with the group's transform for free. */
+    private pushBoolCache(groupId: number, worldSubpaths: Subpath[]): void {
+        const t = this.getTransform(groupId);
+        const inv = invertAffine(t);
+        const local = inv ? transformSubpaths(worldSubpaths, inv) : worldSubpaths;
+        this.engine!.set_bool_cache(groupId, JSON.stringify(local));
+    }
+
     /** Paint a Live Paint edge with a stroke color/width. Undoable. */
     setEdgePaint(edgeId: number, r: number, g: number, b: number, a: number, width: number) {
         this.saveHistory();
@@ -859,7 +1003,11 @@ export class WasmScene {
      */
     reorderNodes(nodeIds: number[], newParent: number | null, index: number): number {
         const snapshot = this._inTransaction ? null : this.engine!.serialize_scene();
-        const moved = this.engine!.reorder_nodes(JSON.stringify(nodeIds), newParent ?? undefined, index);
+        const moved = this.engine!.reorder_nodes(
+            JSON.stringify(nodeIds),
+            newParent ?? undefined,
+            index,
+        );
         if (moved > 0) {
             if (snapshot !== null) this.history!.push_state(snapshot);
             this.invalidateCache();

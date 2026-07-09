@@ -10,7 +10,7 @@
  * FileSystemFileHandle is structured-cloneable, so it round-trips through
  * IndexedDB; re-permissioning on restore is handled by FileService.
  */
-import { Engine } from '../engine/pkg/engine';
+import type { Engine } from '../engine/pkg/engine';
 
 export interface StoredDoc {
     id: string;
@@ -41,7 +41,11 @@ export const BACKUP_CAP = 20;
 export const BACKUP_THROTTLE_MS = 2 * 60 * 1000; // 2 minutes
 
 /** Decide whether enough time has passed to take another automatic snapshot. */
-export function shouldSnapshot(lastAt: number, now: number, throttleMs = BACKUP_THROTTLE_MS): boolean {
+export function shouldSnapshot(
+    lastAt: number,
+    now: number,
+    throttleMs = BACKUP_THROTTLE_MS,
+): boolean {
     return now - lastAt >= throttleMs;
 }
 
@@ -52,8 +56,10 @@ export function shouldSnapshot(lastAt: number, now: number, throttleMs = BACKUP_
 export function backupIdsToPrune(entries: BackupEntry[], cap = BACKUP_CAP): string[] {
     if (entries.length <= cap) return [];
     // Newest first; tiebreak on id so same-millisecond entries prune deterministically.
-    const byNewest = [...entries].sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1));
-    return byNewest.slice(cap).map(e => e.id);
+    const byNewest = [...entries].sort(
+        (a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1),
+    );
+    return byNewest.slice(cap).map((e) => e.id);
 }
 
 const DB_NAME = 'VectorEditorDB';
@@ -67,17 +73,17 @@ const MANIFEST_KEY = 'manifest';
 
 export class PersistenceManager {
     static async saveDocument(doc: StoredDoc): Promise<void> {
-        const db = await this.openDB();
-        return this.tx(db, DOCS, 'readwrite', (store) => store.put(doc, doc.id));
+        const db = await PersistenceManager.openDB();
+        return PersistenceManager.tx(db, DOCS, 'readwrite', (store) => store.put(doc, doc.id));
     }
 
     static async deleteDocument(id: string): Promise<void> {
-        const db = await this.openDB();
-        return this.tx(db, DOCS, 'readwrite', (store) => store.delete(id));
+        const db = await PersistenceManager.openDB();
+        return PersistenceManager.tx(db, DOCS, 'readwrite', (store) => store.delete(id));
     }
 
     static async loadAllDocuments(): Promise<StoredDoc[]> {
-        const db = await this.openDB();
+        const db = await PersistenceManager.openDB();
         return new Promise((resolve) => {
             const req = db.transaction(DOCS, 'readonly').objectStore(DOCS).getAll();
             req.onsuccess = () => resolve((req.result as StoredDoc[]) ?? []);
@@ -86,12 +92,14 @@ export class PersistenceManager {
     }
 
     static async saveManifest(m: SessionManifest): Promise<void> {
-        const db = await this.openDB();
-        return this.tx(db, SESSION, 'readwrite', (store) => store.put(m, MANIFEST_KEY));
+        const db = await PersistenceManager.openDB();
+        return PersistenceManager.tx(db, SESSION, 'readwrite', (store) =>
+            store.put(m, MANIFEST_KEY),
+        );
     }
 
     static async loadManifest(): Promise<SessionManifest | null> {
-        const db = await this.openDB();
+        const db = await PersistenceManager.openDB();
         return new Promise((resolve) => {
             const req = db.transaction(SESSION, 'readonly').objectStore(SESSION).get(MANIFEST_KEY);
             req.onsuccess = () => resolve((req.result as SessionManifest) ?? null);
@@ -101,7 +109,7 @@ export class PersistenceManager {
 
     /** Read the legacy v1 single-scene autosave, if any (for migration). */
     static async loadLegacyScene(): Promise<Uint8Array | null> {
-        const db = await this.openDB();
+        const db = await PersistenceManager.openDB();
         if (!db.objectStoreNames.contains(LEGACY)) return null;
         return new Promise((resolve) => {
             const req = db.transaction(LEGACY, 'readonly').objectStore(LEGACY).get(LEGACY_KEY);
@@ -115,25 +123,27 @@ export class PersistenceManager {
 
     /** Delete the legacy scene once migrated, so it isn't re-imported. */
     static async clearLegacyScene(): Promise<void> {
-        const db = await this.openDB();
+        const db = await PersistenceManager.openDB();
         if (!db.objectStoreNames.contains(LEGACY)) return;
-        return this.tx(db, LEGACY, 'readwrite', (store) => store.delete(LEGACY_KEY));
+        return PersistenceManager.tx(db, LEGACY, 'readwrite', (store) => store.delete(LEGACY_KEY));
     }
 
     // ─── Backups (version history) ───────────────────────────────────────────
 
     /** Write a version snapshot, then prune that document to the newest cap. */
     static async saveBackup(entry: BackupEntry, cap = BACKUP_CAP): Promise<void> {
-        const db = await this.openDB();
-        await this.tx(db, BACKUPS, 'readwrite', (store) => store.put(entry, entry.id));
-        const existing = await this.listBackupsForDoc(entry.docId);
+        const db = await PersistenceManager.openDB();
+        await PersistenceManager.tx(db, BACKUPS, 'readwrite', (store) =>
+            store.put(entry, entry.id),
+        );
+        const existing = await PersistenceManager.listBackupsForDoc(entry.docId);
         const toPrune = backupIdsToPrune(existing, cap);
-        for (const id of toPrune) await this.deleteBackup(id);
+        for (const id of toPrune) await PersistenceManager.deleteBackup(id);
     }
 
     /** All backups across all documents, newest first. */
     static async listBackups(): Promise<BackupEntry[]> {
-        const db = await this.openDB();
+        const db = await PersistenceManager.openDB();
         return new Promise((resolve) => {
             const req = db.transaction(BACKUPS, 'readonly').objectStore(BACKUPS).getAll();
             req.onsuccess = () => {
@@ -146,12 +156,12 @@ export class PersistenceManager {
     }
 
     static async listBackupsForDoc(docId: string): Promise<BackupEntry[]> {
-        const all = await this.listBackups();
-        return all.filter(b => b.docId === docId);
+        const all = await PersistenceManager.listBackups();
+        return all.filter((b) => b.docId === docId);
     }
 
     static async loadBackup(id: string): Promise<BackupEntry | null> {
-        const db = await this.openDB();
+        const db = await PersistenceManager.openDB();
         return new Promise((resolve) => {
             const req = db.transaction(BACKUPS, 'readonly').objectStore(BACKUPS).get(id);
             req.onsuccess = () => resolve((req.result as BackupEntry) ?? null);
@@ -160,8 +170,8 @@ export class PersistenceManager {
     }
 
     static async deleteBackup(id: string): Promise<void> {
-        const db = await this.openDB();
-        return this.tx(db, BACKUPS, 'readwrite', (store) => store.delete(id));
+        const db = await PersistenceManager.openDB();
+        return PersistenceManager.tx(db, BACKUPS, 'readwrite', (store) => store.delete(id));
     }
 
     // ─── Internals ──────────────────────────────────────────────────────────

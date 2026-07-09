@@ -11,6 +11,10 @@
     --border: #383838;
     --border-light: #444;
     --section-gap: 0px;
+    /* One fixed width for every color swatch (fill, stroke, gradient stop,
+       effect) so they line up across all inspector rows. */
+    --color-swatch-w: 48px;
+    --color-swatch-h: 24px;
 }
 
 body, html {
@@ -1219,6 +1223,15 @@ body.scrubbing * {
     border-radius: 5px;
 }
 
+/* Fixed-width color swatch, identical across every inspector row. Row-specific
+   controls sit to its right; the delete button is pinned to the far right. */
+.fill-stroke-row .cp-swatch {
+    flex: 0 0 var(--color-swatch-w);
+    width: var(--color-swatch-w);
+    min-width: var(--color-swatch-w);
+    height: var(--color-swatch-h);
+}
+
 .fill-stroke-row .prop-select {
     height: 24px;
     font-size: 11px;
@@ -1316,6 +1329,14 @@ body.scrubbing * {
     cursor: pointer;
     flex-shrink: 0;
 }
+/* Same fixed-width swatch as the fill/stroke rows; position and opacity fields
+   sit to its right. */
+.gradient-stop-row .cp-swatch {
+    flex: 0 0 var(--color-swatch-w);
+    width: var(--color-swatch-w);
+    min-width: var(--color-swatch-w);
+    height: var(--color-swatch-h);
+}
 .gradient-stop-row .prop-input,
 .gradient-angle-row .prop-input {
     height: 24px;
@@ -1400,6 +1421,17 @@ body.scrubbing * {
     align-self: flex-end;
     margin-bottom: 1px;
     border-radius: 5px;
+}
+
+/* Same fixed-width swatch as the fill/stroke/gradient rows. The effect row is
+   bottom-aligned, so match the color-input's alignment. */
+.effect-row .cp-swatch {
+    flex: 0 0 var(--color-swatch-w);
+    width: var(--color-swatch-w);
+    min-width: var(--color-swatch-w);
+    height: var(--color-swatch-h);
+    align-self: flex-end;
+    margin-bottom: 1px;
 }
 
 .effect-field {
@@ -2177,6 +2209,73 @@ body.scrubbing * {
 .cb-btn-active {
     background: rgba(74, 158, 255, 0.25) !important;
     color: #4a9eff !important;
+}
+
+/* ─── Context bar dropdown (Figma-style split control) ─── */
+.cb-dropdown {
+    display: inline-flex;
+}
+
+.cb-dropdown-btn .cb-caret {
+    font-size: 9px;
+    opacity: 0.7;
+    margin-left: 2px;
+}
+
+/* Popup menu (appended to <body>, opens upward above the bar) */
+.cb-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 150px;
+    padding: 4px;
+    background: rgba(43, 43, 43, 0.98);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5), 0 1px 4px rgba(0, 0, 0, 0.3);
+    z-index: 200;
+}
+
+.cb-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border: none;
+    background: transparent;
+    color: var(--text-main);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    text-align: left;
+    white-space: nowrap;
+    transition: background 0.12s;
+}
+
+.cb-menu-item:hover {
+    background: var(--bg-hover);
+}
+
+.cb-menu-item-active {
+    background: rgba(74, 158, 255, 0.2);
+    color: #4a9eff;
+}
+
+.cb-menu-item-label {
+    flex: 1;
+}
+
+.cb-menu-item-shortcut {
+    font-size: 10px;
+    opacity: 0.6;
+}
+
+.cb-menu-item-danger:hover {
+    background: rgba(255, 68, 68, 0.25);
+    color: #ff6b6b;
 }
 
 .add-property-btn {

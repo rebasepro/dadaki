@@ -16,28 +16,45 @@
  *  - Delete is always the last action and always styled as destructive.
  */
 
-import type { UIEngine } from './ui';
-import type { InputManager } from './input';
-import type { WasmScene } from './wasm_scene';
-import type { Renderer } from './renderer';
-import { getEditorContext } from './context';
-import type { ContextInfo } from './context';
-import { alignSelection, distributeSelection } from './align';
 import type { AlignMode } from './align';
-import { applyBooleanOp } from './boolean_ops';
+import { alignSelection, distributeSelection } from './align';
 import type { BoolOp } from './boolean_ops';
-import { createColorSwatch, colorToHex, parseHex } from './color_picker';
+import { BOOL_OP_BY_INDEX } from './boolean_ops';
+import { colorToHex, createColorSwatch, parseHex } from './color_picker';
+import type { ContextInfo } from './context';
+import { getEditorContext } from './context';
 import {
-    iconPencil, iconTrash, iconCopy,
-    iconAlignLeft, iconAlignCenterH, iconAlignRight,
-    iconAlignTop, iconAlignCenterV, iconAlignBottom,
-    iconDistributeH, iconDistributeV,
-    iconBoolUnion, iconBoolSubtract, iconBoolIntersect, iconBoolExclude,
-    iconGroup, iconUngroup, iconCornerDownRight,
-    iconPlusCircle, iconMinusCircle, iconLink, iconScissors,
-    iconFlipH, iconFlipV, iconFlatten,
+    iconAlignBottom,
+    iconAlignCenterH,
+    iconAlignCenterV,
+    iconAlignLeft,
+    iconAlignRight,
+    iconAlignTop,
+    iconBoolExclude,
+    iconBoolIntersect,
+    iconBoolSubtract,
+    iconBoolUnion,
+    iconCopy,
+    iconCornerDownRight,
     iconCreateOutlines,
+    iconDistributeH,
+    iconDistributeV,
+    iconFlatten,
+    iconFlipH,
+    iconFlipV,
+    iconGroup,
+    iconLink,
+    iconMinusCircle,
+    iconPencil,
+    iconPlusCircle,
+    iconScissors,
+    iconTrash,
+    iconUngroup,
 } from './icons';
+import type { InputManager } from './input';
+import type { Renderer } from './renderer';
+import type { UIEngine } from './ui';
+import type { WasmScene } from './wasm_scene';
 
 /** What each tool does, shown while the tool is armed and nothing is selected. */
 const TOOL_HINTS: Record<string, string> = {
@@ -55,11 +72,37 @@ const TOOL_HINTS: Record<string, string> = {
 };
 
 /** Tools whose next action applies the default style — they get style swatches. */
-const TOOLS_WITH_FILL = new Set(['pen', 'pencil', 'rect', 'ellipse', 'polygon', 'star', 'paint-bucket']);
-const TOOLS_WITH_STROKE = new Set(['pen', 'pencil', 'line', 'rect', 'ellipse', 'polygon', 'star', 'paint-bucket']);
+const TOOLS_WITH_FILL = new Set([
+    'pen',
+    'pencil',
+    'rect',
+    'ellipse',
+    'polygon',
+    'star',
+    'paint-bucket',
+]);
+const TOOLS_WITH_STROKE = new Set([
+    'pen',
+    'pencil',
+    'line',
+    'rect',
+    'ellipse',
+    'polygon',
+    'star',
+    'paint-bucket',
+]);
 
 /** Node types the boolean operations can combine. */
-const BOOLEAN_COMPATIBLE = new Set(['Path', 'Rect', 'Ellipse']);
+const BOOLEAN_COMPATIBLE = new Set(['Path', 'Rect', 'Ellipse', 'Group']);
+
+/** Label + icon for each boolean op, in the order shown in the dropdown. */
+const BOOL_OP_ORDER: readonly BoolOp[] = ['union', 'subtract', 'intersect', 'exclude'];
+const BOOL_OP_META: Record<BoolOp, { label: string; icon: () => string }> = {
+    union: { label: 'Union', icon: () => iconBoolUnion(14) },
+    subtract: { label: 'Subtract', icon: () => iconBoolSubtract(14) },
+    intersect: { label: 'Intersect', icon: () => iconBoolIntersect(14) },
+    exclude: { label: 'Exclude', icon: () => iconBoolExclude(14) },
+};
 
 export class ContextBar {
     private el: HTMLDivElement;
@@ -111,18 +154,25 @@ export class ContextBar {
 
     /** Build a cache key that captures everything affecting the bar's rendered output. */
     private buildSignature(info: ContextInfo): string {
-        const types = info.selectedNodes.map(n => n.node_type).join(',');
-        const names = info.selectedNodes.map(n => n.name).join(',');
+        const types = info.selectedNodes.map((n) => n.node_type).join(',');
+        const names = info.selectedNodes.map((n) => n.name).join(',');
         // Tool contexts render the default-style swatches, so their colors are
         // part of the signature; selection contexts don't show any properties.
-        const styleSig = info.context === 'tool'
-            ? `|${this.ui.rgbToHex(this.ui.getActiveFillColor())}|${this.ui.rgbToHex(this.ui.getActiveStrokeColor())}`
-            : info.context === 'live-paint'
-                ? `|${this.ui.rgbToHex(this.ui.getLivePaintFill())}|${this.ui.rgbToHex(this.ui.getLivePaintStroke())}`
-                : '';
+        const styleSig =
+            info.context === 'tool'
+                ? `|${this.ui.rgbToHex(this.ui.getActiveFillColor())}|${this.ui.rgbToHex(this.ui.getActiveStrokeColor())}`
+                : info.context === 'live-paint'
+                  ? `|${this.ui.rgbToHex(this.ui.getLivePaintFill())}|${this.ui.rgbToHex(this.ui.getLivePaintStroke())}`
+                  : '';
         // Live Paint bar depends on whether a group is active.
         const lpSig = info.context === 'live-paint' ? `|lp${this.scene.getLivePaintGroup()}` : '';
-        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}`;
+        // A selected Boolean Group's controls show its current op, so it's part
+        // of the signature (switching the op must re-render the bar).
+        const boolSig =
+            info.context === 'group-selected' && info.selectedIds.length === 1
+                ? `|bop${this.scene.getBooleanOp(info.selectedIds[0])}`
+                : '';
+        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}`;
     }
 
     /** Rebuild the bar DOM based on context info. */
@@ -169,10 +219,26 @@ export class ContextBar {
         const tool = this.ui.activeTool;
 
         if (TOOLS_WITH_FILL.has(tool)) {
-            this.el.appendChild(this.createColorSwatch('fill', this.ui.rgbToHex(this.ui.getActiveFillColor()), (color) => { this.ui.updateActiveFillColor(color); }));
+            this.el.appendChild(
+                this.createColorSwatch(
+                    'fill',
+                    this.ui.rgbToHex(this.ui.getActiveFillColor()),
+                    (color) => {
+                        this.ui.updateActiveFillColor(color);
+                    },
+                ),
+            );
         }
         if (TOOLS_WITH_STROKE.has(tool)) {
-            this.el.appendChild(this.createColorSwatch('stroke', this.ui.rgbToHex(this.ui.getActiveStrokeColor()), (color) => { this.ui.updateActiveStrokeColor(color); }));
+            this.el.appendChild(
+                this.createColorSwatch(
+                    'stroke',
+                    this.ui.rgbToHex(this.ui.getActiveStrokeColor()),
+                    (color) => {
+                        this.ui.updateActiveStrokeColor(color);
+                    },
+                ),
+            );
         }
         if (TOOLS_WITH_FILL.has(tool)) {
             this.el.appendChild(this.createSeparator());
@@ -195,14 +261,24 @@ export class ContextBar {
         this.el.appendChild(this.createBadge(this.scene.getNodeName(id) || 'Live Paint'));
         this.el.appendChild(this.createSeparator());
 
-        this.el.appendChild(this.createButton('Edit', iconPencil(14), () => {
-            this.input.enterLivePaintGroup(id);
-        }, false, '⏎'));
+        this.el.appendChild(
+            this.createButton(
+                'Edit',
+                iconPencil(14),
+                () => {
+                    this.input.enterLivePaintGroup(id);
+                },
+                false,
+                '⏎',
+            ),
+        );
 
         // Expand bakes the painted faces/edges into real, editable shapes.
-        this.el.appendChild(this.createButton('Expand', iconCreateOutlines(14), () => {
-            this.input.expandLivePaintGroup(id);
-        }));
+        this.el.appendChild(
+            this.createButton('Expand', iconCreateOutlines(14), () => {
+                this.input.expandLivePaintGroup(id);
+            }),
+        );
 
         this.appendTransformActions(info, { flatten: false });
         this.appendLifecycleActions();
@@ -257,12 +333,24 @@ export class ContextBar {
     private renderLivePaint(info: ContextInfo) {
         // Fill (regions) and Stroke (edges) colors. These set only the Live Paint
         // paint color — they do NOT modify the selected shapes.
-        this.el.appendChild(this.createColorSwatch('fill',
-            this.ui.rgbToHex(this.ui.getLivePaintFill()),
-            (color) => { this.ui.setLivePaintFill(color); }));
-        this.el.appendChild(this.createColorSwatch('stroke',
-            this.ui.rgbToHex(this.ui.getLivePaintStroke()),
-            (color) => { this.ui.setLivePaintStroke(color); }));
+        this.el.appendChild(
+            this.createColorSwatch(
+                'fill',
+                this.ui.rgbToHex(this.ui.getLivePaintFill()),
+                (color) => {
+                    this.ui.setLivePaintFill(color);
+                },
+            ),
+        );
+        this.el.appendChild(
+            this.createColorSwatch(
+                'stroke',
+                this.ui.rgbToHex(this.ui.getLivePaintStroke()),
+                (color) => {
+                    this.ui.setLivePaintStroke(color);
+                },
+            ),
+        );
         this.el.appendChild(this.createSeparator());
         this.el.appendChild(this.createGapControl());
         this.el.appendChild(this.createSeparator());
@@ -270,19 +358,37 @@ export class ContextBar {
         const group = this.scene.getLivePaintGroup();
         if (group >= 0) {
             this.el.appendChild(this.createBadge('Editing Live Paint'));
-            this.el.appendChild(this.createHint('Click a region to fill · ⌥-click a line to paint its edge'));
+            this.el.appendChild(
+                this.createHint('Click a region to fill · ⌥-click a line to paint its edge'),
+            );
             this.el.appendChild(this.createSeparator());
-            this.el.appendChild(this.createButton('Done', '✓', () => {
-                this.input.exitLivePaintGroup();
-            }, false, '⏎'));
+            this.el.appendChild(
+                this.createButton(
+                    'Done',
+                    '✓',
+                    () => {
+                        this.input.exitLivePaintGroup();
+                    },
+                    false,
+                    '⏎',
+                ),
+            );
         } else if (info.selectedIds.length > 0) {
-            this.el.appendChild(this.createButton('Make Live Paint Group', iconGroup(14), () => {
-                this.input.makeLivePaintGroup();
-            }));
+            this.el.appendChild(
+                this.createButton('Make Live Paint Group', iconGroup(14), () => {
+                    this.input.makeLivePaintGroup();
+                }),
+            );
             this.el.appendChild(this.createSeparator());
-            this.el.appendChild(this.createHint('Groups the selected shapes so you can paint inside them'));
+            this.el.appendChild(
+                this.createHint('Groups the selected shapes so you can paint inside them'),
+            );
         } else {
-            this.el.appendChild(this.createHint('Select shapes and click Live Paint to make a group, then fill its regions'));
+            this.el.appendChild(
+                this.createHint(
+                    'Select shapes and click Live Paint to make a group, then fill its regions',
+                ),
+            );
         }
     }
 
@@ -290,12 +396,20 @@ export class ContextBar {
     private renderSingleShape(info: ContextInfo) {
         this.appendSelectionBadge(info);
 
-        this.el.appendChild(this.createButton('Edit Path', iconPencil(14), () => {
-            if (info.selectedIds.length === 1) {
-                this.ui.setActiveTool('direct');
-                this.input.enterPathEditMode(info.selectedIds[0]);
-            }
-        }, false, '⏎'));
+        this.el.appendChild(
+            this.createButton(
+                'Edit Path',
+                iconPencil(14),
+                () => {
+                    if (info.selectedIds.length === 1) {
+                        this.ui.setActiveTool('direct');
+                        this.input.enterPathEditMode(info.selectedIds[0]);
+                    }
+                },
+                false,
+                '⏎',
+            ),
+        );
 
         this.appendTransformActions(info, { flatten: true });
         this.appendLifecycleActions();
@@ -307,13 +421,29 @@ export class ContextBar {
 
         const nodeId = info.selectedIds[0];
 
-        this.el.appendChild(this.createButton('Edit Text', iconPencil(14), () => {
-            this.input.editTextNode(nodeId);
-        }, false, '⏎'));
+        this.el.appendChild(
+            this.createButton(
+                'Edit Text',
+                iconPencil(14),
+                () => {
+                    this.input.editTextNode(nodeId);
+                },
+                false,
+                '⏎',
+            ),
+        );
 
-        this.el.appendChild(this.createButton('Create Outlines', iconCreateOutlines(14), () => {
-            void this.input.createOutlines(nodeId);
-        }, false, '⌘⇧O'));
+        this.el.appendChild(
+            this.createButton(
+                'Create Outlines',
+                iconCreateOutlines(14),
+                () => {
+                    void this.input.createOutlines(nodeId);
+                },
+                false,
+                '⌘⇧O',
+            ),
+        );
 
         this.appendTransformActions(info, { flatten: false });
         this.appendLifecycleActions();
@@ -323,15 +453,95 @@ export class ContextBar {
     private renderGroupSelected(info: ContextInfo) {
         this.appendSelectionBadge(info);
 
-        this.el.appendChild(this.createButton('Enter Group', iconCornerDownRight(14), () => {
-            if (info.selectedIds.length === 1) {
-                this.input.enterSelectedNode(info.selectedIds[0]);
-            }
-        }, false, '⏎'));
+        const id = info.selectedIds[0];
+        // A Boolean Group gets a dedicated control set: switch op, edit operands,
+        // flatten to a path, or release back to a plain group.
+        if (info.selectedIds.length === 1 && this.scene.isBooleanGroup(id)) {
+            this.renderBooleanGroupControls(id, info);
+            return;
+        }
 
-        this.el.appendChild(this.createButton('Ungroup', iconUngroup(14), () => {
-            this.input.ungroupSelection();
-        }, false, '⌘⇧G'));
+        this.el.appendChild(
+            this.createButton(
+                'Enter Group',
+                iconCornerDownRight(14),
+                () => {
+                    if (info.selectedIds.length === 1) {
+                        this.input.enterSelectedNode(info.selectedIds[0]);
+                    }
+                },
+                false,
+                '⏎',
+            ),
+        );
+
+        this.el.appendChild(
+            this.createButton(
+                'Ungroup',
+                iconUngroup(14),
+                () => {
+                    this.input.ungroupSelection();
+                },
+                false,
+                '⌘⇧G',
+            ),
+        );
+
+        this.appendTransformActions(info, { flatten: true });
+        this.appendLifecycleActions();
+    }
+
+    /** Controls for a selected non-destructive Boolean Group. */
+    private renderBooleanGroupControls(id: number, info: ContextInfo) {
+        const curOp = BOOL_OP_BY_INDEX[this.scene.getBooleanOp(id)] ?? 'union';
+
+        this.el.appendChild(
+            this.createDropdown(
+                `Boolean · ${BOOL_OP_META[curOp].label}`,
+                BOOL_OP_META[curOp].icon(),
+                BOOL_OP_ORDER.map((op) => ({
+                    label: BOOL_OP_META[op].label,
+                    icon: BOOL_OP_META[op].icon(),
+                    active: op === curOp,
+                    onSelect: () => {
+                        this.scene.setBooleanOp(this.ui.ck, id, op);
+                        this.ui.syncWithSelection();
+                    },
+                })),
+            ),
+        );
+
+        this.el.appendChild(this.createSeparator());
+
+        this.el.appendChild(
+            this.createButton(
+                'Edit',
+                iconCornerDownRight(14),
+                () => {
+                    this.input.enterSelectedNode(id);
+                },
+                false,
+                '⏎',
+            ),
+        );
+
+        this.el.appendChild(
+            this.createButton('Flatten', iconCreateOutlines(14), () => {
+                const pid = this.scene.flattenBoolean(this.ui.ck, id);
+                if (pid >= 0) {
+                    this.ui.syncWithSelection();
+                    this.ui.updateLayerList();
+                }
+            }),
+        );
+
+        this.el.appendChild(
+            this.createButton('Release', iconUngroup(14), () => {
+                this.scene.releaseBoolean(id);
+                this.ui.syncWithSelection();
+                this.ui.updateLayerList();
+            }),
+        );
 
         this.appendTransformActions(info, { flatten: true });
         this.appendLifecycleActions();
@@ -352,59 +562,91 @@ export class ContextBar {
             ['Align bottom', iconAlignBottom(14), 'bottom'],
         ];
         for (const [title, icon, mode] of alignActions) {
-            this.el.appendChild(this.createIconButton(title, icon, () => {
-                alignSelection(this.scene, [...info.selectedIds], mode);
-                this.ui.syncWithSelection();
-            }));
+            this.el.appendChild(
+                this.createIconButton(title, icon, () => {
+                    alignSelection(this.scene, [...info.selectedIds], mode);
+                    this.ui.syncWithSelection();
+                }),
+            );
         }
         if (info.selectedIds.length >= 3) {
-            this.el.appendChild(this.createIconButton('Distribute horizontally', iconDistributeH(14), () => {
-                distributeSelection(this.scene, [...info.selectedIds], 'h');
-                this.ui.syncWithSelection();
-            }));
-            this.el.appendChild(this.createIconButton('Distribute vertically', iconDistributeV(14), () => {
-                distributeSelection(this.scene, [...info.selectedIds], 'v');
-                this.ui.syncWithSelection();
-            }));
+            this.el.appendChild(
+                this.createIconButton('Distribute horizontally', iconDistributeH(14), () => {
+                    distributeSelection(this.scene, [...info.selectedIds], 'h');
+                    this.ui.syncWithSelection();
+                }),
+            );
+            this.el.appendChild(
+                this.createIconButton('Distribute vertically', iconDistributeV(14), () => {
+                    distributeSelection(this.scene, [...info.selectedIds], 'v');
+                    this.ui.syncWithSelection();
+                }),
+            );
         }
 
         // Boolean operations — only when every selected node is combinable geometry
-        const allBoolCompatible = info.selectedNodes.length === info.selectedIds.length
-            && info.selectedNodes.every(n => BOOLEAN_COMPATIBLE.has(n.node_type));
+        const allBoolCompatible =
+            info.selectedNodes.length === info.selectedIds.length &&
+            info.selectedNodes.every((n) => BOOLEAN_COMPATIBLE.has(n.node_type));
         if (allBoolCompatible) {
             this.el.appendChild(this.createSeparator());
-            const boolActions: Array<[string, string, BoolOp]> = [
-                ['Union', iconBoolUnion(14), 'union'],
-                ['Subtract', iconBoolSubtract(14), 'subtract'],
-                ['Intersect', iconBoolIntersect(14), 'intersect'],
-                ['Exclude', iconBoolExclude(14), 'exclude'],
-            ];
-            for (const [title, icon, op] of boolActions) {
-                this.el.appendChild(this.createIconButton(title, icon, () => {
-                    const newId = applyBooleanOp(this.ui.ck, this.scene, [...info.selectedIds], op);
-                    if (newId !== null) {
-                        this.ui.syncWithSelection();
-                        this.ui.updateLayerList();
-                    }
-                }));
-            }
+            // Figma-style: a single Boolean dropdown creates a non-destructive
+            // Boolean Group (children stay editable, op re-evaluates live).
+            this.el.appendChild(
+                this.createDropdown(
+                    'Boolean',
+                    iconBoolUnion(14),
+                    BOOL_OP_ORDER.map((op) => ({
+                        label: BOOL_OP_META[op].label,
+                        icon: BOOL_OP_META[op].icon(),
+                        onSelect: () => {
+                            const gid = this.scene.makeBooleanGroup(
+                                this.ui.ck,
+                                [...info.selectedIds],
+                                op,
+                            );
+                            if (gid >= 0) {
+                                this.ui.syncWithSelection();
+                                this.ui.updateLayerList();
+                            }
+                        },
+                    })),
+                ),
+            );
         }
 
         this.el.appendChild(this.createSeparator());
 
         // Join Paths — only when exactly two Path nodes are selected
-        const twoPaths = info.selectedIds.length === 2
-            && info.selectedNodes.length === 2
-            && info.selectedNodes.every(n => n.node_type === 'Path');
+        const twoPaths =
+            info.selectedIds.length === 2 &&
+            info.selectedNodes.length === 2 &&
+            info.selectedNodes.every((n) => n.node_type === 'Path');
         if (twoPaths) {
-            this.el.appendChild(this.createButton('Join', iconLink(14), () => {
-                this.input.joinSelectedPaths();
-            }, false, '⌘J'));
+            this.el.appendChild(
+                this.createButton(
+                    'Join',
+                    iconLink(14),
+                    () => {
+                        this.input.joinSelectedPaths();
+                    },
+                    false,
+                    '⌘J',
+                ),
+            );
         }
 
-        this.el.appendChild(this.createButton('Group', iconGroup(14), () => {
-            this.input.groupSelection();
-        }, false, '⌘G'));
+        this.el.appendChild(
+            this.createButton(
+                'Group',
+                iconGroup(14),
+                () => {
+                    this.input.groupSelection();
+                },
+                false,
+                '⌘G',
+            ),
+        );
 
         this.appendTransformActions(info, { flatten: false });
         this.appendLifecycleActions();
@@ -415,66 +657,104 @@ export class ContextBar {
         this.el.appendChild(this.createBadge(`${info.pointCount} pts`));
         this.el.appendChild(this.createSeparator());
 
-        this.el.appendChild(this.createHint(
-            'Click to add points · drag for curves · Enter to finish · Esc to cancel · click first point to close'
-        ));
+        this.el.appendChild(
+            this.createHint(
+                'Click to add points · drag for curves · Enter or Esc to finish · click first point to close',
+            ),
+        );
 
         this.el.appendChild(this.createSeparator());
 
-        this.el.appendChild(this.createButton('Finish', '✓', () => {
-            this.input.finalizePenPath();
-        }, false, '⏎'));
+        this.el.appendChild(
+            this.createButton(
+                'Finish',
+                '✓',
+                () => {
+                    this.input.finalizePenPath();
+                },
+                false,
+                '⏎',
+            ),
+        );
 
-        this.el.appendChild(this.createButton('Cancel', '✕', () => {
-            this.input.currentPathPoints = [];
-            this.input.renderer.requestRender();
-            this.refresh();
-        }, true, '⎋'));
+        this.el.appendChild(
+            this.createButton(
+                'Cancel',
+                '✕',
+                () => {
+                    this.input.abandonPenPath();
+                    this.refresh();
+                },
+                true,
+            ),
+        );
     }
 
     /** Node-editing mode: point counts + point actions + exit. */
     private renderPathEditing(info: ContextInfo) {
-        const countText = info.selectedPointCount > 0
-            ? `${info.selectedPointCount} / ${info.pointCount} points`
-            : `${info.pointCount} points`;
+        const countText =
+            info.selectedPointCount > 0
+                ? `${info.selectedPointCount} / ${info.pointCount} points`
+                : `${info.pointCount} points`;
         this.el.appendChild(this.createBadge(countText));
 
         this.el.appendChild(this.createSeparator());
 
         // Add Point (toggles; highlighted while armed)
-        const addBtn = this.createIconButton('Add Point', iconPlusCircle(14), () => {
-            this.input.addPointMode = !this.input.addPointMode;
-            this.refresh();
-        }, '+');
+        const addBtn = this.createIconButton(
+            'Add Point',
+            iconPlusCircle(14),
+            () => {
+                this.input.addPointMode = !this.input.addPointMode;
+                this.refresh();
+            },
+            '+',
+        );
         if (this.input.addPointMode) addBtn.classList.add('cb-btn-active');
         this.el.appendChild(addBtn);
 
         // Delete Point (needs a selection)
-        const delBtn = this.createIconButton('Delete Point', iconMinusCircle(14), () => {
-            this.input.deleteSelectedPoints();
-        }, '⌫');
+        const delBtn = this.createIconButton(
+            'Delete Point',
+            iconMinusCircle(14),
+            () => {
+                this.input.deleteSelectedPoints();
+            },
+            '⌫',
+        );
         if (info.selectedPointCount === 0) delBtn.setAttribute('disabled', '');
         this.el.appendChild(delBtn);
 
         // Cut at the selected anchor (scissors with zero aiming — the point is
         // already selected). Only offered for exactly one anchor.
         if (info.selectedPointCount === 1) {
-            this.el.appendChild(this.createButton('Cut at Point', iconScissors(14), () => {
-                this.input.cutAtSelectedPoint();
-            }));
+            this.el.appendChild(
+                this.createButton('Cut at Point', iconScissors(14), () => {
+                    this.input.cutAtSelectedPoint();
+                }),
+            );
         }
 
         // Merge selected points into one (endpoints weld/close, adjacent collapse)
         if (info.selectedPointCount >= 2) {
-            this.el.appendChild(this.createButton('Merge', iconLink(14), () => {
-                this.input.mergeSelectedPoints();
-            }, false, '⌘J'));
+            this.el.appendChild(
+                this.createButton(
+                    'Merge',
+                    iconLink(14),
+                    () => {
+                        this.input.mergeSelectedPoints();
+                    },
+                    false,
+                    '⌘J',
+                ),
+            );
         }
 
         this.el.appendChild(this.createSeparator());
 
         // Hint tracks what the NEXT click will do
-        let hint = 'Drag points · ⌥drag an anchor for handles · ⇧click or marquee to multi-select · Esc to finish';
+        let hint =
+            'Drag points · ⌥drag an anchor for handles · ⇧click or marquee to multi-select · Esc to finish';
         if (this.input.addPointMode) hint = 'Click a segment to insert a point';
         else if (info.selectedPointCount === 1) hint = 'Cut splits the path at the selected point';
         else if (info.selectedPointCount >= 2) hint = '⌘J merges the selected points';
@@ -483,10 +763,18 @@ export class ContextBar {
         this.el.appendChild(this.createSeparator());
 
         // Done (exit edit mode) — the committing action is always last
-        this.el.appendChild(this.createButton('Done', '✓', () => {
-            this.input.exitEditMode();
-            this.ui.setActiveTool('selection');
-        }, false, '⏎'));
+        this.el.appendChild(
+            this.createButton(
+                'Done',
+                '✓',
+                () => {
+                    this.input.exitEditMode();
+                    this.ui.setActiveTool('selection');
+                },
+                false,
+                '⏎',
+            ),
+        );
     }
 
     // ─── Shared segments (keep every selection state on the same grammar) ──
@@ -503,16 +791,37 @@ export class ContextBar {
     private appendTransformActions(_info: ContextInfo, opts: { flatten: boolean }) {
         this.el.appendChild(this.createSeparator());
 
-        this.el.appendChild(this.createIconButton('Flip Horizontal', iconFlipH(), () => {
-            this.input.flipSelection('h');
-        }, '⇧H'));
-        this.el.appendChild(this.createIconButton('Flip Vertical', iconFlipV(), () => {
-            this.input.flipSelection('v');
-        }, '⇧V'));
+        this.el.appendChild(
+            this.createIconButton(
+                'Flip Horizontal',
+                iconFlipH(),
+                () => {
+                    this.input.flipSelection('h');
+                },
+                '⇧H',
+            ),
+        );
+        this.el.appendChild(
+            this.createIconButton(
+                'Flip Vertical',
+                iconFlipV(),
+                () => {
+                    this.input.flipSelection('v');
+                },
+                '⇧V',
+            ),
+        );
         if (opts.flatten) {
-            this.el.appendChild(this.createIconButton('Flatten', iconFlatten(), () => {
-                this.input.flattenSelection();
-            }, '⌘E'));
+            this.el.appendChild(
+                this.createIconButton(
+                    'Flatten',
+                    iconFlatten(),
+                    () => {
+                        this.input.flattenSelection();
+                    },
+                    '⌘E',
+                ),
+            );
         }
     }
 
@@ -520,13 +829,29 @@ export class ContextBar {
     private appendLifecycleActions() {
         this.el.appendChild(this.createSeparator());
 
-        this.el.appendChild(this.createButton('Duplicate', iconCopy(14), () => {
-            this.input.duplicateSelection();
-        }, false, '⌘D'));
+        this.el.appendChild(
+            this.createButton(
+                'Duplicate',
+                iconCopy(14),
+                () => {
+                    this.input.duplicateSelection();
+                },
+                false,
+                '⌘D',
+            ),
+        );
 
-        this.el.appendChild(this.createButton('Delete', iconTrash(14), () => {
-            this.input.deleteSelection();
-        }, true, '⌫'));
+        this.el.appendChild(
+            this.createButton(
+                'Delete',
+                iconTrash(14),
+                () => {
+                    this.input.deleteSelection();
+                },
+                true,
+                '⌫',
+            ),
+        );
     }
 
     // ─── DOM Helpers ────────────────────────────────────────────────
@@ -579,9 +904,90 @@ export class ContextBar {
         return hint;
     }
 
+    /** A labeled button that opens a small popup menu (Figma-style split control).
+     *  The menu is appended to <body> with fixed positioning so it can't be
+     *  clipped by the bar, and dismisses on any outside pointerdown. */
+    private createDropdown(
+        label: string,
+        icon: string,
+        items: Array<{
+            label: string;
+            icon: string;
+            shortcut?: string;
+            danger?: boolean;
+            active?: boolean;
+            onSelect: () => void;
+        }>,
+    ): HTMLElement {
+        const wrap = document.createElement('div');
+        wrap.className = 'cb-dropdown';
+
+        const btn = document.createElement('button');
+        btn.className = 'cb-btn cb-dropdown-btn';
+        btn.innerHTML = `<span class="cb-btn-icon">${icon}</span><span class="cb-btn-text">${label}</span><span class="cb-caret">▾</span>`;
+        wrap.appendChild(btn);
+
+        let menu: HTMLElement | null = null;
+        const onDoc = (e: PointerEvent) => {
+            if (menu && !menu.contains(e.target as Node) && !wrap.contains(e.target as Node))
+                close();
+        };
+        const close = () => {
+            if (menu) {
+                menu.remove();
+                menu = null;
+            }
+            document.removeEventListener('pointerdown', onDoc, true);
+        };
+        const open = () => {
+            menu = document.createElement('div');
+            menu.className = 'cb-menu';
+            for (const it of items) {
+                const mi = document.createElement('button');
+                mi.className =
+                    'cb-menu-item' +
+                    (it.danger ? ' cb-menu-item-danger' : '') +
+                    (it.active ? ' cb-menu-item-active' : '');
+                mi.innerHTML =
+                    `<span class="cb-btn-icon">${it.icon}</span>` +
+                    `<span class="cb-menu-item-label">${it.label}</span>` +
+                    (it.shortcut
+                        ? `<span class="cb-menu-item-shortcut">${it.shortcut}</span>`
+                        : '');
+                mi.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    close();
+                    it.onSelect();
+                });
+                menu.appendChild(mi);
+            }
+            menu.style.position = 'fixed';
+            menu.style.visibility = 'hidden';
+            document.body.appendChild(menu);
+            // The bar lives at the bottom of the screen, so open upward.
+            const r = btn.getBoundingClientRect();
+            const h = menu.offsetHeight;
+            menu.style.left = `${Math.round(r.left)}px`;
+            menu.style.top = `${Math.round(r.top - h - 4)}px`;
+            menu.style.visibility = 'visible';
+            document.addEventListener('pointerdown', onDoc, true);
+        };
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (menu) close();
+            else open();
+        });
+        return wrap;
+    }
+
     /** Compact icon-only button (align/boolean/flip rows). The label lives in
      *  the tooltip, with the shortcut appended when the action has one. */
-    private createIconButton(title: string, icon: string, onClick: () => void, shortcut?: string): HTMLElement {
+    private createIconButton(
+        title: string,
+        icon: string,
+        onClick: () => void,
+        shortcut?: string,
+    ): HTMLElement {
         const btn = document.createElement('button');
         btn.className = 'cb-btn cb-btn-icon-only';
         btn.setAttribute('data-tooltip', title);

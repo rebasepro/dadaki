@@ -30,23 +30,36 @@ export function alignSelection(scene: WasmScene, ids: number[], mode: AlignMode)
     const items = collectBounds(scene, ids);
     if (items.length < 2) return;
 
-    const uMinX = Math.min(...items.map(i => i.minX));
-    const uMinY = Math.min(...items.map(i => i.minY));
-    const uMaxX = Math.max(...items.map(i => i.maxX));
-    const uMaxY = Math.max(...items.map(i => i.maxY));
+    const uMinX = Math.min(...items.map((i) => i.minX));
+    const uMinY = Math.min(...items.map((i) => i.minY));
+    const uMaxX = Math.max(...items.map((i) => i.maxX));
+    const uMaxY = Math.max(...items.map((i) => i.maxY));
     const uCx = (uMinX + uMaxX) / 2;
     const uCy = (uMinY + uMaxY) / 2;
 
     scene.saveMoveHistory();
     for (const it of items) {
-        let dx = 0, dy = 0;
+        let dx = 0,
+            dy = 0;
         switch (mode) {
-            case 'left':    dx = uMinX - it.minX; break;
-            case 'hcenter': dx = uCx - (it.minX + it.maxX) / 2; break;
-            case 'right':   dx = uMaxX - it.maxX; break;
-            case 'top':     dy = uMinY - it.minY; break;
-            case 'vcenter': dy = uCy - (it.minY + it.maxY) / 2; break;
-            case 'bottom':  dy = uMaxY - it.maxY; break;
+            case 'left':
+                dx = uMinX - it.minX;
+                break;
+            case 'hcenter':
+                dx = uCx - (it.minX + it.maxX) / 2;
+                break;
+            case 'right':
+                dx = uMaxX - it.maxX;
+                break;
+            case 'top':
+                dy = uMinY - it.minY;
+                break;
+            case 'vcenter':
+                dy = uCy - (it.minY + it.maxY) / 2;
+                break;
+            case 'bottom':
+                dy = uMaxY - it.maxY;
+                break;
         }
         if (dx !== 0 || dy !== 0) {
             scene.moveNode(it.id, dx, dy);
@@ -61,8 +74,8 @@ export function distributeSelection(scene: WasmScene, ids: number[], axis: 'h' |
     const items = collectBounds(scene, ids);
     if (items.length < 3) return;
 
-    const size = (it: NodeBounds) => axis === 'h' ? it.maxX - it.minX : it.maxY - it.minY;
-    const min = (it: NodeBounds) => axis === 'h' ? it.minX : it.minY;
+    const size = (it: NodeBounds) => (axis === 'h' ? it.maxX - it.minX : it.maxY - it.minY);
+    const min = (it: NodeBounds) => (axis === 'h' ? it.minX : it.minY);
     const sorted = [...items].sort((a, b) => min(a) - min(b));
 
     const first = sorted[0];
@@ -70,7 +83,7 @@ export function distributeSelection(scene: WasmScene, ids: number[], axis: 'h' |
     const spanStart = min(first);
     const spanEnd = axis === 'h' ? last.maxX : last.maxY;
     const totalSize = sorted.reduce((s, it) => s + size(it), 0);
-    const gap = ((spanEnd - spanStart) - totalSize) / (sorted.length - 1);
+    const gap = (spanEnd - spanStart - totalSize) / (sorted.length - 1);
 
     scene.saveMoveHistory();
     let cursor = spanStart;

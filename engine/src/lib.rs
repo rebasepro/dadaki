@@ -714,6 +714,18 @@ pub struct Node {
     /// Group). Only meaningful on `NodeType::Group`. See `Scene::live_paint_group`.
     #[serde(default)]
     pub live_paint: bool,
+    /// When set, this Group is a non-destructive **Boolean Group** (Figma-style):
+    /// its children are the editable operands, and the group renders/hit-tests a
+    /// single cached outline computed (in JS via CanvasKit) from the boolean of
+    /// the children. Values: 0=union, 1=subtract, 2=intersect, 3=exclude. Only
+    /// meaningful on `NodeType::Group`.
+    #[serde(default)]
+    pub boolean_op: Option<u8>,
+    /// Cached resolved outline of a boolean group, in the group's LOCAL space.
+    /// Recomputed by JS whenever a descendant changes (or after load); never the
+    /// source of truth. Empty for non-boolean nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bool_cache: Vec<Subpath>,
 }
 
 use rstar::{RTree, RTreeObject, AABB, PointDistance};
@@ -868,6 +880,14 @@ pub struct Engine {
     /// naive scan made both O(n²). Kept in sync at the mutation sites that can
     /// change the flag and rebuilt wholesale on snapshot load.
     live_paint_groups: HashSet<u32>,
+    /// Ids of Groups flagged as Boolean Groups (`node.boolean_op.is_some()`).
+    /// Cached like `live_paint_groups` so "is this node inside a boolean group"
+    /// checks stay cheap on every mutation.
+    boolean_groups: HashSet<u32>,
+    /// Boolean groups whose cached outline went stale since JS last drained this
+    /// set (a descendant was edited, or the op changed). JS reads it via
+    /// `take_dirty_boolean_groups`, recomputes each, and pushes back `bool_cache`.
+    dirty_boolean_groups: HashSet<u32>,
     render_buffer: Vec<u8>,
 }
 
@@ -951,6 +971,8 @@ impl Engine {
             node_to_spatial: HashMap::new(),
             dirty_flags: HashMap::new(),
             live_paint_groups: HashSet::new(),
+            boolean_groups: HashSet::new(),
+            dirty_boolean_groups: HashSet::new(),
             render_buffer: Vec::new(),
         }
     }
@@ -1104,11 +1126,22 @@ impl Engine {
         if !node.visible { return; }
 
         if node.node_type == NodeType::Group {
+            // Boolean Group: render the single cached outline with the group's own
+            // style (like a path leaf) and do NOT descend into the operand children.
+            if node.boolean_op.is_some() {
+                let m = self.global_transforms.get(&id).cloned()
+                    .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+                let style = node.style.clone();
+                let cache = node.bool_cache.clone();
+                self.write_boolean_group_draw(id, m, style, cache, total_nodes);
+                return;
+            }
+
             // Check if any descendant is visible (optimization: use R-tree indirectly via visible_set)
             // Groups aren't in R-tree themselves, but their children are.
             // If none of the descendants are in visible_set, we can skip.
             // For now, let's be safe and always process groups if they are visible.
-            
+
             // CMD_START_GROUP
             let rec = begin_record(&mut self.render_buffer);
             self.render_buffer.extend_from_slice(&CMD_START_GROUP.to_le_bytes());
@@ -1334,6 +1367,116 @@ impl Engine {
         }
     }
 
+    /// Emit one CMD_DRAW_NODE (type Path) for a Boolean Group's cached outline,
+    /// using the group's own transform/style. Mirrors the leaf-path branch of
+    /// `write_node`, but takes owned clones so there's no disjoint-field borrow
+    /// against `self.scene` (boolean groups are rare, so the clone cost is fine).
+    fn write_boolean_group_draw(
+        &mut self,
+        id: u32,
+        transform: [f32; 9],
+        style: Style,
+        cache: Vec<Subpath>,
+        total_nodes: &mut u32,
+    ) {
+        let rec = begin_record(&mut self.render_buffer);
+        self.render_buffer.extend_from_slice(&2u32.to_le_bytes()); // CMD_DRAW_NODE
+        self.render_buffer.extend_from_slice(&id.to_le_bytes());
+        self.render_buffer.extend_from_slice(&0u32.to_le_bytes()); // NodeType::Path
+
+        // Global transform → row-major for Skia (same transpose as write_node).
+        let m = transform;
+        let row_major = [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
+        for f in row_major {
+            self.render_buffer.extend_from_slice(&f.to_le_bytes());
+        }
+
+        // Fills
+        self.render_buffer.extend_from_slice(&(style.fills.len() as u32).to_le_bytes());
+        for fill in &style.fills {
+            write_paint(&mut self.render_buffer, &Some(fill.clone()));
+        }
+
+        // Strokes
+        self.render_buffer.extend_from_slice(&(style.strokes.len() as u32).to_le_bytes());
+        for st in &style.strokes {
+            write_paint(&mut self.render_buffer, &st.paint);
+            self.render_buffer.extend_from_slice(&st.width.to_le_bytes());
+            self.render_buffer.extend_from_slice(&(st.cap as u32).to_le_bytes());
+            self.render_buffer.extend_from_slice(&(st.join as u32).to_le_bytes());
+            let dash_on = st.dash_array.first().copied().unwrap_or(0.0);
+            let dash_off = st.dash_array.get(1).copied().unwrap_or(dash_on);
+            self.render_buffer.extend_from_slice(&dash_on.to_le_bytes());
+            self.render_buffer.extend_from_slice(&dash_off.to_le_bytes());
+            self.render_buffer.extend_from_slice(&st.dash_offset.to_le_bytes());
+            self.render_buffer.extend_from_slice(&st.miter_limit.to_le_bytes());
+            let align = match st.alignment {
+                StrokeAlignment::Center => 0u32,
+                StrokeAlignment::Inner => 1u32,
+                StrokeAlignment::Outer => 2u32,
+            };
+            self.render_buffer.extend_from_slice(&align.to_le_bytes());
+        }
+
+        // Common style properties
+        self.render_buffer.extend_from_slice(&style.corner_radius.to_le_bytes());
+        let style_flags: u32 = ((style.blend_mode as u32) << 16) | ((style.fill_rule as u32) << 24);
+        self.render_buffer.extend_from_slice(&style_flags.to_le_bytes());
+
+        // Effects (same self-describing layout as write_node)
+        self.render_buffer.extend_from_slice(&(style.effects.len() as u32).to_le_bytes());
+        for eff in &style.effects {
+            match eff {
+                Effect::Blur { radius } => {
+                    self.render_buffer.extend_from_slice(&0u32.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&radius.to_le_bytes());
+                }
+                Effect::DropShadow { dx, dy, blur, color } => {
+                    self.render_buffer.extend_from_slice(&1u32.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&dx.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&dy.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&blur.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&color.r.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&color.g.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&color.b.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&color.a.to_le_bytes());
+                }
+                Effect::ColorMatrix { matrix, linear_rgb } => {
+                    self.render_buffer.extend_from_slice(&2u32.to_le_bytes());
+                    for v in matrix {
+                        self.render_buffer.extend_from_slice(&v.to_le_bytes());
+                    }
+                    self.render_buffer.extend_from_slice(&(if *linear_rgb { 1u32 } else { 0u32 }).to_le_bytes());
+                }
+            }
+        }
+
+        // Path geometry (corner radii already baked into the cached outline).
+        let resolved = round_subpaths(&cache);
+        let size_offset = self.render_buffer.len();
+        self.render_buffer.extend_from_slice(&[0u8; 4]);
+        let start_len = self.render_buffer.len();
+        self.render_buffer.extend_from_slice(&(resolved.len() as u32).to_le_bytes());
+        for sp in &resolved {
+            self.render_buffer.extend_from_slice(&(if sp.closed { 1u32 } else { 0u32 }).to_le_bytes());
+            self.render_buffer.extend_from_slice(&(sp.points.len() as u32).to_le_bytes());
+            for pt in &sp.points {
+                self.render_buffer.extend_from_slice(&pt.x.to_le_bytes());
+                self.render_buffer.extend_from_slice(&pt.y.to_le_bytes());
+                self.render_buffer.extend_from_slice(&pt.cp1.x.to_le_bytes());
+                self.render_buffer.extend_from_slice(&pt.cp1.y.to_le_bytes());
+                self.render_buffer.extend_from_slice(&pt.cp2.x.to_le_bytes());
+                self.render_buffer.extend_from_slice(&pt.cp2.y.to_le_bytes());
+            }
+        }
+        let end_len = self.render_buffer.len();
+        let total_size = (end_len - start_len) as u32;
+        self.render_buffer[size_offset..size_offset + 4].copy_from_slice(&total_size.to_le_bytes());
+
+        end_record(&mut self.render_buffer, rec);
+        *total_nodes += 1;
+    }
+
     pub fn is_node_dirty(&self, id: u32) -> bool {
         *self.dirty_flags.get(&id).unwrap_or(&true)
     }
@@ -1351,6 +1494,8 @@ impl Engine {
         if self.is_in_any_live_paint(id) {
             self.scene.vector_network.dirty = true;
         }
+        // A boolean group whose descendant changed needs its outline recomputed.
+        self.mark_enclosing_boolean_groups_dirty(id);
     }
 
     pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32) -> u32 {
@@ -1406,6 +1551,8 @@ impl Engine {
             mask_type: 0,
             clip_content: false,
             live_paint: false,
+            boolean_op: None,
+            bool_cache: Vec::new(),
             };
 
         self.scene.nodes.insert(id, node);
@@ -1442,6 +1589,8 @@ impl Engine {
             mask_type: 0,
             clip_content: false,
             live_paint: false,
+            boolean_op: None,
+            bool_cache: Vec::new(),
             };
 
         self.scene.nodes.insert(id, node);
@@ -1514,6 +1663,8 @@ impl Engine {
             mask_type: 0,
             clip_content: false,
             live_paint: false,
+            boolean_op: None,
+            bool_cache: Vec::new(),
             };
 
         self.scene.nodes.insert(id, node);
@@ -1572,6 +1723,8 @@ impl Engine {
             mask_type: 0,
             clip_content: false,
             live_paint: false,
+            boolean_op: None,
+            bool_cache: Vec::new(),
             };
 
         self.scene.nodes.insert(id, node);
@@ -1632,6 +1785,8 @@ impl Engine {
             mask_type: 0,
             clip_content: false,
             live_paint: false,
+            boolean_op: None,
+            bool_cache: Vec::new(),
             };
 
         self.scene.nodes.insert(id, node);
@@ -1725,6 +1880,96 @@ impl Engine {
 
     pub fn get_node_live_paint(&self, id: u32) -> bool {
         self.scene.nodes.get(&id).map(|n| n.live_paint).unwrap_or(false)
+    }
+
+    /// Set (op = 0..3) or clear (op < 0) the boolean operation on a Group node,
+    /// making it a non-destructive Boolean Group. No-op on non-groups. Flags the
+    /// group so JS recomputes its cached outline on the next drain.
+    pub fn set_boolean_op(&mut self, id: u32, op: i32) {
+        let mut is_group = false;
+        let mut is_bool = false;
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            is_group = node.node_type == NodeType::Group;
+            if is_group {
+                node.boolean_op = if op < 0 { None } else { Some(op as u8) };
+                if node.boolean_op.is_none() {
+                    node.bool_cache.clear();
+                }
+            }
+            is_bool = node.boolean_op.is_some();
+        }
+        if !is_group {
+            return;
+        }
+        if is_bool {
+            self.boolean_groups.insert(id);
+            self.dirty_boolean_groups.insert(id);
+        } else {
+            self.boolean_groups.remove(&id);
+            self.dirty_boolean_groups.remove(&id);
+        }
+        self.dirty_flags.insert(id, true);
+    }
+
+    /// The boolean op on a Group (0..3), or -1 if it isn't a Boolean Group.
+    pub fn get_boolean_op(&self, id: u32) -> i32 {
+        self.scene.nodes.get(&id)
+            .and_then(|n| n.boolean_op)
+            .map(|op| op as i32)
+            .unwrap_or(-1)
+    }
+
+    /// Push a recomputed outline (JSON `Vec<Subpath>`, in the group's LOCAL space)
+    /// into a Boolean Group's cache and clear its dirty flag. No-op otherwise.
+    pub fn set_bool_cache(&mut self, id: u32, subpaths_json: &str) {
+        let subpaths: Vec<Subpath> = match serde_json::from_str(subpaths_json) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut applied = false;
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            if node.boolean_op.is_some() {
+                node.bool_cache = subpaths;
+                applied = true;
+            }
+        }
+        if applied {
+            self.dirty_boolean_groups.remove(&id);
+            self.dirty_flags.insert(id, true);
+        }
+    }
+
+    /// Drain and return the ids of Boolean Groups whose outline is stale, ordered
+    /// DEEPEST-FIRST so nested groups recompute before their parents. JSON array.
+    pub fn take_dirty_boolean_groups(&mut self) -> String {
+        let mut ids: Vec<u32> = self.dirty_boolean_groups.drain().collect();
+        ids.sort_by_key(|&id| std::cmp::Reverse(self.node_depth(id)));
+        serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Ids of every Boolean Group in the scene (JSON array). JS uses this after a
+    /// document load to recompute all cached outlines (they aren't serialized).
+    pub fn get_boolean_group_ids(&self) -> String {
+        let mut v: Vec<u32> = self.boolean_groups.iter().copied().collect();
+        v.sort_unstable();
+        serde_json::to_string(&v).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Number of ancestors above `id` (0 for a root). Used to order boolean-group
+    /// recomputation deepest-first.
+    fn node_depth(&self, id: u32) -> u32 {
+        let mut depth = 0;
+        let mut cur = id;
+        while let Some(node) = self.scene.nodes.get(&cur) {
+            match node.parent {
+                Some(p) => {
+                    depth += 1;
+                    cur = p;
+                }
+                None => break,
+            }
+        }
+        depth
     }
 
     /// Replace a node's effects from a JSON array of `Effect` (serde-tagged,
@@ -1926,8 +2171,13 @@ impl Engine {
         if self.is_in_any_live_paint(id) {
             self.scene.vector_network.dirty = true;
         }
+        // Removing an operand (or the group) makes the enclosing boolean group's
+        // outline stale — flag before the node is gone so ancestors resolve.
+        self.mark_enclosing_boolean_groups_dirty(id);
         // Drop from the group cache; descendants are cleared by the recursion below.
         self.live_paint_groups.remove(&id);
+        self.boolean_groups.remove(&id);
+        self.dirty_boolean_groups.remove(&id);
         if let Some(node) = self.scene.nodes.remove(&id) {
             if let Some(parent_id) = node.parent {
                 if let Some(parent) = self.scene.nodes.get_mut(&parent_id) {
@@ -1967,6 +2217,7 @@ impl Engine {
                 self.update_all_global_transforms();
                 self.update_all_spatial_indices();
                 self.rebuild_live_paint_cache();
+                self.rebuild_boolean_groups_cache();
                 true
             }
             None => {
@@ -3235,6 +3486,10 @@ impl Engine {
             if new_node.live_paint {
                 self.live_paint_groups.insert(new_id);
             }
+            // Same for the boolean-group flag (the cloned outline comes along too).
+            if new_node.boolean_op.is_some() {
+                self.boolean_groups.insert(new_id);
+            }
             self.scene.nodes.insert(new_id, new_node);
 
             // Recursively clone children and reparent them
@@ -3339,6 +3594,8 @@ impl Engine {
             mask_type: 0,
             clip_content: false,
             live_paint: false,
+            boolean_op: None,
+            bool_cache: Vec::new(),
             };
         self.scene.nodes.insert(group_id, group_node);
 
@@ -3511,6 +3768,8 @@ impl Engine {
             mask_type: 0,
             clip_content: false,
             live_paint: false,
+            boolean_op: None,
+            bool_cache: Vec::new(),
             };
 
         self.scene.nodes.insert(id, node);
@@ -3578,6 +3837,8 @@ impl Engine {
             mask_type: 0,
             clip_content: false,
             live_paint: false,
+            boolean_op: None,
+            bool_cache: Vec::new(),
         };
 
         self.scene.nodes.insert(id, node);
@@ -4035,6 +4296,50 @@ impl Engine {
             .collect();
     }
 
+    /// Recompute the Boolean Group cache from scratch, and flag every one dirty so
+    /// JS recomputes their outlines after a snapshot load (`bool_cache` isn't
+    /// serialized). Mirrors `rebuild_live_paint_cache`.
+    fn rebuild_boolean_groups_cache(&mut self) {
+        self.boolean_groups = self.scene.nodes.iter()
+            .filter(|(_, n)| n.boolean_op.is_some())
+            .map(|(&id, _)| id)
+            .collect();
+        self.dirty_boolean_groups = self.boolean_groups.clone();
+    }
+
+    /// Whether `id` is a Boolean Group or a descendant of one.
+    #[allow(dead_code)]
+    fn is_in_any_boolean_group(&self, id: u32) -> bool {
+        if self.boolean_groups.is_empty() {
+            return false;
+        }
+        self.boolean_groups.contains(&id)
+            || self.boolean_groups.iter().any(|&g| self.is_descendant_of(id, g))
+    }
+
+    /// Flag every Boolean Group that is `id` itself or an ancestor of `id` as
+    /// stale, so JS recomputes their outlines. Cheap no-op when none exist.
+    fn mark_enclosing_boolean_groups_dirty(&mut self, id: u32) {
+        if self.boolean_groups.is_empty() {
+            return;
+        }
+        if self.boolean_groups.contains(&id) {
+            self.dirty_boolean_groups.insert(id);
+        }
+        let mut cur = id;
+        while let Some(node) = self.scene.nodes.get(&cur) {
+            match node.parent {
+                Some(pid) => {
+                    if self.boolean_groups.contains(&pid) {
+                        self.dirty_boolean_groups.insert(pid);
+                    }
+                    cur = pid;
+                }
+                None => break,
+            }
+        }
+    }
+
     /// The fill of the topmost source shape whose interior contains `face`
     /// (its containment signature), or None if none of them has a fill color.
     fn inherited_face_color(&self, face: &vector_network::PlanarFace, rank: &std::collections::HashMap<u32, usize>) -> Option<Color> {
@@ -4280,6 +4585,7 @@ impl Engine {
                 self.update_all_global_transforms();
                 self.update_all_spatial_indices();
                 self.rebuild_live_paint_cache();
+                self.rebuild_boolean_groups_cache();
                 true
             }
             None => false,
@@ -4301,6 +4607,7 @@ impl Engine {
                 self.update_all_global_transforms();
                 self.update_all_spatial_indices();
                 self.rebuild_live_paint_cache();
+                self.rebuild_boolean_groups_cache();
                 true
             }
             None => false,

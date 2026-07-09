@@ -6,8 +6,8 @@
  * it's tested here directly against jsdom's DOMParser + Element.matches — the
  * same engine the app uses at runtime.
  */
-import { describe, it, expect } from 'vitest';
-import { cssSpecificity, parseSvgStylesheet, matchedCssStyles, type CssRule } from './svg_css';
+import { describe, expect, it } from 'vitest';
+import { type CssRule, cssSpecificity, matchedCssStyles, parseSvgStylesheet } from './svg_css';
 
 /** Parse an SVG string and return its root <svg> element. */
 function parseSvg(svg: string): Element {
@@ -61,7 +61,7 @@ describe('parseSvgStylesheet', () => {
             .a, .b { fill: red; }
         </style></svg>`);
         const rules = parseSvgStylesheet(root);
-        expect(rules.map(r => r.selector).sort()).toEqual(['.a', '.b']);
+        expect(rules.map((r) => r.selector).sort()).toEqual(['.a', '.b']);
         // Distinct source order for tie-breaking.
         expect(rules[0].order).not.toBe(rules[1].order);
     });
@@ -92,7 +92,7 @@ describe('parseSvgStylesheet', () => {
             <defs><style>.b { fill: blue; }</style></defs>
         </svg>`);
         const rules = parseSvgStylesheet(root);
-        expect(rules.map(r => r.selector)).toEqual(['.a', '.b']);
+        expect(rules.map((r) => r.selector)).toEqual(['.a', '.b']);
         expect(rules[1].order).toBeGreaterThan(rules[0].order);
     });
 
@@ -102,7 +102,7 @@ describe('parseSvgStylesheet', () => {
             .a { fill: red; }
         </style></svg>`);
         const rules = parseSvgStylesheet(root);
-        expect(rules.map(r => r.selector)).toEqual(['.a']);
+        expect(rules.map((r) => r.selector)).toEqual(['.a']);
     });
 
     it('returns no rules when there is no <style>', () => {
@@ -136,8 +136,8 @@ describe('matchedCssStyles', () => {
             <path id="p" class="c" d="M0 0 L1 1"/>
             <rect id="r" class="c"/>
         </svg>`);
-        expect(val('p', 'fill')).toBe('orange');       // path.c matches the path
-        expect(val('r', 'fill')).toBeUndefined();       // ...but not the rect
+        expect(val('p', 'fill')).toBe('orange'); // path.c matches the path
+        expect(val('r', 'fill')).toBeUndefined(); // ...but not the rect
     });
 
     it('resolves specificity: id > class > type for the same property', () => {
@@ -151,8 +151,8 @@ describe('matchedCssStyles', () => {
             <rect id="cl" class="c"/>
             <rect id="special" class="c"/>
         </svg>`);
-        expect(val('t', 'fill')).toBe('blue');    // only type matches
-        expect(val('cl', 'fill')).toBe('red');    // class beats type
+        expect(val('t', 'fill')).toBe('blue'); // only type matches
+        expect(val('cl', 'fill')).toBe('red'); // class beats type
         expect(val('special', 'fill')).toBe('green'); // id beats class + type
     });
 

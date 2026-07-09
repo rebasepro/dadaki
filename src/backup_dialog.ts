@@ -49,8 +49,9 @@ export class BackupDialog {
         `;
         this.overlay.appendChild(card);
         this.listEl = card.querySelector('#backup-list') as HTMLElement;
-        (card.querySelector('#backup-close') as HTMLButtonElement)
-            .addEventListener('click', () => this.close());
+        (card.querySelector('#backup-close') as HTMLButtonElement).addEventListener('click', () =>
+            this.close(),
+        );
     }
 
     async open(): Promise<void> {
@@ -131,7 +132,8 @@ function formatWhen(ts: number): string {
     const now = new Date();
     const sameDay = d.toDateString() === now.toDateString();
     if (sameDay) return `${time} · today`;
-    const yst = new Date(now); yst.setDate(now.getDate() - 1);
+    const yst = new Date(now);
+    yst.setDate(now.getDate() - 1);
     if (d.toDateString() === yst.toDateString()) return `${time} · yesterday`;
     return `${time} · ${d.toLocaleDateString()}`;
 }

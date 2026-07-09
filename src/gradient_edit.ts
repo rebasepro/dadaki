@@ -11,9 +11,9 @@
  * follow the shape under move/rotate/skew.
  */
 
-import type { WasmScene } from './wasm_scene';
 import type { Color, Gradient, GradientStop } from './types';
 import { isGradient } from './types';
+import type { WasmScene } from './wasm_scene';
 
 /** What a canvas hit-test resolved to. */
 export type GradientHit =
@@ -31,7 +31,8 @@ export function sampleGradientColor(grad: Gradient, t: number): Color {
     const last = sorted[sorted.length - 1];
     if (t >= last.offset) return { ...last.color };
     for (let i = 0; i < sorted.length - 1; i++) {
-        const a = sorted[i], b = sorted[i + 1];
+        const a = sorted[i],
+            b = sorted[i + 1];
         if (t >= a.offset && t <= b.offset) {
             const span = b.offset - a.offset;
             const k = span < 1e-6 ? 0 : (t - a.offset) / span;
@@ -61,7 +62,11 @@ export class GradientEditController {
 
     /** Active canvas drag: the grabbed handle plus a snapshot of the gradient
      *  and the pointer's local position at drag start. */
-    private drag: { hit: GradientHit; orig: Gradient; startLocal: { x: number; y: number } } | null = null;
+    private drag: {
+        hit: GradientHit;
+        orig: Gradient;
+        startLocal: { x: number; y: number };
+    } | null = null;
 
     constructor(scene: WasmScene) {
         this.scene = scene;
@@ -96,7 +101,10 @@ export class GradientEditController {
      */
     syncSelection() {
         const sel = this.scene.getSelection();
-        if (sel.length !== 1) { this.clear(); return; }
+        if (sel.length !== 1) {
+            this.clear();
+            return;
+        }
         const id = sel[0];
         const node = this.scene.getNode(id);
         const fills = node?.style.fills ?? [];
@@ -109,7 +117,7 @@ export class GradientEditController {
                 return;
             }
         }
-        const gi = fills.findIndex(f => isGradient(f));
+        const gi = fills.findIndex((f) => isGradient(f));
         if (gi >= 0) {
             this.stopFocused = false;
             this.nodeId = id;
@@ -142,8 +150,12 @@ export class GradientEditController {
 
     worldToLocal(wx: number, wy: number): { x: number; y: number } {
         const t = this.transform();
-        const a = t[0], b = t[1], c = t[2];
-        const d = t[3], e = t[4], f = t[5];
+        const a = t[0],
+            b = t[1],
+            c = t[2];
+        const d = t[3],
+            e = t[4],
+            f = t[5];
         const det = a * e - b * d;
         if (Math.abs(det) < 1e-10) return { x: wx, y: wy };
         return {
@@ -186,12 +198,14 @@ export class GradientEditController {
         if (best) return { type: 'stop', stopIndex: best.i };
 
         // Axis line → insert a stop at the projected offset
-        const dx = p1.x - p0.x, dy = p1.y - p0.y;
+        const dx = p1.x - p0.x,
+            dy = p1.y - p0.y;
         const len2 = dx * dx + dy * dy;
         if (len2 > 1e-9) {
             const t = ((world.x - p0.x) * dx + (world.y - p0.y) * dy) / len2;
             if (t > 0.02 && t < 0.98) {
-                const px = p0.x + dx * t, py = p0.y + dy * t;
+                const px = p0.x + dx * t,
+                    py = p0.y + dy * t;
                 if (Math.hypot(world.x - px, world.y - py) < 5 / zoom) {
                     return { type: 'insert', t };
                 }
@@ -203,7 +217,9 @@ export class GradientEditController {
     // ─── Canvas drags ────────────────────────────────────────────────────
 
     /** True while a canvas handle drag is in flight. */
-    isDragging(): boolean { return this.drag !== null; }
+    isDragging(): boolean {
+        return this.drag !== null;
+    }
 
     beginDrag(hit: GradientHit, world: { x: number; y: number }) {
         const grad = this.gradient();
@@ -213,7 +229,11 @@ export class GradientEditController {
             this.stopFocused = true;
         }
         this.scene.beginGesture();
-        this.drag = { hit, orig: cloneGradient(grad), startLocal: this.worldToLocal(world.x, world.y) };
+        this.drag = {
+            hit,
+            orig: cloneGradient(grad),
+            startLocal: this.worldToLocal(world.x, world.y),
+        };
     }
 
     /** Insert a stop at offset `t` and start dragging it — one undo step for
@@ -225,10 +245,16 @@ export class GradientEditController {
         const orig = cloneGradient(grad);
         const newIndex = orig.stops.length;
         orig.stops.push({ offset: t, color: sampleGradientColor(orig, t) });
-        this.writeLive(g => { g.stops = orig.stops.map(cloneStop); });
+        this.writeLive((g) => {
+            g.stops = orig.stops.map(cloneStop);
+        });
         this.stopIndex = newIndex;
         this.stopFocused = true;
-        this.drag = { hit: { type: 'stop', stopIndex: newIndex }, orig, startLocal: this.worldToLocal(world.x, world.y) };
+        this.drag = {
+            hit: { type: 'stop', stopIndex: newIndex },
+            orig,
+            startLocal: this.worldToLocal(world.x, world.y),
+        };
     }
 
     moveDrag(world: { x: number; y: number }, shiftKey: boolean) {
@@ -239,34 +265,46 @@ export class GradientEditController {
         if (hit.type === 'start') {
             if (orig.gradient_type === 'Radial') {
                 // Center handle: translate the whole gradient, radius unchanged
-                const dx = local.x - startLocal.x, dy = local.y - startLocal.y;
-                this.writeLive(g => {
-                    g.start_x = orig.start_x + dx; g.start_y = orig.start_y + dy;
-                    g.end_x = orig.end_x + dx; g.end_y = orig.end_y + dy;
+                const dx = local.x - startLocal.x,
+                    dy = local.y - startLocal.y;
+                this.writeLive((g) => {
+                    g.start_x = orig.start_x + dx;
+                    g.start_y = orig.start_y + dy;
+                    g.end_x = orig.end_x + dx;
+                    g.end_y = orig.end_y + dy;
                 });
             } else {
                 const p = shiftKey
                     ? this.snapToAngle(world, this.localToWorld(orig.end_x, orig.end_y))
                     : local;
                 const snapped = shiftKey ? this.worldToLocal(p.x, p.y) : p;
-                this.writeLive(g => { g.start_x = snapped.x; g.start_y = snapped.y; });
+                this.writeLive((g) => {
+                    g.start_x = snapped.x;
+                    g.start_y = snapped.y;
+                });
             }
         } else if (hit.type === 'end') {
             const p = shiftKey
                 ? this.snapToAngle(world, this.localToWorld(orig.start_x, orig.start_y))
                 : local;
             const snapped = shiftKey ? this.worldToLocal(p.x, p.y) : p;
-            this.writeLive(g => { g.end_x = snapped.x; g.end_y = snapped.y; });
+            this.writeLive((g) => {
+                g.end_x = snapped.x;
+                g.end_y = snapped.y;
+            });
         } else if (hit.type === 'stop') {
             // Project the cursor onto the (original) axis for the new offset
-            const dx = orig.end_x - orig.start_x, dy = orig.end_y - orig.start_y;
+            const dx = orig.end_x - orig.start_x,
+                dy = orig.end_y - orig.start_y;
             const len2 = dx * dx + dy * dy;
             if (len2 < 1e-9) return;
             let t = ((local.x - orig.start_x) * dx + (local.y - orig.start_y) * dy) / len2;
             t = Math.max(0, Math.min(1, t));
             if (shiftKey) t = Math.round(t * 10) / 10; // 10% increments
             const i = hit.stopIndex;
-            this.writeLive(g => { if (g.stops[i]) g.stops[i].offset = t; });
+            this.writeLive((g) => {
+                if (g.stops[i]) g.stops[i].offset = t;
+            });
         }
     }
 
@@ -285,8 +323,12 @@ export class GradientEditController {
     }
 
     /** Snap `world` to 45° increments around `anchor` (world space), keeping distance. */
-    private snapToAngle(world: { x: number; y: number }, anchor: { x: number; y: number }): { x: number; y: number } {
-        const dx = world.x - anchor.x, dy = world.y - anchor.y;
+    private snapToAngle(
+        world: { x: number; y: number },
+        anchor: { x: number; y: number },
+    ): { x: number; y: number } {
+        const dx = world.x - anchor.x,
+            dy = world.y - anchor.y;
         const len = Math.hypot(dx, dy);
         if (len < 1e-9) return world;
         const step = Math.PI / 4;
@@ -297,7 +339,9 @@ export class GradientEditController {
     /** Replace the stop list without pushing history — used by the panel's
      *  ramp drag (bracketed by scene.beginGesture/endGesture). */
     setStopsLive(stops: GradientStop[]) {
-        this.writeLive(g => { g.stops = stops.map(cloneStop); });
+        this.writeLive((g) => {
+            g.stops = stops.map(cloneStop);
+        });
     }
 
     // ─── Discrete stop edits (used by Delete key) ────────────────────────
@@ -307,7 +351,9 @@ export class GradientEditController {
         const grad = this.gradient();
         if (!grad || grad.stops.length <= 2 || i < 0 || i >= grad.stops.length) return false;
         this.scene.transaction(() => {
-            this.writeLive(g => { g.stops.splice(i, 1); });
+            this.writeLive((g) => {
+                g.stops.splice(i, 1);
+            });
         });
         this.stopIndex = Math.max(0, Math.min(this.stopIndex, grad.stops.length - 2));
         this.stopFocused = false;
@@ -323,7 +369,7 @@ export class GradientEditController {
         const node = this.scene.getNode(this.nodeId);
         if (!node) return;
         const style = node.style;
-        const fills = (style.fills ?? []).map(f => (isGradient(f) ? cloneGradient(f) : { ...f }));
+        const fills = (style.fills ?? []).map((f) => (isGradient(f) ? cloneGradient(f) : { ...f }));
         const fill = fills[this.fillIndex];
         if (!fill || !isGradient(fill)) return;
         mutate(fill);

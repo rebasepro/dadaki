@@ -22,8 +22,8 @@
  */
 
 import { Engine } from '../engine/pkg/engine';
-import type { WasmScene } from './wasm_scene';
 import type { Renderer } from './renderer';
+import type { WasmScene } from './wasm_scene';
 
 export interface StressOptions {
     /** Cumulative shape counts to measure at. Default: 1k → 200k. */
@@ -65,7 +65,10 @@ function sampleRealFps(renderer: Renderer, durMs: number): Promise<{ fps: number
             const now = performance.now();
             if (now - t0 >= durMs) {
                 const secs = (now - t0) / 1000;
-                resolve({ fps: +(frames / secs).toFixed(1), ms: +((now - t0) / frames).toFixed(2) });
+                resolve({
+                    fps: +(frames / secs).toFixed(1),
+                    ms: +((now - t0) / frames).toFixed(2),
+                });
                 return;
             }
             // Drop path/geometry caches so this is a full cold render, not a warm
@@ -93,7 +96,8 @@ export async function runStress(deps: StressDeps, opts: StressOptions = {}): Pro
     const vw = canvas.width / zoom;
     const vh = canvas.height / zoom;
 
-    const wasmMB = () => (deps.wasm ? +(deps.wasm.memory.buffer.byteLength / 1_048_576).toFixed(1) : 0);
+    const wasmMB = () =>
+        deps.wasm ? +(deps.wasm.memory.buffer.byteLength / 1_048_576).toFixed(1) : 0;
 
     // Isolate the benchmark on a throwaway engine; restore the real one after.
     const original = scene.engine;
@@ -128,7 +132,10 @@ export async function runStress(deps: StressDeps, opts: StressOptions = {}): Pro
             const visible = bench.get_visible_nodes(sx, sy, sx + vw, sy + vh).length;
             // Yield so the freshly-added scene settles before we sample frames.
             await new Promise((r) => setTimeout(r, 30));
-            const fps = await sampleRealFps(renderer, target >= 50_000 ? Math.min(sampleMs, 400) : sampleMs);
+            const fps = await sampleRealFps(
+                renderer,
+                target >= 50_000 ? Math.min(sampleMs, 400) : sampleMs,
+            );
 
             rows.push({
                 shapes: target,

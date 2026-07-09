@@ -60,8 +60,9 @@ export class AboutDialog {
         `;
         this.overlay.appendChild(card);
 
-        (card.querySelector('#about-close') as HTMLButtonElement)
-            .addEventListener('click', () => this.close());
+        (card.querySelector('#about-close') as HTMLButtonElement).addEventListener('click', () =>
+            this.close(),
+        );
     }
 
     open(): void {

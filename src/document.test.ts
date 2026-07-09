@@ -2,7 +2,7 @@
  * Dirty-state transitions for Document (the mutation-counter model).
  * Pure logic — no WASM, no DOM.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { Document } from './document';
 
 describe('Document dirty tracking', () => {

@@ -3,12 +3,12 @@
  * abort-leaves-dirty contract. FileIO is mocked (its own file-system behavior
  * is out of scope here); we only assert the state bookkeeping FileService owns.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { FileService } from './file_service';
-import { FileIO } from './file_io';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Document } from './document';
-import type { WasmScene } from './wasm_scene';
+import { FileIO } from './file_io';
+import { FileService } from './file_service';
 import type { UIEngine } from './ui';
+import type { WasmScene } from './wasm_scene';
 
 function makeScene() {
     return {
@@ -58,7 +58,7 @@ describe('FileService.saveActive', () => {
         await fs.saveActive();
 
         expect(doc.fileHandle).not.toBeNull();
-        expect(doc.name).toBe('logo');   // extension stripped
+        expect(doc.name).toBe('logo'); // extension stripped
         expect(doc.dirty).toBe(false);
     });
 
@@ -111,7 +111,10 @@ describe('FileService.openIntoActive', () => {
         const scene = makeScene();
         const ui = makeUI();
 
-        vi.spyOn(FileIO, 'openFile').mockResolvedValue({ handle: fakeHandle('art.dataki'), name: 'art.dataki' });
+        vi.spyOn(FileIO, 'openFile').mockResolvedValue({
+            handle: fakeHandle('art.dataki'),
+            name: 'art.dataki',
+        });
         const fs = new FileService(scene, ui, doc);
 
         await fs.openIntoActive();

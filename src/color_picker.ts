@@ -15,25 +15,45 @@ import type { Color } from './types';
 
 // ─── Color math ──────────────────────────────────────────────────────────
 
-interface HSV { h: number; s: number; v: number; } // h 0-360, s/v 0-1
+interface HSV {
+    h: number;
+    s: number;
+    v: number;
+} // h 0-360, s/v 0-1
 
 function hsvToRgb(h: number, s: number, v: number): { r: number; g: number; b: number } {
     h = ((h % 360) + 360) % 360;
     const c = v * s;
     const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
     const m = v - c;
-    let r = 0, g = 0, b = 0;
-    if (h < 60) { r = c; g = x; }
-    else if (h < 120) { r = x; g = c; }
-    else if (h < 180) { g = c; b = x; }
-    else if (h < 240) { g = x; b = c; }
-    else if (h < 300) { r = x; b = c; }
-    else { r = c; b = x; }
+    let r = 0,
+        g = 0,
+        b = 0;
+    if (h < 60) {
+        r = c;
+        g = x;
+    } else if (h < 120) {
+        r = x;
+        g = c;
+    } else if (h < 180) {
+        g = c;
+        b = x;
+    } else if (h < 240) {
+        g = x;
+        b = c;
+    } else if (h < 300) {
+        r = x;
+        b = c;
+    } else {
+        r = c;
+        b = x;
+    }
     return { r: r + m, g: g + m, b: b + m };
 }
 
 function rgbToHsv(r: number, g: number, b: number): HSV {
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const max = Math.max(r, g, b),
+        min = Math.min(r, g, b);
     const d = max - min;
     let h = 0;
     if (d !== 0) {
@@ -47,10 +67,14 @@ function rgbToHsv(r: number, g: number, b: number): HSV {
     return { h, s, v: max };
 }
 
-function clamp01(n: number): number { return Math.max(0, Math.min(1, n)); }
+function clamp01(n: number): number {
+    return Math.max(0, Math.min(1, n));
+}
 
 function toHex2(n: number): string {
-    return Math.round(clamp01(n) * 255).toString(16).padStart(2, '0');
+    return Math.round(clamp01(n) * 255)
+        .toString(16)
+        .padStart(2, '0');
 }
 
 /** Format a color as #RRGGBB, or #RRGGBBAA when it is not fully opaque. */
@@ -62,7 +86,11 @@ export function colorToHex(c: Color, withAlpha = true): string {
 /** Parse #RGB / #RRGGBB / #RRGGBBAA (with or without '#'). Returns null if invalid. */
 export function parseHex(input: string): Color | null {
     let h = input.trim().replace(/^#/, '');
-    if (h.length === 3) h = h.split('').map(ch => ch + ch).join('');
+    if (h.length === 3)
+        h = h
+            .split('')
+            .map((ch) => ch + ch)
+            .join('');
     if (h.length === 6) h += 'ff';
     if (h.length !== 8 || /[^0-9a-fA-F]/.test(h)) return null;
     return {
@@ -93,14 +121,20 @@ const RECENT_MAX = 14;
 function loadList(key: string): string[] {
     try {
         const v = JSON.parse(localStorage.getItem(key) || '[]');
-        return Array.isArray(v) ? v.filter(x => typeof x === 'string') : [];
-    } catch { return []; }
+        return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+    } catch {
+        return [];
+    }
 }
 function saveList(key: string, list: string[]): void {
-    try { localStorage.setItem(key, JSON.stringify(list)); } catch { /* ignore quota */ }
+    try {
+        localStorage.setItem(key, JSON.stringify(list));
+    } catch {
+        /* ignore quota */
+    }
 }
 function pushRecent(hex: string): void {
-    const list = loadList(RECENT_KEY).filter(h => h.toLowerCase() !== hex.toLowerCase());
+    const list = loadList(RECENT_KEY).filter((h) => h.toLowerCase() !== hex.toLowerCase());
     list.unshift(hex);
     saveList(RECENT_KEY, list.slice(0, RECENT_MAX));
 }
@@ -135,11 +169,14 @@ export interface SwatchHandle {
 export function createColorSwatch(opts: SwatchOptions): SwatchHandle {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'cp-swatch' + (opts.className ? ' ' + opts.className : '');
+    btn.className = `cp-swatch${opts.className ? ` ${opts.className}` : ''}`;
     if (opts.title) btn.title = opts.title;
 
     let current: Color = { ...opts.color };
-    const setColor = (c: Color) => { current = { ...c }; paintSwatch(btn, current); };
+    const setColor = (c: Color) => {
+        current = { ...c };
+        paintSwatch(btn, current);
+    };
     setColor(current);
 
     btn.addEventListener('click', (e) => {
@@ -148,8 +185,14 @@ export function createColorSwatch(opts: SwatchOptions): SwatchHandle {
         getPicker().open(btn, current, {
             alpha: opts.alpha !== false,
             title: opts.title,
-            onInput: (c) => { setColor(c); opts.onInput(c); },
-            onChange: (c) => { setColor(c); (opts.onChange ?? opts.onInput)(c); },
+            onInput: (c) => {
+                setColor(c);
+                opts.onInput(c);
+            },
+            onChange: (c) => {
+                setColor(c);
+                (opts.onChange ?? opts.onInput)(c);
+            },
         });
     });
 
@@ -197,7 +240,9 @@ class ColorPicker {
     private anchor: HTMLElement | null = null;
     private dirty = false; // an edit happened since open → commit on close
     private onDocDown = (e: MouseEvent) => this.handleOutside(e);
-    private onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') this.close(); };
+    private onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') this.close();
+    };
     private onReposition = () => this.position();
 
     constructor() {
@@ -320,7 +365,9 @@ class ColorPicker {
             }
         };
         this.hexInput.addEventListener('change', commitHex);
-        this.hexInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') commitHex(); });
+        this.hexInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') commitHex();
+        });
 
         // RGBA numeric
         const readRgb = (): Color => ({
@@ -381,7 +428,7 @@ class ColorPicker {
 
     private handleOutside(e: MouseEvent) {
         const t = e.target as Node;
-        if (this.root.contains(t) || (this.anchor && this.anchor.contains(t))) return;
+        if (this.root.contains(t) || this.anchor?.contains(t)) return;
         // A click outside should ONLY close the picker. Swallow the event so it
         // doesn't also reach the canvas (deselecting the shape) or start a drag.
         // This works because the listener runs in the capture phase (see open()),
@@ -436,8 +483,7 @@ class ColorPicker {
         const hueCss = `rgb(${Math.round(hueRgb.r * 255)},${Math.round(hueRgb.g * 255)},${Math.round(hueRgb.b * 255)})`;
 
         // SV backdrop = hue, with white(→right) and black(→bottom) overlays.
-        this.svArea.style.background =
-            `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, transparent), ${hueCss}`;
+        this.svArea.style.background = `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, transparent), ${hueCss}`;
         this.svThumb.style.left = `${this.hsv.s * 100}%`;
         this.svThumb.style.top = `${(1 - this.hsv.v) * 100}%`;
         this.svThumb.style.background = rgbaCss({ ...c, a: 1 });
@@ -451,7 +497,9 @@ class ColorPicker {
         if (!skipInputs) {
             const active = document.activeElement;
             if (!(skipHexFocus && active === this.hexInput)) {
-                this.hexInput.value = colorToHex(c, this.opts?.alpha !== false).toUpperCase().replace('#', '');
+                this.hexInput.value = colorToHex(c, this.opts?.alpha !== false)
+                    .toUpperCase()
+                    .replace('#', '');
             }
             if (active !== this.rInput) this.rInput.value = String(Math.round(c.r * 255));
             if (active !== this.gInput) this.gInput.value = String(Math.round(c.g * 255));
@@ -485,7 +533,12 @@ class ColorPicker {
                 if (removable) {
                     chip.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
-                        saveList(SAVED_KEY, loadList(SAVED_KEY).filter(h => h.toLowerCase() !== hex.toLowerCase()));
+                        saveList(
+                            SAVED_KEY,
+                            loadList(SAVED_KEY).filter(
+                                (h) => h.toLowerCase() !== hex.toLowerCase(),
+                            ),
+                        );
                         this.renderSavedRows();
                     });
                 }
@@ -498,7 +551,7 @@ class ColorPicker {
 
     private saveCurrent() {
         const hex = colorToHex(this.color(), this.opts?.alpha !== false);
-        const list = loadList(SAVED_KEY).filter(h => h.toLowerCase() !== hex.toLowerCase());
+        const list = loadList(SAVED_KEY).filter((h) => h.toLowerCase() !== hex.toLowerCase());
         list.unshift(hex);
         saveList(SAVED_KEY, list.slice(0, 30));
         this.renderSavedRows();
@@ -506,16 +559,19 @@ class ColorPicker {
 
     private async pickFromScreen() {
         try {
-            // @ts-ignore — EyeDropper is not yet in the TS DOM lib.
+            // @ts-expect-error — EyeDropper is not yet in the TS DOM lib.
             const result = await new EyeDropper().open();
             const c = parseHex(result.sRGBHex);
             if (c) {
-                if (this.opts?.alpha === false) c.a = 1; else c.a = this.a;
+                if (this.opts?.alpha === false) c.a = 1;
+                else c.a = this.a;
                 this.setColor(c, this.opts?.alpha === false);
                 this.render(true);
                 this.emit(true);
             }
-        } catch { /* user cancelled */ }
+        } catch {
+            /* user cancelled */
+        }
     }
 }
 
@@ -571,7 +627,11 @@ function dragArea(elm: HTMLElement, onMove: (nx: number, ny: number, done: boole
     elm.addEventListener('pointerdown', (ev) => {
         ev.preventDefault();
         const rect = elm.getBoundingClientRect();
-        try { elm.setPointerCapture(ev.pointerId); } catch { /* ignore */ }
+        try {
+            elm.setPointerCapture(ev.pointerId);
+        } catch {
+            /* ignore */
+        }
         const move = (e: PointerEvent) => compute(e, rect, false);
         const up = (e: PointerEvent) => {
             compute(e, rect, true);
@@ -592,4 +652,5 @@ function supportsEyeDropper(): boolean {
 
 // Canonical pipette / eyedropper: squared bulb (top-right), shaft, and a
 // two-stroke dripping nib (bottom-left) so it reads unmistakably as a dropper.
-const EYE_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m2 22 1-1h3l9-9"/><path d="M3 21v-3l9-9"/><path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L21 9l-3-3Z"/><path d="m14 7 3 3"/></svg>';
+const EYE_ICON =
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m2 22 1-1h3l9-9"/><path d="M3 21v-3l9-9"/><path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L21 9l-3-3Z"/><path d="m14 7 3 3"/></svg>';

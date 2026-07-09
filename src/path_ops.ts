@@ -32,11 +32,7 @@ export interface SegmentHitResult {
 // ─── Internal helpers ────────────────────────────────────────────────
 
 /** Linearly interpolate between two 2-D points. */
-function lerp2(
-    ax: number, ay: number,
-    bx: number, by: number,
-    t: number,
-): [number, number] {
+function lerp2(ax: number, ay: number, bx: number, by: number, t: number): [number, number] {
     return [ax + (bx - ax) * t, ay + (by - ay) * t];
 }
 
@@ -71,17 +67,9 @@ export function evalCubic(p0: PathPoint, p1: PathPoint, t: number): [number, num
     const t2 = t * t;
     const t3 = t2 * t;
 
-    const x =
-        mt3 * p0.x +
-        3 * mt2 * t * p0.cp2[0] +
-        3 * mt * t2 * p1.cp1[0] +
-        t3 * p1.x;
+    const x = mt3 * p0.x + 3 * mt2 * t * p0.cp2[0] + 3 * mt * t2 * p1.cp1[0] + t3 * p1.x;
 
-    const y =
-        mt3 * p0.y +
-        3 * mt2 * t * p0.cp2[1] +
-        3 * mt * t2 * p1.cp1[1] +
-        t3 * p1.y;
+    const y = mt3 * p0.y + 3 * mt2 * t * p0.cp2[1] + 3 * mt * t2 * p1.cp1[1] + t3 * p1.y;
 
     return [x, y];
 }
@@ -115,10 +103,14 @@ export function deCasteljau(
     point: PathPoint;
 } {
     // Original control polygon
-    const P0x = p0.x, P0y = p0.y;
-    const C1x = p0.cp2[0], C1y = p0.cp2[1];
-    const C2x = p1.cp1[0], C2y = p1.cp1[1];
-    const P3x = p1.x, P3y = p1.y;
+    const P0x = p0.x,
+        P0y = p0.y;
+    const C1x = p0.cp2[0],
+        C1y = p0.cp2[1];
+    const C2x = p1.cp1[0],
+        C2y = p1.cp1[1];
+    const P3x = p1.x,
+        P3y = p1.y;
 
     // First level
     const [B0x, B0y] = lerp2(P0x, P0y, C1x, C1y, t);
@@ -193,9 +185,7 @@ export function addAnchorPoint(
     const result = cloneSubpaths(subpaths);
     const sp = result[subpathIdx];
     const pts = sp.points;
-    const nextIdx = sp.closed
-        ? (segmentIdx + 1) % pts.length
-        : segmentIdx + 1;
+    const nextIdx = sp.closed ? (segmentIdx + 1) % pts.length : segmentIdx + 1;
 
     const p0 = pts[segmentIdx];
     const p1 = pts[nextIdx];
@@ -280,8 +270,8 @@ export function splitPathAtSegment(
     if (sp.closed) {
         // ── Closed → open at the split point ──────────────────────────
         // Reorder so the split point is first; duplicate it at the end.
-        const before = sp.points.slice(0, splitPointIdx);     // points before split point
-        const fromSplit = sp.points.slice(splitPointIdx);      // split point and after
+        const before = sp.points.slice(0, splitPointIdx); // points before split point
+        const fromSplit = sp.points.slice(splitPointIdx); // split point and after
 
         // Duplicate the split point for the tail
         const tailPoint: PathPoint = JSON.parse(JSON.stringify(fromSplit[0]));
@@ -450,7 +440,7 @@ function weldPoints(run: PathPoint[]): PathPoint {
         cp1: [first.cp1[0], first.cp1[1]],
         cp2: [last.cp2[0], last.cp2[1]],
     };
-    const cr = Math.max(...run.map(p => p.corner_radius ?? 0));
+    const cr = Math.max(...run.map((p) => p.corner_radius ?? 0));
     if (cr > 0) merged.corner_radius = cr;
     return merged;
 }
@@ -528,10 +518,7 @@ function collapseSelectedRuns(sp: Subpath, selectedIdx: Set<number>): boolean {
  *
  * @returns A new subpaths array, or `null` if nothing could be merged.
  */
-export function mergeSelectedAnchors(
-    subpaths: Subpath[],
-    selected: AnchorRef[],
-): Subpath[] | null {
+export function mergeSelectedAnchors(subpaths: Subpath[], selected: AnchorRef[]): Subpath[] | null {
     if (selected.length < 2) return null;
     const result = cloneSubpaths(subpaths);
 

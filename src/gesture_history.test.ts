@@ -17,11 +17,11 @@
  * intermediate state instead. Only exactly-one lands byte-equal on it.
  */
 /// <reference types="node" />
-import { describe, it, expect, beforeAll } from 'vitest';
+
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import init from '../engine/pkg/engine';
-import { Engine, History } from '../engine/pkg/engine';
+import { beforeAll, describe, expect, it } from 'vitest';
+import init, { Engine, History } from '../engine/pkg/engine';
 import { WasmScene } from './wasm_scene';
 
 beforeAll(async () => {
@@ -78,8 +78,8 @@ describe('gesture bracket coalesces N mutations into one undo step', () => {
         // edits with NO per-frame history, one endGesture.
         scene.beginGesture();
         for (let f = 1; f <= 25; f++) {
-            scene.engine!.set_node_rotation(id, 5 + f);       // direct engine call (like updateTransform(false))
-            scene.moveNode(id, 1, 0);                          // wrapper that never pushes
+            scene.engine!.set_node_rotation(id, 5 + f); // direct engine call (like updateTransform(false))
+            scene.moveNode(id, 1, 0); // wrapper that never pushes
             if (f % 5 === 0) scene.resizeNode(id, 120 + f, 90); // wrapper that WOULD push outside a gesture
         }
         scene.endGesture();
@@ -107,7 +107,11 @@ describe('gesture bracket coalesces N mutations into one undo step', () => {
         // snapshot and the undo below would overshoot.
         scene.setNodeRotation(id, 40);
         scene.undo();
-        expectSameState(snapshot(scene), pre, 'edit after a stray endGesture must be independently undoable');
+        expectSameState(
+            snapshot(scene),
+            pre,
+            'edit after a stray endGesture must be independently undoable',
+        );
         expect(rotationOf(scene, id)).toBeCloseTo(10);
     });
 });
@@ -119,7 +123,7 @@ describe('transaction() coalesces wrapper calls that each self-push', () => {
         const pre = snapshot(scene);
 
         scene.transaction(() => {
-            scene.resizeNode(id, 200, 150);   // each of these calls saveHistory()
+            scene.resizeNode(id, 200, 150); // each of these calls saveHistory()
             scene.setNodePosition(id, 40, 40); // internally — all must be suppressed
             scene.flipNodeH(id);
         });
@@ -139,9 +143,9 @@ describe('transaction() coalesces wrapper calls that each self-push', () => {
 
         scene.transaction(() => {
             scene.setNodeRotation(id, 15);
-            scene.beginGesture();      // no-op: already inside a transaction
+            scene.beginGesture(); // no-op: already inside a transaction
             scene.moveNode(id, 20, 0);
-            scene.endGesture();        // must not close the outer transaction early
+            scene.endGesture(); // must not close the outer transaction early
             scene.setNodeScale(id, 1.5, 1.5);
         });
 

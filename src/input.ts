@@ -1,25 +1,32 @@
-import { UIEngine } from './ui';
-import { Renderer, type ArtboardHandle } from './renderer';
-import type { FileService } from './file_service';
 import type { DocumentManager } from './document_manager';
-import { SnapEngine, type SnapGuide } from './snapping';
-import type { WasmScene } from './wasm_scene';
-import type { PenPathPoint, Subpath, Artboard } from './types';
+import type { FileService } from './file_service';
+import { DEFAULT_TEXT_FONT, ensureFontCSS, loadGoogleFontData } from './fonts';
 import { outlineStroke } from './outline_stroke';
-import { ensureFontCSS, loadGoogleFontData, DEFAULT_TEXT_FONT } from './fonts';
-import { textNodeToSubpaths } from './text_outlines';
 import {
     addAnchorPoint,
     findNearestSegment,
     joinSubpaths,
     mergeSelectedAnchors,
+    type SegmentHitResult,
     splitPathAtPoint,
     splitPathAtSegment,
-    type SegmentHitResult,
 } from './path_ops';
+import type { ArtboardHandle, Renderer } from './renderer';
+import { SnapEngine, type SnapGuide } from './snapping';
+import { textNodeToSubpaths } from './text_outlines';
+import type { Artboard, PathPoint, PenPathPoint, Subpath } from './types';
+import type { UIEngine } from './ui';
+import type { WasmScene } from './wasm_scene';
 
 /** 2D affine matrix in DOMMatrix convention: x' = a·x + c·y + e, y' = b·x + d·y + f. */
-interface Mat { a: number; b: number; c: number; d: number; e: number; f: number; }
+interface Mat {
+    a: number;
+    b: number;
+    c: number;
+    d: number;
+    e: number;
+    f: number;
+}
 
 /** Cache of measured CSS first-line baseline offsets (em), keyed by font style. */
 const _cssBaselineCache = new Map<string, number>();
@@ -28,15 +35,21 @@ const _cssBaselineCache = new Map<string, number>();
  * size below the line box's top. Used to align the inline text overlay's glyphs
  * with the rendered ones. Cached per font signature (a hidden-DOM measure).
  */
-function measureCssBaselineEm(fontFamily: string, fontWeight: string, fontStyle: string, lineHeight: number): number {
+function measureCssBaselineEm(
+    fontFamily: string,
+    fontWeight: string,
+    fontStyle: string,
+    lineHeight: number,
+): number {
     const key = `${fontFamily}|${fontWeight}|${fontStyle}|${lineHeight}`;
     const cached = _cssBaselineCache.get(key);
     if (cached !== undefined) return cached;
     const size = 100; // measure at a large size for precision
     const probe = document.createElement('div');
-    probe.style.cssText = `position:absolute;visibility:hidden;left:-9999px;top:-9999px;white-space:pre;`
-        + `font-family:${fontFamily};font-weight:${fontWeight};font-style:${fontStyle};`
-        + `font-size:${size}px;line-height:${lineHeight};`;
+    probe.style.cssText =
+        `position:absolute;visibility:hidden;left:-9999px;top:-9999px;white-space:pre;` +
+        `font-family:${fontFamily};font-weight:${fontWeight};font-style:${fontStyle};` +
+        `font-size:${size}px;line-height:${lineHeight};`;
     probe.textContent = 'Hg';
     const marker = document.createElement('span');
     marker.style.cssText = 'display:inline-block;width:0;height:0;vertical-align:baseline;';
@@ -52,7 +65,11 @@ function measureCssBaselineEm(fontFamily: string, fontWeight: string, fontStyle:
  *  world by `m`. For a single node this is its local bounds under its world
  *  transform (so it rotates/skews with the shape); for multi-selection it is
  *  the axis-aligned union (m = pure translation). */
-export interface SelectionFrame { w: number; h: number; m: Mat }
+export interface SelectionFrame {
+    w: number;
+    h: number;
+    m: Mat;
+}
 
 /** Resolved scissors cut target: either an existing anchor or a point on a
  *  segment, on a specific path node. Produced by {@link InputManager.findScissorTarget}. */
@@ -211,7 +228,11 @@ export class InputManager {
     liveFrame: SelectionFrame | null = null;
 
     // --- Corner radius handle state ---
-    cornerRadiusDragging: { nodeId: number; startRadius: number; startPos: { x: number; y: number } } | null = null;
+    cornerRadiusDragging: {
+        nodeId: number;
+        startRadius: number;
+        startPos: { x: number; y: number };
+    } | null = null;
 
     // --- Gradient handle state ---
     /** True while dragging an on-canvas gradient handle (ui.gradientEdit owns the details). */
@@ -258,23 +279,50 @@ export class InputManager {
 
     init() {
         // Helper: wrap handler to request a render frame after every interaction
-        const withRender = <E extends Event>(handler: (e: E) => void) => (e: E) => {
-            handler.call(this, e);
-            this.renderer.requestRender();
-        };
+        const withRender =
+            <E extends Event>(handler: (e: E) => void) =>
+            (e: E) => {
+                handler.call(this, e);
+                this.renderer.requestRender();
+            };
 
-        this.canvas.addEventListener('mousedown', withRender((e: MouseEvent) => this.onMouseDown(e)));
-        this.canvas.addEventListener('dblclick', withRender((e: MouseEvent) => this.onDoubleClick(e)));
+        this.canvas.addEventListener(
+            'mousedown',
+            withRender((e: MouseEvent) => this.onMouseDown(e)),
+        );
+        this.canvas.addEventListener(
+            'dblclick',
+            withRender((e: MouseEvent) => this.onDoubleClick(e)),
+        );
         this.canvas.addEventListener('contextmenu', (e) => this.onContextMenu(e));
         // Clear any hover snap-preview guides when the pointer leaves the canvas.
-        this.canvas.addEventListener('mouseleave', withRender(() => {
-            if (!this.isMouseDown && this.activeSnapGuides.length) this.activeSnapGuides = [];
-        }));
-        window.addEventListener('mousemove', withRender((e: MouseEvent) => this.onMouseMove(e)));
-        window.addEventListener('mouseup', withRender((e: MouseEvent) => this.onMouseUp(e)));
-        window.addEventListener('keydown', withRender((e: KeyboardEvent) => this.onKeyDown(e)));
-        window.addEventListener('keyup', withRender((e: KeyboardEvent) => this.onKeyUp(e)));
-        window.addEventListener('wheel', withRender((e: WheelEvent) => this.onWheel(e)), { passive: false, capture: true });
+        this.canvas.addEventListener(
+            'mouseleave',
+            withRender(() => {
+                if (!this.isMouseDown && this.activeSnapGuides.length) this.activeSnapGuides = [];
+            }),
+        );
+        window.addEventListener(
+            'mousemove',
+            withRender((e: MouseEvent) => this.onMouseMove(e)),
+        );
+        window.addEventListener(
+            'mouseup',
+            withRender((e: MouseEvent) => this.onMouseUp(e)),
+        );
+        window.addEventListener(
+            'keydown',
+            withRender((e: KeyboardEvent) => this.onKeyDown(e)),
+        );
+        window.addEventListener(
+            'keyup',
+            withRender((e: KeyboardEvent) => this.onKeyUp(e)),
+        );
+        window.addEventListener(
+            'wheel',
+            withRender((e: WheelEvent) => this.onWheel(e)),
+            { passive: false, capture: true },
+        );
 
         // Import .svg / .dataki / .vec files by dropping them onto the canvas area
         const dropTarget = document.getElementById('canvas-container') ?? this.canvas;
@@ -282,7 +330,9 @@ export class InputManager {
             e.preventDefault();
             if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
         });
-        dropTarget.addEventListener('drop', (e) => { this.onFileDrop(e).catch(console.error); });
+        dropTarget.addEventListener('drop', (e) => {
+            this.onFileDrop(e).catch(console.error);
+        });
 
         // Safari pinch-to-zoom prevention (page zoom would fight canvas zoom)
         window.addEventListener('gesturestart', (e) => e.preventDefault(), { capture: true });
@@ -308,11 +358,16 @@ export class InputManager {
                 await this.ui.parseSVG(text, (newRoots) => {
                     // Center the imported nodes at the drop point and select them
                     if (newRoots.length === 0) return;
-                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                    let minX = Infinity,
+                        minY = Infinity,
+                        maxX = -Infinity,
+                        maxY = -Infinity;
                     for (const id of newRoots) {
                         const b = this.scene.getNodeBounds(id);
-                        minX = Math.min(minX, b[0]); minY = Math.min(minY, b[1]);
-                        maxX = Math.max(maxX, b[2]); maxY = Math.max(maxY, b[3]);
+                        minX = Math.min(minX, b[0]);
+                        minY = Math.min(minY, b[1]);
+                        maxX = Math.max(maxX, b[2]);
+                        maxY = Math.max(maxY, b[3]);
                     }
                     if (minX < maxX && minY < maxY) {
                         const dx = dropWorld.x - (minX + maxX) / 2;
@@ -338,8 +393,16 @@ export class InputManager {
                 const docW = this.scene.engine.get_document_width();
                 const docH = this.scene.engine.get_document_height();
                 const scale = Math.min(1, (docW * 0.5) / w, (docH * 0.5) / h);
-                w *= scale; h *= scale;
-                const id = this.scene.placeImage(bytes, file.type || 'image/png', dropWorld.x, dropWorld.y, w, h);
+                w *= scale;
+                h *= scale;
+                const id = this.scene.placeImage(
+                    bytes,
+                    file.type || 'image/png',
+                    dropWorld.x,
+                    dropWorld.y,
+                    w,
+                    h,
+                );
                 this.scene.engine.clear_selection();
                 this.scene.selectNode(id, false);
             }
@@ -377,16 +440,24 @@ export class InputManager {
 
         switch (action) {
             case 'bring-to-front':
-                this.scene.transaction(() => { for (const id of selection) this.scene.bringToFront(id); });
+                this.scene.transaction(() => {
+                    for (const id of selection) this.scene.bringToFront(id);
+                });
                 break;
             case 'bring-forward':
-                this.scene.transaction(() => { for (const id of selection) this.scene.bringForward(id); });
+                this.scene.transaction(() => {
+                    for (const id of selection) this.scene.bringForward(id);
+                });
                 break;
             case 'send-backward':
-                this.scene.transaction(() => { for (const id of selection) this.scene.sendBackward(id); });
+                this.scene.transaction(() => {
+                    for (const id of selection) this.scene.sendBackward(id);
+                });
                 break;
             case 'send-to-back':
-                this.scene.transaction(() => { for (const id of selection) this.scene.sendToBack(id); });
+                this.scene.transaction(() => {
+                    for (const id of selection) this.scene.sendToBack(id);
+                });
                 break;
             case 'duplicate':
                 this.duplicateSelection();
@@ -508,7 +579,7 @@ export class InputManager {
 
         // Re-read geometry after potential conversion
         const updatedGeometry = this.scene.getNodeGeometry(nodeId);
-        if (updatedGeometry && updatedGeometry.Path) {
+        if (updatedGeometry?.Path) {
             this.editingNodeId = nodeId;
             this.editingPoints = JSON.parse(JSON.stringify(updatedGeometry.Path.subpaths));
             this.editingTransform = this.scene.getTransform(nodeId);
@@ -554,8 +625,10 @@ export class InputManager {
         // ⌘/Ctrl toggles snapping: clear the hover snap-preview the instant it's
         // held, without needing a mouse move.
         if (e.key === 'Meta' || e.key === 'Control') {
-            this.metaKey = e.metaKey; this.ctrlKey = e.ctrlKey;
+            this.metaKey = e.metaKey;
+            this.ctrlKey = e.ctrlKey;
             this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
+            this.updatePenHover();
         }
 
         // Alt/Shift pressed mid-drag must reapply the transform immediately.
@@ -703,8 +776,9 @@ export class InputManager {
         // Create Outlines: Cmd+Shift+O / Ctrl+Shift+O (selected text nodes → paths)
         if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'o' || e.key === 'O')) {
             e.preventDefault();
-            const textIds = Array.from(this.scene.engine!.get_selection())
-                .filter(id => this.scene.getNode(id)?.node_type === 'Text');
+            const textIds = Array.from(this.scene.engine!.get_selection()).filter(
+                (id) => this.scene.getNode(id)?.node_type === 'Text',
+            );
             for (const id of textIds) void this.createOutlines(id);
         }
 
@@ -716,7 +790,11 @@ export class InputManager {
         }
 
         // New document: Cmd+Alt+N / Ctrl+Alt+N (Cmd+N is browser-reserved)
-        if ((e.metaKey || e.ctrlKey) && e.altKey && (e.key === 'n' || e.key === 'ñ' || e.code === 'KeyN')) {
+        if (
+            (e.metaKey || e.ctrlKey) &&
+            e.altKey &&
+            (e.key === 'n' || e.key === 'ñ' || e.code === 'KeyN')
+        ) {
             e.preventDefault();
             this.documentManager?.create();
         }
@@ -729,7 +807,11 @@ export class InputManager {
         }
 
         // Cycle tabs: Cmd+Alt+←/→
-        if ((e.metaKey || e.ctrlKey) && e.altKey && (e.code === 'ArrowRight' || e.code === 'ArrowLeft')) {
+        if (
+            (e.metaKey || e.ctrlKey) &&
+            e.altKey &&
+            (e.code === 'ArrowRight' || e.code === 'ArrowLeft')
+        ) {
             e.preventDefault();
             this.documentManager?.cycle(e.code === 'ArrowRight' ? 1 : -1);
         }
@@ -750,7 +832,15 @@ export class InputManager {
                 this.ui.syncWithSelection();
                 return;
             }
-            if (this.isMouseDown && (this.moveSnapshot || this.resizeSnapshot || this.previewRect || this.previewLine || this.pencilPoints || this.marqueeRect)) {
+            if (
+                this.isMouseDown &&
+                (this.moveSnapshot ||
+                    this.resizeSnapshot ||
+                    this.previewRect ||
+                    this.previewLine ||
+                    this.pencilPoints ||
+                    this.marqueeRect)
+            ) {
                 this.cancelActiveDrag();
                 return;
             }
@@ -763,12 +853,13 @@ export class InputManager {
                 this.exitEditMode();
                 this.ui.setActiveTool('selection');
             } else if (this.currentPathPoints.length > 0) {
-                // Cancel and discard in-progress pen path (matches Context Bar cancel button)
-                this.currentPathPoints = [];
-                this.penPathClosed = false;
-                this.penClosingDrag = false;
-                this.ui.contextBar?.refresh();
-                this.renderer.requestRender();
+                // Commit the in-progress pen path, matching Figma/Illustrator: Escape
+                // finalizes what you've drawn rather than throwing it away. Points
+                // you've placed are real geometry, so a stray Escape must not be a
+                // data-loss footgun. finalizePenPath only creates a path when there
+                // are ≥2 points; a lone anchor (a degenerate path) is just cleared.
+                // The Context Bar's Cancel button remains the explicit discard action.
+                this.finalizePenPath();
             } else if (this.ui.activeTool !== 'selection') {
                 // Disarm armed creation/drawing tool back to Selection
                 this.ui.setActiveTool('selection');
@@ -855,7 +946,8 @@ export class InputManager {
             if (selection.length > 0) {
                 e.preventDefault();
                 const step = e.shiftKey ? 10 : 1;
-                let dx = 0, dy = 0;
+                let dx = 0,
+                    dy = 0;
                 if (e.key === 'ArrowLeft') dx = -step;
                 if (e.key === 'ArrowRight') dx = step;
                 if (e.key === 'ArrowUp') dy = -step;
@@ -888,7 +980,8 @@ export class InputManager {
         // otherwise the selected nodes.
         if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
             const abId = this.renderer.selectedArtboardId;
-            const ab = abId !== null ? this.scene.getArtboards().find(a => a.id === abId) : undefined;
+            const ab =
+                abId !== null ? this.scene.getArtboards().find((a) => a.id === abId) : undefined;
             if (ab) {
                 this.artboardClipboard = {
                     ab: { ...ab, background: { ...ab.background } },
@@ -960,11 +1053,11 @@ export class InputManager {
     private spawnTextOverlay(opts: {
         /** World-space top-left of the text box (maps to the overlay's left/top). */
         world: { x: number; y: number };
-        fontSize: number;           // world units
-        fontFamily: string;         // CSS font-family stack
-        fontWeight?: string;        // CSS
-        fontStyle?: string;         // 'normal' | 'italic'
-        letterSpacing?: number;     // world units
+        fontSize: number; // world units
+        fontFamily: string; // CSS font-family stack
+        fontWeight?: string; // CSS
+        fontStyle?: string; // 'normal' | 'italic'
+        letterSpacing?: number; // world units
         lineHeight: number;
         color: string;
         value: string;
@@ -997,9 +1090,15 @@ export class InputManager {
             fontStyle: fontStyleCss,
             lineHeight: String(opts.lineHeight),
             color: opts.color,
-            padding: '0', border: 'none', margin: '0', background: 'transparent',
-            resize: 'none', overflow: 'hidden', whiteSpace: 'pre',
-            minWidth: '0', minHeight: '0',
+            padding: '0',
+            border: 'none',
+            margin: '0',
+            background: 'transparent',
+            resize: 'none',
+            overflow: 'hidden',
+            whiteSpace: 'pre',
+            minWidth: '0',
+            minHeight: '0',
             outline: '1px solid var(--accent)',
         } as Partial<CSSStyleDeclaration>);
 
@@ -1026,7 +1125,8 @@ export class InputManager {
             measureCtx.font = `${fontStyleCss} ${fontWeight} ${opts.fontSize * zoom}px ${fam}`;
             const text = input.value || input.placeholder || '';
             let w = 0;
-            for (const line of text.split('\n')) w = Math.max(w, measureCtx.measureText(line).width);
+            for (const line of text.split('\n'))
+                w = Math.max(w, measureCtx.measureText(line).width);
             input.style.width = `${Math.ceil(w) + 2}px`;
             input.style.height = 'auto';
             input.style.height = `${input.scrollHeight}px`;
@@ -1087,10 +1187,13 @@ export class InputManager {
         const fam = geo.Text.font_family ? `${geo.Text.font_family}, sans-serif` : 'sans-serif';
         // Match the node's fill colour so the overlay looks like the real text.
         const node = this.scene.getNode(id);
-        const f = node?.style?.fills?.[0] as { r: number; g: number; b: number; a?: number } | undefined;
-        const color = f && 'r' in f
-            ? `rgba(${Math.round(f.r * 255)},${Math.round(f.g * 255)},${Math.round(f.b * 255)},${f.a ?? 1})`
-            : '#000';
+        const f = node?.style?.fills?.[0] as
+            | { r: number; g: number; b: number; a?: number }
+            | undefined;
+        const color =
+            f && 'r' in f
+                ? `rgba(${Math.round(f.r * 255)},${Math.round(f.g * 255)},${Math.round(f.b * 255)},${f.a ?? 1})`
+                : '#000';
         if (geo.Text.font_family) ensureFontCSS(geo.Text.font_family);
 
         // Hide the underlying node while its overlay stands in (no more doubling).
@@ -1120,7 +1223,10 @@ export class InputManager {
                     this.ui.syncWithSelection();
                 }
             },
-            onTeardown: () => { this.renderer.editingTextId = null; this.renderer.requestRender(); },
+            onTeardown: () => {
+                this.renderer.editingTextId = null;
+                this.renderer.requestRender();
+            },
         });
     }
 
@@ -1166,8 +1272,10 @@ export class InputManager {
         // Releasing ⌘/Ctrl re-enables snapping: bring the hover preview back
         // immediately, without waiting for a mouse move.
         if (e.key === 'Meta' || e.key === 'Control') {
-            this.metaKey = e.metaKey; this.ctrlKey = e.ctrlKey;
+            this.metaKey = e.metaKey;
+            this.ctrlKey = e.ctrlKey;
             this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
+            this.updatePenHover();
         }
         this.reapplyDragForModifiers(e);
     }
@@ -1197,12 +1305,12 @@ export class InputManager {
 
     getPos(e: MouseEvent) {
         const rect = this.canvas.getBoundingClientRect();
-        const screenX = (e.clientX - rect.left);
-        const screenY = (e.clientY - rect.top);
+        const screenX = e.clientX - rect.left;
+        const screenY = e.clientY - rect.top;
 
         return {
             x: (screenX - this.renderer.pan.x) / this.renderer.zoom,
-            y: (screenY - this.renderer.pan.y) / this.renderer.zoom
+            y: (screenY - this.renderer.pan.y) / this.renderer.zoom,
         };
     }
 
@@ -1211,10 +1319,15 @@ export class InputManager {
      *  clear the instant the modifier is pressed/released — not only on movement. */
     updateHoverSnapPreview(bypassed: boolean) {
         if (this.isMouseDown) return;
-        const want = HOVER_SNAP_TOOLS.has(this.ui.activeTool) && this.editingNodeId === null && !bypassed;
+        const want =
+            HOVER_SNAP_TOOLS.has(this.ui.activeTool) && this.editingNodeId === null && !bypassed;
         if (want) {
             this.snap.begin(this.scene, []);
-            const s = this.snap.snapPoint(this.currentPos.x, this.currentPos.y, 8 / this.renderer.zoom);
+            const s = this.snap.snapPoint(
+                this.currentPos.x,
+                this.currentPos.y,
+                8 / this.renderer.zoom,
+            );
             this.snap.end();
             this.activeSnapGuides = s.guides;
         } else if (this.activeSnapGuides.length) {
@@ -1222,10 +1335,55 @@ export class InputManager {
         }
     }
 
+    /** Recompute the pen rubber-band hover position and close-affordance from
+     *  the last mouse position. Called on mouse move AND on ⌘/Ctrl press/release
+     *  (via the key handlers) so the close ring and snapping toggle instantly
+     *  with the modifier — no mouse move required. */
+    updatePenHover() {
+        if (this.isMouseDown || this.ui.activeTool !== 'pen') {
+            if (this.penHoverPos !== null) {
+                this.penHoverPos = null;
+                this.penHoverClosing = false;
+            }
+            if (this.penHoverAdopt !== null) this.penHoverAdopt = null;
+            return;
+        }
+        // Cmd/Ctrl bypasses snapping and, with it, closing on the first anchor.
+        const bypass = this.metaKey || this.ctrlKey;
+        let hp = this.currentPos;
+        if (!bypass) {
+            this.snap.begin(this.scene, []);
+            const s = this.snap.snapPoint(hp.x, hp.y, 8 / this.renderer.zoom);
+            this.snap.end();
+            hp = { x: s.x, y: s.y };
+        }
+        this.penHoverPos = hp;
+        this.penHoverClosing = false;
+        this.penHoverAdopt = null;
+        if (!bypass && this.currentPathPoints.length > 1) {
+            const first = this.currentPathPoints[0];
+            const d = Math.hypot(hp.x - first.x, hp.y - first.y);
+            this.penHoverClosing = d < InputManager.PEN_CLOSE_RADIUS / this.renderer.zoom;
+        } else if (!bypass && this.currentPathPoints.length === 0) {
+            // Idle pen: highlight an existing open endpoint a click would continue.
+            const hit = this.findAdoptableEndpoint(hp);
+            if (hit) {
+                const sp = this.scene.getNodeGeometry(hit.nodeId)?.Path?.subpaths[hit.subpathIndex];
+                if (sp) {
+                    const p = hit.end === 'start' ? sp.points[0] : sp.points[sp.points.length - 1];
+                    const t = this.scene.getTransform(hit.nodeId);
+                    const [wx, wy] = this.penLocalToWorld(t, p.x, p.y);
+                    this.penHoverAdopt = { x: wx, y: wy };
+                }
+            }
+        }
+        this.canvas.style.cursor = 'crosshair';
+    }
+
     onWheel(e: WheelEvent) {
         // Only handle wheel events when the target is the canvas or its container
         const container = document.getElementById('canvas-container');
-        if (!container || !container.contains(e.target as Node)) return;
+        if (!container?.contains(e.target as Node)) return;
 
         e.preventDefault();
         const rect = this.canvas.getBoundingClientRect();
@@ -1233,7 +1391,7 @@ export class InputManager {
         const mouseY = e.clientY - rect.top;
 
         if (e.ctrlKey || e.metaKey) {
-            const factor = Math.pow(0.99, e.deltaY);
+            const factor = 0.99 ** e.deltaY;
             const oldZoom = this.renderer.zoom;
             const newZoom = Math.max(0.01, Math.min(100, oldZoom * factor));
             const worldX = (mouseX - this.renderer.pan.x) / oldZoom;
@@ -1275,7 +1433,7 @@ export class InputManager {
     deleteSelectedArtboard() {
         const id = this.renderer.selectedArtboardId;
         if (id === null) return;
-        const ab = this.scene.getArtboards().find(a => a.id === id);
+        const ab = this.scene.getArtboards().find((a) => a.id === id);
         const contained = ab ? this.artboardContainedRoots(ab) : [];
         // If a contained node is being path-edited, leave edit mode first.
         if (this.editingNodeId !== null && contained.includes(this.editingNodeId)) {
@@ -1301,7 +1459,9 @@ export class InputManager {
     /** World-space AABB of a node including all descendants, or null when it has
      *  no spatial geometry. Groups aren't in the engine R-tree, so their bounds
      *  are unioned from their leaf descendants. */
-    private nodeWorldBounds(id: number): { minX: number; minY: number; maxX: number; maxY: number } | null {
+    private nodeWorldBounds(
+        id: number,
+    ): { minX: number; minY: number; maxX: number; maxY: number } | null {
         const children = this.scene.getNodeChildren(id);
         if (children.length === 0) {
             const b = this.scene.getNodeBounds(id); // [minX, minY, maxX, maxY]
@@ -1313,10 +1473,14 @@ export class InputManager {
         for (const c of children) {
             const cb = this.nodeWorldBounds(c);
             if (!cb) continue;
-            acc = acc ? {
-                minX: Math.min(acc.minX, cb.minX), minY: Math.min(acc.minY, cb.minY),
-                maxX: Math.max(acc.maxX, cb.maxX), maxY: Math.max(acc.maxY, cb.maxY),
-            } : cb;
+            acc = acc
+                ? {
+                      minX: Math.min(acc.minX, cb.minX),
+                      minY: Math.min(acc.minY, cb.minY),
+                      maxX: Math.max(acc.maxX, cb.maxX),
+                      maxY: Math.max(acc.maxY, cb.maxY),
+                  }
+                : cb;
         }
         return acc;
     }
@@ -1371,7 +1535,7 @@ export class InputManager {
     private duplicateSelectedArtboard() {
         const id = this.renderer.selectedArtboardId;
         if (id === null) return;
-        const ab = this.scene.getArtboards().find(a => a.id === id);
+        const ab = this.scene.getArtboards().find((a) => a.id === id);
         if (!ab) return;
         const nodeIds = this.artboardContainedRoots(ab);
         let newId = -1;
@@ -1384,15 +1548,19 @@ export class InputManager {
     }
 
     private beginArtboardDrag(id: number, mode: 'move' | 'resize', handle: ArtboardHandle | null) {
-        const ab = this.scene.getArtboards().find(a => a.id === id);
+        const ab = this.scene.getArtboards().find((a) => a.id === id);
         if (!ab) return;
         // On a move, the shapes inside the frame travel with it; capture them now.
         const contained = mode === 'move' ? this.artboardContainedRoots(ab) : [];
         this.artboardDrag = {
-            id, mode, handle,
+            id,
+            mode,
+            handle,
             start: { x: ab.x, y: ab.y, w: ab.w, h: ab.h },
             startWorld: { ...this.startPos },
-            contained, movedDx: 0, movedDy: 0,
+            contained,
+            movedDx: 0,
+            movedDy: 0,
         };
         // Snap to other shapes/artboards. Exclude this frame's own edges and its
         // contained shapes (they move with the frame, so snapping to their start
@@ -1413,24 +1581,60 @@ export class InputManager {
         this.activeSnapGuides = [];
 
         if (d.mode === 'move') {
-            x += dx; y += dy;
+            x += dx;
+            y += dy;
             if (!snapOff) {
                 const s = this.snap.snapBounds({ x, y, w, h }, thr);
-                x += s.dx; y += s.dy;
+                x += s.dx;
+                y += s.dy;
                 this.activeSnapGuides = s.guides;
             }
         } else {
             const hnd = d.handle!;
             if (hnd.includes('e')) w = Math.max(MIN, d.start.w + dx);
             if (hnd.includes('s')) h = Math.max(MIN, d.start.h + dy);
-            if (hnd.includes('w')) { w = Math.max(MIN, d.start.w - dx); x = d.start.x + (d.start.w - w); }
-            if (hnd.includes('n')) { h = Math.max(MIN, d.start.h - dy); y = d.start.y + (d.start.h - h); }
+            if (hnd.includes('w')) {
+                w = Math.max(MIN, d.start.w - dx);
+                x = d.start.x + (d.start.w - w);
+            }
+            if (hnd.includes('n')) {
+                h = Math.max(MIN, d.start.h - dy);
+                y = d.start.y + (d.start.h - h);
+            }
             // Snap the moving edge(s) to targets.
             if (!snapOff) {
-                if (hnd.includes('e')) { const s = this.snap.snapAxis('x', x + w, thr); if (s) { w = Math.max(MIN, s.value - x); this.activeSnapGuides.push(s.guide); } }
-                if (hnd.includes('w')) { const s = this.snap.snapAxis('x', x, thr); if (s) { const right = x + w; x = Math.min(s.value, right - MIN); w = right - x; this.activeSnapGuides.push(s.guide); } }
-                if (hnd.includes('s')) { const s = this.snap.snapAxis('y', y + h, thr); if (s) { h = Math.max(MIN, s.value - y); this.activeSnapGuides.push(s.guide); } }
-                if (hnd.includes('n')) { const s = this.snap.snapAxis('y', y, thr); if (s) { const bottom = y + h; y = Math.min(s.value, bottom - MIN); h = bottom - y; this.activeSnapGuides.push(s.guide); } }
+                if (hnd.includes('e')) {
+                    const s = this.snap.snapAxis('x', x + w, thr);
+                    if (s) {
+                        w = Math.max(MIN, s.value - x);
+                        this.activeSnapGuides.push(s.guide);
+                    }
+                }
+                if (hnd.includes('w')) {
+                    const s = this.snap.snapAxis('x', x, thr);
+                    if (s) {
+                        const right = x + w;
+                        x = Math.min(s.value, right - MIN);
+                        w = right - x;
+                        this.activeSnapGuides.push(s.guide);
+                    }
+                }
+                if (hnd.includes('s')) {
+                    const s = this.snap.snapAxis('y', y + h, thr);
+                    if (s) {
+                        h = Math.max(MIN, s.value - y);
+                        this.activeSnapGuides.push(s.guide);
+                    }
+                }
+                if (hnd.includes('n')) {
+                    const s = this.snap.snapAxis('y', y, thr);
+                    if (s) {
+                        const bottom = y + h;
+                        y = Math.min(s.value, bottom - MIN);
+                        h = bottom - y;
+                        this.activeSnapGuides.push(s.guide);
+                    }
+                }
             }
         }
         this.scene.setArtboardBounds(d.id, x, y, w, h);
@@ -1471,13 +1675,16 @@ export class InputManager {
         // Hide the pen rubber-band while a press is in progress.
         this.penHoverPos = null;
         this.penHoverClosing = false;
+        this.penHoverAdopt = null;
 
         // Space held (or middle mouse): pan the viewport instead of using the tool
         if (this.isSpacePan || e.button === 1) {
             e.preventDefault();
             this.panDrag = {
-                screenX: e.clientX, screenY: e.clientY,
-                panX: this.renderer.pan.x, panY: this.renderer.pan.y,
+                screenX: e.clientX,
+                screenY: e.clientY,
+                panX: this.renderer.pan.x,
+                panY: this.renderer.pan.y,
             };
             this.canvas.style.cursor = 'grabbing';
             return;
@@ -1487,14 +1694,18 @@ export class InputManager {
             // Artboard chrome (resize handles + name labels). UI-level only —
             // engine node selection is untouched. Only when not path-editing.
             if (this.editingNodeId === null) {
-                const abResize = this.renderer.selectedArtboardId !== null
-                    ? this.renderer.artboardHandleHitTest(this.startPos.x, this.startPos.y)
-                    : null;
+                const abResize =
+                    this.renderer.selectedArtboardId !== null
+                        ? this.renderer.artboardHandleHitTest(this.startPos.x, this.startPos.y)
+                        : null;
                 if (abResize) {
                     this.beginArtboardDrag(abResize.id, 'resize', abResize.handle);
                     return;
                 }
-                const abLabel = this.renderer.artboardLabelHitTest(this.startPos.x, this.startPos.y);
+                const abLabel = this.renderer.artboardLabelHitTest(
+                    this.startPos.x,
+                    this.startPos.y,
+                );
                 if (abLabel !== null) {
                     this.selectArtboard(abLabel);
                     this.beginArtboardDrag(abLabel, 'move', null);
@@ -1525,15 +1736,18 @@ export class InputManager {
             const handle = frame ? this.checkResizeHandle(this.startPos, frame) : null;
             if (handle && frame) {
                 this.resizeHandleType = handle.type;
-                this.resizeTargetIds = Array.from(this.scene.dedupSelection(this.scene.engine!.get_selection()));
+                this.resizeTargetIds = Array.from(
+                    this.scene.dedupSelection(this.scene.engine!.get_selection()),
+                );
                 // Snapshot scene state so we can restore-then-resize each frame
                 this.resizeSnapshot = this.scene.engine!.serialize_scene();
                 // A single text node always uses the oriented pipeline: its
                 // resize scales the font size from the JS-measured text bounds
                 // (the engine has no font metrics, so the legacy world-space
                 // path would use bad bounds).
-                const singleText = this.resizeTargetIds.length === 1
-                    && this.scene.getNodeType(this.resizeTargetIds[0]) === 4;
+                const singleText =
+                    this.resizeTargetIds.length === 1 &&
+                    this.scene.getNodeType(this.resizeTargetIds[0]) === 4;
                 if (this.frameIsAxisAligned(frame) && !singleText) {
                     // Legacy world-space pipeline (with snapping)
                     this.resizeStartBounds = this.getSelectionBounds();
@@ -1548,14 +1762,15 @@ export class InputManager {
             }
 
             // Check corner radius handles (skip in node-editing mode)
-            const crHandle = this.editingNodeId === null ? this.checkCornerRadiusHandle(this.startPos) : null;
+            const crHandle =
+                this.editingNodeId === null ? this.checkCornerRadiusHandle(this.startPos) : null;
             if (crHandle) {
                 const node = this.scene.getNode(crHandle.nodeId);
                 if (node) {
                     this.cornerRadiusDragging = {
                         nodeId: crHandle.nodeId,
                         startRadius: node.style.corner_radius || 0,
-                        startPos: { ...this.startPos }
+                        startPos: { ...this.startPos },
                     };
                     this.scene.saveMoveHistory();
                     return;
@@ -1567,11 +1782,18 @@ export class InputManager {
             if (rotateHandle && frame) {
                 this.rotateHandleType = rotateHandle.type;
                 this.rotatePivot = this.framePoint(frame, frame.w / 2, frame.h / 2);
-                this.rotateStartAngle = Math.atan2(this.startPos.y - this.rotatePivot.y, this.startPos.x - this.rotatePivot.x);
-                this.rotateTargetIds = Array.from(this.scene.dedupSelection(this.scene.engine!.get_selection()));
-                this.rotateSingleStartDeg = this.rotateTargetIds.length === 1
-                    ? this.scene.getNodeTransformComponents(this.rotateTargetIds[0]).rotation_deg
-                    : null;
+                this.rotateStartAngle = Math.atan2(
+                    this.startPos.y - this.rotatePivot.y,
+                    this.startPos.x - this.rotatePivot.x,
+                );
+                this.rotateTargetIds = Array.from(
+                    this.scene.dedupSelection(this.scene.engine!.get_selection()),
+                );
+                this.rotateSingleStartDeg =
+                    this.rotateTargetIds.length === 1
+                        ? this.scene.getNodeTransformComponents(this.rotateTargetIds[0])
+                              .rotation_deg
+                        : null;
                 this.rotateSnapshot = this.scene.engine!.serialize_scene();
                 this.scene.saveMoveHistory();
                 this.canvas.style.cursor = this.rotateCursorForCorner(rotateHandle.type, frame);
@@ -1602,18 +1824,24 @@ export class InputManager {
             }
             this.ui.syncWithSelection();
             this.ui.updateLayerList();
-
         } else if (this.ui.activeTool === 'direct') {
             this.handleDirectDown(this.startPos, e.shiftKey, e.altKey);
         } else if (this.ui.activeTool === 'pen') {
-            // Snap new anchors to geometry unless Cmd/Ctrl bypasses snapping
-            if (!e.metaKey && !e.ctrlKey) {
+            // Snap new anchors to geometry unless Cmd/Ctrl bypasses snapping.
+            // The same modifier also suppresses closing on the first anchor, so
+            // you can place a point right on top of the start without closing.
+            const bypassSnap = e.metaKey || e.ctrlKey;
+            if (!bypassSnap) {
                 this.snap.begin(this.scene, []);
-                const s = this.snap.snapPoint(this.startPos.x, this.startPos.y, 8 / this.renderer.zoom);
+                const s = this.snap.snapPoint(
+                    this.startPos.x,
+                    this.startPos.y,
+                    8 / this.renderer.zoom,
+                );
                 this.startPos = { x: s.x, y: s.y };
                 this.snap.end();
             }
-            this.handlePenDown(this.startPos);
+            this.handlePenDown(this.startPos, bypassSnap);
         } else if (this.ui.activeTool === 'text') {
             // Create an inline text overlay at the click point, using the same
             // glued/auto-sizing overlay as double-click editing.
@@ -1664,24 +1892,47 @@ export class InputManager {
                     this.maybeRevertTool();
                 },
             });
-        } else if (this.ui.activeTool === 'rect' || this.ui.activeTool === 'ellipse'
-                   || this.ui.activeTool === 'polygon' || this.ui.activeTool === 'star'
-                   || this.ui.activeTool === 'artboard') {
+        } else if (
+            this.ui.activeTool === 'rect' ||
+            this.ui.activeTool === 'ellipse' ||
+            this.ui.activeTool === 'polygon' ||
+            this.ui.activeTool === 'star' ||
+            this.ui.activeTool === 'artboard'
+        ) {
             // Snap the anchor corner unless Cmd/Ctrl bypasses snapping
             this.snap.begin(this.scene, []);
             if (!e.metaKey && !e.ctrlKey) {
-                const s = this.snap.snapPoint(this.startPos.x, this.startPos.y, 8 / this.renderer.zoom);
+                const s = this.snap.snapPoint(
+                    this.startPos.x,
+                    this.startPos.y,
+                    8 / this.renderer.zoom,
+                );
                 this.startPos = { x: s.x, y: s.y };
             }
-            this.previewRect = { x: this.startPos.x, y: this.startPos.y, w: 0, h: 0, tool: this.ui.activeTool };
+            this.previewRect = {
+                x: this.startPos.x,
+                y: this.startPos.y,
+                w: 0,
+                h: 0,
+                tool: this.ui.activeTool,
+            };
         } else if (this.ui.activeTool === 'line') {
             // Snap the anchor endpoint unless Cmd/Ctrl bypasses snapping.
             this.snap.begin(this.scene, []);
             if (!e.metaKey && !e.ctrlKey) {
-                const s = this.snap.snapPoint(this.startPos.x, this.startPos.y, 8 / this.renderer.zoom);
+                const s = this.snap.snapPoint(
+                    this.startPos.x,
+                    this.startPos.y,
+                    8 / this.renderer.zoom,
+                );
                 this.startPos = { x: s.x, y: s.y };
             }
-            this.previewLine = { x1: this.startPos.x, y1: this.startPos.y, x2: this.startPos.x, y2: this.startPos.y };
+            this.previewLine = {
+                x1: this.startPos.x,
+                y1: this.startPos.y,
+                x2: this.startPos.x,
+                y2: this.startPos.y,
+            };
         } else if (this.ui.activeTool === 'pencil') {
             this.pencilPoints = [{ x: this.startPos.x, y: this.startPos.y }];
         } else if (this.ui.activeTool === 'paint-bucket') {
@@ -1723,7 +1974,9 @@ export class InputManager {
             const s = JSON.parse(this.ui.getCurrentStyle());
             const w = s?.strokes?.[0]?.width;
             if (typeof w === 'number' && w > 0) return w;
-        } catch { /* fall through */ }
+        } catch {
+            /* fall through */
+        }
         return 2;
     }
 
@@ -1852,7 +2105,10 @@ export class InputManager {
         }
     }
 
-    findNearestHandle(pos: { x: number; y: number }): { subpathIndex: number; index: number; type: 'anchor' | 'cp1' | 'cp2' } | null {
+    findNearestHandle(pos: {
+        x: number;
+        y: number;
+    }): { subpathIndex: number; index: number; type: 'anchor' | 'cp1' | 'cp2' } | null {
         if (!this.editingPoints || !this.editingTransform) return null;
         const threshold = 8 / this.renderer.zoom;
         const t = this.editingTransform;
@@ -1887,8 +2143,12 @@ export class InputManager {
     /** Convert world coords to node-local coords using the inverted transform. */
     worldToLocal(wx: number, wy: number): { x: number; y: number } {
         const t = this.editingTransform!;
-        const a = t[0], b = t[1], c = t[2];
-        const d = t[3], e = t[4], f = t[5];
+        const a = t[0],
+            b = t[1],
+            c = t[2];
+        const d = t[3],
+            e = t[4],
+            f = t[5];
         const det = a * e - b * d;
         if (Math.abs(det) < 1e-10) return { x: wx, y: wy };
         return {
@@ -1917,12 +2177,14 @@ export class InputManager {
         // getTransform returns the row-major global transform:
         //   [scaleX, skewX, transX,  skewY, scaleY, transY,  p0, p1, p2]
         const t = this.scene.getTransform(parentId);
-        const a = t[0], b = t[1]; // row0: scaleX, skewX
-        const d = t[3], e = t[4]; // row1: skewY,  scaleY
+        const a = t[0],
+            b = t[1]; // row0: scaleX, skewX
+        const d = t[3],
+            e = t[4]; // row1: skewY,  scaleY
         const det = a * e - b * d;
         if (Math.abs(det) < 1e-10) return { dx: wdx, dy: wdy };
         return {
-            dx: ( e * wdx - b * wdy) / det,
+            dx: (e * wdx - b * wdy) / det,
             dy: (-d * wdx + a * wdy) / det,
         };
     }
@@ -2015,8 +2277,10 @@ export class InputManager {
         const threshold = 10 / this.renderer.zoom;
 
         const ids = this.scene.getVisibleNodes(
-            pos.x - threshold, pos.y - threshold,
-            pos.x + threshold, pos.y + threshold,
+            pos.x - threshold,
+            pos.y - threshold,
+            pos.x + threshold,
+            pos.y + threshold,
         );
 
         let best: ScissorTarget | null = null;
@@ -2037,9 +2301,12 @@ export class InputManager {
                     const d = Math.hypot(pos.x - wx, pos.y - wy);
                     if (d < threshold && (!best || d < best.distance)) {
                         best = {
-                            nodeId: id, subpaths,
+                            nodeId: id,
+                            subpaths,
                             anchor: { subpathIndex: si, pointIndex: pi },
-                            worldX: wx, worldY: wy, distance: d,
+                            worldX: wx,
+                            worldY: wy,
+                            distance: d,
                         };
                     }
                 }
@@ -2050,8 +2317,12 @@ export class InputManager {
             const segHit = findNearestSegment(subpaths, transform, pos.x, pos.y, threshold);
             if (segHit && (!best || segHit.distance < best.distance)) {
                 best = {
-                    nodeId: id, subpaths, segment: segHit,
-                    worldX: segHit.worldX, worldY: segHit.worldY, distance: segHit.distance,
+                    nodeId: id,
+                    subpaths,
+                    segment: segHit,
+                    worldX: segHit.worldX,
+                    worldY: segHit.worldY,
+                    distance: segHit.distance,
                 };
             }
         }
@@ -2063,11 +2334,17 @@ export class InputManager {
     private applyScissorCut(target: ScissorTarget) {
         this.scene.saveMoveHistory();
         const newSubpaths = target.anchor
-            ? splitPathAtPoint(target.subpaths, target.anchor.subpathIndex, target.anchor.pointIndex)
+            ? splitPathAtPoint(
+                  target.subpaths,
+                  target.anchor.subpathIndex,
+                  target.anchor.pointIndex,
+              )
             : splitPathAtSegment(
-                target.subpaths, target.segment!.subpathIndex,
-                target.segment!.segmentIndex, target.segment!.t,
-            );
+                  target.subpaths,
+                  target.segment!.subpathIndex,
+                  target.segment!.segmentIndex,
+                  target.segment!.t,
+              );
         this.scene.updatePathPoints(target.nodeId, JSON.stringify(newSubpaths));
         this.ui.syncWithSelection();
         this.ui.updateLayerList();
@@ -2100,8 +2377,12 @@ export class InputManager {
         const segHit = findNearestSegment(subpaths, transform, pos.x, pos.y, threshold);
         if (segHit) {
             this.applyScissorCut({
-                nodeId: hitId, subpaths, segment: segHit,
-                worldX: segHit.worldX, worldY: segHit.worldY, distance: segHit.distance,
+                nodeId: hitId,
+                subpaths,
+                segment: segHit,
+                worldX: segHit.worldX,
+                worldY: segHit.worldY,
+                distance: segHit.distance,
             });
         }
     }
@@ -2112,12 +2393,19 @@ export class InputManager {
 
         const threshold = 10 / this.renderer.zoom;
         const segHit = findNearestSegment(
-            this.editingPoints, this.editingTransform, pos.x, pos.y, threshold
+            this.editingPoints,
+            this.editingTransform,
+            pos.x,
+            pos.y,
+            threshold,
         );
         if (!segHit) return false;
 
         const newSubpaths = addAnchorPoint(
-            this.editingPoints, segHit.subpathIndex, segHit.segmentIndex, segHit.t
+            this.editingPoints,
+            segHit.subpathIndex,
+            segHit.segmentIndex,
+            segHit.t,
         );
 
         // Update engine and local editing state
@@ -2134,7 +2422,7 @@ export class InputManager {
         if (this.editingNodeId === null || !this.editingPoints) return;
         if (this.selectedPoints.size === 0) return;
 
-        let currentSubpaths = JSON.parse(JSON.stringify(this.editingPoints));
+        const currentSubpaths = JSON.parse(JSON.stringify(this.editingPoints));
 
         // Group points by subpath to delete efficiently
         const grouped = new Map<number, number[]>();
@@ -2185,7 +2473,7 @@ export class InputManager {
         if (this.editingNodeId === null || !this.editingPoints) return;
         if (this.selectedPoints.size < 2) return;
 
-        const selected = Array.from(this.selectedPoints).map(key => {
+        const selected = Array.from(this.selectedPoints).map((key) => {
             const [subpathIdx, pointIdx] = key.split(':').map(Number);
             return { subpathIdx, pointIdx };
         });
@@ -2248,8 +2536,8 @@ export class InputManager {
         const spA = geoA.Path.subpaths;
         const spB = geoB.Path.subpaths;
 
-        const openA = spA.findIndex(sp => !sp.closed);
-        const openB = spB.findIndex(sp => !sp.closed);
+        const openA = spA.findIndex((sp) => !sp.closed);
+        const openB = spB.findIndex((sp) => !sp.closed);
         if (openA < 0 || openB < 0) return; // no open subpaths to join
 
         // Merge B's geometry into A by combining subpaths, then join the open ones
@@ -2258,8 +2546,12 @@ export class InputManager {
 
         // Transform B's points into A's local space
         // Invert A's transform
-        const a = tA[0], b = tA[1], c = tA[2];
-        const d = tA[3], e = tA[4], f = tA[5];
+        const a = tA[0],
+            b = tA[1],
+            c = tA[2];
+        const d = tA[3],
+            e = tA[4],
+            f = tA[5];
         const det = a * e - b * d;
         if (Math.abs(det) < 1e-10) return;
 
@@ -2294,8 +2586,8 @@ export class InputManager {
         }
 
         // Combine all subpaths into one array, then join the two open ones
-        const combined = [...JSON.parse(JSON.stringify(spA)) as Subpath[], ...bSubpaths];
-        const combinedOpenA = combined.findIndex(sp => !sp.closed);
+        const combined = [...(JSON.parse(JSON.stringify(spA)) as Subpath[]), ...bSubpaths];
+        const combinedOpenA = combined.findIndex((sp) => !sp.closed);
         const aSubpathCount = spA.length;
         const combinedOpenB = combined.findIndex((sp, i) => i >= aSubpathCount && !sp.closed);
 
@@ -2337,7 +2629,7 @@ export class InputManager {
             return;
         }
         // Only vector shapes/groups can form a Live Paint group; drop text/images.
-        const paintable = sel.filter(id => {
+        const paintable = sel.filter((id) => {
             const t = this.scene.getNode(id)?.node_type;
             return t === 'Path' || t === 'Rect' || t === 'Ellipse' || t === 'Group';
         });
@@ -2422,14 +2714,24 @@ export class InputManager {
         this.scene.setLivePaintGroup(groupId);
         type Pt = { x: number; y: number; cp1: number[]; cp2: number[] };
         // Every colored face with its EFFECTIVE fill (painted, or absorbed source).
-        const faces = JSON.parse(e.get_live_paint_faces()) as Array<{ outline: Pt[]; fill: { r: number; g: number; b: number; a: number } }>;
-        const edges = JSON.parse(e.get_painted_edges()) as Array<{ polyline?: number[][]; outline?: Pt[]; color: { r: number; g: number; b: number; a: number }; width: number }>;
+        const faces = JSON.parse(e.get_live_paint_faces()) as Array<{
+            outline: Pt[];
+            fill: { r: number; g: number; b: number; a: number };
+        }>;
+        const edges = JSON.parse(e.get_painted_edges()) as Array<{
+            polyline?: number[][];
+            outline?: Pt[];
+            color: { r: number; g: number; b: number; a: number };
+            width: number;
+        }>;
         if (faces.length === 0 && edges.length === 0) {
             this.releaseLivePaintGroup(groupId);
             return;
         }
-        const outPts = (o?: Pt[]) => (o || []).map(p => ({ x: p.x, y: p.y, cp1: p.cp1, cp2: p.cp2, corner_radius: 0 }));
-        const polyPts = (poly: number[][]) => poly.map(([x, y]) => ({ x, y, cp1: [x, y], cp2: [x, y], corner_radius: 0 }));
+        const outPts = (o?: Pt[]) =>
+            (o || []).map((p) => ({ x: p.x, y: p.y, cp1: p.cp1, cp2: p.cp2, corner_radius: 0 }));
+        const polyPts = (poly: number[][]) =>
+            poly.map(([x, y]) => ({ x, y, cp1: [x, y], cp2: [x, y], corner_radius: 0 }));
         let expanded = 0;
         this.scene.transaction(() => {
             const fillIds: number[] = [];
@@ -2437,16 +2739,54 @@ export class InputManager {
                 const pts = outPts(f.outline);
                 if (pts.length < 3) continue;
                 const id = e.add_path(JSON.stringify([{ closed: true, points: pts }]));
-                e.set_node_style(id, JSON.stringify({ fills: [f.fill], strokes: [], opacity: 1, blend_mode: 0, fill_rule: 0, corner_radius: 0, effects: [] }));
+                e.set_node_style(
+                    id,
+                    JSON.stringify({
+                        fills: [f.fill],
+                        strokes: [],
+                        opacity: 1,
+                        blend_mode: 0,
+                        fill_rule: 0,
+                        corner_radius: 0,
+                        effects: [],
+                    }),
+                );
                 e.set_node_name(id, 'Fill');
                 fillIds.push(id);
             }
             const strokeIds: number[] = [];
             for (const eg of edges) {
-                const pts = eg.outline && eg.outline.length >= 2 ? outPts(eg.outline) : (eg.polyline ? polyPts(eg.polyline) : []);
+                const pts =
+                    eg.outline && eg.outline.length >= 2
+                        ? outPts(eg.outline)
+                        : eg.polyline
+                          ? polyPts(eg.polyline)
+                          : [];
                 if (pts.length < 2) continue;
                 const id = e.add_path(JSON.stringify([{ closed: false, points: pts }]));
-                e.set_node_style(id, JSON.stringify({ fills: [], strokes: [{ paint: eg.color, width: eg.width > 0 ? eg.width : 2, cap: 1, join: 1, dash_array: [], dash_offset: 0, miter_limit: 4, alignment: 'Center' }], opacity: 1, blend_mode: 0, fill_rule: 0, corner_radius: 0, effects: [] }));
+                e.set_node_style(
+                    id,
+                    JSON.stringify({
+                        fills: [],
+                        strokes: [
+                            {
+                                paint: eg.color,
+                                width: eg.width > 0 ? eg.width : 2,
+                                cap: 1,
+                                join: 1,
+                                dash_array: [],
+                                dash_offset: 0,
+                                miter_limit: 4,
+                                alignment: 'Center',
+                            },
+                        ],
+                        opacity: 1,
+                        blend_mode: 0,
+                        fill_rule: 0,
+                        corner_radius: 0,
+                        effects: [],
+                    }),
+                );
                 e.set_node_name(id, 'Edge');
                 strokeIds.push(id);
             }
@@ -2456,8 +2796,16 @@ export class InputManager {
             e.remove_node(groupId);
             // Nest Fills (bottom) + Strokes (top) inside an "Expanded" group.
             const parts: number[] = [];
-            if (fillIds.length) { const g = e.group_nodes(JSON.stringify(fillIds)); e.set_node_name(g, 'Fills'); parts.push(g); }
-            if (strokeIds.length) { const g = e.group_nodes(JSON.stringify(strokeIds)); e.set_node_name(g, 'Strokes'); parts.push(g); }
+            if (fillIds.length) {
+                const g = e.group_nodes(JSON.stringify(fillIds));
+                e.set_node_name(g, 'Fills');
+                parts.push(g);
+            }
+            if (strokeIds.length) {
+                const g = e.group_nodes(JSON.stringify(strokeIds));
+                e.set_node_name(g, 'Strokes');
+                parts.push(g);
+            }
             if (parts.length === 0) return;
             expanded = parts.length > 1 ? e.group_nodes(JSON.stringify(parts)) : parts[0];
             e.set_node_name(expanded, 'Expanded');
@@ -2512,7 +2860,7 @@ export class InputManager {
     toggleMaskSelection() {
         const selection = Array.from(this.scene.engine!.get_selection());
         if (selection.length === 0) return;
-        const anyMask = selection.some(id => this.scene.getNodeIsMask(id));
+        const anyMask = selection.some((id) => this.scene.getNodeIsMask(id));
 
         if (anyMask) {
             this.scene.transaction(() => {
@@ -2521,7 +2869,11 @@ export class InputManager {
         } else if (selection.length > 1) {
             this.scene.transaction(() => {
                 const groupId = this.scene.groupNodes(selection);
-                try { this.scene.engine!.set_node_name(groupId, 'Mask group'); } catch { /* noop */ }
+                try {
+                    this.scene.engine!.set_node_name(groupId, 'Mask group');
+                } catch {
+                    /* noop */
+                }
                 const kids = Array.from(this.scene.getNodeChildren(groupId));
                 if (kids.length > 0) this.scene.setNodeIsMask(kids[0], true);
                 this.scene.engine!.clear_selection();
@@ -2542,7 +2894,11 @@ export class InputManager {
                     const above = idx >= 0 && idx + 1 < roots.length ? roots[idx + 1] : null;
                     const members = above !== null ? [id, above] : [id];
                     const groupId = this.scene.groupNodes(members);
-                    try { this.scene.engine!.set_node_name(groupId, 'Mask group'); } catch { /* noop */ }
+                    try {
+                        this.scene.engine!.set_node_name(groupId, 'Mask group');
+                    } catch {
+                        /* noop */
+                    }
                     this.scene.setNodeIsMask(id, true);
                     this.scene.engine!.clear_selection();
                     this.scene.selectNode(id, false);
@@ -2592,7 +2948,10 @@ export class InputManager {
 
             for (const id of selection) {
                 const node = this.scene.getNode(id);
-                if (!node) { newSelection.push(id); continue; }
+                if (!node) {
+                    newSelection.push(id);
+                    continue;
+                }
 
                 // ── Step 1: Text → Path (create outlines) ──────────────
                 if (node.node_type === 'Text') {
@@ -2616,7 +2975,10 @@ export class InputManager {
 
                 // ── Step 4: Handle strokes ─────────────────────────────
                 const style = this.scene.getNodeStyle(id);
-                const hasStroke = style.strokes && style.strokes.length > 0 && style.strokes.some(s => s.width > 0);
+                const hasStroke =
+                    style.strokes &&
+                    style.strokes.length > 0 &&
+                    style.strokes.some((s) => s.width > 0);
                 const hasFill = style.fills && style.fills.length > 0;
 
                 if (hasStroke && hasFill) {
@@ -2636,12 +2998,10 @@ export class InputManager {
                     // 4. Group them (fill behind, stroke outline on top)
                     const groupId = this.scene.groupNodes([id, strokeNodeId]);
                     newSelection.push(groupId);
-
                 } else if (hasStroke && !hasFill) {
                     // Stroke only → outline in place
                     outlineStroke(this.ui.ck, this.scene, id);
                     newSelection.push(id);
-
                 } else {
                     // Fill only or no paint → nothing more to do
                     newSelection.push(id);
@@ -2677,6 +3037,25 @@ export class InputManager {
     /** True when the hover cursor is close enough to the first anchor that a
      *  click would close the path (drives the close-indicator ring). */
     penHoverClosing: boolean = false;
+    /** World position of an existing open-path endpoint the idle pen is hovering
+     *  (a click there would continue that path); null when none. Drives the
+     *  continuation-indicator ring. */
+    penHoverAdopt: { x: number; y: number } | null = null;
+
+    // ─── Endpoint continuation (extend an existing open path) ───────────
+    /** When the pen path was started by clicking a free endpoint of an existing
+     *  open path, the id of that source node. New anchors extend it in place;
+     *  null means the pen is drawing a brand-new path. */
+    penSourceNodeId: number | null = null;
+    /** The source node's local→world transform, captured at adoption time, used
+     *  to convert the world-space pen points back to local on finalize. */
+    penSourceTransform: Float32Array | null = null;
+    /** Deep copy of the source node's full (local-space) subpaths at adoption
+     *  time. The extended subpath is written back into this array on finalize so
+     *  the node's other subpaths are preserved. */
+    penSourceSubpaths: Subpath[] | null = null;
+    /** Index (within penSourceSubpaths) of the open subpath being extended. */
+    penSourceSubpathIndex: number = -1;
 
     /** Screen-space radius (px) for hitting the first anchor to close the path. */
     static readonly PEN_CLOSE_RADIUS = 10;
@@ -2684,12 +3063,22 @@ export class InputManager {
      *  treated as a handle drag rather than a plain click. */
     static readonly PEN_HANDLE_DEAD_ZONE = 4;
 
-    handlePenDown(pos: { x: number; y: number }) {
+    handlePenDown(pos: { x: number; y: number }, bypassSnap = false) {
         this.penHandleDragging = false;
+
+        // Endpoint continuation: on the very first click of a new path, if the
+        // cursor lands on a free endpoint of an existing open path, adopt that
+        // path and extend it in place rather than starting a fresh one
+        // (Figma-style forgiveness). Cmd/Ctrl bypasses this to force a new path.
+        if (!bypassSnap && this.currentPathPoints.length === 0 && this.tryAdoptEndpoint(pos)) {
+            return;
+        }
+
         // If we have existing points, check if clicking near the first point to
         // close the path. Threshold is in screen pixels (zoom-independent), so
-        // the close target feels the same at any zoom level.
-        if (this.currentPathPoints.length > 1) {
+        // the close target feels the same at any zoom level. Cmd/Ctrl bypasses
+        // this the same way it bypasses snapping — place a point without closing.
+        if (!bypassSnap && this.currentPathPoints.length > 1) {
             const first = this.currentPathPoints[0];
             const dist = Math.hypot(pos.x - first.x, pos.y - first.y);
             if (dist < InputManager.PEN_CLOSE_RADIUS / this.renderer.zoom) {
@@ -2705,21 +3094,24 @@ export class InputManager {
 
         // Add a new anchor point (control points default to the anchor position)
         this.currentPathPoints.push({
-            x: pos.x, y: pos.y,
-            cp1x: pos.x, cp1y: pos.y,
-            cp2x: pos.x, cp2y: pos.y,
+            x: pos.x,
+            y: pos.y,
+            cp1x: pos.x,
+            cp1y: pos.y,
+            cp2x: pos.x,
+            cp2y: pos.y,
         });
         this.isDraggingHandle = true;
         this.ui.contextBar?.refresh();
     }
 
     finalizePenPath() {
-        if (this.currentPathPoints.length >= 2) {
-            const rustPoints = this.currentPathPoints.map(p => ({
-                x: p.x, y: p.y,
-                cp1: [p.cp1x, p.cp1y],
-                cp2: [p.cp2x, p.cp2y],
-            }));
+        if (this.penSourceNodeId !== null) {
+            // Endpoint continuation: write the extended subpath back into the
+            // source node, in its own local space, preserving its other subpaths.
+            this.finalizeAdoptedPenPath();
+        } else if (this.currentPathPoints.length >= 2) {
+            const rustPoints = this.currentPathPoints.map((p) => this.penPointToLocal(p, null, 0));
             const subpaths = [{ points: rustPoints, closed: this.penPathClosed }];
             const newId = this.scene.addPath(JSON.stringify(subpaths));
 
@@ -2733,16 +3125,190 @@ export class InputManager {
             // tools, unless the pen was locked (double-click) for multiple paths.
             this.maybeRevertTool();
         }
+        this.resetPenState();
+    }
+
+    /** Write the extended pen buffer back into the adopted source node. The pen
+     *  points live in world space; convert them to the node's local space via
+     *  the captured transform and replace the open subpath being extended. */
+    private finalizeAdoptedPenPath() {
+        const t = this.penSourceTransform;
+        const subs = this.penSourceSubpaths;
+        if (!t || !subs || this.currentPathPoints.length < 2) return;
+        const det = t[0] * t[4] - t[1] * t[3];
+        if (Math.abs(det) < 1e-10) return; // degenerate transform — leave node as-is
+
+        const localPoints = this.currentPathPoints.map((p) => this.penPointToLocal(p, t, det));
+        const out: Subpath[] = JSON.parse(JSON.stringify(subs));
+        out[this.penSourceSubpathIndex] = { points: localPoints, closed: this.penPathClosed };
+
+        this.scene.updatePathPoints(this.penSourceNodeId!, JSON.stringify(out));
+        this.scene.engine!.clear_selection();
+        this.scene.selectNode(this.penSourceNodeId!, false);
+        this.ui.syncWithSelection();
+        this.ui.updateLayerList();
+        this.maybeRevertTool();
+    }
+
+    /** Convert a world-space pen point to a PathPoint. When t/det are given, map
+     *  through the node's inverse transform (local space); otherwise pass the
+     *  world coordinates straight through (new path at identity). */
+    private penPointToLocal(p: PenPathPoint, t: Float32Array | null, det: number): PathPoint {
+        const map = (x: number, y: number): [number, number] =>
+            t ? this.penWorldToLocal(t, det, x, y) : [x, y];
+        const [ax, ay] = map(p.x, p.y);
+        const pt: PathPoint = {
+            x: ax,
+            y: ay,
+            cp1: map(p.cp1x, p.cp1y),
+            cp2: map(p.cp2x, p.cp2y),
+        };
+        if (p.corner_radius) pt.corner_radius = p.corner_radius;
+        return pt;
+    }
+
+    /** Convert a world point to the source node's local space. `det` is the
+     *  precomputed 2×2 determinant (t0·t4 − t1·t3). */
+    private penWorldToLocal(
+        t: Float32Array,
+        det: number,
+        wx: number,
+        wy: number,
+    ): [number, number] {
+        const dx = wx - t[2],
+            dy = wy - t[5];
+        return [(t[4] * dx - t[1] * dy) / det, (t[0] * dy - t[3] * dx) / det];
+    }
+
+    /** Convert a local point to world space using a node's local→world transform. */
+    private penLocalToWorld(t: Float32Array, lx: number, ly: number): [number, number] {
+        return [t[0] * lx + t[1] * ly + t[2], t[3] * lx + t[4] * ly + t[5]];
+    }
+
+    /** Clear all in-progress pen state after finalizing. */
+    private resetPenState() {
         this.currentPathPoints = [];
         this.penPathClosed = false;
         this.penClosingDrag = false;
+        this.penSourceNodeId = null;
+        this.penSourceTransform = null;
+        this.penSourceSubpaths = null;
+        this.penSourceSubpathIndex = -1;
         this.ui.contextBar?.refresh();
+        this.renderer.requestRender();
     }
 
+    /** Discard the in-progress pen path without committing. When a path was
+     *  adopted for continuation the (hidden) source node reappears unchanged,
+     *  since it was never mutated. */
+    abandonPenPath() {
+        this.resetPenState();
+    }
 
+    /** If `pos` lands on a free endpoint of an existing open path, load that
+     *  subpath into the pen buffer (oriented so the clicked end is last) and
+     *  remember the source node for write-back on finalize. Returns true if a
+     *  path was adopted. */
+    private tryAdoptEndpoint(pos: { x: number; y: number }): boolean {
+        const hit = this.findAdoptableEndpoint(pos);
+        if (!hit) return false;
+
+        const geo = this.scene.getNodeGeometry(hit.nodeId);
+        if (!geo?.Path) return false;
+        const subpaths = JSON.parse(JSON.stringify(geo.Path.subpaths)) as Subpath[];
+        const sp = subpaths[hit.subpathIndex];
+        if (!sp || sp.closed || sp.points.length < 1) return false;
+
+        const t = this.scene.getTransform(hit.nodeId);
+        let pts: PenPathPoint[] = sp.points.map((p) => {
+            const a = this.penLocalToWorld(t, p.x, p.y);
+            const c1 = this.penLocalToWorld(t, p.cp1[0], p.cp1[1]);
+            const c2 = this.penLocalToWorld(t, p.cp2[0], p.cp2[1]);
+            const pp: PenPathPoint = {
+                x: a[0],
+                y: a[1],
+                cp1x: c1[0],
+                cp1y: c1[1],
+                cp2x: c2[0],
+                cp2y: c2[1],
+            };
+            if (p.corner_radius) pp.corner_radius = p.corner_radius;
+            return pp;
+        });
+
+        // Orient so the clicked endpoint is LAST (the extension grows from it).
+        // Clicking the start reverses point order and swaps each point's
+        // incoming/outgoing handles.
+        if (hit.end === 'start') {
+            pts = pts.reverse().map((p) => ({
+                x: p.x,
+                y: p.y,
+                cp1x: p.cp2x,
+                cp1y: p.cp2y,
+                cp2x: p.cp1x,
+                cp2y: p.cp1y,
+                corner_radius: p.corner_radius,
+            }));
+        }
+
+        this.currentPathPoints = pts;
+        this.penSourceNodeId = hit.nodeId;
+        this.penSourceTransform = t;
+        this.penSourceSubpaths = subpaths;
+        this.penSourceSubpathIndex = hit.subpathIndex;
+        this.penPathClosed = false;
+        this.penClosingDrag = false;
+        this.ui.contextBar?.refresh();
+        this.renderer.requestRender();
+        return true;
+    }
+
+    /** Find the nearest free endpoint of an open path near `pos`, within the pen
+     *  close radius. Scans only nodes whose bounds fall near the cursor. */
+    private findAdoptableEndpoint(pos: {
+        x: number;
+        y: number;
+    }): { nodeId: number; subpathIndex: number; end: 'start' | 'end' } | null {
+        const r = InputManager.PEN_CLOSE_RADIUS / this.renderer.zoom;
+        const pad = r * 1.5;
+        const candidates = this.scene.getVisibleNodes(
+            pos.x - pad,
+            pos.y - pad,
+            pos.x + pad,
+            pos.y + pad,
+        );
+        let best: { nodeId: number; subpathIndex: number; end: 'start' | 'end' } | null = null;
+        let bestDist = r;
+        for (const id of candidates) {
+            if (this.scene.getNodeLocked(id) || !this.scene.getNodeVisible(id)) continue;
+            const geo = this.scene.getNodeGeometry(id);
+            if (!geo?.Path) continue;
+            const t = this.scene.getTransform(id);
+            const subs = geo.Path.subpaths;
+            for (let si = 0; si < subs.length; si++) {
+                const sp = subs[si];
+                if (sp.closed || sp.points.length < 1) continue;
+                const ends: Array<'start' | 'end'> =
+                    sp.points.length === 1 ? ['start'] : ['start', 'end'];
+                for (const end of ends) {
+                    const p = end === 'start' ? sp.points[0] : sp.points[sp.points.length - 1];
+                    const w = this.penLocalToWorld(t, p.x, p.y);
+                    const d = Math.hypot(pos.x - w[0], pos.y - w[1]);
+                    if (d < bestDist) {
+                        bestDist = d;
+                        best = { nodeId: id, subpathIndex: si, end };
+                    }
+                }
+            }
+        }
+        return best;
+    }
 
     // --- Modifier helpers ---
-    private constrainToAxis(start: {x: number; y: number}, current: {x: number; y: number}): {x: number; y: number} {
+    private constrainToAxis(
+        start: { x: number; y: number },
+        current: { x: number; y: number },
+    ): { x: number; y: number } {
         const adx = Math.abs(current.x - start.x);
         const ady = Math.abs(current.y - start.y);
         return adx > ady ? { x: current.x, y: start.y } : { x: start.x, y: current.y };
@@ -2783,12 +3349,14 @@ export class InputManager {
 
         // Hover cursor for resize handles (when not dragging, skip in node-editing mode)
         if (!this.isMouseDown && this.ui.activeTool === 'selection') {
-            const gHit = this.editingNodeId === null && this.ui.gradientEdit.isActive()
-                ? this.ui.gradientEdit.hitTest(this.currentPos, this.renderer.zoom)
-                : null;
+            const gHit =
+                this.editingNodeId === null && this.ui.gradientEdit.isActive()
+                    ? this.ui.gradientEdit.hitTest(this.currentPos, this.renderer.zoom)
+                    : null;
             const frame = this.editingNodeId === null && !gHit ? this.getSelectionFrame() : null;
             const handle = frame ? this.checkResizeHandle(this.currentPos, frame) : null;
-            const rotHandle = !handle && frame ? this.checkRotateHandle(this.currentPos, frame) : null;
+            const rotHandle =
+                !handle && frame ? this.checkRotateHandle(this.currentPos, frame) : null;
             if (gHit) {
                 this.hoverNodeId = null;
                 // 'copy' hints that clicking the axis inserts a new stop
@@ -2799,7 +3367,10 @@ export class InputManager {
             } else if (rotHandle && frame) {
                 this.hoverNodeId = null;
                 this.canvas.style.cursor = this.rotateCursorForCorner(rotHandle.type, frame);
-            } else if (this.editingNodeId === null && this.checkCornerRadiusHandle(this.currentPos)) {
+            } else if (
+                this.editingNodeId === null &&
+                this.checkCornerRadiusHandle(this.currentPos)
+            ) {
                 this.hoverNodeId = null;
                 // Diagonal pointer — corner radius handles sit on the diagonal
                 this.canvas.style.cursor = 'pointer';
@@ -2822,7 +3393,11 @@ export class InputManager {
             const faceId = this.scene.engine!.query_face_at(this.currentPos.x, this.currentPos.y);
             if (e.altKey || faceId < 0) {
                 // Edge mode (Alt), or outside any region → preview the edge.
-                const edgeId = this.scene.queryEdgeAt(this.currentPos.x, this.currentPos.y, edgeTol);
+                const edgeId = this.scene.queryEdgeAt(
+                    this.currentPos.x,
+                    this.currentPos.y,
+                    edgeTol,
+                );
                 this.renderer.hoverEdgeId = edgeId;
                 this.renderer.hoverFaceId = e.altKey ? -1 : faceId;
                 this.canvas.style.cursor = edgeId >= 0 ? 'crosshair' : 'default';
@@ -2834,7 +3409,11 @@ export class InputManager {
         }
 
         // Scissors / Add-Point / Segment hover preview
-        if (!this.isMouseDown && (this.ui.activeTool === 'scissors' || (this.ui.activeTool === 'direct' && this.editingNodeId))) {
+        if (
+            !this.isMouseDown &&
+            (this.ui.activeTool === 'scissors' ||
+                (this.ui.activeTool === 'direct' && this.editingNodeId))
+        ) {
             this.scissorsHoverPoint = null;
             this.hoverSegment = null;
 
@@ -2845,9 +3424,18 @@ export class InputManager {
             }
             // For direct tool: hit test the editing path's segments for highlighting or add-point
             else if (this.editingNodeId && this.editingPoints && this.editingTransform) {
-                const seg = findNearestSegment(this.editingPoints, this.editingTransform, this.currentPos.x, this.currentPos.y, 10 / this.renderer.zoom);
+                const seg = findNearestSegment(
+                    this.editingPoints,
+                    this.editingTransform,
+                    this.currentPos.x,
+                    this.currentPos.y,
+                    10 / this.renderer.zoom,
+                );
                 if (seg) {
-                    this.hoverSegment = { subpathIndex: seg.subpathIndex, segmentIndex: seg.segmentIndex };
+                    this.hoverSegment = {
+                        subpathIndex: seg.subpathIndex,
+                        segmentIndex: seg.segmentIndex,
+                    };
                     if (this.addPointMode) {
                         this.scissorsHoverPoint = { x: seg.worldX, y: seg.worldY };
                     }
@@ -2867,36 +3455,19 @@ export class InputManager {
             this.hoverSegment = null;
         }
 
-        // Pen tool hover: track the (snapped) cursor for the rubber-band preview
-        // segment, and flag when a click would close the path (close-indicator
-        // ring). Uses the same snapping the anchor placement uses on mouse-down.
-        if (!this.isMouseDown && this.ui.activeTool === 'pen') {
-            let hp = this.currentPos;
-            if (!e.metaKey && !e.ctrlKey) {
-                this.snap.begin(this.scene, []);
-                const s = this.snap.snapPoint(hp.x, hp.y, 8 / this.renderer.zoom);
-                this.snap.end();
-                hp = { x: s.x, y: s.y };
-            }
-            this.penHoverPos = hp;
-            this.penHoverClosing = false;
-            if (this.currentPathPoints.length > 1) {
-                const first = this.currentPathPoints[0];
-                const d = Math.hypot(hp.x - first.x, hp.y - first.y);
-                this.penHoverClosing = d < InputManager.PEN_CLOSE_RADIUS / this.renderer.zoom;
-            }
-            this.canvas.style.cursor = 'crosshair';
-        } else if (this.penHoverPos !== null) {
-            this.penHoverPos = null;
-            this.penHoverClosing = false;
-        }
+        // Pen tool hover: rubber-band preview segment + close-indicator ring.
+        this.updatePenHover();
 
         // Pre-drag snap preview: for tools that snap their origin, show the snap
         // guides while hovering so the start point is defined by snapping too.
         if (!this.isMouseDown) this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
 
         if (!this.isMouseDown) return;
+        this.onMouseMoveDrag(e, lastPos);
+    }
 
+    /** Pointer-drag handling — runs only while the mouse button is held. */
+    private onMouseMoveDrag(e: MouseEvent, lastPos: { x: number; y: number }) {
         // On-canvas gradient handle drag (endpoints / stops / freshly inserted stop)
         if (this.gradientDragActive) {
             this.ui.gradientEdit.moveDrag(this.currentPos, e.shiftKey);
@@ -2911,16 +3482,24 @@ export class InputManager {
             if (this.cornerRadiusDragging) {
                 const { nodeId, startRadius, startPos } = this.cornerRadiusDragging;
                 const node = this.scene.getNode(nodeId);
-                if (node && node.geometry.Rect) {
+                if (node?.geometry.Rect) {
                     const rect = node.geometry.Rect;
                     const transform = this.scene.getTransform(nodeId);
 
-                    const a = transform[0], b = transform[1], tx = transform[2];
-                    const c = transform[3], d = transform[4], ty = transform[5];
+                    const a = transform[0],
+                        b = transform[1],
+                        tx = transform[2];
+                    const c = transform[3],
+                        d = transform[4],
+                        ty = transform[5];
                     const det = a * d - b * c;
                     const invDet = 1 / det;
-                    const ia = d * invDet, ib = -b * invDet, ic = -c * invDet, id_ = a * invDet;
-                    const itx = (b * ty - d * tx) * invDet, ity = (c * tx - a * ty) * invDet;
+                    const ia = d * invDet,
+                        ib = -b * invDet,
+                        ic = -c * invDet,
+                        id_ = a * invDet;
+                    const itx = (b * ty - d * tx) * invDet,
+                        ity = (c * tx - a * ty) * invDet;
 
                     const slx = ia * startPos.x + ib * startPos.y + itx;
                     const sly = ic * startPos.x + id_ * startPos.y + ity;
@@ -2931,7 +3510,7 @@ export class InputManager {
                         [0, 0, 1, 1],
                         [rect.width, 0, -1, 1],
                         [rect.width, rect.height, -1, -1],
-                        [0, rect.height, 1, -1]
+                        [0, rect.height, 1, -1],
                     ];
 
                     let bestDist = Infinity;
@@ -2946,10 +3525,13 @@ export class InputManager {
 
                     const dx_local = clx - slx;
                     const dy_local = cly - sly;
-                    const dragProj = (dx_local * bestCorner[2] + dy_local * bestCorner[3]) / Math.SQRT2;
+                    const dragProj =
+                        (dx_local * bestCorner[2] + dy_local * bestCorner[3]) / Math.SQRT2;
 
                     let newRadius = startRadius + dragProj * Math.SQRT2;
-                    newRadius = Math.round(Math.max(0, Math.min(newRadius, rect.width / 2, rect.height / 2)));
+                    newRadius = Math.round(
+                        Math.max(0, Math.min(newRadius, rect.width / 2, rect.height / 2)),
+                    );
 
                     const style = { ...node.style, corner_radius: newRadius };
                     this.scene.setNodeStyleNoHistory(nodeId, JSON.stringify(style));
@@ -2959,7 +3541,12 @@ export class InputManager {
             }
 
             // Rotate handle drag (returns early from mouseDown, like resize)
-            if (this.rotateHandleType && this.rotatePivot && this.rotateSnapshot && this.rotateTargetIds.length > 0) {
+            if (
+                this.rotateHandleType &&
+                this.rotatePivot &&
+                this.rotateSnapshot &&
+                this.rotateTargetIds.length > 0
+            ) {
                 const p = this.rotatePivot;
                 const cur = Math.atan2(this.currentPos.y - p.y, this.currentPos.x - p.x);
                 let deltaDeg = (cur - this.rotateStartAngle) * (180 / Math.PI);
@@ -2969,7 +3556,8 @@ export class InputManager {
                 // multi-selection.
                 if (e.shiftKey) {
                     if (this.rotateSingleStartDeg !== null) {
-                        const snapped = Math.round((this.rotateSingleStartDeg + deltaDeg) / 15) * 15;
+                        const snapped =
+                            Math.round((this.rotateSingleStartDeg + deltaDeg) / 15) * 15;
                         deltaDeg = snapped - this.rotateSingleStartDeg;
                     } else {
                         deltaDeg = Math.round(deltaDeg / 15) * 15;
@@ -2984,19 +3572,35 @@ export class InputManager {
 
             // Oriented resize drag (rotated/skewed frame): all math happens in
             // frame space, so the drag follows the shape's own axes.
-            if (this.resizeHandleType && this.resizeFrame && this.resizeSnapshot && this.resizeLocalBounds && this.resizeTargetIds.length > 0) {
+            if (
+                this.resizeHandleType &&
+                this.resizeFrame &&
+                this.resizeSnapshot &&
+                this.resizeLocalBounds &&
+                this.resizeTargetIds.length > 0
+            ) {
                 const F0 = this.resizeFrame;
                 const inv = this.matInv(F0.m);
                 const sp = this.matApply(inv, this.startPos);
                 const cp = this.matApply(inv, this.currentPos);
-                const fdx = cp.x - sp.x, fdy = cp.y - sp.y;
+                const fdx = cp.x - sp.x,
+                    fdy = cp.y - sp.y;
                 const t = this.resizeHandleType;
-                let newW = F0.w, newH = F0.h, moveX = 0, moveY = 0;
+                let newW = F0.w,
+                    newH = F0.h,
+                    moveX = 0,
+                    moveY = 0;
 
                 if (t.includes('e')) newW = F0.w + fdx;
-                if (t.includes('w')) { newW = F0.w - fdx; moveX = fdx; }
+                if (t.includes('w')) {
+                    newW = F0.w - fdx;
+                    moveX = fdx;
+                }
                 if (t.includes('s')) newH = F0.h + fdy;
-                if (t.includes('n')) { newH = F0.h - fdy; moveY = fdy; }
+                if (t.includes('n')) {
+                    newH = F0.h - fdy;
+                    moveY = fdy;
+                }
 
                 // Shift: maintain aspect ratio (corners only, like legacy)
                 if (e.shiftKey && t.length === 2) {
@@ -3023,12 +3627,17 @@ export class InputManager {
                 newW = Math.max(newW, 1);
                 newH = Math.max(newH, 1);
 
-                this.liveFrame = { w: newW, h: newH, m: this.matMul(F0.m, { a: 1, b: 0, c: 0, d: 1, e: moveX, f: moveY }) };
+                this.liveFrame = {
+                    w: newW,
+                    h: newH,
+                    m: this.matMul(F0.m, { a: 1, b: 0, c: 0, d: 1, e: moveX, f: moveY }),
+                };
 
                 // Restore pristine state, then apply the resize in local space.
                 this.scene.engine!.deserialize_scene(this.resizeSnapshot);
                 const id = this.resizeTargetIds[0];
-                const kx = newW / F0.w, ky = newH / F0.h;
+                const kx = newW / F0.w,
+                    ky = newH / F0.h;
                 const lb = this.resizeLocalBounds;
 
                 const nodeType = this.scene.getNodeType(id);
@@ -3038,13 +3647,20 @@ export class InputManager {
                     //   L' = L0 · T(lb+move) · S(kx,ky) · T(-lb)
                     const l = this.scene.getNodeLocalTransform(id);
                     const L0: Mat = { a: l[0], b: l[1], c: l[3], d: l[4], e: l[6], f: l[7] };
-                    const Lp = this.matMul(L0, this.matMul(
-                        { a: 1, b: 0, c: 0, d: 1, e: lb.x + moveX, f: lb.y + moveY },
+                    const Lp = this.matMul(
+                        L0,
                         this.matMul(
-                            { a: kx, b: 0, c: 0, d: ky, e: 0, f: 0 },
-                            { a: 1, b: 0, c: 0, d: 1, e: -lb.x, f: -lb.y },
-                        )));
-                    this.scene.engine!.set_node_transform_matrix(id, JSON.stringify([Lp.a, Lp.b, 0, Lp.c, Lp.d, 0, Lp.e, Lp.f, 1]));
+                            { a: 1, b: 0, c: 0, d: 1, e: lb.x + moveX, f: lb.y + moveY },
+                            this.matMul(
+                                { a: kx, b: 0, c: 0, d: ky, e: 0, f: 0 },
+                                { a: 1, b: 0, c: 0, d: 1, e: -lb.x, f: -lb.y },
+                            ),
+                        ),
+                    );
+                    this.scene.engine!.set_node_transform_matrix(
+                        id,
+                        JSON.stringify([Lp.a, Lp.b, 0, Lp.c, Lp.d, 0, Lp.e, Lp.f, 1]),
+                    );
                 } else if (nodeType === 4) {
                     // Text (auto-width): resizing scales the FONT SIZE, like
                     // Figma — its box hugs the content, so there's no width/height
@@ -3053,9 +3669,12 @@ export class InputManager {
                     // direction-independent (matches Figma's proportional feel).
                     const tg = this.scene.getNodeGeometry(id)?.Text;
                     if (tg) {
-                        const k = (t === 'e' || t === 'w') ? kx
-                            : (t === 'n' || t === 's') ? ky
-                            : Math.sqrt(Math.abs(kx * ky));
+                        const k =
+                            t === 'e' || t === 'w'
+                                ? kx
+                                : t === 'n' || t === 's'
+                                  ? ky
+                                  : Math.sqrt(Math.abs(kx * ky));
                         const newSize = Math.max(1, Math.min(2000, tg.font_size * k));
                         this.scene.engine!.set_text_content(id, tg.content, newSize);
                         this.anchorNodeToFrameTopLeft(id);
@@ -3073,17 +3692,30 @@ export class InputManager {
             }
 
             // Resize handle drag (checked before dragMode since resize returns early from mouseDown)
-            if (this.resizeHandleType && this.resizeStartBounds && this.resizeTargetIds.length > 0 && this.resizeSnapshot) {
+            if (
+                this.resizeHandleType &&
+                this.resizeStartBounds &&
+                this.resizeTargetIds.length > 0 &&
+                this.resizeSnapshot
+            ) {
                 const bounds = this.resizeStartBounds;
-                let rdx = this.currentPos.x - this.startPos.x;
-                let rdy = this.currentPos.y - this.startPos.y;
-                let newW = bounds.w, newH = bounds.h;
-                let moveX = 0, moveY = 0;
+                const rdx = this.currentPos.x - this.startPos.x;
+                const rdy = this.currentPos.y - this.startPos.y;
+                let newW = bounds.w,
+                    newH = bounds.h;
+                let moveX = 0,
+                    moveY = 0;
 
                 if (this.resizeHandleType.includes('e')) newW = bounds.w + rdx;
-                if (this.resizeHandleType.includes('w')) { newW = bounds.w - rdx; moveX = rdx; }
+                if (this.resizeHandleType.includes('w')) {
+                    newW = bounds.w - rdx;
+                    moveX = rdx;
+                }
                 if (this.resizeHandleType.includes('s')) newH = bounds.h + rdy;
-                if (this.resizeHandleType.includes('n')) { newH = bounds.h - rdy; moveY = rdy; }
+                if (this.resizeHandleType.includes('n')) {
+                    newH = bounds.h - rdy;
+                    moveY = rdy;
+                }
 
                 // Shift: maintain aspect ratio
                 if (e.shiftKey) {
@@ -3120,25 +3752,33 @@ export class InputManager {
                     const threshold = 8 / this.renderer.zoom;
                     if (this.resizeHandleType.includes('e')) {
                         const s = this.snap.snapAxis('x', bounds.x + newW, threshold);
-                        if (s) { newW = s.value - bounds.x; this.activeSnapGuides.push(s.guide); }
+                        if (s) {
+                            newW = s.value - bounds.x;
+                            this.activeSnapGuides.push(s.guide);
+                        }
                     }
                     if (this.resizeHandleType.includes('w')) {
                         const s = this.snap.snapAxis('x', bounds.x + moveX, threshold);
                         if (s) {
                             const d = s.value - (bounds.x + moveX);
-                            moveX += d; newW -= d;
+                            moveX += d;
+                            newW -= d;
                             this.activeSnapGuides.push(s.guide);
                         }
                     }
                     if (this.resizeHandleType.includes('s')) {
                         const s = this.snap.snapAxis('y', bounds.y + newH, threshold);
-                        if (s) { newH = s.value - bounds.y; this.activeSnapGuides.push(s.guide); }
+                        if (s) {
+                            newH = s.value - bounds.y;
+                            this.activeSnapGuides.push(s.guide);
+                        }
                     }
                     if (this.resizeHandleType.includes('n')) {
                         const s = this.snap.snapAxis('y', bounds.y + moveY, threshold);
                         if (s) {
                             const d = s.value - (bounds.y + moveY);
-                            moveY += d; newH -= d;
+                            moveY += d;
+                            newH -= d;
                             this.activeSnapGuides.push(s.guide);
                         }
                     }
@@ -3148,7 +3788,12 @@ export class InputManager {
                 newH = Math.max(newH, 1);
 
                 // Update live bounds for the renderer to show smooth handles
-                this.liveResizeBounds = { x: bounds.x + moveX, y: bounds.y + moveY, w: newW, h: newH };
+                this.liveResizeBounds = {
+                    x: bounds.x + moveX,
+                    y: bounds.y + moveY,
+                    w: newW,
+                    h: newH,
+                };
 
                 // Restore original state, then apply the resize cleanly.
                 // Each target node is mapped from the start bounds into the live
@@ -3168,13 +3813,22 @@ export class InputManager {
                     // Text is auto-width: resize_node is a no-op for it, so scale
                     // the font size (geometric mean of the axes) instead. Read from
                     // the just-restored snapshot state, so it never compounds.
-                    const tg = this.scene.getNodeType(id) === 4
-                        ? this.scene.getNodeGeometry(id)?.Text : null;
+                    const tg =
+                        this.scene.getNodeType(id) === 4
+                            ? this.scene.getNodeGeometry(id)?.Text
+                            : null;
                     if (tg) {
-                        const newSize = Math.max(1, Math.min(2000, tg.font_size * Math.sqrt(Math.abs(scaleX * scaleY))));
+                        const newSize = Math.max(
+                            1,
+                            Math.min(2000, tg.font_size * Math.sqrt(Math.abs(scaleX * scaleY))),
+                        );
                         this.scene.engine!.set_text_content(id, tg.content, newSize);
                     } else {
-                        this.scene.engine!.resize_node(id, (b[2] - b[0]) * scaleX, (b[3] - b[1]) * scaleY);
+                        this.scene.engine!.resize_node(
+                            id,
+                            (b[2] - b[0]) * scaleX,
+                            (b[3] - b[1]) * scaleY,
+                        );
                     }
                     const nb = this.scene.getNodeBounds(id);
                     const dx = targetX - nb[0];
@@ -3193,7 +3847,6 @@ export class InputManager {
         }
 
         if (this.ui.activeTool === 'selection' && this.dragMode === 'move') {
-
             if (!this.didMove && (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5)) {
                 this.scene.saveMoveHistory();
                 this.didMove = true;
@@ -3234,8 +3887,9 @@ export class InputManager {
                     const yLocked = e.shiftKey && totalDy === 0;
                     if (!xLocked) totalDx += snapped.dx;
                     if (!yLocked) totalDy += snapped.dy;
-                    this.activeSnapGuides = snapped.guides.filter(g =>
-                        (g.axis === 'x' && !xLocked) || (g.axis === 'y' && !yLocked));
+                    this.activeSnapGuides = snapped.guides.filter(
+                        (g) => (g.axis === 'x' && !xLocked) || (g.axis === 'y' && !yLocked),
+                    );
                 }
 
                 let moveTargets: number[];
@@ -3281,7 +3935,12 @@ export class InputManager {
             this.marqueeRect.h = h;
 
             // If in path edit mode, marquee selects points
-            if (this.ui.activeTool === 'direct' && this.editingNodeId !== null && this.editingPoints && this.editingTransform) {
+            if (
+                this.ui.activeTool === 'direct' &&
+                this.editingNodeId !== null &&
+                this.editingPoints &&
+                this.editingTransform
+            ) {
                 const t = this.editingTransform;
                 const rect = this.marqueeRect;
 
@@ -3293,7 +3952,12 @@ export class InputManager {
                         const p = sp.points[i];
                         const wx = t[0] * p.x + t[1] * p.y + t[2];
                         const wy = t[3] * p.x + t[4] * p.y + t[5];
-                        if (wx >= rect.x && wx <= rect.x + rect.w && wy >= rect.y && wy <= rect.y + rect.h) {
+                        if (
+                            wx >= rect.x &&
+                            wx <= rect.x + rect.w &&
+                            wy >= rect.y &&
+                            wy <= rect.y + rect.h
+                        ) {
                             this.selectedPoints.add(`${si}:${i}`);
                         }
                     }
@@ -3374,12 +4038,19 @@ export class InputManager {
         }
 
         // Pen tool: adjust control handles while dragging after placing an anchor
-        if (this.ui.activeTool === 'pen' && this.isDraggingHandle && this.currentPathPoints.length > 0) {
+        if (
+            this.ui.activeTool === 'pen' &&
+            this.isDraggingHandle &&
+            this.currentPathPoints.length > 0
+        ) {
             // Dead-zone: ignore sub-threshold jitter so a click stays a crisp
             // corner. Once past it, latch into drag mode for the rest of the press.
             if (!this.penHandleDragging) {
-                const moved = Math.hypot(this.currentPos.x - this.startPos.x,
-                                         this.currentPos.y - this.startPos.y) * this.renderer.zoom;
+                const moved =
+                    Math.hypot(
+                        this.currentPos.x - this.startPos.x,
+                        this.currentPos.y - this.startPos.y,
+                    ) * this.renderer.zoom;
                 if (moved < InputManager.PEN_HANDLE_DEAD_ZONE) return;
                 this.penHandleDragging = true;
             }
@@ -3408,7 +4079,12 @@ export class InputManager {
         }
 
         // Direct selection: drag point or handle
-        if (this.ui.activeTool === 'direct' && this.draggingHandleType && this.editingPoints && this.editingTransform) {
+        if (
+            this.ui.activeTool === 'direct' &&
+            this.draggingHandleType &&
+            this.editingPoints &&
+            this.editingTransform
+        ) {
             const sp = this.editingPoints[this.draggingSubpathIndex];
             if (!sp) return;
             const p = sp.points[this.draggingPointIndex];
@@ -3473,7 +4149,7 @@ export class InputManager {
             // Live update the engine so it renders immediately
             this.scene.engine!.update_path_points(
                 this.editingNodeId!,
-                JSON.stringify(this.editingPoints)
+                JSON.stringify(this.editingPoints),
             );
             this.scene.invalidateCache();
             this.ui.syncWithSelection({ interactive: true });
@@ -3581,9 +4257,14 @@ export class InputManager {
                 const sp = this.editingPoints[this.draggingSubpathIndex];
                 const p = sp?.points[this.draggingPointIndex];
                 if (p) {
-                    p.cp1[0] = p.x; p.cp1[1] = p.y;
-                    p.cp2[0] = p.x; p.cp2[1] = p.y;
-                    this.scene.engine!.update_path_points(this.editingNodeId!, JSON.stringify(this.editingPoints));
+                    p.cp1[0] = p.x;
+                    p.cp1[1] = p.y;
+                    p.cp2[0] = p.x;
+                    p.cp2[1] = p.y;
+                    this.scene.engine!.update_path_points(
+                        this.editingNodeId!,
+                        JSON.stringify(this.editingPoints),
+                    );
                 }
             }
             this.scene.updatePathPoints(this.editingNodeId!, JSON.stringify(this.editingPoints));
@@ -3697,7 +4378,12 @@ export class InputManager {
         const pts = this.pencilPoints;
         this.pencilPoints = null;
         if (!pts || pts.length < 2) return;
-        const mk = (p: { x: number; y: number }) => ({ x: p.x, y: p.y, cp1: [p.x, p.y], cp2: [p.x, p.y] });
+        const mk = (p: { x: number; y: number }) => ({
+            x: p.x,
+            y: p.y,
+            cp1: [p.x, p.y],
+            cp2: [p.x, p.y],
+        });
         const subpaths = [{ points: pts.map(mk), closed: false }];
         this.commitDrawnPath(JSON.stringify(subpaths));
     }
@@ -3712,7 +4398,9 @@ export class InputManager {
             const s = JSON.parse(style);
             s.fills = [];
             style = JSON.stringify(s);
-        } catch { /* fall back to the raw style */ }
+        } catch {
+            /* fall back to the raw style */
+        }
         this.scene.setNodeStyleNoHistory(newId, style);
         this.scene.engine!.clear_selection();
         this.scene.selectNode(newId, false);
@@ -3733,7 +4421,10 @@ export class InputManager {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return null;
 
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        let minX = Infinity,
+            minY = Infinity,
+            maxX = -Infinity,
+            maxY = -Infinity;
         for (const id of selection) {
             const b = this.scene.getNodeBounds(id);
             minX = Math.min(minX, b[0]);
@@ -3745,7 +4436,10 @@ export class InputManager {
         return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
     }
 
-    checkResizeHandle(pos: { x: number; y: number }, frame?: SelectionFrame | null): { type: string } | null {
+    checkResizeHandle(
+        pos: { x: number; y: number },
+        frame?: SelectionFrame | null,
+    ): { type: string } | null {
         const F = frame ?? this.getSelectionFrame();
         if (!F) return null;
 
@@ -3754,7 +4448,10 @@ export class InputManager {
         let bestDist = 8 / this.renderer.zoom;
         for (const h of this.frameHandles(F)) {
             const d = Math.hypot(pos.x - h.x, pos.y - h.y);
-            if (d < bestDist) { bestDist = d; best = { type: h.type }; }
+            if (d < bestDist) {
+                bestDist = d;
+                best = { type: h.type };
+            }
         }
         return best;
     }
@@ -3796,7 +4493,11 @@ export class InputManager {
             if (lb && lb.w > 1e-6 && lb.h > 1e-6) {
                 const t = this.scene.getTransform(id); // row-major world [a,b,tx, c,d,ty, …]
                 const W: Mat = { a: t[0], b: t[3], c: t[1], d: t[4], e: t[2], f: t[5] };
-                return { w: lb.w, h: lb.h, m: this.matMul(W, { a: 1, b: 0, c: 0, d: 1, e: lb.x, f: lb.y }) };
+                return {
+                    w: lb.w,
+                    h: lb.h,
+                    m: this.matMul(W, { a: 1, b: 0, c: 0, d: 1, e: lb.x, f: lb.y }),
+                };
             }
         }
         const b = this.getSelectionBounds();
@@ -3814,7 +4515,8 @@ export class InputManager {
         const W: Mat = { a: wt[0], b: wt[3], c: wt[1], d: wt[4], e: wt[2], f: wt[5] };
         const actual = this.matApply(W, { x: lb2.x, y: lb2.y });
         const target = this.framePoint(this.liveFrame, 0, 0);
-        const ddx = target.x - actual.x, ddy = target.y - actual.y;
+        const ddx = target.x - actual.x,
+            ddy = target.y - actual.y;
         if (Math.abs(ddx) > 1e-4 || Math.abs(ddy) > 1e-4) {
             const local = this.worldDeltaToLocal(id, ddx, ddy);
             this.scene.engine!.move_node(id, local.dx, local.dy);
@@ -3826,20 +4528,34 @@ export class InputManager {
      * the renderer draws for the selection outline. Groups union their
      * children's local bounds through the children's local transforms.
      */
-    getNodeLocalBounds(id: number, depth = 0): { x: number; y: number; w: number; h: number } | null {
+    getNodeLocalBounds(
+        id: number,
+        depth = 0,
+    ): { x: number; y: number; w: number; h: number } | null {
         if (depth > 16) return null;
-        if (this.scene.getNodeType(id) === 3) { // Group
+        if (this.scene.getNodeType(id) === 3) {
+            // Group
             const kids = this.scene.getNodeChildren(id);
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            let minX = Infinity,
+                minY = Infinity,
+                maxX = -Infinity,
+                maxY = -Infinity;
             for (const kid of kids) {
                 const lb = this.getNodeLocalBounds(kid, depth + 1);
                 if (!lb) continue;
                 const l = this.scene.getNodeLocalTransform(kid); // column-major
                 const M: Mat = { a: l[0], b: l[1], c: l[3], d: l[4], e: l[6], f: l[7] };
-                for (const [cx, cy] of [[lb.x, lb.y], [lb.x + lb.w, lb.y], [lb.x + lb.w, lb.y + lb.h], [lb.x, lb.y + lb.h]]) {
+                for (const [cx, cy] of [
+                    [lb.x, lb.y],
+                    [lb.x + lb.w, lb.y],
+                    [lb.x + lb.w, lb.y + lb.h],
+                    [lb.x, lb.y + lb.h],
+                ]) {
                     const p = this.matApply(M, { x: cx, y: cy });
-                    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-                    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+                    minX = Math.min(minX, p.x);
+                    minY = Math.min(minY, p.y);
+                    maxX = Math.max(maxX, p.x);
+                    maxY = Math.max(maxY, p.y);
                 }
             }
             return minX === Infinity ? null : { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
@@ -3852,7 +4568,9 @@ export class InputManager {
             return { x: -rx, y: -ry, w: 2 * rx, h: 2 * ry };
         }
         if (geo.Path) {
-            const b = this.renderer.calculatePathBounds({ subpaths: this.scene.getResolvedSubpaths(id) });
+            const b = this.renderer.calculatePathBounds({
+                subpaths: this.scene.getResolvedSubpaths(id),
+            });
             return { x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY };
         }
         if (geo.Text) {
@@ -3866,11 +4584,17 @@ export class InputManager {
 
     /** The 8 resize handle positions of a frame, in world space. */
     private frameHandles(F: SelectionFrame): Array<{ type: string; x: number; y: number }> {
-        const mw = F.w / 2, mh = F.h / 2;
+        const mw = F.w / 2,
+            mh = F.h / 2;
         const spots: Array<[string, number, number]> = [
-            ['nw', 0, 0], ['n', mw, 0], ['ne', F.w, 0],
-            ['w', 0, mh], ['e', F.w, mh],
-            ['sw', 0, F.h], ['s', mw, F.h], ['se', F.w, F.h],
+            ['nw', 0, 0],
+            ['n', mw, 0],
+            ['ne', F.w, 0],
+            ['w', 0, mh],
+            ['e', F.w, mh],
+            ['sw', 0, F.h],
+            ['s', mw, F.h],
+            ['se', F.w, F.h],
         ];
         return spots.map(([type, fx, fy]) => ({ type, ...this.framePoint(F, fx, fy) }));
     }
@@ -3881,7 +4605,10 @@ export class InputManager {
      * the cursor is outside the frame (so it never conflicts with move/resize),
      * giving the familiar "nudge past the resize handle → rotate" affordance.
      */
-    checkRotateHandle(pos: { x: number; y: number }, frame?: SelectionFrame | null): { type: string } | null {
+    checkRotateHandle(
+        pos: { x: number; y: number },
+        frame?: SelectionFrame | null,
+    ): { type: string } | null {
         const F = frame ?? this.getSelectionFrame();
         if (!F) return null;
 
@@ -3891,7 +4618,10 @@ export class InputManager {
 
         const outer = 18 / this.renderer.zoom;
         const corners: Array<[string, number, number]> = [
-            ['nw', 0, 0], ['ne', F.w, 0], ['se', F.w, F.h], ['sw', 0, F.h],
+            ['nw', 0, 0],
+            ['ne', F.w, 0],
+            ['se', F.w, F.h],
+            ['sw', 0, F.h],
         ];
 
         let best: { type: string } | null = null;
@@ -3899,7 +4629,10 @@ export class InputManager {
         for (const [type, fx, fy] of corners) {
             const c = this.framePoint(F, fx, fy);
             const d = Math.hypot(pos.x - c.x, pos.y - c.y);
-            if (d < bestDist) { bestDist = d; best = { type }; }
+            if (d < bestDist) {
+                bestDist = d;
+                best = { type };
+            }
         }
         return best;
     }
@@ -3914,12 +4647,17 @@ export class InputManager {
         if (!this.rotateSnapshot || !this.rotatePivot) return;
         this.scene.engine!.deserialize_scene(this.rotateSnapshot);
 
-        const cos = Math.cos(deltaRad), sin = Math.sin(deltaRad);
-        const px = this.rotatePivot.x, py = this.rotatePivot.y;
+        const cos = Math.cos(deltaRad),
+            sin = Math.sin(deltaRad);
+        const px = this.rotatePivot.x,
+            py = this.rotatePivot.y;
         // World rotation about the pivot, DOMMatrix form {a,b,c,d,e,f}:
         //   x' = a·x + c·y + e,  y' = b·x + d·y + f
         const R: Mat = {
-            a: cos, b: sin, c: -sin, d: cos,
+            a: cos,
+            b: sin,
+            c: -sin,
+            d: cos,
             e: px - px * cos + py * sin,
             f: py - px * sin - py * cos,
         };
@@ -3962,7 +4700,10 @@ export class InputManager {
         const det = A.a * A.d - A.b * A.c;
         const inv = Math.abs(det) < 1e-12 ? 0 : 1 / det;
         return {
-            a: A.d * inv, b: -A.b * inv, c: -A.c * inv, d: A.a * inv,
+            a: A.d * inv,
+            b: -A.b * inv,
+            c: -A.c * inv,
+            d: A.a * inv,
             e: (A.c * A.f - A.d * A.e) * inv,
             f: (A.b * A.e - A.a * A.f) * inv,
         };
@@ -3976,7 +4717,9 @@ export class InputManager {
         const fy = type.includes('s') ? F.h : 0;
         const c = this.framePoint(F, fx, fy);
         const center = this.framePoint(F, F.w / 2, F.h / 2);
-        return this.rotateCursorForAngle(Math.atan2(c.y - center.y, c.x - center.x) * (180 / Math.PI));
+        return this.rotateCursorForAngle(
+            Math.atan2(c.y - center.y, c.x - center.x) * (180 / Math.PI),
+        );
     }
 
     /** Build (and cache) a small rotate cursor. `deg` is the world direction of
@@ -4003,10 +4746,14 @@ export class InputManager {
     private resizeCursorFor(type: string, F: SelectionFrame): string {
         if (this.frameIsAxisAligned(F)) {
             const cursorMap: Record<string, string> = {
-                'nw': 'nwse-resize', 'se': 'nwse-resize',
-                'ne': 'nesw-resize', 'sw': 'nesw-resize',
-                'n': 'ns-resize', 's': 'ns-resize',
-                'e': 'ew-resize', 'w': 'ew-resize',
+                nw: 'nwse-resize',
+                se: 'nwse-resize',
+                ne: 'nesw-resize',
+                sw: 'nesw-resize',
+                n: 'ns-resize',
+                s: 'ns-resize',
+                e: 'ew-resize',
+                w: 'ew-resize',
             };
             return cursorMap[type] || 'default';
         }
@@ -4017,7 +4764,7 @@ export class InputManager {
         const wy = F.m.b * dx + F.m.d * dy;
         const deg = Math.atan2(wy, wx) * (180 / Math.PI);
         // Double arrow is symmetric — fold to [0,180) before caching.
-        const r = ((Math.round(deg / 10) * 10) % 180 + 180) % 180;
+        const r = (((Math.round(deg / 10) * 10) % 180) + 180) % 180;
         const key = `arrow:${r}`;
         if (this.cursorCache[key]) return this.cursorCache[key];
         const svg =
@@ -4041,7 +4788,7 @@ export class InputManager {
 
         const id = selection[0];
         const node = this.scene.getNode(id);
-        if (!node || !node.geometry.Rect) return null;
+        if (!node?.geometry.Rect) return null;
 
         const rect = node.geometry.Rect;
         const radius = node.style.corner_radius || 0;
@@ -4049,8 +4796,12 @@ export class InputManager {
 
         // Convert world position to local space
         // Skia row-major: [a, b, tx, c, d, ty, 0, 0, 1]
-        const a = transform[0], b = transform[1], tx = transform[2];
-        const c = transform[3], d = transform[4], ty = transform[5];
+        const a = transform[0],
+            b = transform[1],
+            tx = transform[2];
+        const c = transform[3],
+            d = transform[4],
+            ty = transform[5];
 
         const det = a * d - b * c;
         if (Math.abs(det) < 1e-6) return null;
@@ -4073,7 +4824,7 @@ export class InputManager {
             [rx, ry],
             [rect.width - rx, ry],
             [rect.width - rx, rect.height - ry],
-            [rx, rect.height - ry]
+            [rx, rect.height - ry],
         ];
 
         const threshold = 10 / this.renderer.zoom;
@@ -4090,7 +4841,10 @@ export class InputManager {
      * This implements "context-aware" selection: if you are inside a group, you select
      * siblings/children of that group. If not, you select the topmost group.
      */
-    private getTargetIdForHit(pos: { x: number; y: number }, deepSelect: boolean = false): number | undefined {
+    private getTargetIdForHit(
+        pos: { x: number; y: number },
+        deepSelect: boolean = false,
+    ): number | undefined {
         const rawHitId = this.scene.hitTest(pos.x, pos.y);
         if (rawHitId === undefined) return undefined;
 

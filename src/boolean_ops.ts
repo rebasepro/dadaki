@@ -5,25 +5,36 @@
  * subpaths via Path.toCmds().
  */
 import type { CanvasKit, Path } from 'canvaskit-wasm';
+import type { PathPoint, Subpath } from './types';
 import type { WasmScene } from './wasm_scene';
-import type { Subpath, PathPoint } from './types';
 
 export type BoolOp = 'union' | 'subtract' | 'intersect' | 'exclude';
+
+/** Stable op ↔ engine index mapping (matches `node.boolean_op`: 0..3). */
+export const BOOL_OP_BY_INDEX: readonly BoolOp[] = ['union', 'subtract', 'intersect', 'exclude'];
+export const BOOL_OP_INDEX: Record<BoolOp, number> = {
+    union: 0,
+    subtract: 1,
+    intersect: 2,
+    exclude: 3,
+};
 
 /** Bezier circle constant: 4·(√2−1)/3 */
 const KAPPA = 0.5522847498;
 
 /**
- * Apply a boolean operation to the given nodes (2+). The originals are
- * replaced by a single path node carrying the first node's style.
- * Returns the new node id, or null if the operation failed.
+ * Combine the given nodes (2+) with a boolean op and return the resulting
+ * outline as engine subpaths in **world space**, plus the fill rule the result
+ * expects. Returns null if any node is unsupported or the result is empty.
+ * This is the shared core of both the destructive op and the non-destructive
+ * Boolean Group's cached-outline recompute.
  */
-export function applyBooleanOp(
+export function computeBooleanSubpaths(
     ck: CanvasKit,
     scene: WasmScene,
     ids: number[],
     op: BoolOp,
-): number | null {
+): { subpaths: Subpath[]; fillRule: number } | null {
     if (ids.length < 2) return null;
 
     const paths: Path[] = [];
@@ -57,31 +68,53 @@ export function applyBooleanOp(
     // MakeFromOp emits contours under this fill type (in practice EvenOdd,
     // with holes wound the same way) — the node style must match or holes
     // render and hit-test as filled.
-    const resultFillRule = result.getFillType() === ck.FillType.EvenOdd ? 1 : 0;
+    const fillRule = result.getFillType() === ck.FillType.EvenOdd ? 1 : 0;
     result.delete();
     if (subpaths.length === 0) {
-        // Empty result (e.g. intersect of disjoint shapes) — treat as failure
-        // rather than silently deleting the originals.
+        // Empty result (e.g. intersect of disjoint shapes) — treat as failure.
         return null;
     }
+    return { subpaths, fillRule };
+}
+
+/**
+ * Apply a boolean operation destructively: the originals are replaced by a
+ * single path node carrying the first node's style. Returns the new node id,
+ * or null if the operation failed. (Non-destructive groups use
+ * `computeBooleanSubpaths` directly — see WasmScene.makeBooleanGroup.)
+ */
+export function applyBooleanOp(
+    ck: CanvasKit,
+    scene: WasmScene,
+    ids: number[],
+    op: BoolOp,
+): number | null {
+    const res = computeBooleanSubpaths(ck, scene, ids, op);
+    if (!res) return null;
 
     // Carry over the style of the first (bottom-most in selection order) node
     const styleData = scene.getNodeStyle(ids[0]);
-    const styleJson = styleData
-        ? JSON.stringify({ ...styleData, fill_rule: resultFillRule })
-        : null;
+    const styleJson = styleData ? JSON.stringify({ ...styleData, fill_rule: res.fillRule }) : null;
 
-    return scene.replaceNodesWithPath(ids, JSON.stringify(subpaths), styleJson);
+    return scene.replaceNodesWithPath(ids, JSON.stringify(res.subpaths), styleJson);
 }
 
 /** Build a world-space CanvasKit path for a node (recursing into groups). */
-function nodeToWorldPath(
-    ck: CanvasKit,
-    scene: WasmScene,
-    id: number,
-): Path | null {
+function nodeToWorldPath(ck: CanvasKit, scene: WasmScene, id: number): Path | null {
     const node = scene.getNode(id);
     if (!node) return null;
+
+    // A nested Boolean Group contributes its *resolved* outline (already the
+    // boolean of its own operands), not the union of its children — otherwise an
+    // inner subtract/intersect would be flattened to a union here.
+    const anyNode = node as unknown as { boolean_op?: number | null; bool_cache?: Subpath[] };
+    if (anyNode.boolean_op && anyNode.bool_cache?.length) {
+        const path = new ck.Path();
+        appendSubpathsToPath(path, anyNode.bool_cache);
+        const t = scene.getTransform(id);
+        path.transform(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8]);
+        return path;
+    }
 
     if (node.node_type === 'Group') {
         const acc = new ck.Path();
@@ -110,7 +143,8 @@ function nodeToWorldPath(
     } else if (geometry.Ellipse) {
         // Build with cubics (not addOval) so boolean results contain no conics
         const { radius_x: rx, radius_y: ry } = geometry.Ellipse;
-        const kx = rx * KAPPA, ky = ry * KAPPA;
+        const kx = rx * KAPPA,
+            ky = ry * KAPPA;
         path.moveTo(0, -ry);
         path.cubicTo(kx, -ry, rx, -ky, rx, 0);
         path.cubicTo(rx, ky, kx, ry, 0, ry);
@@ -122,22 +156,7 @@ function nodeToWorldPath(
         // the boolean result (matches what is rendered).
         const resolved = scene.getResolvedSubpaths(id);
         const subpaths = resolved.length ? resolved : geometry.Path.subpaths;
-        for (const sp of subpaths) {
-            const pts = sp.points;
-            if (pts.length < 2) continue;
-            path.moveTo(pts[0].x, pts[0].y);
-            for (let i = 1; i < pts.length; i++) {
-                const prev = pts[i - 1];
-                const p = pts[i];
-                path.cubicTo(prev.cp2[0], prev.cp2[1], p.cp1[0], p.cp1[1], p.x, p.y);
-            }
-            if (sp.closed) {
-                const last = pts[pts.length - 1];
-                const first = pts[0];
-                path.cubicTo(last.cp2[0], last.cp2[1], first.cp1[0], first.cp1[1], first.x, first.y);
-                path.close();
-            }
-        }
+        appendSubpathsToPath(path, subpaths);
     } else {
         // Text and other geometries aren't supported in boolean ops
         path.delete();
@@ -148,6 +167,77 @@ function nodeToWorldPath(
     const t = scene.getTransform(id);
     path.transform(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8]);
     return path;
+}
+
+/** Append engine subpaths (cubic beziers via cp1/cp2) onto a CanvasKit path. */
+function appendSubpathsToPath(path: Path, subpaths: Subpath[]) {
+    for (const sp of subpaths) {
+        const pts = sp.points;
+        if (pts.length < 2) continue;
+        path.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+            const prev = pts[i - 1];
+            const p = pts[i];
+            path.cubicTo(prev.cp2[0], prev.cp2[1], p.cp1[0], p.cp1[1], p.x, p.y);
+        }
+        if (sp.closed) {
+            const last = pts[pts.length - 1];
+            const first = pts[0];
+            path.cubicTo(last.cp2[0], last.cp2[1], first.cp1[0], first.cp1[1], first.x, first.y);
+            path.close();
+        }
+    }
+}
+
+/**
+ * Invert a row-major affine matrix (the 9-element form returned by
+ * `WasmScene.getTransform`; the bottom row is assumed [0,0,1]). Returns the
+ * inverse in the same row-major layout, or null if singular.
+ */
+export function invertAffine(t: ArrayLike<number>): number[] | null {
+    const a = t[0],
+        b = t[1],
+        c = t[2];
+    const d = t[3],
+        e = t[4],
+        f = t[5];
+    const det = a * e - b * d;
+    if (Math.abs(det) < 1e-12) return null;
+    const ia = e / det,
+        ib = -b / det;
+    const id = -d / det,
+        ie = a / det;
+    const ic = (b * f - e * c) / det;
+    const iff = (d * c - a * f) / det;
+    return [ia, ib, ic, id, ie, iff, 0, 0, 1];
+}
+
+/** Apply a row-major affine matrix to a point [x,y]. */
+function applyAffine(t: ArrayLike<number>, x: number, y: number): [number, number] {
+    return [t[0] * x + t[1] * y + t[2], t[3] * x + t[4] * y + t[5]];
+}
+
+/**
+ * Transform every anchor and control point of `subpaths` by a row-major affine
+ * matrix, returning fresh subpaths. Used to move a world-space boolean result
+ * into a group's local frame (via `invertAffine(groupTransform)`).
+ */
+export function transformSubpaths(subpaths: Subpath[], t: ArrayLike<number>): Subpath[] {
+    return subpaths.map((sp) => ({
+        closed: sp.closed,
+        points: sp.points.map((p) => {
+            const [x, y] = applyAffine(t, p.x, p.y);
+            const [c1x, c1y] = applyAffine(t, p.cp1[0], p.cp1[1]);
+            const [c2x, c2y] = applyAffine(t, p.cp2[0], p.cp2[1]);
+            return {
+                ...p,
+                x,
+                y,
+                cp1: [c1x, c1y] as [number, number],
+                cp2: [c2x, c2y] as [number, number],
+            };
+        }),
+    }));
 }
 
 /** Parse a CanvasKit path back into engine subpaths via toCmds(). */
@@ -162,7 +252,12 @@ export function pathToSubpaths(ck: CanvasKit, path: Path): Subpath[] {
     const CUBIC = ckAny.CUBIC_VERB ?? 4;
     const CLOSE = ckAny.CLOSE_VERB ?? 5;
     const ARG_COUNT: Record<number, number> = {
-        [MOVE]: 2, [LINE]: 2, [QUAD]: 4, [CONIC]: 5, [CUBIC]: 6, [CLOSE]: 0,
+        [MOVE]: 2,
+        [LINE]: 2,
+        [QUAD]: 4,
+        [CONIC]: 5,
+        [CUBIC]: 6,
+        [CLOSE]: 0,
     };
 
     const subpaths: Subpath[] = [];
@@ -203,8 +298,10 @@ export function pathToSubpaths(ck: CanvasKit, path: Path): Subpath[] {
             const prev = current[current.length - 1];
             const p0x = prev ? prev.x : args[0];
             const p0y = prev ? prev.y : args[1];
-            const qx = args[0], qy = args[1];
-            const ex = args[2], ey = args[3];
+            const qx = args[0],
+                qy = args[1];
+            const ex = args[2],
+                ey = args[3];
             const c1x = p0x + (2 / 3) * (qx - p0x);
             const c1y = p0y + (2 / 3) * (qy - p0y);
             const c2x = ex + (2 / 3) * (qx - ex);

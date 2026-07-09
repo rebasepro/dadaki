@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { SnapEngine } from './snapping';
 import type { WasmScene } from './wasm_scene';
 
@@ -8,8 +8,15 @@ const bg = { r: 1, g: 1, b: 1, a: 1 };
 function makeScene(
     nodes: Record<number, [number, number, number, number]>,
     parents: Record<number, number> = {},
-    artboards: { id: number; name: string; x: number; y: number; w: number; h: number; background: typeof bg }[] =
-        [{ id: 1, name: 'Artboard 1', x: 0, y: 0, w: 1000, h: 1000, background: bg }],
+    artboards: {
+        id: number;
+        name: string;
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+        background: typeof bg;
+    }[] = [{ id: 1, name: 'Artboard 1', x: 0, y: 0, w: 1000, h: 1000, background: bg }],
 ): WasmScene {
     return {
         engine: {
@@ -17,7 +24,12 @@ function makeScene(
             get_document_height: () => 1000,
         },
         getArtboards: () => artboards,
-        getRootNodes: () => Uint32Array.from(Object.keys(nodes).map(Number).filter(id => !(id in parents))),
+        getRootNodes: () =>
+            Uint32Array.from(
+                Object.keys(nodes)
+                    .map(Number)
+                    .filter((id) => !(id in parents)),
+            ),
         getNodeParent: (id: number) => parents[id] ?? -1,
         getNodeVisible: () => true,
         getNodeBounds: (id: number) => Float32Array.from(nodes[id]),
@@ -70,10 +82,7 @@ describe('SnapEngine', () => {
     it('excludes the dragged nodes and their root ancestors from targets', () => {
         const engine = new SnapEngine();
         // Node 2 is a child of root 1; dragging 2 must exclude root 1 entirely.
-        const scene = makeScene(
-            { 1: [100, 100, 200, 200], 3: [400, 400, 500, 500] },
-            { 2: 1 },
-        );
+        const scene = makeScene({ 1: [100, 100, 200, 200], 3: [400, 400, 500, 500] }, { 2: 1 });
         engine.begin(scene, [2]);
 
         const r = engine.snapBounds({ x: 203, y: 103, w: 10, h: 10 }, 8);
@@ -98,10 +107,13 @@ describe('SnapEngine', () => {
     it('includes the edges of every artboard as snap targets', () => {
         const engine = new SnapEngine();
         // Two artboards: [0..1000] and a second at x=1200 spanning 1200..2000.
-        engine.begin(makeScene({}, {}, [
-            { id: 1, name: 'A', x: 0, y: 0, w: 1000, h: 1000, background: bg },
-            { id: 2, name: 'B', x: 1200, y: 0, w: 800, h: 600, background: bg },
-        ]), []);
+        engine.begin(
+            makeScene({}, {}, [
+                { id: 1, name: 'A', x: 0, y: 0, w: 1000, h: 1000, background: bg },
+                { id: 2, name: 'B', x: 1200, y: 0, w: 800, h: 600, background: bg },
+            ]),
+            [],
+        );
 
         // Snap to the second artboard's left edge (1200) and right edge (2000).
         expect(engine.snapAxis('x', 1203, 8)?.value).toBe(1200);

@@ -8,13 +8,14 @@
  * its own live engine + history, and switching tabs preserves both.
  */
 /// <reference types="node" />
-import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import init, { Engine } from '../engine/pkg/engine';
-import { WasmScene } from './wasm_scene';
 import { DocumentManager } from './document_manager';
 import { PersistenceManager } from './persistence';
+import { WasmScene } from './wasm_scene';
 
 beforeAll(async () => {
     await init({ module_or_path: readFileSync(resolve('engine/pkg/engine_bg.wasm')) });
@@ -36,13 +37,33 @@ beforeEach(() => {
 function makeManager() {
     const scene = new WasmScene({} as never);
     scene.engine = new Engine();
-    const ui = { setZoom: vi.fn(), updateLayerList: vi.fn(), syncWithSelection: vi.fn(), parseSVG: vi.fn() };
-    const input = { exitEditMode: vi.fn(), commitActiveTextEdit: vi.fn(), currentPathPoints: [] as unknown[] };
-    const renderer = { zoom: 1, pan: { x: 0, y: 0 }, fitToArtboard: vi.fn(), notifyViewChange: vi.fn() };
+    const ui = {
+        setZoom: vi.fn(),
+        updateLayerList: vi.fn(),
+        syncWithSelection: vi.fn(),
+        parseSVG: vi.fn(),
+    };
+    const input = {
+        exitEditMode: vi.fn(),
+        commitActiveTextEdit: vi.fn(),
+        currentPathPoints: [] as unknown[],
+    };
+    const renderer = {
+        zoom: 1,
+        pan: { x: 0, y: 0 },
+        fitToArtboard: vi.fn(),
+        notifyViewChange: vi.fn(),
+    };
     const tabStrip = { render: vi.fn() };
     const fileService = { activeDoc: null as unknown, refreshChrome: vi.fn() };
     const dm = new DocumentManager(
-        scene, ui as any, input as any, renderer as any, fileService as any, tabStrip as any, () => {},
+        scene,
+        ui as any,
+        input as any,
+        renderer as any,
+        fileService as any,
+        tabStrip as any,
+        () => {},
     );
     return { dm, scene, renderer, fileService };
 }
@@ -66,8 +87,8 @@ describe('DocumentManager multi-doc', () => {
         const { dm, scene } = makeManager();
         const a = dm.create('A');
         scene.addRect(0, 0, 50, 50);
-        dm.create('B');            // switch away
-        dm.activate(a.id);         // ...and back
+        dm.create('B'); // switch away
+        dm.activate(a.id); // ...and back
 
         expect(scene.engine).toBe(a.engine);
         expect(scene.engine!.get_root_nodes().length).toBe(1);
@@ -167,19 +188,35 @@ describe('DocumentManager multi-doc', () => {
     });
 
     it('restoreSession rebuilds open tabs from a manifest', async () => {
-        const seedA = new Engine(); seedA.add_rect(0, 0, 10, 10);
+        const seedA = new Engine();
+        seedA.add_rect(0, 0, 10, 10);
         const seedB = new Engine(); // blank
-        vi.spyOn(PersistenceManager, 'loadManifest').mockResolvedValue({ open: ['d1', 'd2'], active: 'd2' });
+        vi.spyOn(PersistenceManager, 'loadManifest').mockResolvedValue({
+            open: ['d1', 'd2'],
+            active: 'd2',
+        });
         vi.spyOn(PersistenceManager, 'loadAllDocuments').mockResolvedValue([
-            { id: 'd1', name: 'One', bytes: new Uint8Array(seedA.serialize_proto()), handle: null, updatedAt: 0 },
-            { id: 'd2', name: 'Two', bytes: new Uint8Array(seedB.serialize_proto()), handle: null, updatedAt: 0 },
+            {
+                id: 'd1',
+                name: 'One',
+                bytes: new Uint8Array(seedA.serialize_proto()),
+                handle: null,
+                updatedAt: 0,
+            },
+            {
+                id: 'd2',
+                name: 'Two',
+                bytes: new Uint8Array(seedB.serialize_proto()),
+                handle: null,
+                updatedAt: 0,
+            },
         ]);
 
         const { dm, scene } = makeManager();
         await dm.restoreSession();
 
-        expect(dm.all().map(d => d.name)).toEqual(['One', 'Two']);
-        expect(dm.active()!.id).toBe('d2');            // manifest's active
+        expect(dm.all().map((d) => d.name)).toEqual(['One', 'Two']);
+        expect(dm.active()!.id).toBe('d2'); // manifest's active
         expect(scene.engine!.get_root_nodes().length).toBe(0); // d2 is blank
     });
 });

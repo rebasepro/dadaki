@@ -84,9 +84,13 @@ export class Toolbar {
         this.sync(ui.activeTool);
 
         // Any pointerdown outside the flyout dismisses it
-        document.addEventListener('pointerdown', (e) => {
-            if (this.flyout && !this.flyout.contains(e.target as Node)) this.closeFlyout();
-        }, true);
+        document.addEventListener(
+            'pointerdown',
+            (e) => {
+                if (this.flyout && !this.flyout.contains(e.target as Node)) this.closeFlyout();
+            },
+            true,
+        );
         window.addEventListener('blur', () => this.closeFlyout());
     }
 
@@ -113,9 +117,10 @@ export class Toolbar {
             // Tooltip hint: how to lock, or how to release once locked.
             const face = this.groupFace.get(idx);
             if (face && LOCKABLE_TOOLS.has(face)) {
-                btn.dataset.lockhint = (isActive && this.ui.toolLocked)
-                    ? 'Locked · click to release'
-                    : 'Double-click to lock';
+                btn.dataset.lockhint =
+                    isActive && this.ui.toolLocked
+                        ? 'Locked · click to release'
+                        : 'Double-click to lock';
             } else {
                 delete btn.dataset.lockhint;
             }
@@ -142,7 +147,10 @@ export class Toolbar {
             this.updateButtonFace(groupIdx);
 
             btn.addEventListener('click', () => {
-                if (this.suppressClick) { this.suppressClick = false; return; }
+                if (this.suppressClick) {
+                    this.suppressClick = false;
+                    return;
+                }
                 this.closeFlyout();
                 this.ui.setActiveTool(this.groupFace.get(groupIdx)!);
             });
@@ -164,7 +172,10 @@ export class Toolbar {
                     }, LONG_PRESS_MS);
                 });
                 const cancelPress = () => {
-                    if (this.pressTimer !== null) { clearTimeout(this.pressTimer); this.pressTimer = null; }
+                    if (this.pressTimer !== null) {
+                        clearTimeout(this.pressTimer);
+                        this.pressTimer = null;
+                    }
                 };
                 btn.addEventListener('pointerup', cancelPress);
                 btn.addEventListener('pointerleave', cancelPress);
@@ -193,8 +204,9 @@ export class Toolbar {
         if (meta.shortcut) btn.dataset.shortcut = meta.shortcut;
         else delete btn.dataset.shortcut;
 
-        btn.innerHTML = `<i data-lucide="${meta.icon}"></i>`
-            + (entry.length > 1 ? '<span class="tool-flyout-indicator"></span>' : '');
+        btn.innerHTML =
+            `<i data-lucide="${meta.icon}"></i>` +
+            (entry.length > 1 ? '<span class="tool-flyout-indicator"></span>' : '');
         this.refreshIcons();
     }
 
@@ -211,8 +223,9 @@ export class Toolbar {
             const item = document.createElement('div');
             item.className = 'tool-flyout-item';
             if (toolId === this.ui.activeTool) item.classList.add('active');
-            item.innerHTML = `<i data-lucide="${meta.icon}"></i><span>${meta.label}</span>`
-                + (meta.shortcut ? `<span class="tool-flyout-shortcut">${meta.shortcut}</span>` : '');
+            item.innerHTML =
+                `<i data-lucide="${meta.icon}"></i><span>${meta.label}</span>` +
+                (meta.shortcut ? `<span class="tool-flyout-shortcut">${meta.shortcut}</span>` : '');
             item.addEventListener('click', () => {
                 this.closeFlyout();
                 this.ui.setActiveTool(toolId);

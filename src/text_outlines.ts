@@ -9,9 +9,9 @@
  */
 import type { CanvasKit } from 'canvaskit-wasm';
 import * as opentype from 'opentype.js';
-import type { Subpath, TextGeometry } from './types';
-import { getFontDataForWeight, loadGoogleFontData, isFontLoaded } from './fonts';
 import { pathToSubpaths } from './boolean_ops';
+import { getFontDataForWeight, isFontLoaded, loadGoogleFontData } from './fonts';
+import type { Subpath, TextGeometry } from './types';
 
 /** Parsed opentype fonts, keyed by `${family}@${weight >= 600 ? 'bold' : 'regular'}`. */
 const parsedFontCache = new Map<string, opentype.Font | null>();
@@ -33,7 +33,7 @@ export async function ensureOutlineFont(
     fontFamily: string | undefined,
     weight: number,
 ): Promise<opentype.Font | null> {
-    const family = fontFamily && fontFamily.trim() ? fontFamily : DEFAULT_OUTLINE_FAMILY;
+    const family = fontFamily?.trim() ? fontFamily : DEFAULT_OUTLINE_FAMILY;
     const key = cacheKey(family, weight);
     if (parsedFontCache.has(key)) return parsedFontCache.get(key)!;
 
@@ -95,7 +95,7 @@ export function textToSubpaths(font: opentype.Font, geo: TextGeometry, ck: Canva
 
     // Block width = widest line, so center/right alignment stays within the same
     // box the selection frame reports (see renderer.getTextLocalBounds).
-    const lineWidths = lines.map(l => (l ? advanceOf(l) : 0));
+    const lineWidths = lines.map((l) => (l ? advanceOf(l) : 0));
     const blockWidth = Math.max(0, ...lineWidths);
     const blockOffsetX = align === 1 ? -blockWidth / 2 : align === 2 ? -blockWidth : 0;
 
@@ -106,10 +106,9 @@ export function textToSubpaths(font: opentype.Font, geo: TextGeometry, ck: Canva
             if (!line) continue;
             const lineW = lineWidths[i];
             // Align each line within the block.
-            const lineStartX = blockOffsetX + (
-                align === 1 ? (blockWidth - lineW) / 2 :
-                align === 2 ? (blockWidth - lineW) : 0
-            );
+            const lineStartX =
+                blockOffsetX +
+                (align === 1 ? (blockWidth - lineW) / 2 : align === 2 ? blockWidth - lineW : 0);
             const y = baseline0 + i * fontSize * lineHeight;
             let penX = lineStartX;
             let prev: opentype.Glyph | null = null;
@@ -143,7 +142,10 @@ export function textToSubpaths(font: opentype.Font, geo: TextGeometry, ck: Canva
  * Returns null if the font can't be loaded — callers should leave the node as
  * text in that case.
  */
-export async function textNodeToSubpaths(geo: TextGeometry, ck: CanvasKit): Promise<Subpath[] | null> {
+export async function textNodeToSubpaths(
+    geo: TextGeometry,
+    ck: CanvasKit,
+): Promise<Subpath[] | null> {
     const font = await ensureOutlineFont(geo.font_family, geo.font_weight || 400);
     if (!font) return null;
     return textToSubpaths(font, geo, ck);

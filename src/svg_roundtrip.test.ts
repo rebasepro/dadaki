@@ -8,10 +8,10 @@
  * Does NOT require WASM — works entirely with the pure export module
  * and jsdom's DOMParser.
  */
-import { describe, it, expect } from 'vitest';
-import { buildSVGFromData, BLEND_MODE_MAP } from './svg_export';
-import type { SVGExportInput, FilledFace } from './svg_export';
-import type { SceneNode, NodeStyle } from './types';
+import { describe, expect, it } from 'vitest';
+import type { FilledFace, SVGExportInput } from './svg_export';
+import { BLEND_MODE_MAP, buildSVGFromData } from './svg_export';
+import type { NodeStyle, SceneNode } from './types';
 import { StrokeAlignment } from './types';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -77,7 +77,8 @@ function queryAllTags(doc: Document, tag: string): NodeListOf<Element> {
 describe('SVG Export — Basic Shapes', () => {
     it('exports a rect with correct dimensions', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 200, height: 100 } },
@@ -100,7 +101,8 @@ describe('SVG Export — Basic Shapes', () => {
 
     it('exports an ellipse', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Ellipse: { radius_x: 50, radius_y: 30 } },
@@ -121,18 +123,21 @@ describe('SVG Export — Basic Shapes', () => {
 
     it('exports a path with cubic beziers', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: {
                         Path: {
-                            subpaths: [{
-                                points: [
-                                    { x: 0, y: 0, cp1: [0, 0], cp2: [50, 0] },
-                                    { x: 100, y: 100, cp1: [50, 100], cp2: [100, 100] },
-                                ],
-                                closed: false,
-                            }],
+                            subpaths: [
+                                {
+                                    points: [
+                                        { x: 0, y: 0, cp1: [0, 0], cp2: [50, 0] },
+                                        { x: 100, y: 100, cp1: [50, 100], cp2: [100, 100] },
+                                    ],
+                                    closed: false,
+                                },
+                            ],
                         },
                     },
                 }),
@@ -153,10 +158,19 @@ describe('SVG Export — Basic Shapes', () => {
 
     it('exports text with escaped content', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
-                    geometry: { Text: { content: 'Hello <World> & "Friends"', font_size: 24, font_family: 'sans-serif', text_align: 0, line_height: 1.2 } },
+                    geometry: {
+                        Text: {
+                            content: 'Hello <World> & "Friends"',
+                            font_size: 24,
+                            font_family: 'sans-serif',
+                            text_align: 0,
+                            line_height: 1.2,
+                        },
+                    },
                 }),
             },
             rootNodeIds: [1],
@@ -180,16 +194,22 @@ describe('SVG Export — Basic Shapes', () => {
 describe('SVG Export — Masks', () => {
     it('a group with an is_mask child exports a <mask> def and a masked <g>', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({ node_type: 'Group', children: [2, 3] }),
                 // mask (bottom child) — an ellipse
-                2: makeNode({ node_type: 'Shape', is_mask: true,
-                    geometry: { Ellipse: { radius_x: 60, radius_y: 60 } } }),
+                2: makeNode({
+                    node_type: 'Shape',
+                    is_mask: true,
+                    geometry: { Ellipse: { radius_x: 60, radius_y: 60 } },
+                }),
                 // content (above) — a red rect
-                3: makeNode({ node_type: 'Shape',
+                3: makeNode({
+                    node_type: 'Shape',
                     geometry: { Rect: { width: 200, height: 200 } },
-                    style: defaultStyle({ fill: { r: 1, g: 0, b: 0, a: 1 } }) }),
+                    style: defaultStyle({ fill: { r: 1, g: 0, b: 0, a: 1 } }),
+                }),
             },
             rootNodeIds: [1],
             localTransforms: { 1: IDENTITY, 2: IDENTITY, 3: IDENTITY },
@@ -207,7 +227,8 @@ describe('SVG Export — Masks', () => {
         // The content is wrapped in a <g mask="url(#...)">.
         const maskId = mask!.getAttribute('id')!;
         const maskedG = Array.from(doc.querySelectorAll('g')).find(
-            g => g.getAttribute('mask') === `url(#${maskId})`);
+            (g) => g.getAttribute('mask') === `url(#${maskId})`,
+        );
         expect(maskedG, 'content wrapped in a masked group').toBeTruthy();
         expect(maskedG!.querySelector('rect'), 'content rect inside masked group').toBeTruthy();
         // The mask shape must NOT also be painted as normal content.
@@ -216,14 +237,20 @@ describe('SVG Export — Masks', () => {
 
     it('masks are group-scoped: a root-level is_mask flag exports plainly', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 // roots: [flagged node (bottom), content (above)] — no group, so
                 // the flag is inert and both shapes export as normal content.
-                1: makeNode({ node_type: 'Shape', is_mask: true,
-                    geometry: { Ellipse: { radius_x: 50, radius_y: 50 } } }),
-                2: makeNode({ node_type: 'Shape',
-                    geometry: { Rect: { width: 300, height: 300 } } }),
+                1: makeNode({
+                    node_type: 'Shape',
+                    is_mask: true,
+                    geometry: { Ellipse: { radius_x: 50, radius_y: 50 } },
+                }),
+                2: makeNode({
+                    node_type: 'Shape',
+                    geometry: { Rect: { width: 300, height: 300 } },
+                }),
             },
             rootNodeIds: [1, 2],
             localTransforms: { 1: IDENTITY, 2: IDENTITY },
@@ -236,11 +263,16 @@ describe('SVG Export — Masks', () => {
 
     it('a pattern-filled node exports a <pattern> with an <image> tile', () => {
         const input: SVGExportInput = {
-            docWidth: 400, docHeight: 400,
+            docWidth: 400,
+            docHeight: 400,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 100 } },
-                    style: defaultStyle({ fills: [{ image_id: 7, width: 20, height: 20, transform: [1, 0, 0, 1, 3, 4] }] as never }),
+                    style: defaultStyle({
+                        fills: [
+                            { image_id: 7, width: 20, height: 20, transform: [1, 0, 0, 1, 3, 4] },
+                        ] as never,
+                    }),
                 }),
             },
             rootNodeIds: [1],
@@ -252,7 +284,9 @@ describe('SVG Export — Masks', () => {
         expect(pat, 'a <pattern> def is emitted').toBeTruthy();
         expect(pat!.getAttribute('width')).toBe('20');
         expect(pat!.getAttribute('patternUnits')).toBe('userSpaceOnUse');
-        expect(pat!.getAttribute('patterntransform') || pat!.getAttribute('patternTransform')).toContain('matrix(1 0 0 1 3 4)');
+        expect(
+            pat!.getAttribute('patterntransform') || pat!.getAttribute('patternTransform'),
+        ).toContain('matrix(1 0 0 1 3 4)');
         const image = pat!.querySelector('image');
         expect(image, 'tile <image> inside the pattern').toBeTruthy();
         expect(image!.getAttribute('href')).toBe('data:image/png;base64,AAAA');
@@ -264,16 +298,28 @@ describe('SVG Export — Masks', () => {
 
     it('exports spreadMethod and a radial focal point', () => {
         const input: SVGExportInput = {
-            docWidth: 400, docHeight: 400,
+            docWidth: 400,
+            docHeight: 400,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 100 } },
-                    style: defaultStyle({ fills: [{
-                        gradient_type: 'Radial',
-                        stops: [{ offset: 0, color: { r: 1, g: 1, b: 1, a: 1 } }, { offset: 1, color: { r: 0, g: 0, b: 0, a: 1 } }],
-                        start_x: 50, start_y: 50, end_x: 90, end_y: 50,
-                        spread: 1, focal: { x: 30, y: 20, r: 0 },
-                    }] as never }),
+                    style: defaultStyle({
+                        fills: [
+                            {
+                                gradient_type: 'Radial',
+                                stops: [
+                                    { offset: 0, color: { r: 1, g: 1, b: 1, a: 1 } },
+                                    { offset: 1, color: { r: 0, g: 0, b: 0, a: 1 } },
+                                ],
+                                start_x: 50,
+                                start_y: 50,
+                                end_x: 90,
+                                end_y: 50,
+                                spread: 1,
+                                focal: { x: 30, y: 20, r: 0 },
+                            },
+                        ] as never,
+                    }),
                 }),
             },
             rootNodeIds: [1],
@@ -289,12 +335,22 @@ describe('SVG Export — Masks', () => {
 
     it('a node with a drop-shadow effect exports a <filter> with feDropShadow', () => {
         const input: SVGExportInput = {
-            docWidth: 400, docHeight: 400,
+            docWidth: 400,
+            docHeight: 400,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 100 } },
                     style: defaultStyle({
-                        effects: [{ DropShadow: { dx: 5, dy: 6, blur: 4, color: { r: 0, g: 0, b: 0, a: 0.5 } } }],
+                        effects: [
+                            {
+                                DropShadow: {
+                                    dx: 5,
+                                    dy: 6,
+                                    blur: 4,
+                                    color: { r: 0, g: 0, b: 0, a: 0.5 },
+                                },
+                            },
+                        ],
                     }),
                 }),
             },
@@ -311,14 +367,20 @@ describe('SVG Export — Masks', () => {
         // A leaf shape carries the filter on the shape element itself (so the
         // importer, which reads `filter` off leaf shapes, round-trips it).
         const fid = filter!.getAttribute('id')!;
-        const ref = Array.from(doc.querySelectorAll('rect')).find(x => x.getAttribute('filter') === `url(#${fid})`);
+        const ref = Array.from(doc.querySelectorAll('rect')).find(
+            (x) => x.getAttribute('filter') === `url(#${fid})`,
+        );
         expect(ref, 'leaf shape references the filter').toBeTruthy();
     });
 
     it('a node with a color-matrix effect exports feColorMatrix', () => {
-        const gray = [0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0, 0, 0, 1, 0];
+        const gray = [
+            0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0,
+            0, 0, 0, 0, 1, 0,
+        ];
         const input: SVGExportInput = {
-            docWidth: 400, docHeight: 400,
+            docWidth: 400,
+            docHeight: 400,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 100 } },
@@ -337,7 +399,8 @@ describe('SVG Export — Masks', () => {
 
     it('a node with a blur effect exports feGaussianBlur', () => {
         const input: SVGExportInput = {
-            docWidth: 400, docHeight: 400,
+            docWidth: 400,
+            docHeight: 400,
             nodes: {
                 1: makeNode({
                     geometry: { Ellipse: { radius_x: 40, radius_y: 40 } },
@@ -355,14 +418,20 @@ describe('SVG Export — Masks', () => {
 
     it('a mask with no content above it renders normally (not wrapped)', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({ node_type: 'Group', children: [2, 3] }),
-                2: makeNode({ node_type: 'Shape',
-                    geometry: { Rect: { width: 100, height: 100 } } }),
+                2: makeNode({
+                    node_type: 'Shape',
+                    geometry: { Rect: { width: 100, height: 100 } },
+                }),
                 // mask is the TOP child → nothing above to mask
-                3: makeNode({ node_type: 'Shape', is_mask: true,
-                    geometry: { Ellipse: { radius_x: 40, radius_y: 40 } } }),
+                3: makeNode({
+                    node_type: 'Shape',
+                    is_mask: true,
+                    geometry: { Ellipse: { radius_x: 40, radius_y: 40 } },
+                }),
             },
             rootNodeIds: [1],
             localTransforms: { 1: IDENTITY, 2: IDENTITY, 3: IDENTITY },
@@ -382,7 +451,8 @@ describe('SVG Export — Masks', () => {
 describe('SVG Export — Corner Radius', () => {
     it('exports rx/ry on rect when corner_radius > 0', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 80 } },
@@ -403,7 +473,8 @@ describe('SVG Export — Corner Radius', () => {
 
     it('omits rx/ry when corner_radius is 0', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 80 } },
@@ -428,7 +499,8 @@ describe('SVG Export — Corner Radius', () => {
 describe('SVG Export — Dash Patterns', () => {
     it('exports stroke-dasharray and stroke-dashoffset', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -453,7 +525,8 @@ describe('SVG Export — Dash Patterns', () => {
 
     it('omits dash attributes when dash_array is empty', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -477,7 +550,8 @@ describe('SVG Export — Dash Patterns', () => {
 describe('SVG Export — Stroke Properties', () => {
     it('exports stroke-linecap and stroke-linejoin', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -502,16 +576,25 @@ describe('SVG Export — Stroke Properties', () => {
 
     it('exports non-default miter limit', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
-                    style: defaultStyle({ strokes: [{
-                        paint: { r: 0, g: 0, b: 0, a: 1 },
-                        width: 1, cap: 0, join: 0,
-                        dash_array: [], dash_offset: 0,
-                        miter_limit: 8, alignment: StrokeAlignment.Center,
-                    }] }),
+                    style: defaultStyle({
+                        strokes: [
+                            {
+                                paint: { r: 0, g: 0, b: 0, a: 1 },
+                                width: 1,
+                                cap: 0,
+                                join: 0,
+                                dash_array: [],
+                                dash_offset: 0,
+                                miter_limit: 8,
+                                alignment: StrokeAlignment.Center,
+                            },
+                        ],
+                    }),
                 }),
             },
             rootNodeIds: [1],
@@ -527,7 +610,8 @@ describe('SVG Export — Stroke Properties', () => {
 
     it('omits miter limit when it is the default (4)', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -551,7 +635,8 @@ describe('SVG Export — Stroke Properties', () => {
 describe('SVG Export — Fill Rule & Opacity', () => {
     it('exports fill-rule="evenodd" when set', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -571,7 +656,8 @@ describe('SVG Export — Fill Rule & Opacity', () => {
 
     it('omits fill-rule when nonzero (default)', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -591,7 +677,8 @@ describe('SVG Export — Fill Rule & Opacity', () => {
 
     it('exports fill-opacity when not 1', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -611,7 +698,8 @@ describe('SVG Export — Fill Rule & Opacity', () => {
 
     it('exports element opacity', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -635,7 +723,8 @@ describe('SVG Export — Fill Rule & Opacity', () => {
 describe('SVG Export — Visibility', () => {
     it('emits display="none" for invisible nodes', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -664,7 +753,8 @@ describe('SVG Export — Visibility', () => {
 
     it('visible nodes do not have display="none"', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -685,7 +775,8 @@ describe('SVG Export — Visibility', () => {
 describe('SVG Export — Blend Mode', () => {
     it('exports mix-blend-mode for non-normal blend mode on shapes', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -702,7 +793,8 @@ describe('SVG Export — Blend Mode', () => {
 
     it('omits mix-blend-mode for normal blend mode', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 50 } },
@@ -719,7 +811,8 @@ describe('SVG Export — Blend Mode', () => {
 
     it('exports mix-blend-mode on group nodes', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     node_type: 'Group',
@@ -753,7 +846,8 @@ describe('SVG Export — Transforms', () => {
         // Column-major: translate(100, 200) = [1,0,0, 0,1,0, 100,200,1]
         const translateMat = [1, 0, 0, 0, 1, 0, 100, 200, 1];
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 50, height: 50 } },
@@ -783,7 +877,8 @@ describe('SVG Export — Transforms', () => {
         const rotMat = [c, s, 0, -s, c, 0, 0, 0, 1];
 
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 50, height: 50 } },
@@ -799,14 +894,15 @@ describe('SVG Export — Transforms', () => {
 
     it('uses identity when no transform provided', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 50, height: 50 } },
                 }),
             },
             rootNodeIds: [1],
-            localTransforms: {},  // No transform provided
+            localTransforms: {}, // No transform provided
         };
 
         const svg = buildSVGFromData(input);
@@ -820,7 +916,8 @@ describe('SVG Export — Transforms', () => {
 describe('SVG Export — Nested Groups', () => {
     it('exports groups with children nested correctly', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     node_type: 'Group',
@@ -855,7 +952,8 @@ describe('SVG Export — Nested Groups', () => {
 
     it('exports group opacity', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     node_type: 'Group',
@@ -888,7 +986,8 @@ describe('SVG Export — Nested Groups', () => {
 
     it('nested groups with transforms produce hierarchical SVG', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     node_type: 'Group',
@@ -906,8 +1005,8 @@ describe('SVG Export — Nested Groups', () => {
             },
             rootNodeIds: [1],
             localTransforms: {
-                1: [1, 0, 0, 0, 1, 0, 10, 0, 1],  // translate(10, 0)
-                2: [1, 0, 0, 0, 1, 0, 0, 20, 1],   // translate(0, 20)
+                1: [1, 0, 0, 0, 1, 0, 10, 0, 1], // translate(10, 0)
+                2: [1, 0, 0, 0, 1, 0, 0, 20, 1], // translate(0, 20)
                 3: IDENTITY,
             },
         };
@@ -927,14 +1026,22 @@ describe('SVG Export — Nested Groups', () => {
 
 describe('SVG Export — Face Fills', () => {
     it('exports filled faces as path elements after scene content', () => {
-        const faces: FilledFace[] = [{
-            id: 42,
-            boundary: [[0, 0], [100, 0], [100, 100], [0, 100]],
-            fill: { r: 1, g: 0, b: 0, a: 0.8 },
-        }];
+        const faces: FilledFace[] = [
+            {
+                id: 42,
+                boundary: [
+                    [0, 0],
+                    [100, 0],
+                    [100, 100],
+                    [0, 100],
+                ],
+                fill: { r: 1, g: 0, b: 0, a: 0.8 },
+            },
+        ];
 
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 200, height: 200 } },
@@ -965,7 +1072,8 @@ describe('SVG Export — Face Fills', () => {
 
     it('no face paths when filledFaces is undefined', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 200, height: 200 } },
@@ -985,7 +1093,8 @@ describe('SVG Export — Face Fills', () => {
 describe('SVG Export — Document Structure', () => {
     it('produces valid SVG with correct root attributes', () => {
         const input: SVGExportInput = {
-            docWidth: 1920, docHeight: 1080,
+            docWidth: 1920,
+            docHeight: 1080,
             nodes: {},
             rootNodeIds: [],
             localTransforms: {},
@@ -1004,7 +1113,8 @@ describe('SVG Export — Document Structure', () => {
 
     it('inserts gradient defs when gradients are used', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 100, height: 100 } },
@@ -1015,8 +1125,10 @@ describe('SVG Export — Document Structure', () => {
                                 { offset: 0, color: { r: 1, g: 0, b: 0, a: 1 } },
                                 { offset: 1, color: { r: 0, g: 0, b: 1, a: 1 } },
                             ],
-                            start_x: 0, start_y: 0,
-                            end_x: 100, end_y: 0,
+                            start_x: 0,
+                            start_y: 0,
+                            end_x: 100,
+                            end_y: 0,
                         },
                     }),
                 }),
@@ -1060,7 +1172,8 @@ describe('SVG Round-Trip — Export then Parse', () => {
         });
 
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 150, height: 100 } },
@@ -1112,7 +1225,8 @@ describe('SVG Round-Trip — Export then Parse', () => {
 
     it('round-trips nested groups with transforms', () => {
         const input: SVGExportInput = {
-            docWidth: 400, docHeight: 400,
+            docWidth: 400,
+            docHeight: 400,
             nodes: {
                 1: makeNode({
                     node_type: 'Group',
@@ -1134,8 +1248,8 @@ describe('SVG Round-Trip — Export then Parse', () => {
             rootNodeIds: [1],
             localTransforms: {
                 1: [1, 0, 0, 0, 1, 0, 100, 100, 1],
-                2: [2, 0, 0, 0, 2, 0, 0, 0, 1],  // scale(2)
-                3: [1, 0, 0, 0, 1, 0, 50, 0, 1],  // translate(50, 0)
+                2: [2, 0, 0, 0, 2, 0, 0, 0, 1], // scale(2)
+                3: [1, 0, 0, 0, 1, 0, 50, 0, 1], // translate(50, 0)
                 4: IDENTITY,
             },
         };
@@ -1154,10 +1268,19 @@ describe('SVG Round-Trip — Export then Parse', () => {
 
     it('round-trips text node', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
-                    geometry: { Text: { content: 'Héllo Wörld', font_size: 32, font_family: 'sans-serif', text_align: 0, line_height: 1.2 } },
+                    geometry: {
+                        Text: {
+                            content: 'Héllo Wörld',
+                            font_size: 32,
+                            font_family: 'sans-serif',
+                            text_align: 0,
+                            line_height: 1.2,
+                        },
+                    },
                     style: defaultStyle({ fill: { r: 0, g: 0, b: 0, a: 1 } }),
                 }),
             },
@@ -1176,7 +1299,8 @@ describe('SVG Round-Trip — Export then Parse', () => {
 
     it('round-trips dashes + rounded rects', () => {
         const input: SVGExportInput = {
-            docWidth: 600, docHeight: 400,
+            docWidth: 600,
+            docHeight: 400,
             nodes: {
                 1: makeNode({
                     geometry: { Rect: { width: 200, height: 120 } },
@@ -1207,19 +1331,22 @@ describe('SVG Round-Trip — Export then Parse', () => {
 
     it('round-trips path with closed subpath', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({
                     geometry: {
                         Path: {
-                            subpaths: [{
-                                points: [
-                                    { x: 0, y: 0, cp1: [0, 0], cp2: [0, 0] },
-                                    { x: 100, y: 0, cp1: [100, 0], cp2: [100, 0] },
-                                    { x: 50, y: 87, cp1: [50, 87], cp2: [50, 87] },
-                                ],
-                                closed: true,
-                            }],
+                            subpaths: [
+                                {
+                                    points: [
+                                        { x: 0, y: 0, cp1: [0, 0], cp2: [0, 0] },
+                                        { x: 100, y: 0, cp1: [100, 0], cp2: [100, 0] },
+                                        { x: 50, y: 87, cp1: [50, 87], cp2: [50, 87] },
+                                    ],
+                                    closed: true,
+                                },
+                            ],
                         },
                     },
                 }),
@@ -1243,20 +1370,23 @@ describe('SVG Round-Trip — Export then Parse', () => {
 describe('SVG Round-Trip — Scene with Multiple Shapes', () => {
     it('exports all root-level shapes in order', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({ geometry: { Rect: { width: 100, height: 50 } } }),
                 2: makeNode({ geometry: { Ellipse: { radius_x: 40, radius_y: 40 } } }),
                 3: makeNode({
                     geometry: {
                         Path: {
-                            subpaths: [{
-                                points: [
-                                    { x: 0, y: 0, cp1: [0, 0], cp2: [0, 0] },
-                                    { x: 50, y: 50, cp1: [50, 50], cp2: [50, 50] },
-                                ],
-                                closed: false,
-                            }],
+                            subpaths: [
+                                {
+                                    points: [
+                                        { x: 0, y: 0, cp1: [0, 0], cp2: [0, 0] },
+                                        { x: 50, y: 50, cp1: [50, 50], cp2: [50, 50] },
+                                    ],
+                                    closed: false,
+                                },
+                            ],
                         },
                     },
                 }),
@@ -1280,7 +1410,8 @@ describe('SVG Round-Trip — Scene with Multiple Shapes', () => {
 
     it('mixes visible and invisible shapes', () => {
         const input: SVGExportInput = {
-            docWidth: 800, docHeight: 600,
+            docWidth: 800,
+            docHeight: 600,
             nodes: {
                 1: makeNode({ geometry: { Rect: { width: 100, height: 50 } }, visible: true }),
                 2: makeNode({ geometry: { Rect: { width: 80, height: 40 } }, visible: false }),
@@ -1317,7 +1448,11 @@ describe('SVG Export — viewBox and background', () => {
 
     it('defaults the viewBox to the document size', () => {
         const svg = buildSVGFromData({
-            docWidth: 800, docHeight: 600, nodes: baseNode(), rootNodeIds: [1], localTransforms: { 1: IDENTITY },
+            docWidth: 800,
+            docHeight: 600,
+            nodes: baseNode(),
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY },
         });
         expect(svg).toContain('viewBox="0 0 800 600"');
         expect(svg).toContain('width="800"');
@@ -1326,7 +1461,11 @@ describe('SVG Export — viewBox and background', () => {
 
     it('uses an explicit artboard viewBox with a non-zero origin', () => {
         const svg = buildSVGFromData({
-            docWidth: 800, docHeight: 600, nodes: baseNode(), rootNodeIds: [1], localTransforms: { 1: IDENTITY },
+            docWidth: 800,
+            docHeight: 600,
+            nodes: baseNode(),
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY },
             viewBox: { x: 1200, y: 50, w: 400, h: 300 },
         });
         expect(svg).toContain('viewBox="1200 50 400 300"');
@@ -1336,7 +1475,11 @@ describe('SVG Export — viewBox and background', () => {
 
     it('emits a background rect covering the viewBox when given', () => {
         const svg = buildSVGFromData({
-            docWidth: 400, docHeight: 300, nodes: baseNode(), rootNodeIds: [1], localTransforms: { 1: IDENTITY },
+            docWidth: 400,
+            docHeight: 300,
+            nodes: baseNode(),
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY },
             viewBox: { x: 0, y: 0, w: 400, h: 300 },
             background: { r: 1, g: 1, b: 1, a: 1 },
         });
@@ -1351,7 +1494,11 @@ describe('SVG Export — viewBox and background', () => {
 
     it('omits the background rect when none is given', () => {
         const svg = buildSVGFromData({
-            docWidth: 400, docHeight: 300, nodes: baseNode(), rootNodeIds: [1], localTransforms: { 1: IDENTITY },
+            docWidth: 400,
+            docHeight: 300,
+            nodes: baseNode(),
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY },
         });
         const doc = parseSVG(svg);
         // Only the content rect (100×100), no full-size background.
@@ -1366,14 +1513,26 @@ describe('SVG Export — viewBox and background', () => {
 describe('SVG Export — Live Paint compositing', () => {
     /** A group (id 1) with one rect member (id 2), flagged as Live Paint. */
     const lpScene = (): SVGExportInput => ({
-        docWidth: 400, docHeight: 400,
+        docWidth: 400,
+        docHeight: 400,
         nodes: {
             1: makeNode({ node_type: 'Group', children: [2] }),
             2: makeNode({
                 geometry: { Rect: { width: 100, height: 100 } },
                 style: defaultStyle({
                     fills: [{ r: 1, g: 0, b: 0, a: 1 }],
-                    strokes: [{ paint: { r: 0, g: 0, b: 0, a: 1 }, width: 4, cap: 0, join: 0, dash_array: [], dash_offset: 0, miter_limit: 4 }],
+                    strokes: [
+                        {
+                            paint: { r: 0, g: 0, b: 0, a: 1 },
+                            width: 4,
+                            cap: 0,
+                            join: 0,
+                            dash_array: [],
+                            dash_offset: 0,
+                            miter_limit: 4,
+                            alignment: StrokeAlignment.Center,
+                        },
+                    ],
                 }),
             }),
         },
@@ -1385,7 +1544,18 @@ describe('SVG Export — Live Paint compositing', () => {
         const input = lpScene();
         input.livePaint = {
             groups: [1],
-            faces: [{ group: 1, boundary: [[0, 0], [100, 0], [100, 100], [0, 100]], fill: { r: 0, g: 1, b: 0, a: 1 } }],
+            faces: [
+                {
+                    group: 1,
+                    boundary: [
+                        [0, 0],
+                        [100, 0],
+                        [100, 100],
+                        [0, 100],
+                    ],
+                    fill: { r: 0, g: 1, b: 0, a: 1 },
+                },
+            ],
             edges: [],
         };
         const svg = buildSVGFromData(input);
@@ -1408,50 +1578,79 @@ describe('SVG Export — Live Paint compositing', () => {
         input.livePaint = {
             groups: [1],
             faces: [],
-            edges: [{
-                group: 1, width: 6, color: { r: 0, g: 0, b: 1, a: 1 },
-                outline: [
-                    { x: 0, y: 0, cp1: [0, 0], cp2: [0, 0] },
-                    { x: 100, y: 0, cp1: [100, 0], cp2: [100, 0] },
-                ],
-            }],
+            edges: [
+                {
+                    group: 1,
+                    width: 6,
+                    color: { r: 0, g: 0, b: 1, a: 1 },
+                    outline: [
+                        { x: 0, y: 0, cp1: [0, 0], cp2: [0, 0] },
+                        { x: 100, y: 0, cp1: [100, 0], cp2: [100, 0] },
+                    ],
+                },
+            ],
         };
         const svg = buildSVGFromData(input);
         const doc = parseSVG(svg);
-        const edge = Array.from(queryAllTags(doc, 'path')).find(p => p.getAttribute('stroke') === '#0000ff')!;
+        const edge = Array.from(queryAllTags(doc, 'path')).find(
+            (p) => p.getAttribute('stroke') === '#0000ff',
+        )!;
         expect(edge).toBeTruthy();
-        expect(edge.getAttribute('fill')).toBe('none');       // open stroke, not filled
+        expect(edge.getAttribute('fill')).toBe('none'); // open stroke, not filled
         expect(edge.getAttribute('stroke-width')).toBe('6');
-        expect(edge.getAttribute('d')).not.toContain('Z');    // open path
+        expect(edge.getAttribute('d')).not.toContain('Z'); // open path
     });
 
     it('renders two Live Paint groups independently', () => {
         const input: SVGExportInput = {
-            docWidth: 400, docHeight: 400,
+            docWidth: 400,
+            docHeight: 400,
             nodes: {
                 1: makeNode({ node_type: 'Group', children: [2] }),
-                2: makeNode({ geometry: { Rect: { width: 100, height: 100 } }, style: defaultStyle({ fills: [{ r: 1, g: 0, b: 0, a: 1 }] }) }),
+                2: makeNode({
+                    geometry: { Rect: { width: 100, height: 100 } },
+                    style: defaultStyle({ fills: [{ r: 1, g: 0, b: 0, a: 1 }] }),
+                }),
                 3: makeNode({ node_type: 'Group', children: [4] }),
-                4: makeNode({ geometry: { Rect: { width: 100, height: 100 } }, style: defaultStyle({ fills: [{ r: 0, g: 0, b: 1, a: 1 }] }) }),
+                4: makeNode({
+                    geometry: { Rect: { width: 100, height: 100 } },
+                    style: defaultStyle({ fills: [{ r: 0, g: 0, b: 1, a: 1 }] }),
+                }),
             },
             rootNodeIds: [1, 3],
             localTransforms: { 1: IDENTITY, 2: IDENTITY, 3: IDENTITY, 4: IDENTITY },
             livePaint: {
                 groups: [1, 3],
                 faces: [
-                    { group: 1, boundary: [[0, 0], [100, 0], [100, 100]], fill: { r: 0, g: 1, b: 0, a: 1 } },
-                    { group: 3, boundary: [[0, 0], [100, 0], [100, 100]], fill: { r: 1, g: 1, b: 0, a: 1 } },
+                    {
+                        group: 1,
+                        boundary: [
+                            [0, 0],
+                            [100, 0],
+                            [100, 100],
+                        ],
+                        fill: { r: 0, g: 1, b: 0, a: 1 },
+                    },
+                    {
+                        group: 3,
+                        boundary: [
+                            [0, 0],
+                            [100, 0],
+                            [100, 100],
+                        ],
+                        fill: { r: 1, g: 1, b: 0, a: 1 },
+                    },
                 ],
                 edges: [],
             },
         };
         const svg = buildSVGFromData(input);
         const doc = parseSVG(svg);
-        const fills = Array.from(queryAllTags(doc, 'path')).map(p => p.getAttribute('fill'));
+        const fills = Array.from(queryAllTags(doc, 'path')).map((p) => p.getAttribute('fill'));
         expect(fills).toContain('#00ff00'); // group 1's face
         expect(fills).toContain('#ffff00'); // group 3's face
         // Both member rects have suppressed fills.
-        const rectFills = Array.from(queryAllTags(doc, 'rect')).map(r => r.getAttribute('fill'));
-        expect(rectFills.every(f => f === 'none')).toBe(true);
+        const rectFills = Array.from(queryAllTags(doc, 'rect')).map((r) => r.getAttribute('fill'));
+        expect(rectFills.every((f) => f === 'none')).toBe(true);
     });
 });
