@@ -44,7 +44,7 @@ async function bootstrap() {
     const tabStripEl = document.getElementById('tab-strip') as HTMLElement;
 
     // Save button reflects dirty state: "Save" (emphasized) when there are
-    // unsaved changes, "Saved" (muted) otherwise. Clicking saves the .vec.
+    // unsaved changes, "Saved" (muted) otherwise. Clicking saves the .dataki.
     const saveBtn = document.getElementById('save-btn') as HTMLButtonElement;
     const saveLabel = saveBtn.querySelector('.save-label') as HTMLElement;
     const updateSaveButton = () => {
@@ -159,7 +159,7 @@ async function bootstrap() {
         };
     }
 
-    console.log('Antigravity Vector Engine Initialized (Rust Core / CanvasKit)');
+    console.log('Dadaki Vector Engine Initialized (Rust Core / CanvasKit)');
 }
 
 bootstrap().catch(err => {

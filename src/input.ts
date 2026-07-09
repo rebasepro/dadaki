@@ -255,7 +255,7 @@ export class InputManager {
         window.addEventListener('keyup', withRender((e: KeyboardEvent) => this.onKeyUp(e)));
         window.addEventListener('wheel', withRender((e: WheelEvent) => this.onWheel(e)), { passive: false, capture: true });
 
-        // Import .svg / .vec files by dropping them onto the canvas area
+        // Import .svg / .dataki / .vec files by dropping them onto the canvas area
         const dropTarget = document.getElementById('canvas-container') ?? this.canvas;
         dropTarget.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -270,7 +270,7 @@ export class InputManager {
     }
 
     /** Import dropped files: .svg content is centered at the drop point and
-     *  selected; .vec replaces the document (undoable — a history snapshot is
+     *  selected; .dataki and .vec replace the document (undoable — a history snapshot is
      *  taken first). */
     async onFileDrop(e: DragEvent) {
         e.preventDefault();
@@ -301,7 +301,7 @@ export class InputManager {
                     this.scene.engine!.clear_selection();
                     for (const id of newRoots) this.scene.selectNode(id, true);
                 });
-            } else if (name.endsWith('.vec')) {
+            } else if (name.endsWith('.dataki') || name.endsWith('.vec')) {
                 const bytes = new Uint8Array(await file.arrayBuffer());
                 this.scene.saveMoveHistory(); // snapshot current doc so the drop is undoable
                 this.scene.engine.deserialize_proto(bytes);
@@ -1115,6 +1115,12 @@ export class InputManager {
             if (!this.panDrag) {
                 this.canvas.style.cursor = 'default';
             }
+        }
+        // Releasing ⌘/Ctrl re-enables snapping: bring the hover preview back
+        // immediately, without waiting for a mouse move.
+        if (e.key === 'Meta' || e.key === 'Control') {
+            this.metaKey = e.metaKey; this.ctrlKey = e.ctrlKey;
+            this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
         }
     }
 

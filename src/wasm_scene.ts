@@ -64,7 +64,7 @@ export class WasmScene {
         this.autosave = null;
         // The fresh engine restarts image-id numbering, so previously-decoded
         // images/pattern shaders in the renderer would be returned for the new
-        // document's colliding ids. Drop them (same reason as the .vec drop path).
+        // document's colliding ids. Drop them (same reason as the .dataki drop path).
         this.renderer?.clearImageCache();
         this.invalidateCache(false);
     }

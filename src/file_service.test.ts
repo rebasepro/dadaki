@@ -35,15 +35,15 @@ beforeEach(() => {
 describe('FileService.saveActive', () => {
     it('saves in place with the existing handle and clears dirty', async () => {
         const doc = new Document('drawing');
-        doc.fileHandle = fakeHandle('drawing.vec');
+        doc.fileHandle = fakeHandle('drawing.dataki');
         doc.markMutated();
 
-        const spy = vi.spyOn(FileIO, 'saveVec').mockResolvedValue({ handle: doc.fileHandle });
+        const spy = vi.spyOn(FileIO, 'saveDataki').mockResolvedValue({ handle: doc.fileHandle });
         const fs = new FileService(makeScene(), makeUI(), doc);
 
         await fs.saveActive();
 
-        expect(spy).toHaveBeenCalledWith(expect.anything(), doc.fileHandle, 'drawing.vec');
+        expect(spy).toHaveBeenCalledWith(expect.anything(), doc.fileHandle, 'drawing.dataki');
         expect(doc.dirty).toBe(false);
     });
 
@@ -52,7 +52,7 @@ describe('FileService.saveActive', () => {
         doc.markMutated();
         expect(doc.fileHandle).toBeNull();
 
-        vi.spyOn(FileIO, 'saveVec').mockResolvedValue({ handle: fakeHandle('logo.vec') });
+        vi.spyOn(FileIO, 'saveDataki').mockResolvedValue({ handle: fakeHandle('logo.dataki') });
         const fs = new FileService(makeScene(), makeUI(), doc);
 
         await fs.saveActive();
@@ -66,7 +66,7 @@ describe('FileService.saveActive', () => {
         const doc = new Document('drawing');
         doc.markMutated();
 
-        vi.spyOn(FileIO, 'saveVec').mockResolvedValue(null); // abort
+        vi.spyOn(FileIO, 'saveDataki').mockResolvedValue(null); // abort
         const fs = new FileService(makeScene(), makeUI(), doc);
 
         await fs.saveActive();
@@ -78,7 +78,7 @@ describe('FileService.saveActive', () => {
         const doc = new Document('Untitled');
         doc.markMutated();
 
-        vi.spyOn(FileIO, 'saveVec').mockResolvedValue({ handle: null });
+        vi.spyOn(FileIO, 'saveDataki').mockResolvedValue({ handle: null });
         const fs = new FileService(makeScene(), makeUI(), doc);
 
         await fs.saveActive();
@@ -92,10 +92,10 @@ describe('FileService.saveActive', () => {
 describe('FileService.saveActiveAs', () => {
     it('leaves dirty untouched on abort', async () => {
         const doc = new Document('drawing');
-        doc.fileHandle = fakeHandle('drawing.vec');
+        doc.fileHandle = fakeHandle('drawing.dataki');
         doc.markMutated();
 
-        vi.spyOn(FileIO, 'saveVecAs').mockResolvedValue(null);
+        vi.spyOn(FileIO, 'saveDatakiAs').mockResolvedValue(null);
         const fs = new FileService(makeScene(), makeUI(), doc);
 
         await fs.saveActiveAs();
@@ -111,7 +111,7 @@ describe('FileService.openIntoActive', () => {
         const scene = makeScene();
         const ui = makeUI();
 
-        vi.spyOn(FileIO, 'openFile').mockResolvedValue({ handle: fakeHandle('art.vec'), name: 'art.vec' });
+        vi.spyOn(FileIO, 'openFile').mockResolvedValue({ handle: fakeHandle('art.dataki'), name: 'art.dataki' });
         const fs = new FileService(scene, ui, doc);
 
         await fs.openIntoActive();
