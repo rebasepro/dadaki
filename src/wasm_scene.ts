@@ -189,6 +189,37 @@ export class WasmScene {
         }
     }
 
+    /**
+     * Invalidation for transform-only mutations (translate during drag): the
+     * scene changed, but no node's LOCAL geometry or paint did — and every
+     * renderer cache (CanvasKit paths, gradient shaders, effect filters,
+     * pattern shaders) is keyed in local space. Wiping them per pointermove
+     * forces a full rebuild of every path/shader in the scene on the next
+     * frame, which is what makes dragging large scenes stutter. A node inside
+     * a Boolean Group still re-evaluates correctly: the engine marks the group
+     * dirty and recomputeDirtyBooleanGroups() performs the full invalidation
+     * itself when the outline actually changes.
+     */
+    /**
+     * @param changedIds when given, nodes whose transform changed. A moved
+     *   node INSIDE a sprite-cached group invalidates that group's sprite; a
+     *   moved cached root doesn't need to (sprites follow their group's
+     *   transform at draw time).
+     */
+    invalidateCacheTransformOnly(changedIds?: ArrayLike<number>) {
+        this._sceneDataDirty = true;
+        this._cachedSceneData = null;
+        this._cachedArtboards = null;
+        this.changeCounter++;
+        this.onMutate?.();
+        if (changedIds && this.renderer) {
+            for (let i = 0; i < changedIds.length; i++) {
+                this.renderer.invalidateGroupSpriteFor(changedIds[i]);
+            }
+        }
+        this.renderer?.requestRender();
+    }
+
     addRect(x: number, y: number, w: number, h: number): number {
         this.saveHistory();
         const id = this.engine!.add_rect(x, y, w, h);
@@ -338,7 +369,8 @@ export class WasmScene {
 
     moveNode(id: number, dx: number, dy: number) {
         this.engine!.move_node(id, dx, dy);
-        this.invalidateCache();
+        // Translation never changes local geometry/paints — keep renderer caches.
+        this.invalidateCacheTransformOnly([id]);
         // No autosave on every move frame — too expensive. Saved on mouseUp via saveHistoryAndPersist().
     }
 

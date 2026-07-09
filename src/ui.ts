@@ -1,8 +1,9 @@
 import type { CanvasKit } from 'canvaskit-wasm';
+import { adaptiveTileSources } from './adaptive_tiles';
+import { logAppEvent } from './analytics';
 import { createColorSwatch } from './color_picker';
 import type { ContextBar } from './context_bar';
 import { FileIO } from './file_io';
-import { logAppEvent } from './analytics';
 import { GradientEditController, sampleGradientColor } from './gradient_edit';
 import {
     iconCircle,
@@ -364,6 +365,60 @@ export class UIEngine {
         document.getElementById('reveal-selection-btn')?.addEventListener('click', (e) => {
             e.stopPropagation(); // don't toggle the section collapse
             this.revealSelection();
+        });
+
+        this.setupLayersPanelResizer();
+    }
+
+    /**
+     * Make the left Objects panel resizable by dragging its right edge.
+     * The chosen width persists to localStorage so it survives reloads.
+     */
+    private setupLayersPanelResizer() {
+        const STORAGE_KEY = 'layers-panel-width';
+        const MIN_WIDTH = 140;
+        const MAX_WIDTH = 500;
+        const panel = document.getElementById('layers-panel');
+        const handle = document.getElementById('layers-panel-resizer');
+        if (!panel || !handle) return;
+
+        const clamp = (w: number) => Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, w));
+
+        // Restore a previously saved width.
+        const saved = Number(localStorage.getItem(STORAGE_KEY));
+        if (Number.isFinite(saved) && saved > 0) {
+            panel.style.width = `${clamp(saved)}px`;
+        }
+
+        let startX = 0;
+        let startWidth = 0;
+
+        const onMove = (e: PointerEvent) => {
+            const width = clamp(startWidth + (e.clientX - startX));
+            panel.style.width = `${width}px`;
+        };
+
+        const onUp = () => {
+            handle.classList.remove('dragging');
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            window.removeEventListener('pointermove', onMove);
+            window.removeEventListener('pointerup', onUp);
+            localStorage.setItem(
+                STORAGE_KEY,
+                String(Math.round(panel.getBoundingClientRect().width)),
+            );
+        };
+
+        handle.addEventListener('pointerdown', (e: PointerEvent) => {
+            e.preventDefault();
+            startX = e.clientX;
+            startWidth = panel.getBoundingClientRect().width;
+            handle.classList.add('dragging');
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            window.addEventListener('pointermove', onMove);
+            window.addEventListener('pointerup', onUp);
         });
     }
 
@@ -2801,7 +2856,7 @@ export class UIEngine {
             else if (maskRole === 'masked') item.classList.add('layer-masked');
 
             // Indent based on depth
-            const indent = depth * 16;
+            const indent = depth * 8;
 
             // Build layer item content
             let chevronHtml = '';
@@ -4215,6 +4270,17 @@ export class UIEngine {
                     w: bw,
                     h: bh,
                 };
+                // Keep the tile's SVG source so the renderer can re-bake it at
+                // the current zoom — fixed-scale tiles pixelate once the view
+                // zooms past the import bake scale.
+                adaptiveTileSources.set(imageId, {
+                    inner: `<defs>${defsHtml}</defs>${el.outerHTML}`,
+                    x: bx,
+                    y: by,
+                    w: bw,
+                    h: bh,
+                    baseScale: scale,
+                });
             }
         } finally {
             document.body.removeChild(host);
@@ -5351,6 +5417,23 @@ export class UIEngine {
                         } catch {
                             /* noop */
                         }
+                        // A <clipPath> made of a single plain shape becomes a
+                        // geometric clip (mask_type 2): the renderer applies it
+                        // as canvas.clipPath — SVG's actual clip semantics and
+                        // far cheaper than the saveLayer alpha-mask sandwich.
+                        // Multi-shape clips (union) and group/text clips keep
+                        // the alpha-mask emulation.
+                        if (defTag === 'clippath' && maskIds.length === 1) {
+                            const t = this.scene.getNodeType(maskNode);
+                            // 0=Path, 1=Rect, 2=Ellipse
+                            if (t === 0 || t === 1 || t === 2) {
+                                try {
+                                    this.scene.engine!.set_node_mask_type(maskNode, 2);
+                                } catch {
+                                    /* noop */
+                                }
+                            }
+                        }
                         // SVG <mask> defaults to luminance masking unless
                         // mask-type="alpha" is explicitly set. <clipPath> is
                         // always alpha (coverage).
@@ -5709,7 +5792,11 @@ export class UIEngine {
                 ];
                 const subpaths = [{ points, closed: false }];
                 nodeId = this.scene.addPath(JSON.stringify(subpaths));
-                gradientGeo = bakedGradientGeo(subpaths, composedMat, this.scene.getTransform(nodeId));
+                gradientGeo = bakedGradientGeo(
+                    subpaths,
+                    composedMat,
+                    this.scene.getTransform(nodeId),
+                );
             } else if (tag === 'polygon' || tag === 'polyline') {
                 const pointsStr = el.getAttribute('points') || '';
                 const coords = pointsStr

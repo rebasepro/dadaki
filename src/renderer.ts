@@ -3,6 +3,8 @@ import type { Canvas, CanvasKit, Paint, Path, Surface } from 'canvaskit-wasm';
 /** A Live Paint outline point: anchor + incoming/outgoing bézier handles. */
 type OutlinePt = { x: number; y: number; cp1: number[]; cp2: number[] };
 
+import { adaptiveTileSources, maxTileScale, rasterizeAdaptiveTile } from './adaptive_tiles';
+import { invertAffine } from './boolean_ops';
 import { buildFontProvider, isFontLoaded, loadGoogleFontData, onFontLoaded } from './fonts';
 
 /** Helper for efficient zero-copy parsing of the WASM binary render buffer. */
@@ -156,9 +158,23 @@ export class Renderer {
     }
     /** Dedicated SrcIn paint for compositing masked-content layers. */
     private _maskPaint: Paint | null = null;
-    /** Stack of mask_type values (0 = alpha, 1 = luminance) matching the
-     *  CMD_BEGIN_MASK / CMD_END_MASK nesting. */
-    private _maskTypeStack: number[] = [];
+    /** Stack of open mask spans matching CMD_BEGIN_MASK / CMD_END_MASK nesting.
+     *  `mode` is the mask_type (0 = alpha, 1 = luminance, 2 = geometric clip).
+     *  For mode 2, `pendingClip` is true until the mask shape's DRAW_NODE has
+     *  been captured as a canvas clip; `converted` marks a mode-2 span that
+     *  fell back to the alpha saveLayer protocol (mask node wasn't a plain
+     *  shape). For modes 0/1, `pendingLayer` is true until the mask/luma
+     *  layers have been opened — opening is deferred to the mask shape's
+     *  DRAW_NODE record so the layers can be BOUNDED to the mask's geometry
+     *  (`bounds`, local to the surrounding group space) instead of allocating
+     *  full-viewport textures per masked span. */
+    private _maskStack: {
+        mode: number;
+        pendingClip: boolean;
+        pendingLayer: boolean;
+        converted: boolean;
+        bounds: ReturnType<CanvasKit['LTRBRect']> | null;
+    }[] = [];
     /** Dedicated paint with luminance→alpha color filter for luminance masks. */
     private _lumaPaint: Paint | null = null;
     /** True while rendering into an offscreen surface for PNG export. */
@@ -182,6 +198,79 @@ export class Renderer {
         { path: ReturnType<CanvasKit['Path']['prototype']['copy']>; fillRule: number }
     > = new Map();
 
+    // Geometric-clip paths (mask_type 2), already node-transformed, keyed by
+    // node id — building one costs a path copy + transform in wasm, which
+    // shows up at 60fps × several clip spans. Invalidated with _pathCache.
+    private _clipPathCache: Map<number, { path: Path; key: string }> = new Map();
+
+    // ─── Drag-layer cache ───
+    // Re-recording every node's draw commands is CPU-bound (~12µs/node), so
+    // dragging in a large scene can't hit 60fps by caching shaders alone.
+    // While a selection of ROOT nodes is dragged, the static rest of the scene
+    // is snapshotted once into two GPU textures — content below and content
+    // above the moving nodes in z — and each drag frame only blits those and
+    // re-records the moving subtree. Built by beginDragLayerCache(), dropped
+    // on drag end or any full cache invalidation.
+    private _dragLayer: {
+        below: NonNullable<ReturnType<CanvasKit['MakeImageFromEncoded']>> | null;
+        above: NonNullable<ReturnType<CanvasKit['MakeImageFromEncoded']>> | null;
+        zoom: number;
+        panX: number;
+        panY: number;
+        dpr: number;
+        width: number;
+        height: number;
+    } | null = null;
+    /** Ids (moving roots + full subtrees) re-recorded live during a cached drag. */
+    private _dragSubtree: Set<number> | null = null;
+    private _dragMovingRoots: number[] = [];
+    /** Set while rendering the below/above snapshot passes. */
+    private _dragSnapshotPass: 'below' | 'above' | null = null;
+
+    // ─── Group sprite cache ───
+    // Command recording is CPU-bound (~12µs/node), so scenes with many heavy
+    // groups can't be re-recorded every frame at 60fps. Each big ROOT group is
+    // baked once into a GPU texture ("sprite") at the current device scale;
+    // frames then draw one image per group instead of its whole subtree.
+    // Sprites follow their group's transform (delta vs bake time), re-bake
+    // when the zoom settles at a meaningfully different scale, and drop on
+    // any content mutation (full invalidation) or a targeted edit inside the
+    // group. When the needed on-screen resolution exceeds a sprite's texture
+    // cap (deep zoom), the group falls back to direct rendering — few groups
+    // are visible then, so direct is cheap.
+    private _groupSprites: Map<
+        number,
+        {
+            img: NonNullable<ReturnType<CanvasKit['MakeImageFromEncoded']>>;
+            surface: Surface;
+            /** Padded world bounds at bake time. */
+            x: number;
+            y: number;
+            w: number;
+            h: number;
+            bakeTransform: Float32Array;
+            /** Device px per world unit the sprite was baked at. */
+            scale: number;
+        }
+    > = new Map();
+    /** Descendant id → cached root id, for stream exclusion + targeted drops. */
+    private _spriteSubtreeIndex: Map<number, number> = new Map();
+    /** Roots checked and found too small to be worth caching. */
+    private _spriteIneligible: Set<number> = new Set();
+    /** Roots queued for (re-)bake on the next settle tick. */
+    private _spriteWanted: Set<number> = new Set();
+    private _spriteBakeTimer: number | null = null;
+    /** Root being baked right now (its opacity is applied at draw time, not baked in). */
+    private _spriteBakeRootId: number | null = null;
+    /** Subtree filter for the sprite-bake render pass. */
+    private _bakeSubset: Set<number> | null = null;
+    private static readonly SPRITE_MIN_SUBTREE = 30;
+    // Per-sprite texture budget (2048² ≈ 16 MB RGBA). Past the cap the group
+    // renders directly — at deep zoom few groups are visible, so direct is
+    // cheap, and this keeps 20+ sprites well under GPU memory pressure.
+    private static readonly SPRITE_MAX_DIM = 2048;
+    private static readonly SPRITE_MAX_PIXELS = 4_000_000;
+
     // ─── Gradient shader cache ───
     private _gradientCache: Map<string, ReturnType<CanvasKit['Shader']['MakeLinearGradient']>> =
         new Map();
@@ -192,6 +281,19 @@ export class Renderer {
     private _imageCache: Map<number, ReturnType<CanvasKit['MakeImageFromEncoded']> | null> =
         new Map();
     private _imagePaint: Paint | null = null;
+    // Zoom-adaptive filter-tile overrides: engine image id → CanvasKit image
+    // re-baked at `scale` px per SVG unit. When present, drawing uses this
+    // instead of the fixed-scale PNG registered at import, so browser-baked
+    // filter tiles stay crisp at any zoom. See src/adaptive_tiles.ts.
+    private _adaptiveTiles: Map<
+        number,
+        { img: NonNullable<ReturnType<CanvasKit['MakeImageFromEncoded']>>; scale: number }
+    > = new Map();
+    // Pending re-bakes (image id → wanted scale), flushed by a debounced
+    // worker once the zoom settles so wheel-zooming doesn't spam rasterizes.
+    private _tileBakeQueue: Map<number, number> = new Map();
+    private _tileBakeTimer: number | null = null;
+    private _tileBakeBusy = false;
     // Repeating image shaders for pattern fills, keyed by pattern signature.
     private _patternShaderCache: Map<
         string,
@@ -289,6 +391,14 @@ export class Renderer {
         }
         this._pathCache.clear();
 
+        for (const entry of this._clipPathCache.values()) entry.path.delete();
+        this._clipPathCache.clear();
+
+        // Any full invalidation means non-transform content may have changed —
+        // the drag-layer snapshots and group sprites can no longer be trusted.
+        this.endDragLayerCache();
+        this.invalidateAllGroupSprites();
+
         // Clear gradient cache
         for (const shader of this._gradientCache.values()) {
             if (shader) shader.delete();
@@ -361,6 +471,13 @@ export class Renderer {
         this._imageCache.clear();
         for (const sh of this._patternShaderCache.values()) if (sh) sh.delete();
         this._patternShaderCache.clear();
+        // Adaptive filter tiles and group sprites belong to the outgoing
+        // document too.
+        for (const t of this._adaptiveTiles.values()) t.img.delete();
+        this._adaptiveTiles.clear();
+        this._tileBakeQueue.clear();
+        adaptiveTileSources.clear();
+        this.invalidateAllGroupSprites();
         this._needsRender = true;
     }
 
@@ -409,7 +526,33 @@ export class Renderer {
 
     /** Draw a raster image node at (0,0,w,h) in the current (local) space. */
     private drawImageNode(canvas: Canvas, imageId: number, w: number, h: number, alpha: number) {
-        const img = this.getImage(imageId);
+        let img = this.getImage(imageId);
+
+        // Zoom-adaptive filter tiles: draw the re-baked bitmap when one
+        // exists, and queue a re-bake when the on-screen scale has drifted
+        // meaningfully from the baked scale (sharper when zooming in, cheaper
+        // when zooming far back out). Only visible nodes reach this point, so
+        // offscreen tiles never re-bake. Skipped during export: the export
+        // render is synchronous, so an async bake could never land in it.
+        const tileSrc = adaptiveTileSources.get(imageId);
+        if (tileSrc) {
+            const baked = this._adaptiveTiles.get(imageId);
+            if (baked) img = baked.img;
+            // Tile re-bakes are queued from live frames AND sprite bakes (a
+            // sprite is the only place a cached group's tiles are drawn), but
+            // not from PNG exports.
+            if (!this._exporting || this._spriteBakeRootId !== null) {
+                const m = canvas.getTotalMatrix(); // row-major 3×3
+                const devScale = Math.max(Math.hypot(m[0], m[3]), Math.hypot(m[1], m[4]));
+                const cur = baked ? baked.scale : tileSrc.baseScale;
+                const want = Math.min(Math.max(devScale, tileSrc.baseScale), maxTileScale(tileSrc));
+                if (want > cur * 1.4 || want < cur / 2.5) {
+                    this._tileBakeQueue.set(imageId, want);
+                    this.scheduleTileBakes();
+                }
+            }
+        }
+
         if (!this._imagePaint) this._imagePaint = new this.ck.Paint();
         const ip = this._imagePaint;
         ip.setShader(null);
@@ -424,6 +567,481 @@ export class Renderer {
             // Decode failed / missing bytes — draw a magenta placeholder.
             ip.setColor(this.ck.Color4f(1, 0, 1, 0.6 * alpha));
             canvas.drawRect(dst, ip);
+        }
+    }
+
+    /** Debounce tile re-bakes until the zoom has settled (~160 ms without a
+     *  zoom change), so continuous wheel-zooming doesn't rasterize every step. */
+    private scheduleTileBakes() {
+        if (this._tileBakeTimer !== null || this._tileBakeBusy) return;
+        const zoomAt = this.zoom;
+        this._tileBakeTimer = window.setTimeout(() => {
+            this._tileBakeTimer = null;
+            if (this.zoom !== zoomAt) {
+                this.scheduleTileBakes(); // still zooming — wait another beat
+                return;
+            }
+            void this.processTileBakes();
+        }, 160);
+    }
+
+    /** Drain the bake queue: rasterize each tile's SVG source at the wanted
+     *  scale (browser SVG renderer, off the frame loop) and swap the result in
+     *  as the tile's drawing image. A wanted scale at/below the import bake
+     *  drops the override instead, freeing the high-res bitmap. */
+    private async processTileBakes() {
+        if (this._tileBakeBusy) return;
+        this._tileBakeBusy = true;
+        let anyChanged = false;
+        try {
+            while (this._tileBakeQueue.size > 0) {
+                const next = this._tileBakeQueue.entries().next().value;
+                if (!next) break;
+                const [imageId, scale] = next;
+                this._tileBakeQueue.delete(imageId);
+                const src = adaptiveTileSources.get(imageId);
+                if (!src) continue;
+                const prev = this._adaptiveTiles.get(imageId);
+                if (scale <= src.baseScale * 1.01) {
+                    if (prev) {
+                        prev.img.delete();
+                        this._adaptiveTiles.delete(imageId);
+                        this._needsRender = true;
+                        anyChanged = true;
+                    }
+                    continue;
+                }
+                const bitmap = await rasterizeAdaptiveTile(src, scale);
+                if (!bitmap) continue;
+                const ckImg = this.ck.MakeImageFromCanvasImageSource(bitmap);
+                if (!ckImg) continue;
+                if (prev) prev.img.delete();
+                this._adaptiveTiles.set(imageId, { img: ckImg, scale });
+                this._needsRender = true;
+                anyChanged = true;
+            }
+        } finally {
+            this._tileBakeBusy = false;
+            // Tiles drawn inside cached groups changed — those sprites are
+            // stale; drop them all (they re-queue on the next frame at the
+            // same settled zoom, so both caches converge together).
+            if (anyChanged && this._groupSprites.size > 0) {
+                this.invalidateAllGroupSprites();
+                this._needsRender = true;
+            }
+        }
+    }
+
+    /** Open the saveLayer sandwich for an alpha (mode 0) or luminance (mode 1)
+     *  mask span, bounded to `bounds` when the mask shape's extent is known
+     *  (null → unbounded, the pre-existing behavior). Layer counts must match
+     *  what CMD_BEGIN_MASKED_CONTENT / CMD_END_MASK restore. */
+    private openMaskLayers(
+        canvas: Canvas,
+        span: {
+            mode: number;
+            pendingLayer: boolean;
+            bounds: ReturnType<CanvasKit['LTRBRect']> | null;
+        },
+        bounds: ReturnType<CanvasKit['LTRBRect']> | null,
+    ) {
+        span.pendingLayer = false;
+        span.bounds = bounds;
+        if (span.mode === 1) {
+            // Luminance mask: 3-layer protocol.
+            // Layer 0 (outer): collects the final masked result.
+            canvas.saveLayer(undefined, bounds ?? undefined);
+            // Layer 1 (luma): mask shapes are drawn here. On restore,
+            // the luminance→alpha color filter converts RGB to alpha.
+            if (!this._lumaPaint) {
+                this._lumaPaint = new this.ck.Paint();
+                // SVG luminance mask: A' = 0.2126·R + 0.7152·G + 0.0722·B
+                // (R,G,B are premultiplied, so we also account for source alpha).
+                const lumaMatrix = [
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0,
+                ];
+                this._lumaPaint.setColorFilter(this.ck.ColorFilter.MakeMatrix(lumaMatrix));
+            }
+            canvas.saveLayer(this._lumaPaint, bounds ?? undefined);
+        } else {
+            // Alpha mask: 2-layer protocol (original).
+            // Isolated layer accumulating the mask shape's coverage.
+            canvas.saveLayer(undefined, bounds ?? undefined);
+        }
+    }
+
+    /** Collect `roots` plus all their descendants into a set. */
+    private collectSubtree(roots: number[]): Set<number> {
+        const out = new Set<number>();
+        const stack = [...roots];
+        while (stack.length > 0) {
+            const id = stack.pop()!;
+            if (out.has(id)) continue;
+            out.add(id);
+            const kids = this.scene.getNodeChildren(id);
+            if (kids) for (const k of kids) stack.push(k);
+        }
+        return out;
+    }
+
+    /**
+     * Start a drag-layer cache for a move of `movingIds`. Only supported when
+     * every moving node is a ROOT node (top-level z-split is well-defined and
+     * no ancestor group opacity/mask/blend can leak); returns false otherwise
+     * and the caller just keeps the normal full-render path. Costs two extra
+     * full renders up front (the below/above snapshots), then every drag frame
+     * re-records only the moving subtree.
+     */
+    beginDragLayerCache(movingIds: number[]): boolean {
+        this.endDragLayerCache();
+        if (!this.surface || this._exporting || movingIds.length === 0) return false;
+        const roots: number[] = Array.from(this.scene.getRootNodes());
+        const rootSet = new Set(roots);
+        if (!movingIds.every((id) => rootSet.has(id))) return false;
+
+        const moving = new Set(movingIds);
+        let minMovingIdx = Infinity;
+        roots.forEach((r, i) => {
+            if (moving.has(r) && i < minMovingIdx) minMovingIdx = i;
+        });
+        // Static roots under the lowest mover go in the below layer, the rest
+        // above. (A static root sandwiched between two movers can't be split
+        // exactly — it lands above, correct relative to the lowest mover.)
+        const belowRoots = roots.filter((r, i) => !moving.has(r) && i < minMovingIdx);
+        const aboveRoots = roots.filter((r, i) => !moving.has(r) && i >= minMovingIdx);
+
+        const dpr = window.devicePixelRatio || 1;
+        const snapshot = (
+            pass: 'below' | 'above',
+            ids: number[],
+        ): NonNullable<ReturnType<CanvasKit['MakeImageFromEncoded']>> | null => {
+            this._dragSnapshotPass = pass;
+            this._dragSubtree = this.collectSubtree(ids);
+            try {
+                this.render();
+                return this.surface!.makeImageSnapshot() as NonNullable<
+                    ReturnType<CanvasKit['MakeImageFromEncoded']>
+                >;
+            } finally {
+                this._dragSnapshotPass = null;
+            }
+        };
+        const below = snapshot('below', belowRoots);
+        const above = snapshot('above', aboveRoots);
+
+        this._dragLayer = {
+            below,
+            above,
+            zoom: this.zoom,
+            panX: this.pan.x,
+            panY: this.pan.y,
+            dpr,
+            width: this.canvas.width,
+            height: this.canvas.height,
+        };
+        this.setDragMovingRoots(movingIds);
+        this._needsRender = true;
+        return true;
+    }
+
+    /** Update which roots are re-recorded live during a cached drag (the set
+     *  grows during an Alt clone-drag: originals stay put but aren't in the
+     *  snapshots, and the clones move). No-op when unchanged. */
+    setDragMovingRoots(movingIds: number[]) {
+        if (!this._dragLayer) return;
+        if (
+            movingIds.length === this._dragMovingRoots.length &&
+            movingIds.every((id, i) => id === this._dragMovingRoots[i])
+        ) {
+            return;
+        }
+        this._dragMovingRoots = [...movingIds];
+        this._dragSubtree = this.collectSubtree(movingIds);
+    }
+
+    /** Drop the drag-layer cache (drag ended, or the static content changed). */
+    endDragLayerCache() {
+        if (this._dragLayer) {
+            this._dragLayer.below?.delete();
+            this._dragLayer.above?.delete();
+            this._dragLayer = null;
+            this._needsRender = true;
+        }
+        this._dragSubtree = null;
+        this._dragMovingRoots = [];
+    }
+
+    /** Blit a drag-layer snapshot in WORLD space: the destination rect is the
+     *  world region the snapshot covered, so it lands correctly even if the
+     *  view panned (and merely scales if it zoomed) since the cache was built. */
+    private drawDragLayerImage(
+        canvas: Canvas,
+        img: NonNullable<ReturnType<CanvasKit['MakeImageFromEncoded']>>,
+    ) {
+        const dl = this._dragLayer!;
+        if (!this._imagePaint) this._imagePaint = new this.ck.Paint();
+        const ip = this._imagePaint;
+        ip.setShader(null);
+        ip.setStyle(this.ck.PaintStyle.Fill);
+        ip.setColor(this.ck.Color4f(1, 1, 1, 1));
+        ip.setAlphaf(1);
+        const worldX = -dl.panX / dl.zoom;
+        const worldY = -dl.panY / dl.zoom;
+        const worldW = dl.width / dl.dpr / dl.zoom;
+        const worldH = dl.height / dl.dpr / dl.zoom;
+        canvas.drawImageRect(
+            img,
+            this.ck.XYWHRect(0, 0, dl.width, dl.height),
+            this.ck.XYWHRect(worldX, worldY, worldW, worldH),
+            ip,
+        );
+    }
+
+    // ─── Group sprite cache methods ───
+
+    /** Drop the sprite covering `id` — call for any edit to a node INSIDE a
+     *  cached group. A change to the cached root's own transform doesn't need
+     *  this: sprites follow their group's transform at draw time. */
+    invalidateGroupSpriteFor(id: number) {
+        const root = this._spriteSubtreeIndex.get(id);
+        if (root !== undefined) this.dropGroupSprite(root);
+    }
+
+    private dropGroupSprite(root: number) {
+        const s = this._groupSprites.get(root);
+        if (!s) return;
+        s.img.delete();
+        s.surface.delete();
+        this._groupSprites.delete(root);
+        for (const [k, v] of this._spriteSubtreeIndex) {
+            if (v === root) this._spriteSubtreeIndex.delete(k);
+        }
+        this._needsRender = true;
+    }
+
+    invalidateAllGroupSprites() {
+        for (const s of this._groupSprites.values()) {
+            s.img.delete();
+            s.surface.delete();
+        }
+        this._groupSprites.clear();
+        this._spriteSubtreeIndex.clear();
+        this._spriteIneligible.clear();
+        this._spriteWanted.clear();
+    }
+
+    /** Highest useful bake scale for a sprite of the given world size. */
+    private spriteMaxScale(w: number, h: number): number {
+        return Math.min(
+            Renderer.SPRITE_MAX_DIM / Math.max(w, h),
+            Math.sqrt(Renderer.SPRITE_MAX_PIXELS / (w * h)),
+        );
+    }
+
+    /** Bake `rootId`'s subtree into a GPU texture at the current device scale
+     *  (capped by the texture budget). Renders through the normal pipeline
+     *  with an export-style state swap onto an offscreen GL surface. */
+    private bakeGroupSprite(rootId: number): boolean {
+        if (!this.surface || !this.scene.engine || this._exporting) return false;
+        const b = this.scene.getNodeBounds(rootId);
+        const bw = b[2] - b[0];
+        const bh = b[3] - b[1];
+        if (!(bw > 0) || !(bh > 0)) return false;
+        // Pad for filter/stroke spill past the engine's geometry bounds.
+        const pad = Math.max(10, 0.05 * Math.max(bw, bh));
+        const x = b[0] - pad;
+        const y = b[1] - pad;
+        const w = bw + 2 * pad;
+        const h = bh + 2 * pad;
+        const dpr = window.devicePixelRatio || 1;
+        const scale = Math.min(Math.max(0.05, this.zoom * dpr), this.spriteMaxScale(w, h));
+        const pxW = Math.max(1, Math.ceil(w * scale));
+        const pxH = Math.max(1, Math.ceil(h * scale));
+        const ckAny = this.ck as unknown as Record<string, CallableFunction>;
+        const surface = ckAny.MakeRenderTarget(this.grContext, pxW, pxH) as Surface | null;
+        if (!surface) return false;
+
+        const subtree = this.collectSubtree([rootId]);
+        const savedSurface = this.surface;
+        const savedZoom = this.zoom;
+        const savedPan = this.pan;
+        this.surface = surface;
+        this.zoom = scale;
+        this.pan = { x: -x * scale, y: -y * scale };
+        this._exporting = true; // transparent clear, no chrome, dpr 1
+        this._exportBounds = { x, y, w, h };
+        this._bakeSubset = subtree;
+        this._spriteBakeRootId = rootId;
+        try {
+            this.render();
+        } finally {
+            this.surface = savedSurface;
+            this.zoom = savedZoom;
+            this.pan = savedPan;
+            this._exporting = false;
+            this._exportBounds = null;
+            this._bakeSubset = null;
+            this._spriteBakeRootId = null;
+        }
+        const img = surface.makeImageSnapshot() as NonNullable<
+            ReturnType<CanvasKit['MakeImageFromEncoded']>
+        > | null;
+        if (!img) {
+            surface.delete();
+            return false;
+        }
+        this._groupSprites.set(rootId, {
+            img,
+            surface,
+            x,
+            y,
+            w,
+            h,
+            bakeTransform: this.scene.getTransform(rootId),
+            scale,
+        });
+        for (const id of subtree) {
+            if (id !== rootId) this._spriteSubtreeIndex.set(id, rootId);
+        }
+        this._needsRender = true;
+        return true;
+    }
+
+    /** Draw a cached group as one image, transformed by the group's movement
+     *  since bake time. Queues a re-bake when the on-screen scale has drifted. */
+    private drawGroupSprite(
+        canvas: Canvas,
+        rootId: number,
+        sprite: NonNullable<ReturnType<Renderer['_groupSprites']['get']>>,
+        devScale: number,
+    ) {
+        const cur = this.scene.getTransform(rootId);
+        const bk = sprite.bakeTransform;
+        let delta: number[] | null = null;
+        const moved =
+            cur[0] !== bk[0] ||
+            cur[1] !== bk[1] ||
+            cur[2] !== bk[2] ||
+            cur[3] !== bk[3] ||
+            cur[4] !== bk[4] ||
+            cur[5] !== bk[5];
+        if (moved) {
+            const inv = invertAffine(bk);
+            if (inv) {
+                // delta = cur · inv, row-major affine
+                delta = [
+                    cur[0] * inv[0] + cur[1] * inv[3],
+                    cur[0] * inv[1] + cur[1] * inv[4],
+                    cur[0] * inv[2] + cur[1] * inv[5] + cur[2],
+                    cur[3] * inv[0] + cur[4] * inv[3],
+                    cur[3] * inv[1] + cur[4] * inv[4],
+                    cur[3] * inv[2] + cur[4] * inv[5] + cur[5],
+                    0,
+                    0,
+                    1,
+                ];
+            }
+        }
+        if (delta) {
+            canvas.save();
+            canvas.concat(delta);
+        }
+        if (!this._imagePaint) this._imagePaint = new this.ck.Paint();
+        const ip = this._imagePaint;
+        ip.setShader(null);
+        ip.setStyle(this.ck.PaintStyle.Fill);
+        ip.setColor(this.ck.Color4f(1, 1, 1, 1));
+        ip.setAlphaf(1);
+        canvas.drawImageRect(
+            sprite.img,
+            this.ck.XYWHRect(0, 0, sprite.img.width(), sprite.img.height()),
+            this.ck.XYWHRect(sprite.x, sprite.y, sprite.w, sprite.h),
+            ip,
+        );
+        if (delta) canvas.restore();
+
+        // Queue a re-bake when the settled zoom wants a meaningfully different
+        // resolution than the sprite has — but never chase past the cap.
+        const target = Math.min(Math.max(0.05, devScale), this.spriteMaxScale(sprite.w, sprite.h));
+        const ratio = target / sprite.scale;
+        if (ratio > 1.4 || ratio < 1 / 1.4) {
+            this._spriteWanted.add(rootId);
+            this.scheduleSpriteBakes();
+        }
+    }
+
+    /** Debounce sprite bakes until the view settles, then spread them over
+     *  timer ticks so a batch never blocks a frame for long. */
+    private scheduleSpriteBakes() {
+        if (this._spriteBakeTimer !== null) return;
+        const zoomAt = this.zoom;
+        this._spriteBakeTimer = window.setTimeout(() => {
+            this._spriteBakeTimer = null;
+            if (this.zoom !== zoomAt) {
+                this.scheduleSpriteBakes();
+                return;
+            }
+            this.processSpriteBakes();
+        }, 160);
+    }
+
+    private processSpriteBakes() {
+        // Don't bake mid-gesture (resize/rotate drags mutate every frame —
+        // sprites would be dropped again immediately).
+        if (this.inputManager?.isMouseDown) {
+            this.scheduleSpriteBakes();
+            return;
+        }
+        // A zero-sized surface (hidden/minimized window) can't judge
+        // visibility — try again later rather than draining the queue.
+        if (this.canvas.width === 0 || this.canvas.height === 0) {
+            this.scheduleSpriteBakes();
+            return;
+        }
+        // Only bake what's on screen: offscreen roots get re-queued when they
+        // scroll into view, and baking all of them at once at a deep zoom
+        // would blow the GPU memory budget for nothing.
+        const dpr = window.devicePixelRatio || 1;
+        const vMinX = -this.pan.x / this.zoom;
+        const vMinY = -this.pan.y / this.zoom;
+        const vMaxX = (this.canvas.width / dpr - this.pan.x) / this.zoom;
+        const vMaxY = (this.canvas.height / dpr - this.pan.y) / this.zoom;
+        const BUDGET = 4;
+        let done = 0;
+        for (const rootId of [...this._spriteWanted]) {
+            if (done >= BUDGET) break;
+            this._spriteWanted.delete(rootId);
+            if (this._spriteIneligible.has(rootId)) continue;
+            if (this.scene.getNodeType(rootId) !== 3) {
+                // Not a group (or gone) — never cache.
+                this._spriteIneligible.add(rootId);
+                continue;
+            }
+            const b = this.scene.getNodeBounds(rootId);
+            if (b[2] < vMinX || b[0] > vMaxX || b[3] < vMinY || b[1] > vMaxY) continue;
+            if (!this._groupSprites.has(rootId)) {
+                const size = this.collectSubtree([rootId]).size;
+                if (size < Renderer.SPRITE_MIN_SUBTREE) {
+                    this._spriteIneligible.add(rootId);
+                    continue;
+                }
+            } else {
+                this.dropGroupSprite(rootId);
+            }
+            if (this.bakeGroupSprite(rootId)) {
+                done++;
+            } else {
+                // Bake failed (degenerate bounds / render-target allocation) —
+                // don't retry-loop; eligibility resets with the next full
+                // invalidation.
+                this._spriteIneligible.add(rootId);
+            }
+        }
+        if (this._spriteWanted.size > 0) {
+            this._spriteBakeTimer = window.setTimeout(() => {
+                this._spriteBakeTimer = null;
+                this.processSpriteBakes();
+            }, 30);
         }
     }
 
@@ -483,6 +1101,13 @@ export class Renderer {
 
     destroy() {
         this.isRunning = false;
+        if (this._tileBakeTimer !== null) {
+            window.clearTimeout(this._tileBakeTimer);
+            this._tileBakeTimer = null;
+        }
+        for (const t of this._adaptiveTiles.values()) t.img.delete();
+        this._adaptiveTiles.clear();
+        this._tileBakeQueue.clear();
         if (this.paint) {
             this.paint.delete();
             this.paint = null;
@@ -507,6 +1132,8 @@ export class Renderer {
 
     onResize() {
         try {
+            // Snapshots are sized to the old surface — rebuildable, so drop.
+            this.endDragLayerCache();
             const dpr = window.devicePixelRatio;
             this.canvas.width = this.canvas.clientWidth * dpr;
             this.canvas.height = this.canvas.clientHeight * dpr;
@@ -620,12 +1247,18 @@ export class Renderer {
         // editor chrome (grid, artboard, selection, guides).
         const exporting = this._exporting;
         const dpr = exporting ? 1 : window.devicePixelRatio || 1;
+        // Drag-layer state: `snapshotPass` while baking the below/above
+        // snapshots (chrome-less, like exporting), `dragActive` while blitting
+        // them and re-recording only the moving subtree.
+        const snapshotPass = this._dragSnapshotPass;
+        const dragActive = !exporting && snapshotPass === null && this._dragLayer !== null;
 
-        if (exporting) {
+        if (exporting || snapshotPass === 'above') {
             canvas.clear(this.ck.TRANSPARENT);
         } else {
             canvas.clear(this.ck.Color(43, 43, 43, 1.0));
-            this.drawGrid(canvas, dpr);
+            // During a cached drag the grid is already in the below snapshot.
+            if (!dragActive) this.drawGrid(canvas, dpr);
         }
 
         canvas.save();
@@ -649,7 +1282,12 @@ export class Renderer {
             canvas.drawRect(this.ck.LTRBRect(eb.x, eb.y, eb.x + eb.w, eb.y + eb.h), p);
             p.delete();
         }
-        if (!exporting) this.drawArtboards(canvas);
+        // Artboards live in the below snapshot during a cached drag, and must
+        // stay out of the above snapshot.
+        if (!exporting && snapshotPass !== 'above' && !dragActive) this.drawArtboards(canvas);
+        if (dragActive && this._dragLayer?.below) {
+            this.drawDragLayerImage(canvas, this._dragLayer.below);
+        }
 
         // Compute viewport in document space for culling. Export culls to the
         // export bounds (a specific artboard, or the whole canvas) so content
@@ -677,13 +1315,72 @@ export class Renderer {
         // so the cached outline the stream draws is current. Cheap when idle.
         this.scene.recomputeDirtyBooleanGroups(this.ck);
 
+        // Compute the dim target once per frame. getEditingDimTarget self-heals a
+        // stale id (edited node removed by undo/delete), so dimming can never stick.
+        // No dimming in export output.
+        const dimTarget = exporting ? null : (this.inputManager?.getEditingDimTarget() ?? null);
+
+        // Group sprites are bypassed in export output (full-res vectors) and
+        // in per-node visibility modes a baked image can't express (edit
+        // dimming, pen-source hiding, inline text editing).
+        const spriteMode =
+            !exporting &&
+            dimTarget === null &&
+            this.editingTextId === null &&
+            (this.inputManager?.penSourceNodeId ?? null) == null;
+        // Sprites sharp enough for this frame's resolution; groups whose
+        // sprite is past its texture cap fall back to direct rendering.
+        let usableSpriteRoots: Set<number> | null = null;
+        if (spriteMode && this._groupSprites.size > 0) {
+            usableSpriteRoots = new Set();
+            for (const [rootId, s] of this._groupSprites) {
+                if (this.zoom * dpr <= s.scale * 1.6) usableSpriteRoots.add(rootId);
+            }
+        }
+
         // Draw Scene Objects via binary command stream (Phase 3: No JSON Tax)
-        const visibleIds = this.scene.getVisibleNodes(
+        let visibleIds = this.scene.getVisibleNodes(
             viewportMinX,
             viewportMinY,
             viewportMaxX,
             viewportMaxY,
         );
+        if (this._bakeSubset) {
+            // Sprite-bake pass: record only the group being baked.
+            const sub = this._bakeSubset;
+            const tmp = new Uint32Array(visibleIds.length);
+            let n = 0;
+            for (let i = 0; i < visibleIds.length; i++) {
+                if (sub.has(visibleIds[i])) tmp[n++] = visibleIds[i];
+            }
+            visibleIds = tmp.subarray(0, n);
+        } else {
+            // Drag-layer subsetting: snapshot passes record only the static side,
+            // drag frames record only the moving subtree.
+            if ((dragActive || snapshotPass !== null) && this._dragSubtree) {
+                const sub = this._dragSubtree;
+                const tmp = new Uint32Array(visibleIds.length);
+                let n = 0;
+                for (let i = 0; i < visibleIds.length; i++) {
+                    if (sub.has(visibleIds[i])) tmp[n++] = visibleIds[i];
+                }
+                visibleIds = tmp.subarray(0, n);
+            }
+            // Sprite subsetting: descendants of a usable cached group never
+            // enter the stream — its START_GROUP draws the baked image.
+            if (usableSpriteRoots && usableSpriteRoots.size > 0) {
+                const idx = this._spriteSubtreeIndex;
+                const tmp = new Uint32Array(visibleIds.length);
+                let n = 0;
+                for (let i = 0; i < visibleIds.length; i++) {
+                    const root = idx.get(visibleIds[i]);
+                    if (root === undefined || !usableSpriteRoots.has(root)) {
+                        tmp[n++] = visibleIds[i];
+                    }
+                }
+                visibleIds = tmp.subarray(0, n);
+            }
+        }
         const view = this.scene.getRenderData(visibleIds);
         const reader = new BinaryReader(view);
 
@@ -706,6 +1403,9 @@ export class Renderer {
         }
 
         const commandCount = reader.u32();
+        // Mask spans never straddle frames; reset so a mid-frame desync can't
+        // leak stale span state into the next frame.
+        this._maskStack.length = 0;
         if (!this.paint) this.paint = new this.ck.Paint();
         const p = this.paint;
         // Anti-aliasing is disabled only for the supersampled export pass, where
@@ -714,10 +1414,18 @@ export class Renderer {
         const contentAA = !this._exportNoAA;
         p.setAntiAlias(contentAA);
 
-        // Compute the dim target once per frame. getEditingDimTarget self-heals a
-        // stale id (edited node removed by undo/delete), so dimming can never stick.
-        // No dimming in export output.
-        const dimTarget = exporting ? null : (this.inputManager?.getEditingDimTarget() ?? null);
+        // Geometric-clip masks (mask_type 2) render as real canvas clips only
+        // when zoomed in enough that the alpha-mask saveLayer sandwich is the
+        // dominant cost. Measured on Tux.svg (13 clip spans): at ≥24 device px
+        // per unit clips cut frame time up to ~2× (no more full-viewport
+        // layers), while at low zoom Skia's AA path-clip masks are *slower*
+        // than the layers — so each frame picks the cheaper strategy.
+        const clipMaskDevScale = this.zoom * dpr;
+        const useGeometricClips = clipMaskDevScale >= 24;
+
+        // Group nesting depth — 0 means the next START_GROUP is a root group
+        // (the sprite-cache unit).
+        let groupDepth = 0;
 
         for (let i = 0; i < commandCount; i++) {
             const recordLen = reader.u32();
@@ -727,13 +1435,33 @@ export class Renderer {
 
             if (cmdType === 1) {
                 // CMD_START_GROUP
+                const isRootLevel = groupDepth === 0;
+                groupDepth++;
+                // A group arriving as a geometric clip's mask node can't be
+                // captured as a single clip path — convert the span back to
+                // the alpha saveLayer protocol before the group renders. A
+                // group as an alpha/luma mask node likewise opens its pending
+                // layers unbounded (its extent isn't known without recursing).
+                const groupSpan = this._maskStack[this._maskStack.length - 1];
+                if (groupSpan && groupSpan.mode === 2 && groupSpan.pendingClip) {
+                    groupSpan.pendingClip = false;
+                    groupSpan.converted = true;
+                    canvas.saveLayer();
+                } else if (groupSpan?.pendingLayer) {
+                    this.openMaskLayers(canvas, groupSpan, null);
+                }
                 const opacity = reader.f32();
                 const groupFlags = reader.u32();
                 const groupBlend = (groupFlags >>> 16) & 0xff;
                 // A non-Normal blend mode requires an isolation layer so the
                 // group composites as a single unit against the backdrop (like
                 // opacity does), otherwise the group's blend would never apply.
-                if (opacity < 1.0 || groupBlend > 0) {
+                if (nodeId === this._spriteBakeRootId) {
+                    // Sprite bake: the root's own opacity/blend are applied at
+                    // draw time (the stream carries them every frame) — baking
+                    // them in would double-apply.
+                    canvas.save();
+                } else if (opacity < 1.0 || groupBlend > 0) {
                     p.setAlphaf(opacity);
                     const bm = this.ckBlendModes();
                     if (groupBlend > 0 && groupBlend < bm.length) p.setBlendMode(bm[groupBlend]);
@@ -743,59 +1471,117 @@ export class Renderer {
                 } else {
                     canvas.save();
                 }
+
+                // Group sprite: a cached root group draws as one baked image
+                // (its descendants were excluded from the stream). Unknown
+                // roots are queued for an eligibility check + bake; sprites
+                // past their texture cap render direct but may still re-bake
+                // toward the cap.
+                //
+                // IMPORTANT: the engine always emits group brackets — only
+                // LEAVES honor the visible-id subset. So when a drag frame or
+                // snapshot pass subsets the stream, excluded groups still
+                // arrive here as empty brackets, and drawing their sprite
+                // would paint them into the wrong layer (e.g. the moving
+                // group baked into the static drag snapshot — a "ghost" copy
+                // at its pre-drag position). Only treat the group as renderable
+                // if the active subset contains it.
+                const streamSubset =
+                    dragActive || snapshotPass !== null ? this._dragSubtree : this._bakeSubset;
+                if (isRootLevel && spriteMode && (!streamSubset || streamSubset.has(nodeId))) {
+                    const sprite = this._groupSprites.get(nodeId);
+                    if (sprite && usableSpriteRoots?.has(nodeId)) {
+                        this.drawGroupSprite(canvas, nodeId, sprite, clipMaskDevScale);
+                    } else if (sprite) {
+                        const target = Math.min(
+                            clipMaskDevScale,
+                            this.spriteMaxScale(sprite.w, sprite.h),
+                        );
+                        if (target / sprite.scale > 1.4) this._spriteWanted.add(nodeId);
+                    } else if (!this._spriteIneligible.has(nodeId)) {
+                        this._spriteWanted.add(nodeId);
+                    }
+                }
             } else if (cmdType === 3) {
                 // CMD_END_GROUP
+                groupDepth--;
                 canvas.restore();
             } else if (cmdType === 4) {
                 // CMD_BEGIN_MASK
-                // Read mask_type: 0 = alpha, 1 = luminance (v8+).
-                const maskType = reader.u32();
-                this._maskTypeStack.push(maskType);
-                if (maskType === 1) {
-                    // Luminance mask: 3-layer protocol.
-                    // Layer 0 (outer): collects the final masked result.
-                    canvas.saveLayer();
-                    // Layer 1 (luma): mask shapes are drawn here. On restore,
-                    // the luminance→alpha color filter converts RGB to alpha.
-                    if (!this._lumaPaint) {
-                        this._lumaPaint = new this.ck.Paint();
-                        // SVG luminance mask: A' = 0.2126·R + 0.7152·G + 0.0722·B
-                        // (R,G,B are premultiplied, so we also account for source alpha).
-                        const lumaMatrix = [
-                            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.2126, 0.7152, 0.0722, 0,
-                            0,
-                        ];
-                        this._lumaPaint.setColorFilter(this.ck.ColorFilter.MakeMatrix(lumaMatrix));
-                    }
-                    canvas.saveLayer(this._lumaPaint);
-                } else {
-                    // Alpha mask: 2-layer protocol (original).
-                    // Isolated layer accumulating the mask shape's coverage.
-                    canvas.saveLayer();
+                // Read mask_type: 0 = alpha, 1 = luminance, 2 = geometric clip.
+                // Clip-eligible masks fall back to the alpha protocol at low
+                // zoom, where layers are cheaper than AA path clips.
+                let maskType = reader.u32();
+                if (maskType === 2 && !useGeometricClips) maskType = 0;
+                this._maskStack.push({
+                    mode: maskType,
+                    pendingClip: maskType === 2,
+                    // Alpha/luma layers are opened lazily at the mask shape's
+                    // DRAW_NODE record, where its geometry bounds are known —
+                    // see openMaskLayers().
+                    pendingLayer: maskType !== 2,
+                    converted: false,
+                    bounds: null,
+                });
+                if (maskType === 2) {
+                    // Geometric clip fast path: the mask shape becomes a plain
+                    // canvas clip — no saveLayer sandwich, so no full-viewport
+                    // offscreen layers (which dominate frame cost at high
+                    // zoom). The next DRAW_NODE record is captured as the clip
+                    // path instead of being drawn; if the mask node turns out
+                    // not to be a plain shape, the span converts itself back
+                    // to the alpha protocol (see `converted`).
+                    canvas.save();
                 }
             } else if (cmdType === 5) {
                 // CMD_BEGIN_MASKED_CONTENT
-                const maskType =
-                    this._maskTypeStack.length > 0
-                        ? this._maskTypeStack[this._maskTypeStack.length - 1]
-                        : 0;
-                if (maskType === 1) {
-                    // Restore the luma layer: mask shapes are composited through
-                    // the luminance→alpha filter into the outer layer.
-                    canvas.restore();
+                const span = this._maskStack[this._maskStack.length - 1];
+                const maskType = span ? span.mode : 0;
+                if (maskType === 2 && span && !span.converted) {
+                    // Clip mode: content draws directly under the clip — no
+                    // layers. If the clip shape never arrived (culled while
+                    // offscreen), clip to nothing so the content is hidden,
+                    // matching what an empty alpha mask produces.
+                    if (span.pendingClip) {
+                        span.pendingClip = false;
+                        canvas.clipRect(
+                            this.ck.LTRBRect(0, 0, 0, 0),
+                            this.ck.ClipOp.Intersect,
+                            false,
+                        );
+                    }
+                } else {
+                    // Mask node never arrived (culled offscreen): open the
+                    // layers now so the restore counts stay balanced — the
+                    // empty mask hides the content, as before.
+                    if (span?.pendingLayer) this.openMaskLayers(canvas, span, null);
+                    if (maskType === 1) {
+                        // Restore the luma layer: mask shapes are composited through
+                        // the luminance→alpha filter into the outer layer.
+                        canvas.restore();
+                    }
+                    // Content layer: on restore it composites into the mask/outer
+                    // layer with SrcIn, so content survives only where the mask has
+                    // coverage (alpha for alpha-masks, luminance-derived alpha for
+                    // luminance masks). Content outside the mask's bounds is
+                    // discarded by SrcIn anyway, so the mask bounds bound this
+                    // layer too.
+                    if (!this._maskPaint) this._maskPaint = new this.ck.Paint();
+                    this._maskPaint.setBlendMode(this.ck.BlendMode.SrcIn);
+                    canvas.saveLayer(this._maskPaint, span?.bounds ?? undefined);
                 }
-                // Content layer: on restore it composites into the mask/outer
-                // layer with SrcIn, so content survives only where the mask has
-                // coverage (alpha for alpha-masks, luminance-derived alpha for
-                // luminance masks).
-                if (!this._maskPaint) this._maskPaint = new this.ck.Paint();
-                this._maskPaint.setBlendMode(this.ck.BlendMode.SrcIn);
-                canvas.saveLayer(this._maskPaint);
             } else if (cmdType === 6) {
                 // CMD_END_MASK
-                if (this._maskTypeStack.length > 0) this._maskTypeStack.pop();
-                canvas.restore(); // content → mask/outer layer (SrcIn)
-                canvas.restore(); // masked result → canvas
+                const span = this._maskStack.pop();
+                if (span && span.mode === 2 && !span.converted) {
+                    canvas.restore(); // pops the clip scope save
+                } else {
+                    canvas.restore(); // content → mask/outer layer (SrcIn)
+                    canvas.restore(); // masked result → canvas
+                    // A converted clip span opened an extra clip-scope save
+                    // before falling back to the alpha protocol.
+                    if (span && span.mode === 2 && span.converted) canvas.restore();
+                }
             } else if (cmdType === 7) {
                 // CMD_LP_FACES (Live Paint face fills)
                 const faceCount = reader.u32();
@@ -1057,6 +1843,110 @@ export class Renderer {
                     }
                 }
 
+                // Clip-capture: this DRAW_NODE is the mask shape of a geometric
+                // clip span (mask_type 2) — apply its geometry as a canvas clip
+                // instead of drawing it. The record is length-framed, so the
+                // remainder (its geometry was consumed to build the path) can
+                // be skipped exactly.
+                const clipSpan = this._maskStack[this._maskStack.length - 1];
+                if (clipSpan && clipSpan.mode === 2 && clipSpan.pendingClip) {
+                    clipSpan.pendingClip = false;
+                    let clipped = false;
+                    if (nodeType === 0 || nodeType === 1 || nodeType === 2) {
+                        // Reuse the node-transformed clip path across frames;
+                        // rebuilding costs a wasm path copy + transform per
+                        // span per frame.
+                        const key = `${fillRule}|${matrix.join(',')}`;
+                        let entry = this._clipPathCache.get(nodeId);
+                        if (!entry || entry.key !== key) {
+                            const p = this.getBinaryGeometryPath(
+                                nodeType,
+                                reader,
+                                cornerRadius,
+                                nodeId,
+                            );
+                            if (p) {
+                                p.setFillType(
+                                    fillRule === 1
+                                        ? this.ck.FillType.EvenOdd
+                                        : this.ck.FillType.Winding,
+                                );
+                                p.transform(matrix);
+                                if (entry) entry.path.delete();
+                                entry = { path: p, key };
+                                this._clipPathCache.set(nodeId, entry);
+                            }
+                        }
+                        if (entry) {
+                            // AA matches the content AA (off only in the
+                            // supersampled export pass, where the downscale
+                            // supplies it).
+                            canvas.clipPath(entry.path, this.ck.ClipOp.Intersect, contentAA);
+                            clipped = true;
+                        }
+                    }
+                    if (!clipped) {
+                        // Unclippable geometry (text/image) — hide the span,
+                        // matching what an empty alpha mask would produce.
+                        canvas.clipRect(
+                            this.ck.LTRBRect(0, 0, 0, 0),
+                            this.ck.ClipOp.Intersect,
+                            false,
+                        );
+                    }
+                    reader.offset = recordStart + recordLen;
+                    continue;
+                }
+
+                // Deferred mask layers: this DRAW_NODE is the mask shape of an
+                // alpha/luma span — open the span's layers bounded to this
+                // shape's extent (geometry + stroke + filter spill, mapped by
+                // its matrix) before it draws its coverage into them.
+                if (clipSpan?.pendingLayer) {
+                    let maskBounds: ReturnType<CanvasKit['LTRBRect']> | null = null;
+                    // A ColorMatrix effect can tint fully-transparent pixels,
+                    // giving the mask coverage beyond its geometry — keep the
+                    // layer unbounded in that case.
+                    if (effects.every((e) => e.kind === 0 || e.kind === 1)) {
+                        const gb = this.peekGeometryBounds(nodeType, reader, cornerRadius, nodeId);
+                        if (gb) {
+                            let pad = 2 / clipMaskDevScale; // AA fringe
+                            for (const st of strokes)
+                                if (st.paint.type !== 0) pad = Math.max(pad, st.width);
+                            for (const e of effects) {
+                                if (e.kind === 0) {
+                                    pad += 3 * Math.max(e.radius, e.radiusY);
+                                } else {
+                                    pad += 3 * e.radius + Math.max(Math.abs(e.dx), Math.abs(e.dy));
+                                }
+                            }
+                            const l = gb[0] - pad;
+                            const t = gb[1] - pad;
+                            const rt = gb[2] + pad;
+                            const bt = gb[3] + pad;
+                            let minX = Infinity;
+                            let minY = Infinity;
+                            let maxX = -Infinity;
+                            let maxY = -Infinity;
+                            for (const [x, y] of [
+                                [l, t],
+                                [rt, t],
+                                [l, bt],
+                                [rt, bt],
+                            ]) {
+                                const mx = matrix[0] * x + matrix[1] * y + matrix[2];
+                                const my = matrix[3] * x + matrix[4] * y + matrix[5];
+                                if (mx < minX) minX = mx;
+                                if (mx > maxX) maxX = mx;
+                                if (my < minY) minY = my;
+                                if (my > maxY) maxY = my;
+                            }
+                            maskBounds = this.ck.LTRBRect(minX, minY, maxX, maxY);
+                        }
+                    }
+                    this.openMaskLayers(canvas, clipSpan, maskBounds);
+                }
+
                 canvas.save();
                 canvas.concat(matrix);
 
@@ -1068,7 +1958,47 @@ export class Renderer {
                     if (filter) {
                         if (!this._effectPaint) this._effectPaint = new this.ck.Paint();
                         this._effectPaint.setImageFilter(filter);
-                        canvas.saveLayer(this._effectPaint);
+                        // Bound the filtered layer to the node's geometry plus
+                        // the filter spill (3σ covers a gaussian's visible
+                        // extent) and stroke width. An unbounded saveLayer
+                        // allocates a full-viewport texture per filtered node
+                        // — that, times every blurred node, dominates frame
+                        // time at high zoom. ColorMatrix effects can tint
+                        // fully-transparent pixels, so only pure blur/shadow
+                        // stacks are bounded.
+                        let layerBounds: ReturnType<CanvasKit['LTRBRect']> | undefined;
+                        if (effects.every((e) => e.kind === 0 || e.kind === 1)) {
+                            const gb = this.peekGeometryBounds(
+                                nodeType,
+                                reader,
+                                cornerRadius,
+                                nodeId,
+                            );
+                            if (gb) {
+                                let pad = 0;
+                                for (const st of strokes)
+                                    if (st.paint.type !== 0) pad = Math.max(pad, st.width);
+                                let spill = 0;
+                                for (const e of effects) {
+                                    if (e.kind === 0) {
+                                        spill = Math.max(spill, 3 * Math.max(e.radius, e.radiusY));
+                                    } else {
+                                        spill = Math.max(
+                                            spill,
+                                            3 * e.radius + Math.max(Math.abs(e.dx), Math.abs(e.dy)),
+                                        );
+                                    }
+                                }
+                                pad += spill;
+                                layerBounds = this.ck.LTRBRect(
+                                    gb[0] - pad,
+                                    gb[1] - pad,
+                                    gb[2] + pad,
+                                    gb[3] + pad,
+                                );
+                            }
+                        }
+                        canvas.saveLayer(this._effectPaint, layerBounds);
                         effectLayerOpen = true;
                     }
                 }
@@ -1296,8 +2226,23 @@ export class Renderer {
         // in-stream at the group's z (CMD_LP_FACES/EDGES) so members' strokes
         // sit on top, like Illustrator.
 
-        // Editor overlays — never part of exported output.
-        if (!exporting) {
+        // Kick off any sprite bakes queued during this frame (debounced until
+        // the view settles; skipped inside export/bake passes). Also self-heal
+        // a stranded tile queue: a schedule request during a busy drain is
+        // dropped, so re-arm it from the frame loop.
+        if (!exporting && snapshotPass === null) {
+            if (this._spriteWanted.size > 0) this.scheduleSpriteBakes();
+            if (this._tileBakeQueue.size > 0) this.scheduleTileBakes();
+        }
+
+        // Static content above the moving nodes, blitted over them so z-order
+        // holds during a cached drag (still under the editor overlays below).
+        if (dragActive && this._dragLayer?.above) {
+            this.drawDragLayerImage(canvas, this._dragLayer.above);
+        }
+
+        // Editor overlays — never part of exported output or drag snapshots.
+        if (!exporting && snapshotPass === null) {
             // Draw live preview shape (while user is dragging to create)
             this.drawPreview(canvas);
             // Draw pen tool in-progress path
@@ -1312,7 +2257,7 @@ export class Renderer {
 
         canvas.restore();
 
-        if (!exporting) {
+        if (!exporting && snapshotPass === null) {
             // Draw hover outline (shape under cursor, selection tool)
             this.drawHoverOutline(canvas, dpr);
             // Draw selection overlay
@@ -1540,6 +2485,47 @@ export class Renderer {
         }
         this._gradientCache.set(key, shader);
         return shader;
+    }
+
+    /** Peek the local-space bounds of the record's geometry without drawing,
+     *  leaving the reader where it started. Cached paths answer without any
+     *  allocation. Returns [l,t,r,b], or null for unbounded/unknown geometry. */
+    private peekGeometryBounds(
+        type: number,
+        reader: BinaryReader,
+        cornerRadius: number,
+        nodeId: number,
+    ): [number, number, number, number] | null {
+        const start = reader.offset;
+        try {
+            if (type === 1) {
+                reader.u32(); // size
+                const w = reader.f32();
+                const h = reader.f32();
+                return [0, 0, w, h];
+            }
+            if (type === 2) {
+                reader.u32(); // size
+                const rx = reader.f32();
+                const ry = reader.f32();
+                return [-rx, -ry, rx, ry];
+            }
+            if (type === 0) {
+                const cached = this._pathCache.get(nodeId);
+                if (cached && nodeId > 0) {
+                    const b = cached.path.getBounds();
+                    return [b[0], b[1], b[2], b[3]];
+                }
+                const p = this.getBinaryGeometryPath(type, reader, cornerRadius, nodeId);
+                if (!p) return null;
+                const b = p.getBounds();
+                p.delete();
+                return [b[0], b[1], b[2], b[3]];
+            }
+            return null;
+        } finally {
+            reader.offset = start;
+        }
     }
 
     private getBinaryGeometryPath(

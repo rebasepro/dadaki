@@ -970,9 +970,9 @@ export class InputManager {
                 }, 500);
 
                 for (const id of selection) {
+                    // moveNode performs the (transform-only) invalidation.
                     this.scene.moveNode(id, dx, dy);
                 }
-                this.scene.invalidateCache();
                 this.ui.syncWithSelection();
             }
         }
@@ -3870,6 +3870,10 @@ export class InputManager {
                 this.moveOriginalIds = [...this.scene.engine!.get_selection()];
                 this.moveStartBounds = this.getSelectionBounds();
                 this.snap.begin(this.scene, this.moveOriginalIds);
+                // Cache the static scene into GPU layers so each drag frame
+                // only re-records the moving nodes (falls back silently when
+                // the selection isn't all root-level).
+                this.renderer.beginDragLayerCache(this.moveOriginalIds);
             }
 
             if (this.didMove && this.moveSnapshot) {
@@ -3931,7 +3935,17 @@ export class InputManager {
                     const local = this.worldDeltaToLocal(id, totalDx, totalDy);
                     this.scene.engine!.move_node(id, local.dx, local.dy);
                 }
-                this.scene.invalidateCache();
+                // The moving set feeds the drag-layer cache: during an Alt
+                // clone-drag the unmoved originals must render live too (they
+                // were excluded from the static snapshots).
+                this.renderer.setDragMovingRoots(
+                    e.altKey ? [...this.moveOriginalIds, ...moveTargets] : moveTargets,
+                );
+                // Translation-only frame: geometry and paints are unchanged, so
+                // renderer caches (paths/shaders) and the drag layers stay valid.
+                // Passing the moved ids drops the sprite of any cached group a
+                // moved node sits INSIDE (moved cached roots keep theirs).
+                this.scene.invalidateCacheTransformOnly(moveTargets);
                 // Update property panel position values without rebuilding chrome DOM
                 this.ui.syncWithSelection({ interactive: true });
             }

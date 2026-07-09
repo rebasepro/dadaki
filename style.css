@@ -527,13 +527,35 @@ body, html {
 
 #layers-panel {
     width: 200px;
-    min-width: 200px;
+    min-width: 140px;
+    max-width: 500px;
+    flex-shrink: 0;
     background: var(--bg-panel);
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     z-index: 10;
     overflow: hidden;
+    position: relative;
+}
+
+/* Drag handle on the panel's right edge to resize its width. */
+#layers-panel-resizer {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 20;
+    background: transparent;
+    transition: background 0.15s;
+}
+
+#layers-panel-resizer:hover,
+#layers-panel-resizer.dragging {
+    background: var(--accent, #3b82f6);
+    opacity: 0.6;
 }
 
 /* ─── Toolbar ─── */
@@ -1944,20 +1966,20 @@ body.scrubbing * {
     opacity: 1;
 }
 
-/* Layer actions (visibility / lock) */
+/* Layer actions (visibility / lock). Hidden entirely — not just transparent —
+   when idle so they reserve no width and don't leave a gap; they only take
+   space on hover, or when the layer is hidden/locked (state worth surfacing). */
 .layer-actions {
-    display: flex;
+    display: none;
     align-items: center;
     gap: 2px;
     margin-left: auto;
-    opacity: 0;
-    transition: opacity 0.15s;
 }
 
 .layer-item-row:hover .layer-actions,
 .layer-item.layer-hidden .layer-actions,
 .layer-item.layer-locked .layer-actions {
-    opacity: 1;
+    display: flex;
 }
 
 .layer-vis-btn,
