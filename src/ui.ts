@@ -754,24 +754,43 @@ export class UIEngine {
     }
 
     updateSelectedProperties() {
-        const selection = this.scene.engine!.get_selection();
-        if (selection.length === 0) return;
-
-        const styleJson = this.buildCurrentStyleJson();
-        for (const id of selection) {
-            this.scene.setNodeStyle(id, styleJson);
-        }
+        this.applyStylePanelToSelection(true);
     }
 
     /** Apply style changes to selected nodes WITHOUT pushing undo history.
      *  Used for live preview during drag-editing (color picker, sliders). */
     updateSelectedPropertiesNoHistory() {
+        this.applyStylePanelToSelection(false);
+    }
+
+    /** Apply the Opacity + Blend panel widgets to the selection.
+     *  These are overlaid onto each node's OWN style so that fills, strokes and
+     *  other per-node properties are preserved — we must not replace the whole
+     *  style with the global "current style", which would clobber each shape's
+     *  paint (and, when no current style exists yet, stamp the gray+stroke
+     *  default onto it). The values are also remembered on the current style so
+     *  newly drawn shapes inherit them. */
+    private applyStylePanelToSelection(withHistory: boolean) {
+        const opacity = (parseFloat(this.opacityInput?.value) || 100) / 100;
+        const blend_mode = this.blendMode ? parseInt(this.blendMode.value) || 0 : 0;
+
+        // Remember for newly drawn shapes.
+        try {
+            const s = JSON.parse(this._currentStyleJson || "{}");
+            s.opacity = opacity;
+            s.blend_mode = blend_mode;
+            this._currentStyleJson = JSON.stringify(s);
+        } catch { }
+
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
-
-        const styleJson = this.buildCurrentStyleJson();
         for (const id of selection) {
-            this.scene.setNodeStyleNoHistory(id, styleJson);
+            const node = this.scene.getNode(id);
+            if (!node) continue;
+            const newStyle = { ...node.style, opacity, blend_mode };
+            const json = JSON.stringify(newStyle);
+            if (withHistory) this.scene.setNodeStyle(id, json);
+            else this.scene.setNodeStyleNoHistory(id, json);
         }
     }
 
