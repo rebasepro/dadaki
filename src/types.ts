@@ -29,6 +29,10 @@ export interface Gradient {
     spread?: number;
     /** Radial focal point; absent = concentric (focal at center, fr 0). */
     focal?: { x: number; y: number; r: number };
+    /** Gradient→local affine [a,b,c,d,e,f] for rotated/elliptical radials.
+     *  When set, start/end/focal are raw gradient-space coords (renderer applies
+     *  this as the shader local matrix); absent = baked circular/linear form. */
+    transform?: number[];
 }
 
 /** A tiled-image pattern fill (matches the engine's Pattern struct). */

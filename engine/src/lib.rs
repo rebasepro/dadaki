@@ -102,6 +102,13 @@ pub struct Gradient {
     /// Radial focal point; `None` means concentric (focal = center, fr = 0).
     #[serde(default)]
     pub focal: Option<GradientFocal>,
+    /// Optional gradient→local affine `[a, b, c, d, e, f]` (x' = a·x + c·y + e).
+    /// When present the renderer applies it as the shader's local matrix and
+    /// `start`/`end`/`focal` are raw gradient-space coordinates — this represents
+    /// rotated / non-uniform (elliptical) radial gradients exactly. `None` keeps
+    /// the baked circular/linear form (coords already in node-local space).
+    #[serde(default)]
+    pub transform: Option<[f32; 6]>,
 }
 
 /// A tiled-image pattern fill. The tile is an encoded image in `Scene.images`;
@@ -360,8 +367,14 @@ impl Transform2D {
 /// A post-processing effect applied to a node's rendered pixels.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Effect {
-    /// Gaussian blur. `radius` is the blur sigma in local units.
-    Blur { radius: f32 },
+    /// Gaussian blur. `radius` is the blur sigma (x axis) in local units.
+    /// `radius_y` is the y-axis sigma for anisotropic blur (SVG two-value
+    /// stdDeviation); `None` means isotropic (y sigma = `radius`).
+    Blur {
+        radius: f32,
+        #[serde(default)]
+        radius_y: Option<f32>,
+    },
     /// Drop shadow offset by (dx, dy), blurred by `blur` (sigma), tinted `color`.
     DropShadow { dx: f32, dy: f32, blur: f32, color: Color },
     /// A 4×5 color matrix (row-major, applied to [R G B A 1]), matching SVG
@@ -776,7 +789,10 @@ pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// v9: gradients gain spread (u32) + focal point (fx, fy, fr) after end_x/end_y.
 /// v10: Live Paint faces/edges drawn in-stream at group z (CMD_LP_FACES/EDGES);
 ///      members of a Live Paint group write zero fills (faces provide the fill).
-pub const RENDER_PROTOCOL_VERSION: u32 = 10;
+/// v11: Blur effect gains a second f32 (y-axis sigma, anisotropic); gradients
+///      gain a trailing [has_transform u32][a,b,c,d,e,f f32] block for rotated /
+///      elliptical radials (local matrix + raw gradient-space coords).
+pub const RENDER_PROTOCOL_VERSION: u32 = 11;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -857,6 +873,18 @@ fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>) {
             buf.extend_from_slice(&fx.to_le_bytes());
             buf.extend_from_slice(&fy.to_le_bytes());
             buf.extend_from_slice(&fr.to_le_bytes());
+            // v11: optional gradient→local affine for rotated / non-uniform
+            // (elliptical) radials. A leading u32 flag says whether the 6 affine
+            // floats [a,b,c,d,e,f] follow. Absent (0) = baked circular/linear.
+            match &g.transform {
+                Some(t) => {
+                    buf.extend_from_slice(&1u32.to_le_bytes());
+                    for v in t {
+                        buf.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+                None => buf.extend_from_slice(&0u32.to_le_bytes()),
+            }
         }
     }
 }
@@ -1252,15 +1280,19 @@ impl Engine {
 
             // Effects block: count u32, then per effect a self-describing record
             // [kind u32][payload...] where the payload size is fixed per kind:
-            //   0 = Blur:        radius f32                              (4B)
+            //   0 = Blur:        radius_x, radius_y  (2 f32)             (8B)
             //   1 = DropShadow:  dx,dy,blur,r,g,b,a  (7 f32)             (28B)
             //   2 = ColorMatrix: 20 f32 + 1 u32 (linear_rgb flag)         (84B)
             self.render_buffer.extend_from_slice(&(s.effects.len() as u32).to_le_bytes());
             for eff in &s.effects {
                 match eff {
-                    Effect::Blur { radius } => {
+                    Effect::Blur { radius, radius_y } => {
                         self.render_buffer.extend_from_slice(&0u32.to_le_bytes());
                         self.render_buffer.extend_from_slice(&radius.to_le_bytes());
+                        // v11: y-axis sigma (anisotropic blur). Defaults to the
+                        // x sigma so isotropic blurs are unchanged.
+                        let ry = radius_y.unwrap_or(*radius);
+                        self.render_buffer.extend_from_slice(&ry.to_le_bytes());
                     }
                     Effect::DropShadow { dx, dy, blur, color } => {
                         self.render_buffer.extend_from_slice(&1u32.to_le_bytes());
@@ -1427,9 +1459,11 @@ impl Engine {
         self.render_buffer.extend_from_slice(&(style.effects.len() as u32).to_le_bytes());
         for eff in &style.effects {
             match eff {
-                Effect::Blur { radius } => {
+                Effect::Blur { radius, radius_y } => {
                     self.render_buffer.extend_from_slice(&0u32.to_le_bytes());
                     self.render_buffer.extend_from_slice(&radius.to_le_bytes());
+                    let ry = radius_y.unwrap_or(*radius);
+                    self.render_buffer.extend_from_slice(&ry.to_le_bytes());
                 }
                 Effect::DropShadow { dx, dy, blur, color } => {
                     self.render_buffer.extend_from_slice(&1u32.to_le_bytes());

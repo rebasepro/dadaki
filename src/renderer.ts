@@ -75,12 +75,13 @@ export type ArtboardHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 10; // v10: in-stream Live Paint faces/edges (CMD 7/8)
+const EXPECTED_RENDER_PROTOCOL_VERSION = 11; // v11: anisotropic blur + elliptical-radial gradient transform
 
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {
     kind: number; // 0 = blur, 1 = drop shadow, 2 = color matrix
     radius: number;
+    radiusY: number; // kind 0: y-axis blur sigma (anisotropic); = radius when isotropic
     dx: number;
     dy: number;
     r: number;
@@ -315,7 +316,7 @@ export class Renderer {
         const key = effects
             .map(
                 (e) =>
-                    `${e.kind}:${e.radius},${e.dx},${e.dy},${e.r},${e.g},${e.b},${e.a},${e.matrix?.join(',') ?? ''},${e.linearRGB ? 'L' : 'S'}`,
+                    `${e.kind}:${e.radius},${e.radiusY},${e.dx},${e.dy},${e.r},${e.g},${e.b},${e.a},${e.matrix?.join(',') ?? ''},${e.linearRGB ? 'L' : 'S'}`,
             )
             .join('|');
         const cached = this._effectFilterCache.get(key);
@@ -323,8 +324,9 @@ export class Renderer {
         let filter: ReturnType<CanvasKit['ImageFilter']['MakeBlur']> | null = null;
         for (const e of effects) {
             if (e.kind === 0) {
-                const s = Math.max(0, e.radius);
-                filter = this.ck.ImageFilter.MakeBlur(s, s, this.ck.TileMode.Decal, filter);
+                const sx = Math.max(0, e.radius);
+                const sy = Math.max(0, e.radiusY);
+                filter = this.ck.ImageFilter.MakeBlur(sx, sy, this.ck.TileMode.Decal, filter);
             } else if (e.kind === 1) {
                 const s = Math.max(0, e.radius);
                 const color = this.ck.Color4f(e.r, e.g, e.b, e.a);
@@ -882,6 +884,17 @@ export class Renderer {
                             end: [reader.f32(), reader.f32()],
                             spread: reader.u32(),
                             focal: [reader.f32(), reader.f32(), reader.f32()], // fx, fy, fr
+                            // v11: optional gradient→local affine (elliptical radial).
+                            transform: reader.u32()
+                                ? [
+                                      reader.f32(),
+                                      reader.f32(),
+                                      reader.f32(),
+                                      reader.f32(),
+                                      reader.f32(),
+                                      reader.f32(),
+                                  ]
+                                : null,
                         });
                     } else if (fillType === 4) {
                         // Pattern
@@ -939,6 +952,17 @@ export class Renderer {
                             end: [reader.f32(), reader.f32()],
                             spread: reader.u32(),
                             focal: [reader.f32(), reader.f32(), reader.f32()], // fx, fy, fr
+                            // v11: optional gradient→local affine (elliptical radial).
+                            transform: reader.u32()
+                                ? [
+                                      reader.f32(),
+                                      reader.f32(),
+                                      reader.f32(),
+                                      reader.f32(),
+                                      reader.f32(),
+                                      reader.f32(),
+                                  ]
+                                : null,
                         };
                     } else if (strokeType === 4) {
                         // Pattern
@@ -982,10 +1006,13 @@ export class Renderer {
                 for (let e = 0; e < effectCount; e++) {
                     const kind = reader.u32();
                     if (kind === 0) {
-                        // Blur
+                        // Blur: radius_x, radius_y (v11 — anisotropic)
+                        const radius = reader.f32();
+                        const radiusY = reader.f32();
                         effects.push({
                             kind,
-                            radius: reader.f32(),
+                            radius,
+                            radiusY,
                             dx: 0,
                             dy: 0,
                             r: 0,
@@ -1001,6 +1028,7 @@ export class Renderer {
                         effects.push({
                             kind,
                             radius,
+                            radiusY: radius,
                             dx,
                             dy,
                             r: reader.f32(),
@@ -1016,6 +1044,7 @@ export class Renderer {
                         effects.push({
                             kind,
                             radius: 0,
+                            radiusY: 0,
                             dx: 0,
                             dy: 0,
                             r: 0,
@@ -1082,6 +1111,7 @@ export class Renderer {
                                 nodeAlpha,
                                 fill.spread,
                                 fill.focal,
+                                fill.transform,
                             );
                             p.setShader(fillShader);
                         } else if (fill.type === 4) {
@@ -1147,6 +1177,7 @@ export class Renderer {
                                 nodeAlpha,
                                 st.paint.spread,
                                 st.paint.focal,
+                                st.paint.transform,
                             );
                             p.setShader(strokeShader);
                         } else if (st.paint.type === 4) {
@@ -1437,6 +1468,9 @@ export class Renderer {
         spread: number = 0,
         /** Radial focal point [fx, fy, fr]; defaults to the center circle. */
         focal: [number, number, number] = [start[0], start[1], 0],
+        /** Gradient→local affine [a,b,c,d,e,f] for rotated/elliptical radials;
+         *  null = none (start/end/focal are already in node-local space). */
+        transform: number[] | null = null,
     ): ReturnType<CanvasKit['Shader']['MakeLinearGradient']> {
         // Stops are stored in insertion order (the editor appends new stops and
         // mutates offsets in place without re-sorting). Skia's gradient builders
@@ -1445,7 +1479,7 @@ export class Renderer {
         stops = [...stops].sort((a, b) => a.offset - b.offset);
 
         // Build a compact cache key from gradient parameters
-        let key = `${gradType}|${start[0]},${start[1]}|${end[0]},${end[1]}|${nodeAlpha}|${spread}|${focal.join(',')}`;
+        let key = `${gradType}|${start[0]},${start[1]}|${end[0]},${end[1]}|${nodeAlpha}|${spread}|${focal.join(',')}|${transform?.join(',') ?? ''}`;
         for (const s of stops) {
             key += `|${s.offset},${s.r},${s.g},${s.b},${s.a}`;
         }
@@ -1461,10 +1495,34 @@ export class Renderer {
                   : this.ck.TileMode.Clamp;
         const colors = stops.map((s) => this.ck.Color4f(s.r, s.g, s.b, s.a * nodeAlpha));
         const offsets = stops.map((s) => s.offset);
+        // For a rotated / non-uniform (elliptical) radial, the gradient is
+        // defined in raw gradient space and mapped to node-local space by this
+        // affine, passed as Skia's local matrix (row-major 3×3). The SVG affine
+        // [a,b,c,d,e,f] (x'=a·x+c·y+e) becomes [a,c,e, b,d,f, 0,0,1].
+        const localMatrix = transform
+            ? [
+                  transform[0],
+                  transform[2],
+                  transform[4],
+                  transform[1],
+                  transform[3],
+                  transform[5],
+                  0,
+                  0,
+                  1,
+              ]
+            : null;
         let shader: ReturnType<CanvasKit['Shader']['MakeLinearGradient']>;
         if (gradType === 2) {
             // Linear
-            shader = this.ck.Shader.MakeLinearGradient(start, end, colors, offsets, tileMode);
+            shader = this.ck.Shader.MakeLinearGradient(
+                start,
+                end,
+                colors,
+                offsets,
+                tileMode,
+                localMatrix ?? undefined,
+            );
         } else {
             // Radial — focal point is the start circle (fx, fy, fr), the
             // center circle is (start, radius). Concentric when focal = center.
@@ -1477,6 +1535,7 @@ export class Renderer {
                 colors,
                 offsets,
                 tileMode,
+                localMatrix ?? undefined,
             );
         }
         this._gradientCache.set(key, shader);

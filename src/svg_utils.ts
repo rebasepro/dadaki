@@ -1026,6 +1026,11 @@ export interface SVGGradientData {
     spread: number;
     /** Radial focal point in local space; absent = concentric (focal = center). */
     focal?: { x: number; y: number; r: number };
+    /** Gradient→local affine [a,b,c,d,e,f] for rotated / non-uniform (elliptical)
+     *  radials. When present, start/end/focal are RAW gradient-space coordinates
+     *  and the renderer applies this as the shader's local matrix. Absent = the
+     *  baked circular/linear form (coordinates already in node-local space). */
+    transform?: number[];
 }
 
 /**
@@ -1117,6 +1122,17 @@ export function resolveGradient(
 
     if (stops.length === 0) return null;
 
+    // Per SVG: each stop offset is clamped to [0,1] AND must be >= every previous
+    // offset ("if not equal to or greater than all previous, adjust to the largest
+    // previous value"). A missing offset parses as 0, so without this a later stop
+    // with no offset would sort BEFORE earlier stops and swap the color order.
+    let runningMax = 0;
+    for (const s of stops) {
+        const clamped = Math.max(0, Math.min(1, s.offset));
+        s.offset = Math.max(clamped, runningMax);
+        runningMax = s.offset;
+    }
+
     // Resolve an attribute through the href/xlink:href template chain — coords,
     // gradientUnits and gradientTransform (like stops) commonly live on a
     // referenced template gradient in Illustrator/Figma exports. Per spec the
@@ -1193,10 +1209,53 @@ export function resolveGradient(
             fy = num('fy', cy),
             fr = num('fr', 0);
 
+        // Full gradient-space → node-local affine F (column-major mat3):
+        // objectBoundingBox folds the bbox mapping; userSpaceOnUse uses the
+        // element's user→local matrix. gradientTransform (gt) sits innermost.
+        const gtM = gt ?? identityMatrix();
+        const F = isOBB
+            ? composeMatrices(
+                  composeMatrices(translateMatrix(g.bx, g.by), scaleMatrix(g.bw, g.bh)),
+                  gtM,
+              )
+            : composeMatrices(g.userToLocal, gtM);
+
+        // Is F circle-preserving? Its two linear columns must be equal-length and
+        // orthogonal (pure rotation + uniform scale). If so, the baked start/end/
+        // focal form below represents the radial exactly. A non-uniform or skewed
+        // F makes an ELLIPSE — carrying F through as the shader's local matrix
+        // (with raw gradient-space coords) renders it correctly, instead of
+        // collapsing to a circle (which read as a flat, mis-sized gradient).
+        const la = F[0],
+            lb = F[1],
+            lc = F[3],
+            ld = F[4];
+        const col0 = la * la + lb * lb;
+        const col1 = lc * lc + ld * ld;
+        const dot = la * lc + lb * ld;
+        const tol = 1e-6 * Math.max(col0, col1, 1);
+        const isSimilarity = Math.abs(col0 - col1) < tol && Math.abs(dot) < tol;
+
+        if (!isSimilarity) {
+            const hasFocal = Math.abs(fx - cx) > 1e-6 || Math.abs(fy - cy) > 1e-6 || fr > 1e-6;
+            return {
+                gradient_type: 'Radial',
+                stops,
+                // Raw gradient-space: center (cx,cy), a +x edge at radius r.
+                start_x: cx,
+                start_y: cy,
+                end_x: cx + r,
+                end_y: cy,
+                spread,
+                ...(hasFocal ? { focal: { x: fx, y: fy, r: fr } } : {}),
+                // SVG 2×3 affine [a,b,c,d,e,f] from the column-major F.
+                transform: [F[0], F[1], F[3], F[4], F[6], F[7]],
+            };
+        }
+
+        // Circle-preserving: bake center/radius/focal into node-local space.
         // Transform the center and a +x radius-edge point together, so the
-        // gradientTransform's rotation/scale affects the radius. A non-uniform
-        // transform yields an ellipse we can't represent — we collapse it to
-        // the transformed major-axis radius (an approximation).
+        // gradientTransform's rotation/uniform scale affects the radius.
         const [c0x, c0y] = applyGt(cx, cy);
         const [e0x, e0y] = applyGt(cx + r, cy);
         const [f0x, f0y] = applyGt(fx, fy);

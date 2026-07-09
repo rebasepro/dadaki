@@ -4105,14 +4105,41 @@ export class UIEngine {
      *  collects <defs> contents PLUS any definition element declared outside a
      *  <defs>. */
     private collectDefsHtml(doc: Document): string {
+        const DEF_SELECTOR =
+            'filter, linearGradient, radialGradient, pattern, clipPath, mask, symbol, marker, style';
         const parts: string[] = [];
         for (const d of Array.from(doc.querySelectorAll('defs'))) parts.push(d.innerHTML);
-        for (const def of Array.from(
-            doc.querySelectorAll(
-                'filter, linearGradient, radialGradient, pattern, clipPath, mask, symbol, marker, style',
-            ),
-        )) {
+        for (const def of Array.from(doc.querySelectorAll(DEF_SELECTOR))) {
             if (!def.closest('defs')) parts.push(def.outerHTML);
+        }
+        // Also include ordinary render-tree shapes that are referenced by id — e.g.
+        // a <clipPath> whose <use href="#body_base"> points at a <path> living in
+        // the main tree (not in <defs>). An isolation tile contains only <defs> +
+        // the single target element, so without these the <use>/clip-path/mask
+        // resolves to nothing: the element clips away to a fully-transparent tile,
+        // which canvasIsBlank rejects, and it then falls back to an UNFILTERED
+        // hard-edged draw. Gathering every referenced id (href="#id" and any
+        // url(#id) attribute) transitively covers nested references too.
+        const referenced = new Set<string>();
+        for (const el of Array.from(doc.querySelectorAll('*'))) {
+            for (const attr of Array.from(el.attributes)) {
+                const v = attr.value;
+                if (!v) continue;
+                if (attr.localName === 'href') {
+                    if (v.startsWith('#')) referenced.add(v.slice(1));
+                } else if (v.includes('url(')) {
+                    for (const m of v.matchAll(/url\(\s*['"]?#([^'")\s]+)/g)) referenced.add(m[1]);
+                }
+            }
+        }
+        for (const id of referenced) {
+            const el = doc.getElementById(id);
+            // Skip missing targets, anything already inside <defs>, and definition
+            // elements already emitted above — leaving only tree shapes we're
+            // missing. They live inside <defs> in the tile, so they never paint;
+            // they exist purely as reference targets for <use>/clip-path/mask.
+            if (!el || el.closest('defs') || el.matches(DEF_SELECTOR)) continue;
+            parts.push(el.outerHTML);
         }
         return parts.join('');
     }
@@ -4741,6 +4768,7 @@ export class UIEngine {
                 end_y: paint.data.end_y,
                 spread: paint.data.spread ?? 0,
                 ...(paint.data.focal ? { focal: paint.data.focal } : {}),
+                ...(paint.data.transform ? { transform: paint.data.transform } : {}),
             };
         };
 
@@ -5114,12 +5142,18 @@ export class UIEngine {
          * @param inherited    Cascaded presentation attributes from ancestor elements
          * @param useRefStack  Set of href IDs currently being resolved (cycle detection)
          */
-        // Build a GradientGeo for a baked shape (path/line/poly): its geometry
-        // lives in the composed space (node transform is identity), so the OBB
-        // box is the baked bbox and userSpaceOnUse coords map via composedMat.
+        // Build a GradientGeo for a baked shape (path/line/poly). The engine's
+        // addPath offsets the geometry to a local origin and stores that shift as
+        // the node's transform (translate). So the shape's LOCAL space is the
+        // composed space minus that offset — gradient coordinates must map there
+        // too, or a userSpaceOnUse gradient lands shifted off the geometry and
+        // clamps to its first stop (a flat fill). `nodeTransform` is the node's
+        // transform (row-major mat3: tx = [2], ty = [5]); pass it so we subtract
+        // the same offset the engine applied.
         const bakedGradientGeo = (
             subpaths: { points: { x: number; y: number }[] }[],
             mat: number[],
+            nodeTransform?: Float32Array | number[],
         ): GradientGeo => {
             let minX = Infinity,
                 minY = Infinity,
@@ -5138,7 +5172,18 @@ export class UIEngine {
                 maxX = 0;
                 maxY = 0;
             }
-            return { bx: minX, by: minY, bw: maxX - minX, bh: maxY - minY, userToLocal: mat };
+            const ox = nodeTransform ? nodeTransform[2] : 0;
+            const oy = nodeTransform ? nodeTransform[5] : 0;
+            // userToLocal = translate(-offset) · composedMat, and the OBB box is
+            // the composed bbox shifted into local space (≈ origin-aligned).
+            const userToLocal = composeMatrices(translateMatrix(-ox, -oy), mat);
+            return {
+                bx: minX - ox,
+                by: minY - oy,
+                bw: maxX - minX,
+                bh: maxY - minY,
+                userToLocal,
+            };
         };
 
         const processElement = (
@@ -5664,7 +5709,7 @@ export class UIEngine {
                 ];
                 const subpaths = [{ points, closed: false }];
                 nodeId = this.scene.addPath(JSON.stringify(subpaths));
-                gradientGeo = bakedGradientGeo(subpaths, composedMat);
+                gradientGeo = bakedGradientGeo(subpaths, composedMat, this.scene.getTransform(nodeId));
             } else if (tag === 'polygon' || tag === 'polyline') {
                 const pointsStr = el.getAttribute('points') || '';
                 const coords = pointsStr
@@ -5680,7 +5725,11 @@ export class UIEngine {
                 if (pts.length >= 2) {
                     const subpaths = [{ points: pts, closed: tag === 'polygon' }];
                     nodeId = this.scene.addPath(JSON.stringify(subpaths));
-                    gradientGeo = bakedGradientGeo(subpaths, composedMat);
+                    gradientGeo = bakedGradientGeo(
+                        subpaths,
+                        composedMat,
+                        this.scene.getTransform(nodeId),
+                    );
                 }
             } else if (tag === 'path') {
                 const d = el.getAttribute('d') || '';
@@ -5688,7 +5737,11 @@ export class UIEngine {
                 const subpaths = this.parseSVGPathDWithMatrix(d, composedMat);
                 if (subpaths.length > 0) {
                     nodeId = this.scene.addPath(JSON.stringify(subpaths));
-                    gradientGeo = bakedGradientGeo(subpaths, composedMat);
+                    gradientGeo = bakedGradientGeo(
+                        subpaths,
+                        composedMat,
+                        this.scene.getTransform(nodeId),
+                    );
                 }
             } else if (tag === 'image') {
                 // preprocessImages (async pre-pass) decoded the image: intrinsic
@@ -5985,7 +6038,14 @@ export class UIEngine {
         for (const prim of primitives) {
             const t = prim.tagName.toLowerCase();
             if (t === 'fegaussianblur') {
-                effects.push({ Blur: { radius: firstNum(prim.getAttribute('stdDeviation')) } });
+                // stdDeviation may be one value (isotropic) or two (x y →
+                // anisotropic). Carry the y sigma when it differs from x.
+                const sd = (prim.getAttribute('stdDeviation') || '').trim().split(/[\s,]+/);
+                const sx = firstNum(prim.getAttribute('stdDeviation'));
+                const sy = sd.length > 1 ? parseFloat(sd[1]) : sx;
+                const blur: { radius: number; radius_y?: number } = { radius: sx };
+                if (!Number.isNaN(sy) && Math.abs(sy - sx) > 1e-6) blur.radius_y = sy;
+                effects.push({ Blur: blur });
             } else if (t === 'fedropshadow') {
                 const flood = prim.getAttribute('flood-color') || '#000000';
                 const fo = firstNum(prim.getAttribute('flood-opacity'), 1);

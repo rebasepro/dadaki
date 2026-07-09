@@ -116,6 +116,9 @@ pub struct ProtoEffect {
     /// For ColorMatrix: true if the matrix should be applied in linearRGB space.
     #[prost(bool, tag = "7")]
     pub linear_rgb: bool,
+    /// Blur (kind 0): y-axis sigma for anisotropic blur. 0 = isotropic (= radius).
+    #[prost(float, tag = "8")]
+    pub radius_y: f32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -168,6 +171,12 @@ pub struct ProtoGradient {
     pub focal_y: f32,
     #[prost(float, tag = "11")]
     pub focal_r: f32,
+    /// True when `transform` carries a gradient→local affine (elliptical radial).
+    #[prost(bool, tag = "12")]
+    pub has_transform: bool,
+    /// Gradient→local affine [a, b, c, d, e, f]; empty when `has_transform` false.
+    #[prost(float, repeated, tag = "13")]
+    pub transform: Vec<f32>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -514,6 +523,8 @@ impl From<&Gradient> for ProtoGradient {
             focal_x: g.focal.as_ref().map(|f| f.x).unwrap_or(0.0),
             focal_y: g.focal.as_ref().map(|f| f.y).unwrap_or(0.0),
             focal_r: g.focal.as_ref().map(|f| f.r).unwrap_or(0.0),
+            has_transform: g.transform.is_some(),
+            transform: g.transform.map(|t| t.to_vec()).unwrap_or_default(),
         }
     }
 }
@@ -534,6 +545,13 @@ impl From<&ProtoGradient> for Gradient {
             spread: g.spread as u8,
             focal: if g.has_focal {
                 Some(GradientFocal { x: g.focal_x, y: g.focal_y, r: g.focal_r })
+            } else {
+                None
+            },
+            transform: if g.has_transform && g.transform.len() == 6 {
+                let mut t = [0.0f32; 6];
+                t.copy_from_slice(&g.transform);
+                Some(t)
             } else {
                 None
             },
@@ -571,21 +589,27 @@ impl From<&ProtoStyle> for Style {
 
 fn effect_to_proto(e: &crate::Effect) -> ProtoEffect {
     match e {
-        crate::Effect::Blur { radius } => ProtoEffect {
+        crate::Effect::Blur { radius, radius_y } => ProtoEffect {
             kind: 0, radius: *radius, dx: 0.0, dy: 0.0, color: None, matrix: Vec::new(), linear_rgb: false,
+            radius_y: radius_y.unwrap_or(0.0),
         },
         crate::Effect::DropShadow { dx, dy, blur, color } => ProtoEffect {
             kind: 1, radius: *blur, dx: *dx, dy: *dy, color: Some(color.into()), matrix: Vec::new(), linear_rgb: false,
+            radius_y: 0.0,
         },
         crate::Effect::ColorMatrix { matrix, linear_rgb } => ProtoEffect {
             kind: 2, radius: 0.0, dx: 0.0, dy: 0.0, color: None, matrix: matrix.to_vec(), linear_rgb: *linear_rgb,
+            radius_y: 0.0,
         },
     }
 }
 
 fn proto_to_effect(e: &ProtoEffect) -> Option<crate::Effect> {
     match e.kind {
-        0 => Some(crate::Effect::Blur { radius: e.radius }),
+        0 => Some(crate::Effect::Blur {
+            radius: e.radius,
+            radius_y: if e.radius_y > 0.0 { Some(e.radius_y) } else { None },
+        }),
         1 => Some(crate::Effect::DropShadow {
             dx: e.dx, dy: e.dy, blur: e.radius,
             color: e.color.as_ref().map(Color::from).unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
