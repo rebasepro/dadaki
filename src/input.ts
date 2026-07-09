@@ -4,7 +4,7 @@ import type { FileService } from './file_service';
 import type { DocumentManager } from './document_manager';
 import { SnapEngine, type SnapGuide } from './snapping';
 import type { WasmScene } from './wasm_scene';
-import type { PenPathPoint, Subpath } from './types';
+import type { PenPathPoint, Subpath, Artboard } from './types';
 import { outlineStroke } from './outline_stroke';
 import { ensureFontCSS } from './fonts';
 import { textNodeToSubpaths } from './text_outlines';
@@ -102,6 +102,12 @@ export class InputManager {
         handle: ArtboardHandle | null;
         start: { x: number; y: number; w: number; h: number };
         startWorld: { x: number; y: number };
+        /** Top-level nodes contained in the artwork at drag start — they travel
+         *  with the frame on a move (empty for resize). */
+        contained: number[];
+        /** Cumulative delta already applied to `contained` this drag. */
+        movedDx: number;
+        movedDy: number;
     } | null = null;
     /** Whether any actual movement happened during a drag. */
     didMove: boolean = false;
@@ -117,6 +123,10 @@ export class InputManager {
     /** Marquee selection rect in world coords, read by Renderer each frame. */
     marqueeRect: { x: number; y: number; w: number; h: number } | null = null;
     clipboardIds: number[] = [];
+    /** Figma-style artwork clipboard: a frame descriptor plus its contained
+     *  top-level node ids, captured on copy. When set, it takes precedence over
+     *  `clipboardIds` on paste (and is cleared when plain nodes are copied). */
+    private artboardClipboard: { ab: Artboard; nodeIds: number[] } | null = null;
 
     // --- Modifier key state (updated every mousemove) ---
     shiftKey: boolean = false;
@@ -255,7 +265,7 @@ export class InputManager {
         window.addEventListener('keyup', withRender((e: KeyboardEvent) => this.onKeyUp(e)));
         window.addEventListener('wheel', withRender((e: WheelEvent) => this.onWheel(e)), { passive: false, capture: true });
 
-        // Import .svg / .vec files by dropping them onto the canvas area
+        // Import .svg / .dataki / .vec files by dropping them onto the canvas area
         const dropTarget = document.getElementById('canvas-container') ?? this.canvas;
         dropTarget.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -270,7 +280,7 @@ export class InputManager {
     }
 
     /** Import dropped files: .svg content is centered at the drop point and
-     *  selected; .vec replaces the document (undoable — a history snapshot is
+     *  selected; .dataki and .vec replace the document (undoable — a history snapshot is
      *  taken first). */
     async onFileDrop(e: DragEvent) {
         e.preventDefault();
@@ -301,7 +311,7 @@ export class InputManager {
                     this.scene.engine!.clear_selection();
                     for (const id of newRoots) this.scene.selectNode(id, true);
                 });
-            } else if (name.endsWith('.vec')) {
+            } else if (name.endsWith('.dataki') || name.endsWith('.vec')) {
                 const bytes = new Uint8Array(await file.arrayBuffer());
                 this.scene.saveMoveHistory(); // snapshot current doc so the drop is undoable
                 this.scene.engine.deserialize_proto(bytes);
@@ -852,14 +862,29 @@ export class InputManager {
             }
         }
 
-        // Cmd+C: Copy
+        // Cmd+C: Copy — a selected artwork copies as a frame + its contents,
+        // otherwise the selected nodes.
         if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
-            this.clipboardIds = [...this.scene.engine!.get_selection()];
+            const abId = this.renderer.selectedArtboardId;
+            const ab = abId !== null ? this.scene.getArtboards().find(a => a.id === abId) : undefined;
+            if (ab) {
+                this.artboardClipboard = {
+                    ab: { ...ab, background: { ...ab.background } },
+                    nodeIds: this.artboardContainedRoots(ab),
+                };
+                this.clipboardIds = [];
+            } else {
+                this.clipboardIds = [...this.scene.engine!.get_selection()];
+                this.artboardClipboard = null;
+            }
         }
 
         // Cmd+V: Paste (duplicate from clipboard)
         if ((e.metaKey || e.ctrlKey) && e.key === 'v' && !e.shiftKey) {
-            if (this.clipboardIds.length > 0) {
+            if (this.artboardClipboard) {
+                e.preventDefault();
+                this.pasteArtboard();
+            } else if (this.clipboardIds.length > 0) {
                 e.preventDefault();
                 this.scene.transaction(() => {
                     this.scene.engine!.clear_selection();
@@ -1116,6 +1141,12 @@ export class InputManager {
                 this.canvas.style.cursor = 'default';
             }
         }
+        // Releasing ⌘/Ctrl re-enables snapping: bring the hover preview back
+        // immediately, without waiting for a mouse move.
+        if (e.key === 'Meta' || e.key === 'Control') {
+            this.metaKey = e.metaKey; this.ctrlKey = e.ctrlKey;
+            this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
+        }
     }
 
     getPos(e: MouseEvent) {
@@ -1193,28 +1224,134 @@ export class InputManager {
         this.renderer.requestRender();
     }
 
-    /** Delete the currently-selected artwork (frame). */
+    /** Delete the currently-selected artwork (frame) together with everything
+     *  inside it — a single undo restores the frame and all its contents. */
     deleteSelectedArtboard() {
         const id = this.renderer.selectedArtboardId;
         if (id === null) return;
-        this.scene.removeArtboard(id);
+        const ab = this.scene.getArtboards().find(a => a.id === id);
+        const contained = ab ? this.artboardContainedRoots(ab) : [];
+        // If a contained node is being path-edited, leave edit mode first.
+        if (this.editingNodeId !== null && contained.includes(this.editingNodeId)) {
+            this.exitEditMode();
+        }
+        this.scene.transaction(() => {
+            for (const nid of contained) this.scene.engine!.remove_node(nid);
+            this.scene.engine!.remove_artboard(id);
+        });
         this.renderer.selectedArtboardId = null;
         this.ui.refreshArtboardPanel();
         this.ui.updateLayerList();
         this.renderer.requestRender();
     }
 
+    // ─── Artwork ↔ contents membership (geometric, Figma-style) ──────────────
+    // Artboards are a scene-level list, not nodes, so there is no parent/child
+    // link to the shapes drawn inside them. Membership is resolved on demand:
+    // a top-level node belongs to a frame when its bounding-box center lies
+    // within the frame's rect. This set is captured at the moment of an action
+    // (move / delete / copy) and then stays fixed for that action.
+
+    /** World-space AABB of a node including all descendants, or null when it has
+     *  no spatial geometry. Groups aren't in the engine R-tree, so their bounds
+     *  are unioned from their leaf descendants. */
+    private nodeWorldBounds(id: number): { minX: number; minY: number; maxX: number; maxY: number } | null {
+        const children = this.scene.getNodeChildren(id);
+        if (children.length === 0) {
+            const b = this.scene.getNodeBounds(id); // [minX, minY, maxX, maxY]
+            // The engine returns all-zeros for a node with no spatial entry.
+            if (b[0] === 0 && b[1] === 0 && b[2] === 0 && b[3] === 0) return null;
+            return { minX: b[0], minY: b[1], maxX: b[2], maxY: b[3] };
+        }
+        let acc: { minX: number; minY: number; maxX: number; maxY: number } | null = null;
+        for (const c of children) {
+            const cb = this.nodeWorldBounds(c);
+            if (!cb) continue;
+            acc = acc ? {
+                minX: Math.min(acc.minX, cb.minX), minY: Math.min(acc.minY, cb.minY),
+                maxX: Math.max(acc.maxX, cb.maxX), maxY: Math.max(acc.maxY, cb.maxY),
+            } : cb;
+        }
+        return acc;
+    }
+
+    /** Top-level nodes whose center lies within the artwork's rect — the set
+     *  that moves/deletes/copies with the frame. */
+    private artboardContainedRoots(ab: Artboard): number[] {
+        const out: number[] = [];
+        for (const id of this.scene.getRootNodes()) {
+            const b = this.nodeWorldBounds(id);
+            if (!b) continue;
+            const cx = (b.minX + b.maxX) / 2;
+            const cy = (b.minY + b.maxY) / 2;
+            if (cx >= ab.x && cx <= ab.x + ab.w && cy >= ab.y && cy <= ab.y + ab.h) {
+                out.push(id);
+            }
+        }
+        return out;
+    }
+
+    /** Create a copy of an artwork — the frame plus the given contained nodes —
+     *  offset by (ox, oy). MUST run inside a scene.transaction(). Returns the new
+     *  frame's id. */
+    private cloneArtboard(ab: Artboard, nodeIds: number[], ox: number, oy: number): number {
+        const eng = this.scene.engine!;
+        const newId = eng.add_artboard(ab.x + ox, ab.y + oy, ab.w, ab.h);
+        eng.set_artboard_name(newId, `${ab.name} copy`);
+        const bg = ab.background;
+        eng.set_artboard_background(newId, bg.r, bg.g, bg.b, bg.a);
+        for (const nid of nodeIds) {
+            const clone = eng.duplicate_node(nid); // has a built-in +20,+20 offset
+            eng.move_node(clone, ox - 20, oy - 20); // re-align to exactly (ox, oy)
+        }
+        return newId;
+    }
+
+    /** Paste the copied artwork (frame + contents) as a new frame beside the
+     *  original. */
+    private pasteArtboard() {
+        const clip = this.artboardClipboard;
+        if (!clip) return;
+        let newId = -1;
+        this.scene.transaction(() => {
+            this.scene.engine!.clear_selection();
+            newId = this.cloneArtboard(clip.ab, clip.nodeIds, clip.ab.w + 40, 0);
+        });
+        this.selectArtboard(newId);
+        this.ui.updateLayerList();
+    }
+
+    /** Duplicate the selected artwork in place (Cmd+D / context-menu Duplicate). */
+    private duplicateSelectedArtboard() {
+        const id = this.renderer.selectedArtboardId;
+        if (id === null) return;
+        const ab = this.scene.getArtboards().find(a => a.id === id);
+        if (!ab) return;
+        const nodeIds = this.artboardContainedRoots(ab);
+        let newId = -1;
+        this.scene.transaction(() => {
+            this.scene.engine!.clear_selection();
+            newId = this.cloneArtboard(ab, nodeIds, ab.w + 40, 0);
+        });
+        this.selectArtboard(newId);
+        this.ui.updateLayerList();
+    }
+
     private beginArtboardDrag(id: number, mode: 'move' | 'resize', handle: ArtboardHandle | null) {
         const ab = this.scene.getArtboards().find(a => a.id === id);
         if (!ab) return;
+        // On a move, the shapes inside the frame travel with it; capture them now.
+        const contained = mode === 'move' ? this.artboardContainedRoots(ab) : [];
         this.artboardDrag = {
             id, mode, handle,
             start: { x: ab.x, y: ab.y, w: ab.w, h: ab.h },
             startWorld: { ...this.startPos },
+            contained, movedDx: 0, movedDy: 0,
         };
-        // Snap to other shapes/artboards (exclude this one so it can't snap to
-        // its own edges).
-        this.snap.begin(this.scene, [], id);
+        // Snap to other shapes/artboards. Exclude this frame's own edges and its
+        // contained shapes (they move with the frame, so snapping to their start
+        // positions would fight the drag).
+        this.snap.begin(this.scene, contained, id);
         this.scene.beginGesture(); // coalesce the whole drag into one undo step
     }
 
@@ -1251,6 +1388,19 @@ export class InputManager {
             }
         }
         this.scene.setArtboardBounds(d.id, x, y, w, h);
+        // Drag the contained shapes by the same cumulative delta (move only).
+        if (d.mode === 'move' && d.contained.length > 0) {
+            const totalDx = x - d.start.x;
+            const totalDy = y - d.start.y;
+            const stepDx = totalDx - d.movedDx;
+            const stepDy = totalDy - d.movedDy;
+            if (stepDx !== 0 || stepDy !== 0) {
+                for (const nid of d.contained) this.scene.engine!.move_node(nid, stepDx, stepDy);
+                this.scene.invalidateCache();
+                d.movedDx = totalDx;
+                d.movedDy = totalDy;
+            }
+        }
         this.ui.refreshArtboardPanel();
     }
 
@@ -1731,6 +1881,11 @@ export class InputManager {
     }
 
     duplicateSelection() {
+        // A selected artwork duplicates as a frame + its contents.
+        if (this.renderer.selectedArtboardId !== null) {
+            this.duplicateSelectedArtboard();
+            return;
+        }
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
         this.scene.transaction(() => {

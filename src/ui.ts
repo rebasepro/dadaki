@@ -104,6 +104,13 @@ export class UIEngine {
     textLetterSpacing!: HTMLInputElement;
     typographySection: HTMLElement;
 
+    // Export Panel DOM elements
+    exportPaneScale: HTMLSelectElement;
+    exportPaneFormat: HTMLSelectElement;
+    exportPaneSuffix: HTMLInputElement;
+    exportPaneTransparent: HTMLInputElement;
+    exportPaneBtn: HTMLButtonElement;
+
     // Context menu
     contextMenuEl: HTMLElement;
     private _contextMenuCallback: ((action: string) => void) | null = null;
@@ -169,6 +176,13 @@ export class UIEngine {
         // Context menu
         this.contextMenuEl = document.getElementById('context-menu') as HTMLElement;
 
+        // Export Panel
+        this.exportPaneScale = document.getElementById('export-pane-scale') as HTMLSelectElement;
+        this.exportPaneFormat = document.getElementById('export-pane-format') as HTMLSelectElement;
+        this.exportPaneSuffix = document.getElementById('export-pane-suffix') as HTMLInputElement;
+        this.exportPaneTransparent = document.getElementById('export-pane-transparent') as HTMLInputElement;
+        this.exportPaneBtn = document.getElementById('export-pane-btn') as HTMLButtonElement;
+
         this.initEvents();
         this.initCollapsibleSections();
 
@@ -179,61 +193,83 @@ export class UIEngine {
     /** Figma-style label scrubbing: dragging the label inside a dimension
      *  field adjusts its value (Shift = ×10). One undo snapshot per gesture;
      *  live edits apply without history. A plain click focuses the field. */
+    /** General Figma-style label scrubbing helper */
+    private makeScrubbable(label: HTMLElement, input: HTMLInputElement, onUpdate: () => void) {
+        label.addEventListener('pointerdown', (e: PointerEvent) => {
+            if (input.disabled) return;
+            const isAb = input.id.startsWith('ab-');
+            if (!isAb && this.scene.engine!.get_selection().length === 0) return;
+            
+            e.preventDefault();
+            try { label.setPointerCapture(e.pointerId); } catch { }
+
+            const startX = e.clientX;
+            const startVal = parseFloat(input.value) || 0;
+            const step = parseFloat(input.step) || 1;
+            const min = input.min !== '' ? parseFloat(input.min) : -Infinity;
+            const max = input.max !== '' ? parseFloat(input.max) : Infinity;
+            let moved = false;
+
+            const onMove = (ev: PointerEvent) => {
+                const dx = ev.clientX - startX;
+                if (!moved && Math.abs(dx) < 3) return; // click-vs-drag threshold
+                if (!moved) this.scene.beginGesture(); // one undo snapshot for the whole drag
+                moved = true;
+                document.body.classList.add('scrubbing');
+
+                const mult = ev.shiftKey ? 10 : 1;
+                const val = Math.max(min, Math.min(max, startVal + Math.round(dx) * step * mult));
+                const next = String(Math.round(val * 100) / 100);
+                if (next === input.value) return;
+                input.value = next;
+
+                onUpdate();
+            };
+
+            const onUp = () => {
+                label.removeEventListener('pointermove', onMove);
+                label.removeEventListener('pointerup', onUp);
+                label.removeEventListener('pointercancel', onUp);
+                document.body.classList.remove('scrubbing');
+                if (moved) {
+                    this.scene.endGesture();
+                    this.syncWithSelection({ interactive: true });
+                } else {
+                    input.focus();
+                    input.select();
+                }
+            };
+
+            label.addEventListener('pointermove', onMove);
+            label.addEventListener('pointerup', onUp);
+            label.addEventListener('pointercancel', onUp);
+        });
+    }
+
+    /** Figma-style label scrubbing: dragging the label inside a dimension
+     *  field adjusts its value (Shift = ×10). One undo snapshot per gesture;
+     *  live edits apply without history. A plain click focuses the field. */
     private initScrubbing() {
         document.querySelectorAll<HTMLElement>('.dim-label[data-scrub]').forEach(label => {
             const input = document.getElementById(label.dataset.scrub!) as HTMLInputElement | null;
             if (!input) return;
 
-            label.addEventListener('pointerdown', (e: PointerEvent) => {
-                if (input.disabled) return;
-                if (this.scene.engine!.get_selection().length === 0) return;
-                e.preventDefault();
-                try { label.setPointerCapture(e.pointerId); } catch { }
+            const onUpdate = () => {
+                if (input.id.startsWith('ab-')) {
+                    this.applyArtboardBounds();
+                } else if (input === this.cornerRadius) {
+                    this.applyCornerRadiusToSelection();
+                } else if (input === this.textFontSize || input === this.textLineHeight || input === this.textLetterSpacing) {
+                    this.updateTextPropertiesNoHistory();
+                } else if (input === this.opacityInput) {
+                    this._currentStyleJson = this.buildCurrentStyleJson();
+                    this.updateSelectedPropertiesNoHistory();
+                } else {
+                    this.updateTransform(false);
+                }
+            };
 
-                const startX = e.clientX;
-                const startVal = parseFloat(input.value) || 0;
-                const step = parseFloat(input.step) || 1;
-                const min = input.min !== '' ? parseFloat(input.min) : -Infinity;
-                let moved = false;
-
-                const onMove = (ev: PointerEvent) => {
-                    const dx = ev.clientX - startX;
-                    if (!moved && Math.abs(dx) < 3) return; // click-vs-drag threshold
-                    if (!moved) this.scene.beginGesture(); // one undo snapshot for the whole drag
-                    moved = true;
-                    document.body.classList.add('scrubbing');
-
-                    const mult = ev.shiftKey ? 10 : 1;
-                    const val = Math.max(min, startVal + Math.round(dx) * step * mult);
-                    const next = String(Math.round(val * 100) / 100);
-                    if (next === input.value) return;
-                    input.value = next;
-
-                    if (input === this.cornerRadius) {
-                        this.applyCornerRadiusToSelection();
-                    } else {
-                        this.updateTransform(false);
-                    }
-                };
-
-                const onUp = () => {
-                    label.removeEventListener('pointermove', onMove);
-                    label.removeEventListener('pointerup', onUp);
-                    label.removeEventListener('pointercancel', onUp);
-                    document.body.classList.remove('scrubbing');
-                    if (moved) {
-                        this.scene.endGesture();
-                        this.syncWithSelection({ interactive: true });
-                    } else {
-                        input.focus();
-                        input.select();
-                    }
-                };
-
-                label.addEventListener('pointermove', onMove);
-                label.addEventListener('pointerup', onUp);
-                label.addEventListener('pointercancel', onUp);
-            });
+            this.makeScrubbable(label, input, onUpdate);
         });
     }
 
@@ -254,6 +290,17 @@ export class UIEngine {
 
     private initEvents() {
         // (Toolbar clicks are wired by the Toolbar class itself — see toolbar.ts)
+
+        // Export Panel events
+        this.exportPaneFormat?.addEventListener('change', () => {
+            const isSVG = this.exportPaneFormat.value === 'svg';
+            if (this.exportPaneScale) this.exportPaneScale.disabled = isSVG;
+            if (this.exportPaneTransparent) this.exportPaneTransparent.disabled = isSVG;
+        });
+
+        this.exportPaneBtn?.addEventListener('click', () => {
+            this.exportSelection();
+        });
 
         // Style properties — coalesced undo: one snapshot per gesture
         const styleInputs = [
@@ -334,16 +381,31 @@ export class UIEngine {
             if (el) el.addEventListener('change', () => this.updateTransform());
         }
 
-        // Shift+Arrow = ±10 on all dimension fields (Figma convention).
+        // Shift+Arrow = ±10 * step on all dimension fields (Figma convention).
         // Setting the value and dispatching 'change' reuses each field's handler.
-        for (const el of [...transformInputs, this.cornerRadius]) {
+        const allScrubbableInputs = [
+            ...transformInputs, 
+            this.cornerRadius, 
+            this.textFontSize, 
+            this.textLineHeight, 
+            this.textLetterSpacing, 
+            this.opacityInput,
+            document.getElementById('ab-x') as HTMLInputElement,
+            document.getElementById('ab-y') as HTMLInputElement,
+            document.getElementById('ab-w') as HTMLInputElement,
+            document.getElementById('ab-h') as HTMLInputElement
+        ];
+        for (const el of allScrubbableInputs) {
             if (!el) continue;
             el.addEventListener('keydown', (e: KeyboardEvent) => {
                 if (!e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
                 e.preventDefault();
                 const min = el.min !== '' ? parseFloat(el.min) : -Infinity;
+                const max = el.max !== '' ? parseFloat(el.max) : Infinity;
                 const cur = parseFloat(el.value) || 0;
-                el.value = String(Math.max(min, cur + (e.key === 'ArrowUp' ? 10 : -10)));
+                const step = el.step !== '' ? parseFloat(el.step) : 1;
+                const val = Math.max(min, Math.min(max, cur + (e.key === 'ArrowUp' ? 10 : -10) * step));
+                el.value = String(Math.round(val * 100) / 100);
                 el.dispatchEvent(new Event('change'));
             });
         }
@@ -461,23 +523,25 @@ export class UIEngine {
         this.bindArtboardPanel();
     }
 
+    private applyArtboardBounds() {
+        const selectedId = this.scene.renderer?.selectedArtboardId ?? null;
+        const ab = this.scene.getArtboards().find(a => a.id === selectedId);
+        if (!ab) return;
+        const x = parseFloat((document.getElementById('ab-x') as HTMLInputElement).value) || 0;
+        const y = parseFloat((document.getElementById('ab-y') as HTMLInputElement).value) || 0;
+        const w = Math.max(1, parseFloat((document.getElementById('ab-w') as HTMLInputElement).value) || 1);
+        const h = Math.max(1, parseFloat((document.getElementById('ab-h') as HTMLInputElement).value) || 1);
+        this.scene.setArtboardBounds(ab.id, x, y, w, h);
+        this.scene.renderer?.requestRender();
+    }
+
     /** Wire the artboard properties panel inputs (once, from bindEvents). */
     private bindArtboardPanel() {
         const selectedId = () => this.scene.renderer?.selectedArtboardId ?? null;
         const current = () => this.scene.getArtboards().find(a => a.id === selectedId());
 
-        const applyBounds = () => {
-            const ab = current();
-            if (!ab) return;
-            const x = parseFloat((document.getElementById('ab-x') as HTMLInputElement).value) || 0;
-            const y = parseFloat((document.getElementById('ab-y') as HTMLInputElement).value) || 0;
-            const w = Math.max(1, parseFloat((document.getElementById('ab-w') as HTMLInputElement).value) || 1);
-            const h = Math.max(1, parseFloat((document.getElementById('ab-h') as HTMLInputElement).value) || 1);
-            this.scene.setArtboardBounds(ab.id, x, y, w, h);
-            this.scene.renderer?.requestRender();
-        };
         for (const id of ['ab-x', 'ab-y', 'ab-w', 'ab-h']) {
-            document.getElementById(id)?.addEventListener('change', applyBounds);
+            document.getElementById(id)?.addEventListener('change', () => this.applyArtboardBounds());
         }
         document.getElementById('ab-name')?.addEventListener('change', (e) => {
             const ab = current();
@@ -543,6 +607,8 @@ export class UIEngine {
         const id = this.scene.renderer?.selectedArtboardId ?? null;
         const ab = id !== null ? this.scene.getArtboards().find(a => a.id === id) : undefined;
 
+        this.updateExportPanel();
+
         if (!ab) {
             section.style.display = 'none';
             // No artboard selected: show the node inspector only when a node is
@@ -567,6 +633,38 @@ export class UIEngine {
         const bg = document.getElementById('ab-bg') as HTMLInputElement;
         bg.value = this.rgbToHex(ab.background);
         bg.disabled = transparent;
+    }
+
+    /** Update the visibility and label of the Export panel. */
+    updateExportPanel() {
+        const exportSection = document.getElementById('export-pane-section');
+        if (!exportSection) return;
+
+        const selection = this.scene.engine?.get_selection() ?? [];
+        const artboardId = this.scene.renderer?.selectedArtboardId ?? null;
+        const ab = artboardId !== null ? this.scene.getArtboards().find(a => a.id === artboardId) : undefined;
+
+        // If nothing is selected, hide the panel completely.
+        if (!ab && selection.length === 0) {
+            exportSection.style.display = 'none';
+            return;
+        }
+
+        // Show the panel
+        exportSection.style.display = '';
+
+        const exportBtn = this.exportPaneBtn;
+        if (!exportBtn) return;
+
+        if (ab) {
+            exportBtn.innerText = `Export ${ab.name || 'Artboard'}`;
+        } else if (selection.length > 0) {
+            if (selection.length === 1) {
+                exportBtn.innerText = `Export ${this.scene.getNodeName(selection[0]) || 'Selection'}`;
+            } else {
+                exportBtn.innerText = `Export selection (${selection.length})`;
+            }
+        }
     }
 
     /** Add a new artboard to the right of the existing ones and select it. */
@@ -1551,27 +1649,57 @@ export class UIEngine {
             }
         });
 
+        const posContainer = document.createElement('div');
+        posContainer.className = 'dim-input';
+        posContainer.style.cssText = 'width:52px;flex:0 0 52px';
+        posContainer.title = 'Stop position %';
+
+        const posLabel = document.createElement('span');
+        posLabel.className = 'dim-label';
+        posLabel.innerHTML = `<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><path d="M6 1.5l3.5 4v5h-7v-5z"/></svg>`;
+
         const pos = document.createElement('input');
         pos.type = 'number'; pos.min = '0'; pos.max = '100';
-        pos.className = 'prop-input';
-        pos.style.cssText = 'width:44px;flex:0 0 44px';
         pos.value = String(Math.round(stop.offset * 100));
-        pos.title = 'Stop position %';
-        pos.addEventListener('change', () => {
+
+        const updatePos = () => {
             const v = Math.max(0, Math.min(100, parseFloat(pos.value) || 0)) / 100;
             commit(f => { (f[index] as Gradient).stops[si].offset = v; });
-        });
+        };
+
+        pos.addEventListener('change', updatePos);
+        pos.addEventListener('input', updatePos);
+
+        this.makeScrubbable(posLabel, pos, updatePos);
+
+        posContainer.appendChild(posLabel);
+        posContainer.appendChild(pos);
+
+        const alphaContainer = document.createElement('div');
+        alphaContainer.className = 'dim-input';
+        alphaContainer.style.cssText = 'width:52px;flex:0 0 52px';
+        alphaContainer.title = 'Stop opacity %';
+
+        const alphaLabel = document.createElement('span');
+        alphaLabel.className = 'dim-label';
+        alphaLabel.innerHTML = `<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><circle cx="6" cy="6" r="4.5"/><path d="M6 1.5A4.5 4.5 0 0 1 6 10.5V1.5z" fill="currentColor"/></svg>`;
 
         const alpha = document.createElement('input');
         alpha.type = 'number'; alpha.min = '0'; alpha.max = '100';
-        alpha.className = 'prop-input';
-        alpha.style.cssText = 'width:44px;flex:0 0 44px';
         alpha.value = String(Math.round((stop.color.a ?? 1) * 100));
-        alpha.title = 'Stop opacity %';
-        alpha.addEventListener('change', () => {
+
+        const updateAlpha = () => {
             const a = Math.max(0, Math.min(100, parseFloat(alpha.value) || 0)) / 100;
             commit(f => { (f[index] as Gradient).stops[si].color.a = a; });
-        });
+        };
+
+        alpha.addEventListener('change', updateAlpha);
+        alpha.addEventListener('input', updateAlpha);
+
+        this.makeScrubbable(alphaLabel, alpha, updateAlpha);
+
+        alphaContainer.appendChild(alphaLabel);
+        alphaContainer.appendChild(alpha);
 
         const delStop = document.createElement('button');
         delStop.className = 'icon-toggle';
@@ -1587,8 +1715,8 @@ export class UIEngine {
 
         stopRow.appendChild(sw);
         stopRow.appendChild(hexInput);
-        stopRow.appendChild(pos);
-        stopRow.appendChild(alpha);
+        stopRow.appendChild(posContainer);
+        stopRow.appendChild(alphaContainer);
         const sp = document.createElement('div'); sp.style.flex = '1'; stopRow.appendChild(sp);
         stopRow.appendChild(delStop);
         editor.appendChild(stopRow);
@@ -1598,20 +1726,33 @@ export class UIEngine {
         actions.className = 'gradient-angle-row';
 
         if (fill.gradient_type === 'Linear') {
-            const label = document.createElement('span');
-            label.textContent = 'Angle';
-            label.className = 'gradient-sub-label';
+            const angleContainer = document.createElement('div');
+            angleContainer.className = 'dim-input';
+            angleContainer.style.cssText = 'width:56px;flex:0 0 56px';
+            angleContainer.title = 'Gradient angle';
+
+            const angleLabel = document.createElement('span');
+            angleLabel.className = 'dim-label';
+            angleLabel.innerHTML = `<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><path d="M2.5 1.5v8h8"/><path d="M6.7 9.5a4.2 4.2 0 0 0-4.2-4.2"/></svg>`;
+
             const angleInput = document.createElement('input');
             angleInput.type = 'number';
-            angleInput.className = 'prop-input';
-            angleInput.style.cssText = 'width:48px;flex:0 0 48px';
             angleInput.value = String(Math.round(UIEngine.gradientAngle(fill)));
-            angleInput.addEventListener('change', () => {
+
+            const updateAngle = () => {
                 commit(f => { UIEngine.rotateGradientTo(f[index] as Gradient, parseFloat(angleInput.value) || 0); });
-            });
+            };
+
+            angleInput.addEventListener('change', updateAngle);
+            angleInput.addEventListener('input', updateAngle);
+
+            this.makeScrubbable(angleLabel, angleInput, updateAngle);
+
+            angleContainer.appendChild(angleLabel);
+            angleContainer.appendChild(angleInput);
+
             const deg = document.createElement('span'); deg.textContent = '°'; deg.className = 'gradient-sub-label';
-            actions.appendChild(label);
-            actions.appendChild(angleInput);
+            actions.appendChild(angleContainer);
             actions.appendChild(deg);
         }
 
@@ -1698,19 +1839,35 @@ export class UIEngine {
                 }
             });
 
+            const wContainer = document.createElement('div');
+            wContainer.className = 'dim-input';
+            wContainer.style.width = '52px';
+            wContainer.style.flex = '0 0 52px';
+            wContainer.title = 'Stroke thickness';
+
+            const wLabel = document.createElement('span');
+            wLabel.className = 'dim-label';
+            wLabel.innerHTML = `<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><path d="M1.5 2h9" stroke-width="0.8"/><path d="M1.5 5.5h9" stroke-width="1.6"/><path d="M1.5 9h9" stroke-width="2.4"/></svg>`;
+
             const wInput = document.createElement('input');
             wInput.type = 'number';
-            wInput.className = 'prop-input';
             wInput.value = String(stroke.width);
             wInput.step = '0.5';
             wInput.min = '0';
-            wInput.style.width = '36px';
-            wInput.style.flex = '0 0 36px';
-            wInput.addEventListener('input', () => {
+
+            const updateStrokeWidth = () => {
                 const newStrokes = [...strokes];
                 newStrokes[index].width = parseFloat(wInput.value) || 0;
                 this.updateNodeStyle(node, { strokes: newStrokes }, true);
-            });
+            };
+
+            wInput.addEventListener('input', updateStrokeWidth);
+            wInput.addEventListener('change', updateStrokeWidth);
+
+            this.makeScrubbable(wLabel, wInput, updateStrokeWidth);
+
+            wContainer.appendChild(wLabel);
+            wContainer.appendChild(wInput);
 
             const alignSelect = document.createElement('select');
             alignSelect.className = 'prop-select';
@@ -1739,7 +1896,7 @@ export class UIEngine {
 
             row.appendChild(colorInput);
             row.appendChild(hexInput);
-            row.appendChild(wInput);
+            row.appendChild(wContainer);
             row.appendChild(alignSelect);
             row.appendChild(delBtn);
             this.strokesList.appendChild(row);
@@ -2473,37 +2630,44 @@ export class UIEngine {
         // the density of the fill/stroke rows.
         const numField = (label: string, val: number, on: (v: number) => void,
                           opts: { step?: number; min?: number; max?: number; suffix?: string } = {}) => {
-            const field = document.createElement('label');
-            field.className = 'effect-field';
+            const field = document.createElement('div');
+            field.className = 'dim-input';
+            field.style.flex = '1';
+            field.style.height = '24px';
+            
             const cap = document.createElement('span');
-            cap.className = 'effect-field-label';
+            cap.className = 'dim-label';
             cap.textContent = label;
-            const wrap = document.createElement('span');
-            wrap.className = 'effect-input-wrap';
+            
             const input = document.createElement('input');
             input.type = 'number';
-            input.className = 'prop-input';
             input.value = String(val);
             if (opts.step !== undefined) input.step = String(opts.step);
             if (opts.min !== undefined) input.min = String(opts.min);
             if (opts.max !== undefined) input.max = String(opts.max);
-            withGesture(input, () => {
+
+            const updateVal = () => {
                 let v = parseFloat(input.value);
                 if (!isFinite(v)) v = 0;
                 if (opts.min !== undefined) v = Math.max(opts.min, v);
                 if (opts.max !== undefined) v = Math.min(opts.max, v);
                 on(v);
                 commit();
-            });
-            wrap.appendChild(input);
+            };
+
+            withGesture(input, updateVal);
+            
+            this.makeScrubbable(cap, input, updateVal);
+
+            field.appendChild(cap);
+            field.appendChild(input);
+
             if (opts.suffix) {
                 const unit = document.createElement('span');
-                unit.className = 'effect-unit';
+                unit.className = 'dim-unit';
                 unit.textContent = opts.suffix;
-                wrap.appendChild(unit);
+                field.appendChild(unit);
             }
-            field.appendChild(cap);
-            field.appendChild(wrap);
             return field;
         };
 
@@ -2617,7 +2781,249 @@ export class UIEngine {
         URL.revokeObjectURL(url);
     }
 
-    /** Build the full SVG document string (with embedded .vec payload). */
+    /** Build a high-fidelity SVG string containing ONLY the selected shape nodes and their children. */
+    buildSVGStringForSelection(selection: number[], bounds?: { x: number; y: number; w: number; h: number }, background?: Color): string {
+        const docW = this.scene.engine?.get_document_width() ?? 1000;
+        const docH = this.scene.engine?.get_document_height() ?? 1000;
+
+        const selSet = new Set(selection);
+        const topSelected = selection.filter(id => {
+            let curr = id;
+            while (true) {
+                const parent = this.scene.getNodeParent(curr);
+                if (!parent || parent === 0) break;
+                if (selSet.has(parent)) {
+                    return false;
+                }
+                curr = parent;
+            }
+            return true;
+        });
+
+        const nodes: SVGExportInput['nodes'] = {};
+        const localTransforms: SVGExportInput['localTransforms'] = {};
+        const imageIds = new Set<number>();
+
+        const collectNodeData = (id: number, isTopLevel: boolean) => {
+            const node = this.scene.getNode(id);
+            if (!node) return;
+            if (node.geometry?.Path && this.scene.engine) {
+                const resolved = this.scene.getResolvedSubpaths(id);
+                if (resolved.length) node.geometry.Path.subpaths = resolved;
+            }
+            nodes[id] = node;
+
+            if (isTopLevel) {
+                const t = this.scene.getTransform(id);
+                // Convert Skia row-major [a, b, tx, c, d, ty, ...] to column-major [a, b, 0, c, d, 0, tx, ty, 1]
+                localTransforms[id] = [t[0], t[1], 0, t[3], t[4], 0, t[2], t[5], 1];
+            } else {
+                localTransforms[id] = Array.from(this.scene.getNodeLocalTransform(id));
+            }
+
+            if (node.geometry?.Image) imageIds.add(node.geometry.Image.image_id);
+            for (const p of node.style?.fills ?? []) if (p && (p as { image_id?: number }).image_id != null) imageIds.add((p as { image_id: number }).image_id);
+            for (const st of node.style?.strokes ?? []) { const p = st?.paint as { image_id?: number } | undefined; if (p?.image_id != null) imageIds.add(p.image_id); }
+            if (node.node_type === 'Group') {
+                const children = this.scene.getNodeChildren(id);
+                for (const childId of Array.from(children)) {
+                    collectNodeData(childId, false);
+                }
+            }
+        };
+
+        for (const rootId of topSelected) {
+            collectNodeData(rootId, true);
+        }
+
+        // Encode referenced images as base64 data URIs
+        let imageDataUris: Record<number, string> | undefined;
+        if (imageIds.size > 0 && this.scene.engine) {
+            imageDataUris = {};
+            for (const imgId of imageIds) {
+                const bytes = this.scene.engine.get_image_bytes(imgId);
+                if (!bytes || bytes.length === 0) continue;
+                const mime = this.scene.engine.get_image_mime(imgId) || 'image/png';
+                let bin = '';
+                for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+                imageDataUris[imgId] = `data:${mime};base64,${btoa(bin)}`;
+            }
+        }
+
+        let livePaint: LivePaintRenderData | undefined;
+        let filledFaces: FilledFace[] | undefined;
+        if (this.scene.engine) {
+            try {
+                const data = JSON.parse(this.scene.engine.get_live_paint_render_data()) as LivePaintRenderData;
+                if (data.groups && data.groups.length > 0) livePaint = data;
+            } catch { /* no live paint */ }
+            if (!livePaint) {
+                try {
+                    const parsed = JSON.parse(this.scene.engine.get_filled_faces()) as FilledFace[];
+                    if (parsed.length > 0) filledFaces = parsed;
+                } catch { /* no faces */ }
+            }
+        }
+
+        const svg = buildSVGFromData({
+            docWidth: docW,
+            docHeight: docH,
+            nodes,
+            rootNodeIds: topSelected,
+            localTransforms,
+            filledFaces,
+            livePaint,
+            imageDataUris,
+            viewBox: bounds,
+            background,
+        });
+
+        return svg;
+    }
+
+    /** Handle Figma-style exporting of selections, artboards, or canvas. */
+    async exportSelection() {
+        const scaleSelect = this.exportPaneScale;
+        const formatSelect = this.exportPaneFormat;
+        const suffixInput = this.exportPaneSuffix;
+        const transparentInput = this.exportPaneTransparent;
+
+        const scale = parseFloat(scaleSelect?.value || '1');
+        const format = (formatSelect?.value || 'png') as 'png' | 'svg';
+        const suffix = suffixInput?.value || '';
+        const transparent = transparentInput ? transparentInput.checked : true;
+
+        const selection = Array.from(this.scene.engine?.get_selection() ?? []);
+        const artboardId = this.scene.renderer?.selectedArtboardId ?? null;
+        const ab = artboardId !== null ? this.scene.getArtboards().find(a => a.id === artboardId) : undefined;
+
+        let filename = 'export';
+        let bounds: { x: number; y: number; w: number; h: number } | undefined = undefined;
+        let background: { r: number; g: number; b: number; a: number } | undefined = undefined;
+
+        if (ab) {
+            filename = ab.name || 'artboard';
+            bounds = { x: ab.x, y: ab.y, w: ab.w, h: ab.h };
+            if (!transparent) {
+                background = ab.background;
+            }
+        } else if (selection.length > 0) {
+            if (selection.length === 1) {
+                filename = this.scene.getNodeName(selection[0]) || 'selection';
+            } else {
+                filename = 'selection';
+            }
+
+            // Calculate bounds of selection
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const id of selection) {
+                const b = this.scene.getNodeBounds(id);
+                if (b) {
+                    minX = Math.min(minX, b[0]);
+                    minY = Math.min(minY, b[1]);
+                    maxX = Math.max(maxX, b[2]);
+                    maxY = Math.max(maxY, b[3]);
+                }
+            }
+            if (minX !== Infinity) {
+                bounds = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+            }
+
+            if (!transparent) {
+                background = { r: 1, g: 1, b: 1, a: 1 }; // Default to white background if not transparent
+            }
+        } else {
+            filename = 'canvas';
+            bounds = {
+                x: 0,
+                y: 0,
+                w: this.scene.engine?.get_document_width() ?? 1000,
+                h: this.scene.engine?.get_document_height() ?? 1000
+            };
+            if (!transparent) {
+                background = { r: 1, g: 1, b: 1, a: 1 };
+            }
+        }
+
+        // Apply suffix
+        filename = filename + suffix + '.' + format;
+
+        if (format === 'svg') {
+            let svgString = '';
+            if (selection.length > 0) {
+                svgString = this.buildSVGStringForSelection(selection, bounds, background);
+            } else {
+                svgString = this.buildSVGString(bounds, background);
+            }
+
+            const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 100);
+        } else {
+            // PNG format
+            if (selection.length > 0) {
+                // High-fidelity selection-only export via SVG-to-canvas rendering
+                const svgString = this.buildSVGStringForSelection(selection, bounds, background);
+                const img = new Image();
+                const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+                const url = URL.createObjectURL(svgBlob);
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const b = bounds ?? { x: 0, y: 0, w: 100, h: 100 };
+                    canvas.width = Math.max(1, Math.round(b.w * scale));
+                    canvas.height = Math.max(1, Math.round(b.h * scale));
+                    const ctx = canvas.getContext('2d');
+                    if (ctx) {
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        canvas.toBlob((blob) => {
+                            if (blob) {
+                                const downloadUrl = URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.href = downloadUrl;
+                                a.download = filename;
+                                a.click();
+                                setTimeout(() => URL.revokeObjectURL(downloadUrl), 100);
+                            }
+                            URL.revokeObjectURL(url);
+                        }, 'image/png');
+                    } else {
+                        URL.revokeObjectURL(url);
+                    }
+                };
+                img.onerror = () => {
+                    URL.revokeObjectURL(url);
+                    // Fallback to Skia/CanvasKit rendering if canvas drawing fails
+                    const blob = this.scene.renderer?.exportPNG(scale, bounds, background);
+                    if (blob) {
+                        const downloadUrl = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = downloadUrl;
+                        a.download = filename;
+                        a.click();
+                        setTimeout(() => URL.revokeObjectURL(downloadUrl), 100);
+                    }
+                };
+                img.src = url;
+            } else {
+                // Artboard / Canvas exports use Skia/CanvasKit renderer directly
+                const blob = this.scene.renderer?.exportPNG(scale, bounds, background);
+                if (blob) {
+                    const downloadUrl = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = downloadUrl;
+                    a.download = filename;
+                    a.click();
+                    setTimeout(() => URL.revokeObjectURL(downloadUrl), 100);
+                }
+            }
+        }
+    }
+
+    /** Build the full SVG document string (with embedded .dataki payload). */
     buildSVGString(bounds?: { x: number; y: number; w: number; h: number }, background?: Color): string {
         const docW = this.scene.engine?.get_document_width() ?? 1000;
         const docH = this.scene.engine?.get_document_height() ?? 1000;
@@ -2700,7 +3106,7 @@ export class UIEngine {
             background,
         });
 
-        // Embed the binary .vec payload for round-tripping
+        // Embed the binary .dataki payload for round-tripping
         if (this.scene.engine) {
             svg = FileIO.embedPayloadInSVG(this.scene.engine, svg);
         }

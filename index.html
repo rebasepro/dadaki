@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="description" content="Antigravity Vector — a professional in-browser SVG vector graphics editor with Rust/WASM rendering engine">
-    <title>Antigravity Vector — Pro SVG Editor</title>
+    <meta name="description" content="Dadaki vector editor — a professional in-browser SVG vector graphics editor with Rust/WASM rendering engine">
+    <title>Dadaki vector editor — Pro SVG Editor</title>
     <link rel="stylesheet" href="style.css">
     <script>
         // Block browser zoom
@@ -80,12 +80,24 @@
                             <input type="text" id="ab-name" class="ab-name-input" placeholder="Artwork name">
                         </div>
                         <div class="ab-row">
-                            <label class="ab-cell"><span>X</span><input type="number" id="ab-x" value="0" step="1"></label>
-                            <label class="ab-cell"><span>Y</span><input type="number" id="ab-y" value="0" step="1"></label>
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="ab-x" title="Artwork X">X</span>
+                                <input type="number" id="ab-x" value="0" step="1">
+                            </div>
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="ab-y" title="Artwork Y">Y</span>
+                                <input type="number" id="ab-y" value="0" step="1">
+                            </div>
                         </div>
-                        <div class="ab-row">
-                            <label class="ab-cell"><span>W</span><input type="number" id="ab-w" value="0" step="1" min="1"></label>
-                            <label class="ab-cell"><span>H</span><input type="number" id="ab-h" value="0" step="1" min="1"></label>
+                        <div class="ab-row" style="margin-top: 6px;">
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="ab-w" title="Artwork Width">W</span>
+                                <input type="number" id="ab-w" value="0" step="1" min="1">
+                            </div>
+                            <div class="dim-input">
+                                <span class="dim-label" data-scrub="ab-h" title="Artwork Height">H</span>
+                                <input type="number" id="ab-h" value="0" step="1" min="1">
+                            </div>
                         </div>
                         <div class="ab-field">
                             <span class="ab-sublabel">Presets</span>
@@ -226,28 +238,30 @@
                                 <option value="Raleway">Raleway</option>
                             </select>
                         </div>
-                        <div class="transform-grid" style="grid-template-columns: 1fr 1fr 1fr;">
-                            <div class="transform-cell">
-                                <label>Size</label>
-                                <input type="number" id="text-font-size" class="prop-input" value="32" min="1" step="1">
+                        <div class="transform-grid" style="grid-template-columns: 1fr 1fr 1fr; gap: 6px;">
+                            <div class="dim-input" title="Font size">
+                                <span class="dim-label" data-scrub="text-font-size">
+                                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><path d="M2 2.5h8M6 2.5v7.5"/></svg>
+                                </span>
+                                <input type="number" id="text-font-size" value="32" min="1" step="1">
+                            </div>
+                            <div class="dim-input" title="Line height">
+                                <span class="dim-label" data-scrub="text-line-height">
+                                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><path d="M1.5 2.5h5M1.5 6h5M1.5 9.5h5M9.5 2v7.5M8 3.5l1.5-1.5 1.5 1.5M8 8l1.5 1.5 1.5-1.5"/></svg>
+                                </span>
+                                <input type="number" id="text-line-height" value="1.2" min="0.5" max="5" step="0.1">
                             </div>
                             <div class="transform-cell">
-                                <label>Line H</label>
-                                <input type="number" id="text-line-height" class="prop-input" value="1.2" min="0.5" max="5" step="0.1">
-                            </div>
-                            <div class="transform-cell">
-                                <label>Align</label>
-                                <select id="text-align" class="prop-select">
+                                <select id="text-align" class="prop-select" style="height: 26px;">
                                     <option value="0">Left</option>
                                     <option value="1">Center</option>
                                     <option value="2">Right</option>
                                 </select>
                             </div>
                         </div>
-                        <div class="transform-grid" style="grid-template-columns: 1fr 1fr 1fr;">
+                        <div class="transform-grid" style="grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 6px;">
                             <div class="transform-cell">
-                                <label>Weight</label>
-                                <select id="text-weight" class="prop-select">
+                                <select id="text-weight" class="prop-select" style="height: 26px;">
                                     <option value="300">Light</option>
                                     <option value="400">Regular</option>
                                     <option value="500">Medium</option>
@@ -256,15 +270,16 @@
                                 </select>
                             </div>
                             <div class="transform-cell">
-                                <label>Style</label>
-                                <select id="text-italic" class="prop-select">
+                                <select id="text-italic" class="prop-select" style="height: 26px;">
                                     <option value="0">Normal</option>
                                     <option value="1">Italic</option>
                                 </select>
                             </div>
-                            <div class="transform-cell">
-                                <label>Spacing</label>
-                                <input type="number" id="text-letter-spacing" class="prop-input" value="0" step="0.5">
+                            <div class="dim-input" title="Letter spacing">
+                                <span class="dim-label" data-scrub="text-letter-spacing">
+                                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 2.5v7M10.5 2.5v7M3.5 6h5M5 4.5L3.5 6l1.5 1.5M7 4.5L8.5 6l-1.5 1.5"/></svg>
+                                </span>
+                                <input type="number" id="text-letter-spacing" value="0" step="0.5">
                             </div>
                         </div>
                     </div>
@@ -313,10 +328,14 @@
                         <span class="section-title">Appearance</span>
                     </div>
                     <div class="panel-section-body" data-section-body="appearance">
-                        <div class="prop-row">
-                            <span class="label">Layer Opacity</span>
-                            <input type="number" id="opacity" class="prop-input" value="100" min="0" max="100" style="width: 48px; flex: 0 0 48px;">
-                            <span class="unit">%</span>
+                        <div class="prop-row" style="gap: 8px;">
+                            <div class="dim-input" style="flex: 1;" title="Layer Opacity">
+                                <span class="dim-label" data-scrub="opacity">
+                                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><circle cx="6" cy="6" r="4.5"/><path d="M6 1.5A4.5 4.5 0 0 1 6 10.5V1.5z" fill="currentColor"/></svg>
+                                </span>
+                                <input type="number" id="opacity" value="100" min="0" max="100">
+                                <span class="dim-unit">%</span>
+                            </div>
                             <span class="header-spacer"></span>
                             <button class="icon-toggle active" id="toggle-visible" title="Visibility"><i data-lucide="eye" style="width:14px;height:14px;"></i></button>
                             <button class="icon-toggle" id="toggle-locked" title="Lock"><i data-lucide="lock" style="width:14px;height:14px;"></i></button>
@@ -349,6 +368,44 @@
                 <!-- Shown when nothing is selected -->
                 <div id="props-empty" class="props-empty" style="display:none;">
                     <span>Select an object to edit its properties</span>
+                </div>
+
+                <!-- Export Panel -->
+                <div class="panel-section" id="export-pane-section">
+                    <div class="panel-section-header" data-section="export">
+                        <span class="chevron">▾</span>
+                        <span class="section-title">Export</span>
+                    </div>
+                    <div class="panel-section-body" data-section-body="export">
+                        <div class="prop-row">
+                            <span class="label">Scale</span>
+                            <select id="export-pane-scale" class="prop-select" style="width: 60px; flex: 0 0 60px;">
+                                <option value="0.5">0.5×</option>
+                                <option value="1" selected>1×</option>
+                                <option value="1.5">1.5×</option>
+                                <option value="2">2×</option>
+                                <option value="3">3×</option>
+                                <option value="4">4×</option>
+                            </select>
+                            <span class="header-spacer"></span>
+                            <span class="label" style="margin-left: 10px;">Format</span>
+                            <select id="export-pane-format" class="prop-select" style="width: 70px; flex: 0 0 70px;">
+                                <option value="png">PNG</option>
+                                <option value="svg">SVG</option>
+                            </select>
+                        </div>
+                        <div class="prop-row" id="export-pane-options-row">
+                            <span class="label">Suffix</span>
+                            <input type="text" id="export-pane-suffix" class="prop-input" placeholder="e.g. @2x" style="width: 70px; flex: 0 0 70px;">
+                            <span class="header-spacer"></span>
+                            <label class="ab-transparent" style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
+                                <input type="checkbox" id="export-pane-transparent" checked style="margin: 0; accent-color: var(--accent);"> Transparent
+                            </label>
+                        </div>
+                        <div class="prop-row" style="margin-top: 8px;">
+                            <button id="export-pane-btn" class="export-pane-btn">Export selection</button>
+                        </div>
+                    </div>
                 </div>
 
                 </div><!-- .properties-scroll -->

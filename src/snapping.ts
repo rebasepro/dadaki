@@ -69,21 +69,27 @@ export class SnapEngine {
             this.yTargets.push(0, docH / 2, docH);
         }
 
-        // Top-level nodes: edges and centers of their world AABBs
-        for (const rootId of scene.getRootNodes()) {
-            if (excludedRoots.has(rootId)) continue;
-            if (!scene.getNodeVisible(rootId)) continue;
-            const b = scene.getNodeBounds(rootId);
-            if (b[2] <= b[0] && b[3] <= b[1]) continue; // empty bounds
+        // Collect edges/centers/anchors from every LEAF shape, recursing into
+        // groups so nested shapes (e.g. an expanded Live Paint group) each snap
+        // as themselves — not just to their parent group's overall box.
+        const canAnchors = typeof scene.getResolvedSubpaths === 'function' && typeof scene.getTransform === 'function';
+        const collect = (id: number) => {
+            if (!scene.getNodeVisible(id)) return; // skips a hidden group's whole subtree
+            const children = scene.getNodeChildren ? scene.getNodeChildren(id) : [];
+            if (children.length > 0) {
+                for (const c of children) collect(c);
+                return; // a group contributes only through its children
+            }
+            const b = scene.getNodeBounds(id);
+            if (b[2] <= b[0] && b[3] <= b[1]) return; // empty bounds
             this.xTargets.push(b[0], (b[0] + b[2]) / 2, b[2]);
             this.yTargets.push(b[1], (b[1] + b[3]) / 2, b[3]);
 
-            // Path vertices as exact 2D snap points (endpoint chaining). Guarded
-            // so the minimal test stub — which lacks these getters — still works.
-            if (typeof scene.getResolvedSubpaths === 'function' && typeof scene.getTransform === 'function') {
-                const subs = scene.getResolvedSubpaths(rootId);
+            // Path vertices as exact 2D snap points (endpoint chaining).
+            if (canAnchors) {
+                const subs = scene.getResolvedSubpaths(id);
                 if (subs.length > 0) {
-                    const t = scene.getTransform(rootId); // row-major world [a,b,tx, c,d,ty, …]
+                    const t = scene.getTransform(id); // row-major world [a,b,tx, c,d,ty, …]
                     for (const sp of subs) {
                         for (const p of sp.points) {
                             this.points.push({
@@ -94,6 +100,10 @@ export class SnapEngine {
                     }
                 }
             }
+        };
+        for (const rootId of scene.getRootNodes()) {
+            if (excludedRoots.has(rootId)) continue;
+            collect(rootId);
         }
 
         this.active = true;
