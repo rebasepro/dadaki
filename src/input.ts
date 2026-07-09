@@ -157,6 +157,13 @@ export class InputManager {
     draggingSubpathIndex: number = -1;
     /** Which part is being dragged: 'anchor', 'cp1', 'cp2', or null. */
     draggingHandleType: 'anchor' | 'cp1' | 'cp2' | null = null;
+    /**
+     * True while Alt-dragging an anchor to pull out (or reset) its bezier
+     * handles — the "convert anchor point" gesture. Forces symmetric handle
+     * mirroring even though Alt is held (which normally breaks the tangent),
+     * and turns a zero-distance click into a handle-collapse (smooth→corner).
+     */
+    convertingAnchor: boolean = false;
     /** Transform of the node being edited (for world<->local conversion). */
     editingTransform: Float32Array | null = null;
     /** Set of selected points in the format "subpathIndex:pointIndex" */
@@ -255,7 +262,7 @@ export class InputManager {
         window.addEventListener('keyup', withRender((e: KeyboardEvent) => this.onKeyUp(e)));
         window.addEventListener('wheel', withRender((e: WheelEvent) => this.onWheel(e)), { passive: false, capture: true });
 
-        // Import .svg / .vec files by dropping them onto the canvas area
+        // Import .svg / .dataki / .vec files by dropping them onto the canvas area
         const dropTarget = document.getElementById('canvas-container') ?? this.canvas;
         dropTarget.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -270,7 +277,7 @@ export class InputManager {
     }
 
     /** Import dropped files: .svg content is centered at the drop point and
-     *  selected; .vec replaces the document (undoable — a history snapshot is
+     *  selected; .dataki and .vec replace the document (undoable — a history snapshot is
      *  taken first). */
     async onFileDrop(e: DragEvent) {
         e.preventDefault();
@@ -301,7 +308,7 @@ export class InputManager {
                     this.scene.engine!.clear_selection();
                     for (const id of newRoots) this.scene.selectNode(id, true);
                 });
-            } else if (name.endsWith('.vec')) {
+            } else if (name.endsWith('.dataki') || name.endsWith('.vec')) {
                 const bytes = new Uint8Array(await file.arrayBuffer());
                 this.scene.saveMoveHistory(); // snapshot current doc so the drop is undoable
                 this.scene.engine.deserialize_proto(bytes);
@@ -1116,6 +1123,12 @@ export class InputManager {
                 this.canvas.style.cursor = 'default';
             }
         }
+        // Releasing ⌘/Ctrl re-enables snapping: bring the hover preview back
+        // immediately, without waiting for a mouse move.
+        if (e.key === 'Meta' || e.key === 'Control') {
+            this.metaKey = e.metaKey; this.ctrlKey = e.ctrlKey;
+            this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
+        }
     }
 
     getPos(e: MouseEvent) {
@@ -1405,7 +1418,7 @@ export class InputManager {
             this.ui.updateLayerList();
 
         } else if (this.ui.activeTool === 'direct') {
-            this.handleDirectDown(this.startPos, e.shiftKey);
+            this.handleDirectDown(this.startPos, e.shiftKey, e.altKey);
         } else if (this.ui.activeTool === 'pen') {
             // Snap new anchors to geometry unless Cmd/Ctrl bypasses snapping
             if (!e.metaKey && !e.ctrlKey) {
@@ -1512,7 +1525,7 @@ export class InputManager {
         return 2;
     }
 
-    handleDirectDown(pos: { x: number; y: number }, isShift: boolean) {
+    handleDirectDown(pos: { x: number; y: number }, isShift: boolean, isAlt = false) {
         // First: if we're already editing a node, check if clicking on one of its points/handles
         if (this.editingNodeId !== null && this.editingPoints) {
             // Add Point mode: clicking on a segment inserts a new anchor
@@ -1523,6 +1536,26 @@ export class InputManager {
             const hitInfo = this.findNearestHandle(pos);
             if (hitInfo) {
                 const pointKey = `${hitInfo.subpathIndex}:${hitInfo.index}`;
+
+                // Alt on an anchor is the "convert anchor point" gesture: drag
+                // pulls out symmetric handles (corner→smooth); a zero-distance
+                // click collapses them (smooth→corner, handled on mouse-up).
+                // Alt on a *handle* falls through to the normal path below where
+                // it breaks the tangent during the drag.
+                if (isAlt && hitInfo.type === 'anchor') {
+                    this.selectedPoints.clear();
+                    this.selectedPoints.add(pointKey);
+                    this.selectedAnchorSubpath = hitInfo.subpathIndex;
+                    this.selectedAnchorIndex = hitInfo.index;
+                    this.draggingSubpathIndex = hitInfo.subpathIndex;
+                    this.draggingPointIndex = hitInfo.index;
+                    // Pull the outgoing handle; the incoming one mirrors it.
+                    this.draggingHandleType = 'cp2';
+                    this.convertingAnchor = true;
+                    this.scene.saveMoveHistory();
+                    this.ui.contextBar?.refresh();
+                    return;
+                }
 
                 if (hitInfo.type === 'anchor') {
                     if (isShift) {
@@ -2580,6 +2613,15 @@ export class InputManager {
                         this.scissorsHoverPoint = { x: seg.worldX, y: seg.worldY };
                     }
                 }
+                // Cursor affordance: Alt over an anchor pulls/collapses handles.
+                const hnd = this.findNearestHandle(this.currentPos);
+                if (hnd?.type === 'anchor' && e.altKey) {
+                    this.canvas.style.cursor = 'crosshair';
+                } else if (hnd) {
+                    this.canvas.style.cursor = 'move';
+                } else {
+                    this.canvas.style.cursor = 'default';
+                }
             }
         } else {
             this.scissorsHoverPoint = null;
@@ -3135,16 +3177,20 @@ export class InputManager {
             } else if (this.draggingHandleType === 'cp1') {
                 p.cp1[0] = local.x;
                 p.cp1[1] = local.y;
-                // Alt: break tangent — move only this handle
-                if (!e.altKey) {
+                // Alt: break tangent — move only this handle. While pulling a
+                // new handle out of an anchor (convertingAnchor), keep it
+                // symmetric even though Alt is held.
+                if (!e.altKey || this.convertingAnchor) {
                     p.cp2[0] = 2 * p.x - local.x;
                     p.cp2[1] = 2 * p.y - local.y;
                 }
             } else if (this.draggingHandleType === 'cp2') {
                 p.cp2[0] = local.x;
                 p.cp2[1] = local.y;
-                // Alt: break tangent — move only this handle
-                if (!e.altKey) {
+                // Alt: break tangent — move only this handle. While pulling a
+                // new handle out of an anchor (convertingAnchor), keep it
+                // symmetric even though Alt is held.
+                if (!e.altKey || this.convertingAnchor) {
                     p.cp1[0] = 2 * p.x - local.x;
                     p.cp1[1] = 2 * p.y - local.y;
                 }
@@ -3245,9 +3291,22 @@ export class InputManager {
 
         // Commit direct selection edit
         if (this.ui.activeTool === 'direct' && this.draggingHandleType && this.editingPoints) {
+            // Alt-click on an anchor without dragging collapses its handles,
+            // converting a smooth point back to a corner. (A real drag already
+            // pulled symmetric handles out via convertingAnchor.)
+            if (this.convertingAnchor && dist <= 3) {
+                const sp = this.editingPoints[this.draggingSubpathIndex];
+                const p = sp?.points[this.draggingPointIndex];
+                if (p) {
+                    p.cp1[0] = p.x; p.cp1[1] = p.y;
+                    p.cp2[0] = p.x; p.cp2[1] = p.y;
+                    this.scene.engine!.update_path_points(this.editingNodeId!, JSON.stringify(this.editingPoints));
+                }
+            }
             this.scene.updatePathPoints(this.editingNodeId!, JSON.stringify(this.editingPoints));
             this.draggingPointIndex = -1;
             this.draggingHandleType = null;
+            this.convertingAnchor = false;
         }
 
         // Commit marquee selection

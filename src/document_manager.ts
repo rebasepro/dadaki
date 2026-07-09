@@ -125,14 +125,14 @@ export class DocumentManager {
 
         // Create + activate a blank tab so the scene points at its engine, then
         // load into it (SVG import parses into the active engine).
-        const isVec = picked.file.name.endsWith('.vec');
+        const isDatakiOrVec = picked.file.name.endsWith('.dataki') || picked.file.name.endsWith('.vec');
         const doc = this.create(stripExt(picked.file.name));
         const ok = await FileIO.loadFile(this.scene.engine!, picked.file, (svg) => this.ui.parseSVG(svg));
         if (!ok) {
             this.close(doc.id);
             return;
         }
-        doc.fileHandle = isVec ? picked.handle : null;
+        doc.fileHandle = isDatakiOrVec ? picked.handle : null;
         this.scene.invalidateCache();
         doc.markSaved();
         this.ui.updateLayerList();

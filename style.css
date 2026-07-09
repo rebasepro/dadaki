@@ -842,7 +842,7 @@ body, html {
 .prop-row {
     display: flex;
     align-items: center;
-    height: 24px;
+    height: 28px;
     gap: 6px;
 }
 
@@ -869,20 +869,31 @@ body, html {
 .prop-input {
     width: 100%;
     min-width: 0;
+    height: 26px;
     background: var(--bg-input);
-    border: 1px solid var(--border);
+    border: 1px solid transparent;
     color: var(--text-main);
-    padding: 3px 5px;
+    padding: 4px 8px;
     font-size: 11px;
-    border-radius: 3px;
+    border-radius: 5px;
     outline: none;
-    transition: border-color 0.15s;
+    transition: border-color 0.1s, background-color 0.1s;
     box-sizing: border-box;
     font-family: inherit;
 }
 
+.prop-input:hover {
+    border-color: var(--border-light);
+}
+
 .prop-input:focus {
     border-color: var(--accent);
+}
+
+textarea.prop-input {
+    height: auto;
+    padding: 6px 8px;
+    line-height: 1.4;
 }
 
 .prop-input::-webkit-inner-spin-button {
@@ -895,16 +906,23 @@ body, html {
 
 .prop-select {
     background: var(--bg-input);
-    border: 1px solid var(--border);
+    border: 1px solid transparent;
     color: var(--text-main);
-    padding: 3px 4px;
-    font-size: 10px;
-    border-radius: 3px;
+    padding: 4px 8px;
+    font-size: 11px;
+    border-radius: 5px;
+    height: 26px;
     outline: none;
     flex: 1;
     min-width: 0;
     cursor: pointer;
     font-family: inherit;
+    transition: border-color 0.1s, background-color 0.1s;
+    box-sizing: border-box;
+}
+
+.prop-select:hover {
+    border-color: var(--border-light);
 }
 
 .prop-select:focus {
@@ -914,23 +932,34 @@ body, html {
 /* ─── Color Swatch ─── */
 
 .color-input {
-    width: 28px;
-    height: 20px;
-    min-width: 28px;
+    width: 32px;
+    height: 26px;
+    min-width: 32px;
     padding: 0;
-    border: 1px solid var(--border);
-    border-radius: 3px;
+    border: 1px solid transparent;
+    border-radius: 5px;
     cursor: pointer;
     background: none;
+    transition: border-color 0.1s;
+    box-sizing: border-box;
+}
+
+.color-input:hover {
+    border-color: var(--border-light);
+}
+
+.color-input:focus {
+    border-color: var(--accent);
+    outline: none;
 }
 
 .color-input::-webkit-color-swatch-wrapper {
-    padding: 1px;
+    padding: 0;
 }
 
 .color-input::-webkit-color-swatch {
     border: none;
-    border-radius: 2px;
+    border-radius: 4px;
 }
 
 /* ─── Toggle / Checkbox ─── */
@@ -1031,7 +1060,8 @@ body, html {
 }
 
 .dim-input .dim-label {
-    width: 24px;
+    min-width: 24px;
+    padding: 0 4px;
     align-self: stretch;
     display: flex;
     align-items: center;
@@ -1154,11 +1184,11 @@ body.scrubbing * {
 }
 
 .fill-stroke-row .color-input {
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     padding: 0;
-    border: 1px solid var(--panel-border);
-    border-radius: 3px;
+    border: 1px solid transparent;
+    border-radius: 5px;
     background: none;
     cursor: pointer;
     flex-shrink: 0;
@@ -1170,19 +1200,21 @@ body.scrubbing * {
 
 .fill-stroke-row .color-input::-webkit-color-swatch {
     border: none;
-    border-radius: 2px;
+    border-radius: 4px;
 }
 
 .fill-stroke-row .prop-input {
-    height: 20px;
+    height: 24px;
     font-size: 11px;
-    padding: 0 4px;
+    padding: 0 6px;
+    border-radius: 5px;
 }
 
 .fill-stroke-row .prop-select {
-    height: 20px;
+    height: 24px;
     font-size: 11px;
-    padding: 0 2px;
+    padding: 0 4px;
+    border-radius: 5px;
 }
 
 .fill-stroke-row .label-short {
@@ -1201,14 +1233,15 @@ body.scrubbing * {
 .gradient-preview {
     flex: 1;
     min-width: 40px;
-    height: 20px;
-    border: 1px solid var(--panel-border);
-    border-radius: 3px;
+    height: 24px;
+    border: 1px solid transparent;
+    border-radius: 5px;
     cursor: pointer;
     /* checkerboard behind, so transparent stops read correctly
        (gradient layer is set inline as the first background-image) */
     background-color: #fff;
     background-size: auto, 8px 8px;
+    transition: border-color 0.1s;
 }
 .gradient-preview:hover {
     border-color: var(--border-light);
@@ -1265,20 +1298,21 @@ body.scrubbing * {
     color: var(--text-dim);
 }
 .gradient-stop-row .color-input {
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     padding: 0;
-    border: 1px solid var(--panel-border);
-    border-radius: 3px;
+    border: 1px solid transparent;
+    border-radius: 5px;
     background: none;
     cursor: pointer;
     flex-shrink: 0;
 }
 .gradient-stop-row .prop-input,
 .gradient-angle-row .prop-input {
-    height: 20px;
+    height: 24px;
     font-size: 11px;
-    padding: 0 4px;
+    padding: 0 6px;
+    border-radius: 5px;
 }
 .gradient-stop-row .icon-toggle:disabled {
     opacity: 0.35;
@@ -1321,8 +1355,9 @@ body.scrubbing * {
 
 .effect-head .prop-select {
     flex: 1;
-    height: 22px;
+    height: 24px;
     font-size: 11px;
+    border-radius: 5px;
 }
 
 .effect-head .icon-toggle {
@@ -1349,12 +1384,13 @@ body.scrubbing * {
 }
 
 .effect-row .color-input {
-    width: 22px;
-    height: 22px;
-    min-width: 22px;
+    width: 24px;
+    height: 24px;
+    min-width: 24px;
     flex-shrink: 0;
     align-self: flex-end;
     margin-bottom: 1px;
+    border-radius: 5px;
 }
 
 .effect-field {
@@ -1380,9 +1416,10 @@ body.scrubbing * {
 }
 
 .effect-input-wrap .prop-input {
-    height: 22px;
+    height: 24px;
     font-size: 11px;
     width: 100%;
+    border-radius: 5px;
 }
 
 .effect-unit {
@@ -1405,7 +1442,7 @@ body.scrubbing * {
 }
 
 .stroke-details .prop-row {
-    height: 22px;
+    height: 28px;
 }
 
 
@@ -2162,4 +2199,26 @@ body.scrubbing * {
 .add-property-btn:hover {
     background: rgba(255,255,255,0.08);
     color: var(--text-main);
+}
+
+/* Sidebar Export Panel Button */
+.export-pane-btn {
+    width: 100%;
+    padding: 7px;
+    margin-top: 2px;
+    border: 1px solid var(--border);
+    background: var(--bg-hover);
+    color: var(--text-main);
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.export-pane-btn:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
 }

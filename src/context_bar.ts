@@ -472,7 +472,7 @@ export class ContextBar {
         this.el.appendChild(this.createSeparator());
 
         // Hint tracks what the NEXT click will do
-        let hint = 'Drag points · ⇧click or marquee to multi-select · Esc to finish';
+        let hint = 'Drag points · ⌥drag an anchor for handles · ⇧click or marquee to multi-select · Esc to finish';
         if (this.input.addPointMode) hint = 'Click a segment to insert a point';
         else if (info.selectedPointCount === 1) hint = 'Cut splits the path at the selected point';
         else if (info.selectedPointCount >= 2) hint = '⌘J merges the selected points';

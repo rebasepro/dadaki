@@ -33,7 +33,7 @@ export class FileService {
             handle = null;
         }
 
-        const res = await FileIO.saveVec(engine, handle, this.suggestedName());
+        const res = await FileIO.saveDataki(engine, handle, this.suggestedName());
         if (!res) return; // user aborted — keep dirty state
         this.adoptHandle(res.handle);
         this.activeDoc.markSaved();
@@ -44,7 +44,7 @@ export class FileService {
     async saveActiveAs(): Promise<void> {
         const engine = this.scene.engine;
         if (!engine) return;
-        const res = await FileIO.saveVecAs(engine, this.suggestedName());
+        const res = await FileIO.saveDatakiAs(engine, this.suggestedName());
         if (!res) return;
         this.adoptHandle(res.handle);
         this.activeDoc.markSaved();
@@ -73,7 +73,7 @@ export class FileService {
     /** Update document.title and downstream chrome. */
     refreshChrome(): void {
         const doc = this.activeDoc;
-        document.title = `${doc.dirty ? '● ' : ''}${doc.name} — Vector Editor`;
+        document.title = `${doc.dirty ? '● ' : ''}${doc.name} — Dadaki vector editor`;
         this.onChrome();
     }
 
@@ -93,12 +93,12 @@ export class FileService {
 
     private suggestedName(): string {
         const n = this.activeDoc.name || 'untitled';
-        return n.endsWith('.vec') ? n : `${n}.vec`;
+        return n.endsWith('.dataki') ? n : `${n}.dataki`;
     }
 }
 
 function stripExt(name: string): string {
-    return name.replace(/\.(vec|svg)$/i, '');
+    return name.replace(/\.(dataki|vec|svg)$/i, '');
 }
 
 /** Ensure readwrite permission on a (possibly restored) handle. */
