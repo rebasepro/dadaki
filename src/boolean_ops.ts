@@ -105,7 +105,7 @@ export function applyBooleanOp(
 }
 
 /** Build a world-space CanvasKit path for a node (recursing into groups). */
-function nodeToWorldPath(ck: CanvasKit, scene: WasmScene, id: number): Path | null {
+export function nodeToWorldPath(ck: CanvasKit, scene: WasmScene, id: number): Path | null {
     const node = scene.getNode(id);
     if (!node) return null;
 

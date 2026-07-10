@@ -1,3 +1,4 @@
+import { blendNodes } from './blend';
 import type { DocumentManager } from './document_manager';
 import type { FileService } from './file_service';
 import { DEFAULT_TEXT_FONT, ensureFontCSS, loadGoogleFontData } from './fonts';
@@ -2651,6 +2652,24 @@ export class InputManager {
         if (newId == null) return;
         this.scene.engine!.clear_selection();
         this.scene.selectNode(newId, false);
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
+    /** Last-used Blend step count, remembered across invocations. */
+    lastBlendSteps = 4;
+
+    /** Blend the two selected shapes: generate `steps` in-between shapes
+     *  (geometry + color) grouped with the originals. */
+    blendSelection(steps = this.lastBlendSteps) {
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length !== 2) return;
+        this.lastBlendSteps = steps;
+        const groupId = blendNodes(this.ui.ck, this.scene, selection[0], selection[1], steps);
+        if (groupId == null) return;
+        this.scene.engine!.clear_selection();
+        this.scene.selectNode(groupId, false);
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
         this.renderer.requestRender();

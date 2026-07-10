@@ -646,6 +646,37 @@ export class ContextBar {
             );
         }
 
+        // Blend — exactly two combinable shapes: generate in-between shapes.
+        // Minimal UI: a steps field + a Blend button (matches the Offset control).
+        if (allBoolCompatible && info.selectedIds.length === 2) {
+            const wrap = document.createElement('div');
+            wrap.style.display = 'inline-flex';
+            wrap.style.alignItems = 'center';
+            wrap.style.gap = '4px';
+            const steps = document.createElement('input');
+            steps.type = 'number';
+            steps.className = 'cb-num';
+            steps.min = '1';
+            steps.value = String(this.input.lastBlendSteps);
+            steps.title = 'Number of in-between shapes';
+            const doBlend = () => {
+                const n = Math.max(1, Math.round(parseFloat(steps.value) || 0));
+                if (n >= 1) this.input.blendSelection(n);
+            };
+            steps.addEventListener('click', (e) => e.stopPropagation());
+            steps.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    doBlend();
+                }
+            });
+            const blendIcon =
+                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 8.5l7 7" stroke-dasharray="2 2"/></svg>';
+            wrap.appendChild(steps);
+            wrap.appendChild(this.createButton('Blend', blendIcon, doBlend));
+            this.el.appendChild(wrap);
+        }
+
         this.el.appendChild(this.createSeparator());
 
         // Join Paths — only when exactly two Path nodes are selected
