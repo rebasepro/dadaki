@@ -43,6 +43,7 @@ const TOOL_META: Record<string, ToolMeta> = {
     star: { label: 'Star', icon: 'star' },
     text: { label: 'Text', shortcut: 'T', icon: 'type' },
     'paint-bucket': { label: 'Live Paint', shortcut: 'B', icon: 'paint-bucket' },
+    eyedropper: { label: 'Eyedropper', shortcut: 'I', icon: 'pipette' },
 };
 
 /** One rail slot: a tool group (first member = default face) or a divider. */
@@ -58,6 +59,7 @@ const LAYOUT: LayoutEntry[] = [
     ['text'],
     'sep',
     ['paint-bucket'],
+    ['eyedropper'],
 ];
 
 const LONG_PRESS_MS = 250;

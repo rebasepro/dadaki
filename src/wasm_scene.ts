@@ -121,6 +121,57 @@ export class WasmScene {
         return id;
     }
 
+    // ─── Ruler guides ────────────────────────────────────────────────────────
+    // History for guides is coordinated by the caller (InputManager) via
+    // pushHistorySnapshot() at gesture start — guide state rides along in the
+    // serialized scene snapshot, so these wrappers stay history-free.
+
+    /** All guides as `{ x: [world x…], y: [world y…] }`. */
+    getGuides(): { x: number[]; y: number[] } {
+        if (!this.engine) return { x: [], y: [] };
+        try {
+            return JSON.parse(this.engine.get_guides_json());
+        } catch {
+            return { x: [], y: [] };
+        }
+    }
+
+    /** Add a guide on `axis` ('x' = vertical, 'y' = horizontal). Returns its index. */
+    addGuide(axis: 'x' | 'y', pos: number): number {
+        const idx = this.engine!.add_guide(axis, pos);
+        this.autosave?.trigger();
+        return idx;
+    }
+
+    /** Move an existing guide (live drag; no autosave churn per frame). */
+    setGuide(axis: 'x' | 'y', index: number, pos: number): void {
+        this.engine!.set_guide(axis, index, pos);
+    }
+
+    removeGuide(axis: 'x' | 'y', index: number): void {
+        this.engine!.remove_guide(axis, index);
+        this.autosave?.trigger();
+    }
+
+    // ─── Color swatches ──────────────────────────────────────────────────────
+
+    /** The document's color swatches (empty array if none). */
+    getSwatches(): import('./types').Color[] {
+        if (!this.engine) return [];
+        try {
+            return JSON.parse(this.engine.get_swatches_json() || '[]');
+        } catch {
+            return [];
+        }
+    }
+
+    /** Replace the document's swatch list (persists via autosave; no undo step —
+     *  the caller pushes history around any accompanying recolor). */
+    setSwatches(list: import('./types').Color[]): void {
+        this.engine!.set_swatches_json(JSON.stringify(list));
+        this.autosave?.trigger();
+    }
+
     removeArtboard(id: number): boolean {
         this.saveHistory();
         const ok = this.engine!.remove_artboard(id);
@@ -366,6 +417,13 @@ export class WasmScene {
         this.invalidateCache();
         this.autosave?.trigger();
         logAppEvent('property_changed', { property: 'effects' });
+    }
+
+    /** Replace a node's effects without pushing history (batched edits, e.g.
+     *  the eyedropper applying to a multi-node selection under one undo step). */
+    setNodeEffectsNoHistory(id: number, effectsJson: string) {
+        this.engine!.set_node_effects(id, effectsJson);
+        this.invalidateCache();
     }
 
     getNodeEffects(id: number): string {

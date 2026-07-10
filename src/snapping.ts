@@ -30,6 +30,9 @@ export class SnapEngine {
      *  another path's vertex instead of on a phantom edge×edge intersection. */
     private points: { x: number; y: number }[] = [];
     active: boolean = false;
+    /** Grid spacing (world units) for snap-to-grid; 0 disables it. Persists
+     *  across `begin()`/`end()` so a toggle set once stays in effect. */
+    gridSize: number = 0;
 
     /**
      * Collect snap targets, excluding `excludeIds` and any root that contains
@@ -108,6 +111,13 @@ export class SnapEngine {
             collect(rootId);
         }
 
+        // Ruler guides — a vertical guide snaps x, a horizontal guide snaps y.
+        const guides = scene.getGuides?.();
+        if (guides) {
+            for (const gx of guides.x) this.xTargets.push(gx);
+            for (const gy of guides.y) this.yTargets.push(gy);
+        }
+
         this.active = true;
     }
 
@@ -141,6 +151,17 @@ export class SnapEngine {
             if (d < bestDist) {
                 bestDist = d;
                 best = t;
+            }
+        }
+        // Snap-to-grid: the nearest grid line is a virtual target. Explicit
+        // targets (guides, object edges) still win on ties since they're checked
+        // first with `<` — the grid only fills the gaps between them.
+        if (this.gridSize > 0) {
+            const g = Math.round(value / this.gridSize) * this.gridSize;
+            const d = Math.abs(g - value);
+            if (d < bestDist) {
+                bestDist = d;
+                best = g;
             }
         }
         return best;

@@ -85,12 +85,17 @@ export class UIEngine {
     gradientEdit: GradientEditController;
     contextBar: ContextBar | null = null;
     toolbar: Toolbar | null = null;
+    /** Document swatches panel — refreshed on structural/document changes. */
+    swatchesController: { render(): void } | null = null;
 
     /** Tracks whether we've already taken a history snapshot for the current
      *  property-editing gesture (e.g. a color picker drag). */
     private _propertyEditSnapshotTaken: boolean = false;
     /** W/H proportion constraint (the link button between W and H). */
     private aspectLocked: boolean = false;
+    /** Reference point (normalized bbox anchor) that numeric rotate/scale pivot
+     *  around. Center by default — matches the engine's about-center behavior. */
+    private refAnchor: { ax: number; ay: number } = { ax: 0.5, ay: 0.5 };
     /** Last style the user configured — applied to newly created shapes. */
     private _currentStyleJson: string | null = null;
 
@@ -671,10 +676,27 @@ export class UIEngine {
         const rotateBy = (id: number, delta: number) => {
             const tc = this.scene.getNodeTransformComponents(id);
             const deg = ((((tc.rotation_deg + delta + 180) % 360) + 360) % 360) - 180;
-            this.scene.engine!.set_node_rotation(id, deg);
+            const { ax, ay } = this.refAnchor;
+            this.scene.engine!.set_node_rotation_about(id, deg, ax, ay);
         };
         bindAction('rotate-ccw-btn', iconRotateCCW(12), (id) => rotateBy(id, -90));
         bindAction('rotate-cw-btn', iconRotateCW(12), (id) => rotateBy(id, 90));
+
+        // Reference-point (9-anchor) selector: the pivot numeric rotate/scale
+        // keep fixed. Center (0.5, 0.5) matches the classic about-center behavior.
+        const refAnchorEl = document.getElementById('ref-anchor');
+        refAnchorEl?.querySelectorAll<HTMLElement>('.ref-dot').forEach((dot) => {
+            dot.addEventListener('click', () => {
+                this.refAnchor = {
+                    ax: parseFloat(dot.dataset.ax || '0.5'),
+                    ay: parseFloat(dot.dataset.ay || '0.5'),
+                };
+                for (const d of refAnchorEl.querySelectorAll('.ref-dot')) {
+                    d.classList.remove('active');
+                }
+                dot.classList.add('active');
+            });
+        });
         bindAction('flip-h-btn', iconFlipH(12), (id) => this.scene.flipNodeH(id));
         bindAction('flip-v-btn', iconFlipV(12), (id) => this.scene.flipNodeV(id));
         bindAction('flatten-btn', iconFlatten(12), (id) => this.scene.flattenTransform(id));
@@ -1160,6 +1182,25 @@ export class UIEngine {
         return { r: 66 / 255, g: 133 / 255, b: 244 / 255, a: 1 };
     }
 
+    /** Apply a solid color to the selection's primary fill (one undo step). With
+     *  no selection, it becomes the default fill for the next-created shape.
+     *  Used by the swatches palette. */
+    applySolidFill(color: Color): void {
+        if (this.scene.engine!.get_selection().length === 0) {
+            try {
+                const s = JSON.parse(this.getCurrentStyle());
+                s.fills = [{ ...color }];
+                this._currentStyleJson = JSON.stringify(s);
+            } catch {}
+            this.contextBar?.refresh();
+            return;
+        }
+        this.applyPaintEdit('fills', (arr) => {
+            if (arr.length === 0) arr.push({ ...color });
+            else arr[0] = { ...color };
+        });
+    }
+
     private toggleNodeVisibility() {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
@@ -1306,6 +1347,12 @@ export class UIEngine {
         return this._currentStyleJson ?? this.buildCurrentStyleJson();
     }
 
+    /** Set the current ("last used") style JSON — applied to newly created
+     *  shapes. Used by the eyedropper when sampling with no selection. */
+    setCurrentStyle(json: string): void {
+        this._currentStyleJson = json;
+    }
+
     /** Write a transform field and remember what was written, so change events
      *  can tell a real user edit from an untouched (rounded) display value. */
     private syncField(input: HTMLInputElement | null, value: string) {
@@ -1430,8 +1477,15 @@ export class UIEngine {
             }
 
             // Rotation / skew / scale — components are canonical in the engine.
+            // Rotation and scale pivot around the chosen reference point.
+            const { ax, ay } = this.refAnchor;
             if (this.fieldEdited(this.propRotation)) {
-                this.scene.engine!.set_node_rotation(id, parseFloat(this.propRotation!.value) || 0);
+                this.scene.engine!.set_node_rotation_about(
+                    id,
+                    parseFloat(this.propRotation!.value) || 0,
+                    ax,
+                    ay,
+                );
             }
             if (this.fieldEdited(this.propSkewX) || this.fieldEdited(this.propSkewY)) {
                 const tc = this.scene.getNodeTransformComponents(id);
@@ -1458,7 +1512,7 @@ export class UIEngine {
                 const sy = this.fieldEdited(this.propScaleY)
                     ? parseScale(this.propScaleY!, tc.scale_y)
                     : tc.scale_y;
-                this.scene.engine!.set_node_scale(id, sx, sy);
+                this.scene.engine!.set_node_scale_about(id, sx, sy, ax, ay);
             }
         };
 
@@ -2797,6 +2851,10 @@ export class UIEngine {
 
     updateLayerList() {
         if (!this.scene.engine) return;
+
+        // The swatch palette is document-level; refresh it alongside the layer
+        // list so undo/redo and document switches keep it in sync.
+        this.swatchesController?.render();
 
         let rootNodes: Uint32Array;
         let selection: number[];

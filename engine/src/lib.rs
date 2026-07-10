@@ -968,6 +968,16 @@ pub struct Scene {
     /// "Live Paint Group"). None = the whole visible scene participates.
     #[serde(default)]
     pub live_paint_group: Option<u32>,
+    /// Vertical ruler guides — world x positions (each spans the whole canvas).
+    #[serde(default)]
+    pub guides_x: Vec<f32>,
+    /// Horizontal ruler guides — world y positions.
+    #[serde(default)]
+    pub guides_y: Vec<f32>,
+    /// Document color swatches, as a JS-owned JSON array string (the engine
+    /// treats it as an opaque blob; the editor defines the schema).
+    #[serde(default)]
+    pub swatches_json: String,
 }
 
 fn default_document_size() -> f32 { 1000.0 }
@@ -998,6 +1008,9 @@ impl Engine {
                     background: default_artboard_bg(),
                 }],
                 live_paint_group: None,
+                guides_x: Vec::new(),
+                guides_y: Vec::new(),
+                swatches_json: String::new(),
             },
             next_id: 1,
             global_transforms: HashMap::new(),
@@ -3239,6 +3252,19 @@ impl Engine {
     /// The mutation is rolled back if it would leave the transform invalid.
     fn set_components_about_center(&mut self, id: u32, f: impl FnOnce(&mut Transform2D)) {
         let (cx, cy) = self.compute_local_center(id);
+        self.set_components_about_local_point(id, cx, cy, f);
+    }
+
+    /// Apply a component change while keeping the given LOCAL point fixed in
+    /// world space (the pivot). `set_components_about_center` is the (0.5,0.5)
+    /// bounding-box case; the reference-point transforms pass other anchors.
+    fn set_components_about_local_point(
+        &mut self,
+        id: u32,
+        cx: f32,
+        cy: f32,
+        f: impl FnOnce(&mut Transform2D),
+    ) {
         if let Some(node) = self.scene.nodes.get_mut(&id) {
             let c = Vec2::new(cx, cy);
             let old = node.transform;
@@ -3272,6 +3298,33 @@ impl Engine {
     pub fn set_node_rotation(&mut self, id: u32, deg: f32) {
         let Some(deg) = Self::normalize_deg(deg) else { return };
         self.set_components_about_center(id, |t| t.rotation_deg = deg);
+    }
+
+    /// Set rotation while keeping a reference point fixed. `ax`/`ay` are the
+    /// normalized bounding-box anchor (0..1); (0.5,0.5) is the center and
+    /// matches `set_node_rotation`.
+    pub fn set_node_rotation_about(&mut self, id: u32, deg: f32, ax: f32, ay: f32) {
+        let Some(deg) = Self::normalize_deg(deg) else { return };
+        if !ax.is_finite() || !ay.is_finite() {
+            return;
+        }
+        let (px, py) = self.compute_local_anchor(id, ax, ay);
+        self.set_components_about_local_point(id, px, py, |t| t.rotation_deg = deg);
+    }
+
+    /// Set scale while keeping a reference point fixed (see `set_node_rotation_about`).
+    pub fn set_node_scale_about(&mut self, id: u32, sx: f32, sy: f32, ax: f32, ay: f32) {
+        if !sx.is_finite() || !sy.is_finite() || sx.abs() < 1e-4 || sy.abs() < 1e-4 {
+            return;
+        }
+        if !ax.is_finite() || !ay.is_finite() {
+            return;
+        }
+        let (px, py) = self.compute_local_anchor(id, ax, ay);
+        self.set_components_about_local_point(id, px, py, |t| {
+            t.scale_x = sx;
+            t.scale_y = sy;
+        });
     }
 
     /// Skew is clamped to ±89° — tan() diverges at 90° and the shape would
@@ -3324,29 +3377,58 @@ impl Engine {
 
     /// Compute the center of a node's geometry in its local coordinate space.
     fn compute_local_center(&self, id: u32) -> (f32, f32) {
+        let [min_x, min_y, max_x, max_y] = self.compute_local_bounds(id);
+        if min_x > max_x {
+            return (0.0, 0.0);
+        }
+        ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+    }
+
+    /// A node's bounding box in its own local (pre-transform) coordinate space,
+    /// as `[min_x, min_y, max_x, max_y]`. Returns an inverted box (min > max)
+    /// when no bounds can be determined. Used both for the center pivot and for
+    /// the reference-point anchors (a normalized position within this box).
+    fn compute_local_bounds(&self, id: u32) -> [f32; 4] {
         let node = match self.scene.nodes.get(&id) {
             Some(n) => n,
-            None => return (0.0, 0.0),
+            None => return [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
         };
         match node.node_type {
             NodeType::Group => {
                 let bounds = self.get_node_bounds(id);
-                if bounds[0] > bounds[2] { return (0.0, 0.0); }
-                let world_cx = (bounds[0] + bounds[2]) / 2.0;
-                let world_cy = (bounds[1] + bounds[3]) / 2.0;
+                if bounds[0] > bounds[2] {
+                    return [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                }
+                // Map the world-space corners back into this group's local space.
                 if let Some(gt) = self.global_transforms.get(&id) {
-                    let global = Mat3::from_cols_array(gt);
-                    let inv = global.inverse();
-                    let local = inv.transform_point2(Vec2::new(world_cx, world_cy));
-                    (local.x, local.y)
+                    let inv = Mat3::from_cols_array(gt).inverse();
+                    let mut min_x = f32::MAX;
+                    let mut min_y = f32::MAX;
+                    let mut max_x = f32::MIN;
+                    let mut max_y = f32::MIN;
+                    for &(wx, wy) in &[
+                        (bounds[0], bounds[1]),
+                        (bounds[2], bounds[1]),
+                        (bounds[2], bounds[3]),
+                        (bounds[0], bounds[3]),
+                    ] {
+                        let l = inv.transform_point2(Vec2::new(wx, wy));
+                        min_x = min_x.min(l.x);
+                        min_y = min_y.min(l.y);
+                        max_x = max_x.max(l.x);
+                        max_y = max_y.max(l.y);
+                    }
+                    [min_x, min_y, max_x, max_y]
                 } else {
-                    (0.0, 0.0)
+                    [f32::MAX, f32::MAX, f32::MIN, f32::MIN]
                 }
             }
             _ => match &node.geometry {
-                Geometry::Rect { width, height } => (*width / 2.0, *height / 2.0),
-                Geometry::Image { width, height, .. } => (*width / 2.0, *height / 2.0),
-                Geometry::Ellipse { .. } => (0.0, 0.0),
+                Geometry::Rect { width, height } => [0.0, 0.0, *width, *height],
+                Geometry::Image { width, height, .. } => [0.0, 0.0, *width, *height],
+                Geometry::Ellipse { radius_x, radius_y } => {
+                    [-*radius_x, -*radius_y, *radius_x, *radius_y]
+                }
                 Geometry::Path { subpaths, .. } => {
                     let mut min_x = f32::MAX;
                     let mut max_x = f32::MIN;
@@ -3360,15 +3442,22 @@ impl Engine {
                             max_y = max_y.max(pt.y);
                         }
                     }
-                    if min_x <= max_x {
-                        ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
-                    } else {
-                        (0.0, 0.0)
-                    }
+                    [min_x, min_y, max_x, max_y]
                 }
-                Geometry::Text { .. } => (0.0, 0.0),
-            }
+                Geometry::Text { .. } => [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+            },
         }
+    }
+
+    /// Local anchor point for a normalized bounding-box position: (0,0) =
+    /// top-left, (0.5,0.5) = center, (1,1) = bottom-right. Falls back to the
+    /// local center when no bounds are available (e.g. text).
+    fn compute_local_anchor(&self, id: u32, ax: f32, ay: f32) -> (f32, f32) {
+        let [min_x, min_y, max_x, max_y] = self.compute_local_bounds(id);
+        if min_x > max_x {
+            return self.compute_local_center(id);
+        }
+        (min_x + (max_x - min_x) * ax, min_y + (max_y - min_y) * ay)
     }
 
     /// Flip a node horizontally: mirror across the vertical axis through the
@@ -4807,6 +4896,84 @@ impl Engine {
             )
         }).collect();
         format!("[{}]", items.join(","))
+    }
+
+    // ─── Ruler guides ───────────────────────────────────────────────────────
+    // Guides are stored as bare positions per axis: `guides_x` are vertical
+    // guides (fixed world x), `guides_y` horizontal (fixed world y). History is
+    // handled JS-side (serialize snapshots include guides), so these mutators
+    // don't push undo entries themselves.
+
+    /// Guides as JSON: `{"x":[..world x..],"y":[..world y..]}`.
+    pub fn get_guides_json(&self) -> String {
+        let fmt = |v: &Vec<f32>| v.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+        format!("{{\"x\":[{}],\"y\":[{}]}}", fmt(&self.scene.guides_x), fmt(&self.scene.guides_y))
+    }
+
+    /// Add a guide on the given axis ("x" = vertical, "y" = horizontal).
+    /// Returns the index of the new guide, or u32::MAX for a bad axis/value.
+    pub fn add_guide(&mut self, axis: &str, pos: f32) -> u32 {
+        if !pos.is_finite() {
+            return u32::MAX;
+        }
+        let list = match axis {
+            "x" => &mut self.scene.guides_x,
+            "y" => &mut self.scene.guides_y,
+            _ => return u32::MAX,
+        };
+        list.push(pos);
+        (list.len() - 1) as u32
+    }
+
+    /// Move an existing guide (live drag; no history).
+    pub fn set_guide(&mut self, axis: &str, index: u32, pos: f32) -> bool {
+        if !pos.is_finite() {
+            return false;
+        }
+        let list = match axis {
+            "x" => &mut self.scene.guides_x,
+            "y" => &mut self.scene.guides_y,
+            _ => return false,
+        };
+        if let Some(g) = list.get_mut(index as usize) {
+            *g = pos;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove the guide at `index` on the given axis.
+    pub fn remove_guide(&mut self, axis: &str, index: u32) -> bool {
+        let list = match axis {
+            "x" => &mut self.scene.guides_x,
+            "y" => &mut self.scene.guides_y,
+            _ => return false,
+        };
+        if (index as usize) < list.len() {
+            list.remove(index as usize);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove every guide on both axes.
+    pub fn clear_guides(&mut self) {
+        self.scene.guides_x.clear();
+        self.scene.guides_y.clear();
+    }
+
+    // ─── Color swatches ───────────────────────────────────────────────────────
+    // Stored as an opaque JSON string owned by the editor. History rides the
+    // scene snapshot, so this setter is history-free (the caller decides).
+
+    pub fn get_swatches_json(&self) -> String {
+        self.scene.swatches_json.clone()
+    }
+
+    pub fn set_swatches_json(&mut self, json: String) {
+        self.scene.swatches_json = json;
     }
 }
 

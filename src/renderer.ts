@@ -137,6 +137,8 @@ export class Renderer {
     zoom: number;
     pan: { x: number; y: number };
     inputManager: InputManager | null = null;
+    /** Ruler/guide controller — asked to redraw its strips after each frame. */
+    guidesController: { syncRulers(): void } | null = null;
     /** Face ID currently being hovered by the paint bucket tool (or -1). */
     hoverFaceId: number = -1;
     hoverEdgeId: number = -1;
@@ -2276,6 +2278,8 @@ export class Renderer {
             this.drawPaintBucketHover(canvas);
             // Draw marquee selection rectangle
             this.drawMarquee(canvas);
+            // Draw persistent ruler guides (under the transient snap guides)
+            this.drawGuides(canvas, viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
             // Draw snapping alignment guides
             this.drawSnapGuides(canvas, viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
         }
@@ -2296,6 +2300,9 @@ export class Renderer {
         }
 
         this.surface.flush();
+
+        // Keep the ruler strips in step with the current pan/zoom.
+        if (!exporting && snapshotPass === null) this.guidesController?.syncRulers();
     }
 
     /**
@@ -3708,6 +3715,37 @@ export class Renderer {
     }
 
     /** Magenta alignment guides for active snaps, spanning the viewport. */
+    /** Persistent ruler guides (cyan). The one under the cursor / being dragged
+     *  is highlighted so it reads as grab-able. */
+    private drawGuides(canvas: Canvas, minX: number, minY: number, maxX: number, maxY: number) {
+        const guides = this.scene.getGuides();
+        if (guides.x.length === 0 && guides.y.length === 0) return;
+        const hi = this.inputManager?.highlightedGuide ?? null;
+
+        const base = new this.ck.Paint();
+        base.setColor(this.ck.Color(0, 200, 255, 0.7));
+        base.setStyle(this.ck.PaintStyle.Stroke);
+        base.setStrokeWidth(1 / this.zoom);
+        base.setAntiAlias(true);
+
+        const strong = new this.ck.Paint();
+        strong.setColor(this.ck.Color(0, 200, 255, 1.0));
+        strong.setStyle(this.ck.PaintStyle.Stroke);
+        strong.setStrokeWidth(1.5 / this.zoom);
+        strong.setAntiAlias(true);
+
+        guides.x.forEach((gx, i) => {
+            const p = hi && hi.axis === 'x' && hi.index === i ? strong : base;
+            canvas.drawLine(gx, minY, gx, maxY, p);
+        });
+        guides.y.forEach((gy, i) => {
+            const p = hi && hi.axis === 'y' && hi.index === i ? strong : base;
+            canvas.drawLine(minX, gy, maxX, gy, p);
+        });
+        base.delete();
+        strong.delete();
+    }
+
     private drawSnapGuides(canvas: Canvas, minX: number, minY: number, maxX: number, maxY: number) {
         const guides = this.inputManager?.activeSnapGuides;
         if (!guides || guides.length === 0) return;

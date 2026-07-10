@@ -1,6 +1,7 @@
 import type { DocumentManager } from './document_manager';
 import type { FileService } from './file_service';
 import { DEFAULT_TEXT_FONT, ensureFontCSS, loadGoogleFontData } from './fonts';
+import type { GuideHit, GuidesController } from './guides';
 import { outlineStroke } from './outline_stroke';
 import {
     addAnchorPoint,
@@ -181,6 +182,12 @@ export class InputManager {
     snap = new SnapEngine();
     /** Guides from the latest snapped frame, drawn by the Renderer. */
     activeSnapGuides: SnapGuide[] = [];
+    /** Ruler/guide controller (set in main.ts once constructed). */
+    guides: GuidesController | null = null;
+    /** Guide highlighted by hover or an in-progress drag (drawn emphasized). */
+    highlightedGuide: GuideHit | null = null;
+    /** The ruler guide currently being dragged on the canvas, if any. */
+    private draggingGuide: GuideHit | null = null;
 
     // --- Viewport navigation ---
     /** True while the space bar is held (hand tool). */
@@ -670,6 +677,14 @@ export class InputManager {
             return;
         }
 
+        // Cmd/Ctrl+R: toggle rulers (matches Illustrator). Prevent the browser
+        // reload that key would otherwise trigger.
+        if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === 'r' || e.key === 'R')) {
+            e.preventDefault();
+            this.guides?.toggleRulers();
+            return;
+        }
+
         // Tool shortcuts — plain letters only; ⇧letter is reserved for actions (flip etc.)
         if (!e.metaKey && !e.ctrlKey) {
             if (!e.shiftKey) {
@@ -684,6 +699,7 @@ export class InputManager {
                 if (e.key === 'b' || e.key === 'B') this.ui.setActiveTool('paint-bucket');
                 if (e.key === 'c' || e.key === 'C') this.ui.setActiveTool('scissors');
                 if (e.key === 't' || e.key === 'T') this.ui.setActiveTool('text');
+                if (e.key === 'i' || e.key === 'I') this.ui.setActiveTool('eyedropper');
             }
 
             // Shift+H / Shift+V: flip selection in place
@@ -1721,6 +1737,27 @@ export class InputManager {
             return;
         }
 
+        // Grab a ruler guide under the cursor (selection/direct tools, not while
+        // editing a path). Guides sit above the artwork, so this takes priority.
+        if (
+            this.guides &&
+            this.editingNodeId === null &&
+            (this.ui.activeTool === 'selection' || this.ui.activeTool === 'direct')
+        ) {
+            const hit = this.guides.hitGuide(
+                this.startPos.x,
+                this.startPos.y,
+                5 / this.renderer.zoom,
+            );
+            if (hit) {
+                this.draggingGuide = hit;
+                this.highlightedGuide = hit;
+                this.scene.pushHistorySnapshot();
+                this.canvas.style.cursor = hit.axis === 'x' ? 'col-resize' : 'row-resize';
+                return;
+            }
+        }
+
         if (this.ui.activeTool === 'selection') {
             // Artboard chrome (resize handles + name labels). UI-level only —
             // engine node selection is untouched. Only when not path-editing.
@@ -1977,7 +2014,53 @@ export class InputManager {
             this.handlePaintBucketClick(this.startPos, e.altKey);
         } else if (this.ui.activeTool === 'scissors') {
             this.handleScissorsDown(this.startPos);
+        } else if (this.ui.activeTool === 'eyedropper') {
+            this.handleEyedropper(this.startPos);
         }
+    }
+
+    /** Eyedropper: sample the appearance (fills, strokes, opacity, blend mode,
+     *  effects) of the node under the cursor and apply it to the current
+     *  selection. With nothing selected, the sampled appearance becomes the
+     *  default style for the next-created shape. One-shot back to Selection. */
+    private handleEyedropper(pos: { x: number; y: number }) {
+        const srcId = this.scene.hitTest(pos.x, pos.y);
+        if (srcId === undefined) {
+            this.maybeRevertTool();
+            return;
+        }
+        const srcStyle = this.scene.getNodeStyle(srcId);
+        const srcEffects = this.scene.getNodeEffects(srcId); // JSON array string
+        // The appearance keys the eyedropper transfers — geometry-specific style
+        // (corner_radius, fill_rule) stays with the target.
+        const appearance = {
+            fills: srcStyle.fills ?? [],
+            strokes: srcStyle.strokes ?? [],
+            opacity: srcStyle.opacity ?? 1,
+            blend_mode: srcStyle.blend_mode ?? 0,
+        };
+
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length === 0) {
+            // No target: adopt the sampled appearance as the default style.
+            const cur = JSON.parse(this.ui.getCurrentStyle());
+            this.ui.setCurrentStyle(JSON.stringify({ ...cur, ...appearance }));
+            this.maybeRevertTool();
+            return;
+        }
+
+        // Apply to every selected node under a single undo step.
+        this.scene.pushHistorySnapshot();
+        for (const id of selection) {
+            const target = this.scene.getNodeStyle(id);
+            const merged = { ...target, ...appearance };
+            this.scene.setNodeStyleNoHistory(id, JSON.stringify(merged));
+            this.scene.setNodeEffectsNoHistory(id, srcEffects);
+        }
+        this.scene.invalidateCache();
+        this.renderer.requestRender();
+        this.ui.syncWithSelection();
+        this.maybeRevertTool();
     }
 
     handlePaintBucketClick(pos: { x: number; y: number }, wantEdge = false) {
@@ -3369,6 +3452,20 @@ export class InputManager {
         this.metaKey = e.metaKey;
         this.ctrlKey = e.ctrlKey;
 
+        // Ruler-guide drag in progress: track the cursor on the guide's axis.
+        if (this.draggingGuide && this.isMouseDown) {
+            this.didMove = true;
+            const { axis, index } = this.draggingGuide;
+            let pos = axis === 'x' ? this.currentPos.x : this.currentPos.y;
+            if (this.guides?.gridSnap && this.guides.gridSize > 0) {
+                pos = Math.round(pos / this.guides.gridSize) * this.guides.gridSize;
+            }
+            this.scene.setGuide(axis, index, pos);
+            this.canvas.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize';
+            this.renderer.requestRender();
+            return;
+        }
+
         // Artboard move/resize drag in progress.
         if (this.artboardDrag && this.isMouseDown) {
             this.didMove = true;
@@ -3386,6 +3483,32 @@ export class InputManager {
         if (this.isSpacePan) return; // hand tool active — no hover/tool behavior
 
         // Hover cursor for resize handles (when not dragging, skip in node-editing mode)
+        // Hover feedback for ruler guides — a grab-able guide highlights and
+        // shows a resize cursor. Only when not editing a path.
+        if (!this.isMouseDown && this.guides && this.editingNodeId === null) {
+            const gh = this.guides.hitGuide(
+                this.currentPos.x,
+                this.currentPos.y,
+                5 / this.renderer.zoom,
+            );
+            if (gh) {
+                if (
+                    !this.highlightedGuide ||
+                    this.highlightedGuide.axis !== gh.axis ||
+                    this.highlightedGuide.index !== gh.index
+                ) {
+                    this.highlightedGuide = gh;
+                    this.renderer.requestRender();
+                }
+                this.canvas.style.cursor = gh.axis === 'x' ? 'col-resize' : 'row-resize';
+                return;
+            }
+            if (this.highlightedGuide) {
+                this.highlightedGuide = null;
+                this.renderer.requestRender();
+            }
+        }
+
         if (!this.isMouseDown && this.ui.activeTool === 'selection') {
             const gHit =
                 this.editingNodeId === null && this.ui.gradientEdit.isActive()
@@ -3421,6 +3544,11 @@ export class InputManager {
                     this.canvas.style.cursor = 'default';
                 }
             }
+        }
+
+        // Eyedropper: crosshair cursor while hovering, so it reads as a sampler.
+        if (!this.isMouseDown && this.ui.activeTool === 'eyedropper') {
+            this.canvas.style.cursor = 'crosshair';
         }
 
         // Paint bucket hover preview. Filling is primary, so we highlight the
@@ -4262,6 +4390,22 @@ export class InputManager {
         this.penHandleDragging = false;
         this.snap.end();
         this.activeSnapGuides = [];
+
+        // Finish a ruler-guide drag: dropping it back over a ruler (or off the
+        // canvas) deletes it; otherwise persist the new position.
+        if (this.draggingGuide) {
+            const { axis, index } = this.draggingGuide;
+            this.draggingGuide = null;
+            this.highlightedGuide = null;
+            if (this.guides?.isOverRuler(e.clientX, e.clientY)) {
+                this.scene.removeGuide(axis, index);
+            } else {
+                this.scene.autosave?.trigger();
+            }
+            this.canvas.style.cursor = 'default';
+            this.renderer.requestRender();
+            return;
+        }
 
         // Finish a path that was just closed on the first anchor. Deferred to
         // mouse-up so the click could pull a bezier handle off the closing point.

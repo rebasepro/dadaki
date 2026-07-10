@@ -754,6 +754,106 @@ body, html {
     height: 100%;
 }
 
+/* ─── Swatches ─── */
+.swatches-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 22px);
+    gap: 6px;
+    padding: 2px 0 6px;
+}
+.swatch-chip {
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    padding: 0;
+    cursor: pointer;
+    position: relative;
+    /* checker backdrop shows through translucent swatches */
+    background-image:
+        linear-gradient(45deg, #666 25%, transparent 25%),
+        linear-gradient(-45deg, #666 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #666 75%),
+        linear-gradient(-45deg, transparent 75%, #666 75%);
+    background-size: 8px 8px;
+    background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+}
+.swatch-chip .swatch-fill {
+    position: absolute;
+    inset: 0;
+    border-radius: 3px;
+}
+.swatch-chip:hover {
+    border-color: var(--accent);
+}
+.swatches-hint {
+    font-size: 10px;
+    color: var(--text-dim);
+    line-height: 1.4;
+}
+.swatches-empty {
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 2px 0 6px;
+}
+
+/* ─── Rulers ─── */
+.ruler {
+    position: absolute;
+    z-index: 5;
+    background: #2b2b2b;
+    cursor: default;
+}
+.ruler-top {
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 20px;
+    border-bottom: 1px solid var(--border);
+    cursor: row-resize; /* drag down to pull a horizontal guide */
+}
+.ruler-left {
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 20px;
+    border-right: 1px solid var(--border);
+    cursor: col-resize; /* drag right to pull a vertical guide */
+}
+.ruler-corner {
+    position: absolute;
+    z-index: 6;
+    top: 0;
+    left: 0;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    background: #2b2b2b;
+    border: none;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    background-image:
+        linear-gradient(var(--border) 1px, transparent 1px),
+        linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 5px 5px;
+    background-position: 3px 3px;
+    opacity: 0.5;
+}
+.ruler-corner:hover {
+    opacity: 0.8;
+}
+.ruler-corner.active {
+    opacity: 1;
+    background-color: var(--accent-dim);
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+/* When rulers are toggled off, hide all three strips. */
+#canvas-container.rulers-hidden .ruler,
+#canvas-container.rulers-hidden .ruler-corner {
+    display: none;
+}
+
 /* ─── Side Panel ─── */
 
 #side-panel {
@@ -1217,6 +1317,49 @@ textarea.prop-input {
 .dim-icon-btn.active {
     color: var(--accent);
     background: var(--accent-dim);
+}
+
+/* Reference-point (9-anchor) selector — pivot for numeric rotate/scale. */
+.ref-anchor {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(3, 1fr);
+    gap: 1px;
+    width: 22px;
+    height: 22px;
+    justify-self: center;
+    align-self: center;
+    padding: 1px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+}
+
+.ref-dot {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+}
+
+.ref-dot::after {
+    content: '';
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    transition: background 0.1s, transform 0.1s;
+}
+
+.ref-dot:hover::after {
+    background: var(--text-main);
+}
+
+.ref-dot.active::after {
+    background: var(--accent);
+    transform: scale(1.5);
 }
 
 /* While scrubbing a dim-label, keep the resize cursor everywhere */

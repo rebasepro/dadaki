@@ -473,6 +473,15 @@ pub struct ProtoDocument {
     /// Node id of the active Live Paint group (0 = none).
     #[prost(uint32, tag = "13")]
     pub live_paint_group: u32,
+    /// Vertical ruler guides — world x positions.
+    #[prost(float, repeated, tag = "14")]
+    pub guides_x: Vec<f32>,
+    /// Horizontal ruler guides — world y positions.
+    #[prost(float, repeated, tag = "15")]
+    pub guides_y: Vec<f32>,
+    /// Document color swatches (editor-owned JSON blob).
+    #[prost(string, tag = "16")]
+    pub swatches_json: String,
 }
 
 /// A history/undo/drag snapshot. Wraps a full document plus the transient
@@ -1075,6 +1084,9 @@ impl ProtoDocument {
                 pe
             },
             live_paint_group: scene.live_paint_group.unwrap_or(0),
+            guides_x: scene.guides_x.clone(),
+            guides_y: scene.guides_y.clone(),
+            swatches_json: scene.swatches_json.clone(),
         }
     }
 
@@ -1160,6 +1172,9 @@ impl ProtoDocument {
             images,
             artboards,
             live_paint_group: if self.live_paint_group != 0 { Some(self.live_paint_group) } else { None },
+            guides_x: self.guides_x.clone(),
+            guides_y: self.guides_y.clone(),
+            swatches_json: self.swatches_json.clone(),
         };
 
         let next_id = if self.next_id > 0 {
@@ -1346,6 +1361,9 @@ mod tests {
             gap_bridge_distance: 0.0,
             painted_edges: Vec::new(),
             live_paint_group: 0,
+            guides_x: Vec::new(),
+            guides_y: Vec::new(),
+            swatches_json: String::new(),
         };
 
         let bytes = v1_doc.encode_to_vec();
@@ -1383,6 +1401,9 @@ mod tests {
             gap_bridge_distance: 0.0,
             painted_edges: Vec::new(),
             live_paint_group: 0,
+            guides_x: Vec::new(),
+            guides_y: Vec::new(),
+            swatches_json: String::new(),
         };
         doc.nodes.push(ProtoNode {
             id: 1,
@@ -1493,6 +1514,9 @@ mod tests {
             images: Default::default(),
             artboards: Vec::new(),
             live_paint_group: None,
+            guides_x: Vec::new(),
+            guides_y: Vec::new(),
+            swatches_json: String::new(),
         };
 
         let bytes = serialize_to_proto(&scene, 8);
@@ -1540,6 +1564,9 @@ mod tests {
             images: Default::default(),
             artboards,
             live_paint_group: None,
+            guides_x: Vec::new(),
+            guides_y: Vec::new(),
+            swatches_json: String::new(),
         }
     }
 
@@ -1585,6 +1612,9 @@ mod tests {
             gap_bridge_distance: 0.0,
             painted_edges: Vec::new(),
             live_paint_group: 0,
+            guides_x: Vec::new(),
+            guides_y: Vec::new(),
+            swatches_json: String::new(),
         };
         let bytes = old.encode_to_vec();
         let (scene, _) = deserialize_from_proto(&bytes).unwrap();

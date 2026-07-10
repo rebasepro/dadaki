@@ -69,6 +69,7 @@ const TOOL_HINTS: Record<string, string> = {
     text: 'Click on the canvas to place text',
     scissors: 'Click a path segment or anchor point to cut the path there',
     'paint-bucket': 'Click a region to fill it, or a line to paint the edge',
+    eyedropper: 'Click a shape to copy its appearance onto the selection',
 };
 
 /** Tools whose next action applies the default style — they get style swatches. */

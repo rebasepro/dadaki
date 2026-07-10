@@ -8,9 +8,11 @@ import { DocumentManager } from './document_manager';
 import { ExportDialog, type ExportOptions } from './export_dialog';
 import { FileService } from './file_service';
 import { createFirebaseAnalyticsSink } from './firebase_analytics';
+import { GuidesController } from './guides';
 import { InputManager } from './input';
 import { PersistenceManager } from './persistence';
 import { Renderer } from './renderer';
+import { SwatchesController } from './swatches';
 import { TabStrip } from './tab_strip';
 import { Toolbar } from './toolbar';
 import { UIEngine } from './ui';
@@ -44,6 +46,15 @@ async function bootstrap() {
     const canvasContainer = document.getElementById('canvas-container') as HTMLElement;
     const contextBar = new ContextBar(canvasContainer, ui, input, wasmScene, renderer);
     ui.contextBar = contextBar;
+
+    // Rulers + guides + snap-to-grid.
+    const guides = new GuidesController(canvasContainer, wasmScene, renderer, input);
+    input.guides = guides;
+    renderer.guidesController = guides;
+
+    // Document color swatches (global colors).
+    const swatches = new SwatchesController(wasmScene, ui, () => renderer.requestRender());
+    ui.swatchesController = swatches;
 
     // ─── File / document lifecycle (multi-tab) ──────────────────────────
     const tabStripEl = document.getElementById('tab-strip') as HTMLElement;

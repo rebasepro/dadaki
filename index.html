@@ -117,6 +117,9 @@
 
             <section id="canvas-container">
                 <canvas id="editor-canvas"></canvas>
+                <canvas id="ruler-top" class="ruler ruler-top"></canvas>
+                <canvas id="ruler-left" class="ruler ruler-left"></canvas>
+                <button id="ruler-corner" class="ruler-corner" title="Snap to grid: off"></button>
             </section>
 
             <aside id="side-panel">
@@ -244,7 +247,17 @@
                                 <input type="number" id="prop-scale-y" value="100" step="1">
                                 <span class="dim-unit">%</span>
                             </div>
-                            <span></span>
+                            <div class="ref-anchor" id="ref-anchor" title="Reference point for rotate &amp; scale">
+                                <button class="ref-dot" data-ax="0" data-ay="0" title="Top left"></button>
+                                <button class="ref-dot" data-ax="0.5" data-ay="0" title="Top"></button>
+                                <button class="ref-dot" data-ax="1" data-ay="0" title="Top right"></button>
+                                <button class="ref-dot" data-ax="0" data-ay="0.5" title="Left"></button>
+                                <button class="ref-dot active" data-ax="0.5" data-ay="0.5" title="Center"></button>
+                                <button class="ref-dot" data-ax="1" data-ay="0.5" title="Right"></button>
+                                <button class="ref-dot" data-ax="0" data-ay="1" title="Bottom left"></button>
+                                <button class="ref-dot" data-ax="0.5" data-ay="1" title="Bottom"></button>
+                                <button class="ref-dot" data-ax="1" data-ay="1" title="Bottom right"></button>
+                            </div>
                             <div class="dim-actions">
                                 <button id="rotate-ccw-btn" class="dim-icon-btn" title="Rotate 90° counterclockwise"></button>
                                 <button id="rotate-cw-btn" class="dim-icon-btn" title="Rotate 90° clockwise"></button>
@@ -419,6 +432,19 @@
                 <!-- Shown when nothing is selected -->
                 <div id="props-empty" class="props-empty" style="display:none;">
                     <span>Select an object to edit its properties</span>
+                </div>
+
+                <!-- Swatches Panel (document-level, always visible) -->
+                <div class="panel-section" id="swatches-section">
+                    <div class="panel-section-header" data-section="swatches">
+                        <span class="chevron">▾</span>
+                        <span class="section-title" style="flex:1;">Swatches</span>
+                        <button id="add-swatch-btn" class="add-property-btn" title="Add current fill as a swatch">+</button>
+                    </div>
+                    <div class="panel-section-body" data-section-body="swatches">
+                        <div id="swatches-grid" class="swatches-grid"></div>
+                        <div class="swatches-hint">Click to apply · double-click to edit (recolors uses) · ⌥-click to remove</div>
+                    </div>
                 </div>
 
                 <!-- Export Panel -->

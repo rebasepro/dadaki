@@ -214,6 +214,26 @@ function getPicker(): ColorPicker {
     return _picker;
 }
 
+/** Open the shared color picker anchored to `anchor`, without wiring it to a
+ *  persistent swatch button. Used by the swatches palette to edit a swatch. */
+export function openColorPicker(
+    anchor: HTMLElement,
+    color: Color,
+    opts: {
+        alpha?: boolean;
+        title?: string;
+        onInput: (c: Color) => void;
+        onChange?: (c: Color) => void;
+    },
+): void {
+    getPicker().open(anchor, color, {
+        alpha: opts.alpha !== false,
+        title: opts.title,
+        onInput: opts.onInput,
+        onChange: opts.onChange ?? opts.onInput,
+    });
+}
+
 class ColorPicker {
     private root: HTMLElement;
     private svArea!: HTMLElement;
