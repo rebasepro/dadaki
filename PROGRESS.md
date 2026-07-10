@@ -7,25 +7,33 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 - [x] Tier 1 baseline (eyedropper, swatches/global colors, rulers+guides+grid, transform reference point) — committed `8486fe2`
 - [x] 1. Offset Path — committed `cceab38` (src/offset_path.ts; context-bar distance control, negative=inset)
 - [ ] 2. Text on a path — DEFERRED (needs a dedicated session; see note below)
-- [ ] 3. Shape Builder tool
+- [ ] 3. Shape Builder tool — BLOCKED without plumbing (see note)
 - [ ] 4. Variable-width stroke (width profile)
-- [ ] 5. Clipping frame (clip_content)
+- [ ] 5. Clipping frame (clip_content) — DEFERRED, data-model mismatch (see note)
 - [x] 6. Blend tool — committed `ae02e44` (src/blend.ts; ContourMeasure arc-length morph + color lerp, grouped; context-bar steps field)
 - [ ] 7. Reusable components / symbols (stretch)
+- [x] 8. Simplify Path — committed `06e8630` (src/simplify_path.ts; RDP + Catmull-Rom refit; context-bar tolerance field, progressive-disclosed at 6+ pts)
 
 ## Next step
-Do **item 5 — Clipping frame (clip_content)** next: it's more self-contained than the
-remaining big ones and high-value (Figma-core: frames clip their contents). The
-`clip_content` flag already exists on the node (types.ts, reserved). Wire it in the
-engine renderer so a group/frame with clip_content=true clips its descendants to its
-bounds; add a Figma-style "Clip content" toggle (context bar or a small panel control)
-for a selected group. Accept: toggle on a group → children clip to its bounds; round-trips
-through save + SVG. Study the render stream in renderer.ts (how groups/masks push/pop
-clips — mask_type=2 clipPath path is the closest existing machinery per memory
-[[adaptive-tiles-clip-masks]]).
+Recommend **item 4 — Variable-width stroke (width profile)** OR pick another
+single-action path op. Note the two blocks discovered this session before choosing:
 
-Then item 3 (Shape Builder), item 4 (variable-width stroke), item 2 (text-on-path — needs
-its own session), item 7 (components, stretch).
+- **Item 5 (clip_content) — deferred:** on THIS branch a group's bounds == its children's
+  extent, so "clip to own bounds" is a no-op. A real frame needs either an explicit stored
+  clip-rect on the node (engine field + a render-stream clip command — the render buffer is
+  u32-aligned zero-copy, so adding a command is delicate) or the `artwork-containment`
+  branch's frame↔contents model. Too risky for one window; needs a dedicated session with
+  a render-protocol change. Alpha/luminance/geometric MASKS already provide clipping today.
+- **Item 3 (Shape Builder) — blocked:** the face graph (`query_face_at`/`get_face_boundary`)
+  only exists inside a Live Paint group — `query_face_at` returns -1 on arbitrary overlapping
+  shapes. Shape Builder would need to build a temporary vector network from the selection
+  first (the Live Paint machinery). Feasible but multi-part; pair it with extended
+  Pathfinders (Divide/Trim/Crop) in a dedicated session that stands up the network.
+
+Remaining after that: item 2 (text-on-path, dedicated session), item 7 (components, stretch),
+item 4 (variable-width). For a safe next single-window win, consider more single-action path
+ops (they've all landed cleanly): e.g. a Pathfinder that works via CanvasKit path-ops on the
+selection directly (Divide-by-boolean, Outline), or "Distribute spacing (equal gaps)".
 
 ### Deferred: item 2 — Text on a path
 Investigated this session. It's genuinely multi-part: (a) persist the text→path link
@@ -55,3 +63,14 @@ dedicated session; the ContourMeasure + typeface pieces are the key enablers.
   Learned: getResolvedSubpaths returns [] for Rect/Ellipse (Path-only) — sample the world
   CanvasKit path via ContourMeasure instead (now exported nodeToWorldPath from boolean_ops).
   Next: item 5 (Clipping frame / clip_content).
+- 2026-07-10 22:09 (Fri) — Item 8 **Simplify Path** done + committed (`06e8630`). Reordered
+  again: items 5 (clip_content) and 3 (Shape Builder) both turned out to need engine-level
+  plumbing not landable cleanly in one window (see Next-step notes), so I built Simplify —
+  a genuine Illustrator gap (Object › Path › Simplify) fitting the proven single-action +
+  one-field pattern. Verified in browser: 60-pt sine polyline → 24 smooth points, no cusps
+  (added a handle-length clamp after a first pass showed cusping); context-bar Simplify
+  control (tolerance field + button) renders natively, progressive-disclosed at 6+ points.
+  tsc + biome + vitest (221) green. Note: browser tooling switched mid-session from the
+  preview_* MCP to claude-in-chrome (navigate + javascript_tool + computer screenshot on a
+  numeric tabId); same http://localhost:5312 target. Next: item 4 (variable-width) or another
+  single-action path op / Pathfinder.
