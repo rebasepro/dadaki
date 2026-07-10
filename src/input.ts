@@ -15,6 +15,7 @@ import {
     splitPathAtSegment,
 } from './path_ops';
 import type { ArtboardHandle, Renderer } from './renderer';
+import { pathPointCount, simplifyPath } from './simplify_path';
 import { SnapEngine, type SnapGuide } from './snapping';
 import { textNodeToSubpaths } from './text_outlines';
 import type { Artboard, PathPoint, PenPathPoint, Subpath } from './types';
@@ -2670,6 +2671,28 @@ export class InputManager {
         if (groupId == null) return;
         this.scene.engine!.clear_selection();
         this.scene.selectNode(groupId, false);
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
+    /** Last-used Simplify tolerance (world units), remembered across invocations. */
+    lastSimplifyTolerance = 2;
+
+    /** Point count of the single selected path (for the Simplify UI), or 0. */
+    selectedPathPointCount(): number {
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length !== 1) return 0;
+        return pathPointCount(this.scene, selection[0]);
+    }
+
+    /** Simplify the single selected Path in place at `tolerance` world units. */
+    simplifySelectedPath(tolerance = this.lastSimplifyTolerance) {
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length !== 1) return;
+        if (!this.scene.getNodeGeometry(selection[0])?.Path) return;
+        this.lastSimplifyTolerance = tolerance;
+        if (simplifyPath(this.scene, selection[0], tolerance) == null) return;
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
         this.renderer.requestRender();

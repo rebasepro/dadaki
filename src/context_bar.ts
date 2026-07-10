@@ -440,6 +440,37 @@ export class ContextBar {
             wrap.appendChild(amt);
             wrap.appendChild(this.createButton('Offset', offsetIcon, applyOffset));
             this.el.appendChild(wrap);
+
+            // Simplify — only surfaces when the path has enough points to be worth
+            // reducing (progressive disclosure). Tolerance field + button.
+            if (this.input.selectedPathPointCount() >= 6) {
+                const sWrap = document.createElement('div');
+                sWrap.style.display = 'inline-flex';
+                sWrap.style.alignItems = 'center';
+                sWrap.style.gap = '4px';
+                const tol = document.createElement('input');
+                tol.type = 'number';
+                tol.className = 'cb-num';
+                tol.min = '0';
+                tol.value = String(this.input.lastSimplifyTolerance);
+                tol.title = 'Simplify tolerance (larger = fewer points)';
+                const applySimplify = () => {
+                    const t = parseFloat(tol.value);
+                    if (Number.isFinite(t) && t >= 0) this.input.simplifySelectedPath(t);
+                };
+                tol.addEventListener('click', (e) => e.stopPropagation());
+                tol.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        applySimplify();
+                    }
+                });
+                const simplifyIcon =
+                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c4 0 5-10 9-10s5 6 9 6"/></svg>';
+                sWrap.appendChild(tol);
+                sWrap.appendChild(this.createButton('Simplify', simplifyIcon, applySimplify));
+                this.el.appendChild(sWrap);
+            }
         }
 
         this.appendTransformActions(info, { flatten: true });
