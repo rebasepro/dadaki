@@ -7,9 +7,33 @@ every 4 hours; each firing does ~1 hour of work, then stops. Read `PROGRESS.md`
 for the live state and pick up the next unchecked item.
 
 ## Mission
-Ship the missing Illustrator features that genuinely make sense for a **minimal-UX**
-vector editor. Quality over quantity. Each feature must land fully working, verified,
-and committed — no half-features.
+Ship the missing Illustrator features that genuinely make sense, wrapped in an
+**amazing, minimal, Figma-grade UI**. The power is Illustrator; the feel is Figma.
+Quality over quantity. Each feature lands fully working, verified, and committed —
+no half-features.
+
+## UI/UX principles — Figma-grade minimalism (NON-NEGOTIABLE)
+Every feature's surface must feel like it shipped with the product, not bolted on.
+1. **Direct manipulation first.** Prefer on-canvas gestures/handles over panels, and
+   panels over modal dialogs. Never use `window.prompt`/`alert`/`confirm`.
+2. **Reuse the design system — never ad-hoc widgets.** Use the existing components and
+   classes: context-bar buttons (`.cb-btn`, `createButton`), numeric fields (`.cb-num`),
+   selects (`.cb-select`), the shared color picker (`openColorPicker`/`createColorSwatch`),
+   panel sections, lucide icons at the sizes already in use. Style ONLY via the CSS
+   tokens in `:root` (`--bg-input`, `--accent`, `--border`, `--text-main`, …). Do NOT
+   hand-set hex colors or sprinkle inline styles for anything the system already covers.
+3. **Progressive disclosure.** Sensible defaults; show a control only when it applies to
+   the current selection/tool. No always-visible clutter. One primary action per feature.
+4. **Consistency.** Match existing spacing, 22–24px control heights, 11px labels, icon
+   weight, hover/active states, and interaction patterns (e.g. one-shot tools revert to
+   Selection; ⌘-drag bypasses snapping). New tools follow the toolbar/flyout conventions.
+5. **Keyboard + discoverability.** Give obvious actions a shortcut and a tooltip; keep
+   labels short. Prefer a single number field or drag over multi-field forms.
+6. **Quiet by default.** Minimal chrome, calm colors, accent used sparingly for the active
+   state. If in doubt, remove UI — the feature should feel effortless, not configurable.
+
+When a feature seems to need a lot of UI, that's a smell: find the Figma-style reduction
+(a handle, a single field, a right-click, a mode) before adding a panel.
 
 ## Explicitly OUT of scope (the "noise" the user does not want)
 Brushes (art/scatter/pattern/calligraphic), gradient mesh, envelope/warp/perspective
@@ -19,6 +43,8 @@ distort, image trace, a full Appearance/Graphic-Styles tree. Do NOT build these.
 1. `cd /Users/francesco/vector-editor/.claude/worktrees/tier1-features`
 2. Read `PROGRESS.md`. Continue an in-progress item, else start the next unchecked one.
 3. Implement fully: engine (Rust) + JS + UI + a context-bar/menu entry as needed.
+   The UI must honor the **UI/UX principles** above — Figma-grade, reuse the design
+   system, no ad-hoc widgets. Treat the UX as half the feature, not an afterthought.
 4. **Verify before committing:**
    - `./node_modules/.bin/tsc --noEmit -p tsconfig.json` (clean)
    - `./node_modules/.bin/biome check --write <changed files>` then re-check (clean)

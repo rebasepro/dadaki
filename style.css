@@ -2398,6 +2398,31 @@ body.scrubbing * {
     appearance: none;
 }
 
+/* Compact numeric input for context-bar controls (e.g. Offset distance). */
+.cb-num {
+    width: 44px;
+    height: 22px;
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    background: var(--bg-input);
+    color: var(--text-main);
+    font-size: 11px;
+    font-family: inherit;
+    padding: 0 6px;
+    text-align: right;
+    -webkit-appearance: none;
+    appearance: none;
+}
+.cb-num::-webkit-inner-spin-button,
+.cb-num::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+.cb-num:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
 /* Badge */
 .cb-badge {
     background: var(--accent-dim);

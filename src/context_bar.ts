@@ -421,16 +421,9 @@ export class ContextBar {
             wrap.style.gap = '4px';
             const amt = document.createElement('input');
             amt.type = 'number';
+            amt.className = 'cb-num';
             amt.value = String(this.input.lastOffsetAmount);
             amt.title = 'Offset distance (negative = inset)';
-            amt.style.width = '46px';
-            amt.style.height = '22px';
-            amt.style.background = 'var(--bg-input, #333)';
-            amt.style.color = 'var(--text-main, #e0e0e0)';
-            amt.style.border = '1px solid var(--border, #444)';
-            amt.style.borderRadius = '4px';
-            amt.style.padding = '0 4px';
-            amt.style.fontSize = '11px';
             const applyOffset = () => {
                 const d = parseFloat(amt.value);
                 if (Number.isFinite(d) && d !== 0) this.input.offsetSelectedPath(d);
