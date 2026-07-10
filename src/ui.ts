@@ -188,6 +188,11 @@ export class UIEngine {
      *  when the grabbed row is part of a multi-selection), or null. */
     private _draggingLayerIds: number[] | null = null;
 
+    /** The row that anchors a Shift range-select in the Objects panel — the last
+     *  row clicked without Shift. Shift+click selects the contiguous run between
+     *  this anchor and the clicked row. Arrow-key navigation also tracks it. */
+    private _layerSelectAnchor: number | null = null;
+
     constructor(ck: CanvasKit, scene: WasmScene) {
         this.ck = ck;
         this.scene = scene;
@@ -478,8 +483,161 @@ export class UIEngine {
         row?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
 
+    /**
+     * Collapse a freshly-created subtree (paste / duplicate / SVG import) in the
+     * Objects panel so a large copied or imported group doesn't flood the list
+     * with expanded descendants. Every group in the subtree (the new root and
+     * all nested groups) starts collapsed; leaf nodes have nothing to collapse.
+     * Callers still need to `updateLayerList()` to reflect the change.
+     */
+    collapseSubtreeByDefault(id: number) {
+        if (!this.scene.engine) return;
+        const walk = (nid: number) => {
+            const children = this.scene.getNodeChildren(nid);
+            if (children.length === 0) return;
+            this._collapsedGroups.add(nid);
+            for (const child of children) walk(child);
+        };
+        walk(id);
+    }
+
+    /** Inverse of {@link collapseSubtreeByDefault}: expand a group and every
+     *  nested group beneath it (Alt/Option+click on a chevron — "expand all"). */
+    private expandSubtree(id: number) {
+        if (!this.scene.engine) return;
+        const walk = (nid: number) => {
+            const children = this.scene.getNodeChildren(nid);
+            if (children.length === 0) return;
+            this._collapsedGroups.delete(nid);
+            for (const child of children) walk(child);
+        };
+        walk(id);
+    }
+
+    /** The node ids of the currently-visible layer rows, top-to-bottom in the
+     *  same order they're painted in the panel. Used for range-select and
+     *  arrow-key navigation. Collapsed groups hide their descendants, so those
+     *  rows are correctly absent. */
+    private _visibleLayerOrder(): number[] {
+        return Array.from(
+            this.layerList.querySelectorAll('.layer-item[data-node-id]'),
+        ).map((el) => Number((el as HTMLElement).dataset.nodeId));
+    }
+
+    /** Replace the selection with exactly `ids` (engine `select_node` is
+     *  add-only, so we clear first). */
+    private _setLayerSelection(ids: number[]) {
+        this.scene.engine!.clear_selection();
+        for (const id of ids) this.scene.selectNode(id, true);
+    }
+
+    /** Select the contiguous run of visible rows between the anchor and the
+     *  clicked row (inclusive) — the panel's Shift+click behavior. */
+    private _selectLayerRange(anchorId: number, targetId: number) {
+        const order = this._visibleLayerOrder();
+        const ai = order.indexOf(anchorId);
+        const ti = order.indexOf(targetId);
+        if (ai === -1 || ti === -1) {
+            this._setLayerSelection([targetId]);
+            return;
+        }
+        const [lo, hi] = ai <= ti ? [ai, ti] : [ti, ai];
+        this._setLayerSelection(order.slice(lo, hi + 1));
+    }
+
+    /** Toggle a single row's membership in the selection — the panel's
+     *  Cmd/Ctrl+click behavior (engine `select_node` can't deselect). */
+    private _toggleLayerSelection(id: number) {
+        const sel = Array.from(this.scene.getSelection());
+        this._setLayerSelection(
+            sel.includes(id) ? sel.filter((s) => s !== id) : [...sel, id],
+        );
+    }
+
+    /** Arrow-key navigation within the Objects panel: move the selection one
+     *  visible row up (`dir = -1`) or down (`dir = +1`). With `extend`, grow the
+     *  selection from the anchor instead of replacing it. */
+    private _moveLayerSelection(dir: -1 | 1, extend: boolean) {
+        const order = this._visibleLayerOrder();
+        if (order.length === 0) return;
+        const sel = Array.from(this.scene.getSelection());
+        // Step from the most-recently-touched row (anchor), else the selection edge.
+        const from =
+            this._layerSelectAnchor !== null && order.includes(this._layerSelectAnchor)
+                ? this._layerSelectAnchor
+                : dir > 0
+                  ? sel[sel.length - 1]
+                  : sel[0];
+        const cur = from === undefined ? -1 : order.indexOf(from);
+        const next = cur === -1 ? (dir > 0 ? 0 : order.length - 1) : cur + dir;
+        if (next < 0 || next >= order.length) return;
+        const targetId = order[next];
+        if (extend && this._layerSelectAnchor !== null) {
+            this._selectLayerRange(this._layerSelectAnchor, targetId);
+        } else {
+            this._setLayerSelection([targetId]);
+            this._layerSelectAnchor = targetId;
+        }
+        this.updateLayerList();
+        this.layerList.focus();
+        this.syncWithSelection();
+        this.layerList
+            .querySelector(`.layer-item[data-node-id="${targetId}"]`)
+            ?.scrollIntoView({ block: 'nearest' });
+    }
+
+    /** Collapse (`ArrowLeft`) or expand (`ArrowRight`) the focused group via the
+     *  keyboard. On a leaf ArrowRight is a no-op; on a collapsed group ArrowLeft
+     *  jumps to the parent, mirroring a file tree. */
+    private _arrowToggleFocusedGroup(expand: boolean) {
+        const sel = Array.from(this.scene.getSelection());
+        const id = sel[sel.length - 1];
+        if (id === undefined) return;
+        const children = this.scene.getNodeChildren(id);
+        const isGroup = children.length > 0;
+        if (expand) {
+            if (isGroup && this._collapsedGroups.has(id)) this._collapsedGroups.delete(id);
+            else return;
+        } else {
+            if (isGroup && !this._collapsedGroups.has(id)) {
+                this._collapsedGroups.add(id);
+            } else {
+                // Already collapsed (or a leaf) — hop to the parent group.
+                const parent = this.scene.getNodeParent(id);
+                if (parent === -1) return;
+                this._setLayerSelection([parent]);
+                this._layerSelectAnchor = parent;
+            }
+        }
+        this.updateLayerList();
+        this.layerList.focus();
+        this.syncWithSelection();
+    }
+
     private initEvents() {
         // (Toolbar clicks are wired by the Toolbar class itself — see toolbar.ts)
+
+        // Keyboard navigation for the Objects panel. The list is focusable
+        // (tabindex) so ↑/↓ move the selection between visible rows and ←/→
+        // collapse/expand the focused group — without stealing the canvas's
+        // arrow-key nudge, which only fires when the list isn't focused.
+        this.layerList.tabIndex = 0;
+        this.layerList.addEventListener('keydown', (e) => {
+            switch (e.key) {
+                case 'ArrowUp':
+                case 'ArrowDown':
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this._moveLayerSelection(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey);
+                    break;
+                case 'ArrowRight':
+                case 'ArrowLeft':
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this._arrowToggleFocusedGroup(e.key === 'ArrowRight');
+                    break;
+            }
+        });
 
         // Export Panel events
         this.exportPaneFormat?.addEventListener('change', () => {
@@ -2811,6 +2969,12 @@ export class UIEngine {
         // with zero nodes, so artboards always show in the Objects panel.)
         this.layerList.innerHTML = '';
 
+        // Drop collapse state for nodes that no longer exist (deleted / ungrouped)
+        // so the set doesn't grow without bound over a long session.
+        for (const gid of this._collapsedGroups) {
+            if (this.scene.getNodeType(gid) === undefined) this._collapsedGroups.delete(gid);
+        }
+
         // Figma-style mask roles: within each group, a mask marks the siblings
         // above it (higher paint index, until the next mask) as "masked". The
         // panel renders front-to-back top-to-bottom, so the masked rows appear
@@ -2909,7 +3073,18 @@ export class UIEngine {
                 if (im && im.editingNodeId !== null && im.editingNodeId !== id) {
                     im.exitEditMode();
                 }
-                this.scene.selectNode(id, e.shiftKey);
+                // Shift = contiguous range from the anchor; Cmd/Ctrl = toggle a
+                // single row; plain click = select just this row (and re-anchor).
+                if (e.shiftKey && this._layerSelectAnchor !== null) {
+                    this._selectLayerRange(this._layerSelectAnchor, id);
+                } else if (e.metaKey || e.ctrlKey) {
+                    this._toggleLayerSelection(id);
+                    this._layerSelectAnchor = id;
+                } else {
+                    this.scene.selectNode(id, false);
+                    this._layerSelectAnchor = id;
+                }
+                this.layerList.focus();
                 this.syncWithSelection();
             });
 
@@ -2939,12 +3114,28 @@ export class UIEngine {
                 this.startLayerRename(nameEl, { node: id });
             });
 
+            // Double-click elsewhere on a group's row toggles its expansion
+            // (the name owns dblclick-to-rename via stopPropagation above).
+            if (hasChildren) {
+                row.addEventListener('dblclick', () => {
+                    if (this._collapsedGroups.has(id)) this._collapsedGroups.delete(id);
+                    else this._collapsedGroups.add(id);
+                    this.updateLayerList();
+                });
+            }
+
             // Chevron toggle for groups
             if (hasChildren) {
                 const chevron = item.querySelector('.layer-chevron') as HTMLElement;
                 chevron.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    if (this._collapsedGroups.has(id)) {
+                    const collapsed = this._collapsedGroups.has(id);
+                    if (e.altKey) {
+                        // Alt/Option+click toggles the ENTIRE subtree (expand-all
+                        // / collapse-all), matching Figma & Illustrator.
+                        if (collapsed) this.expandSubtree(id);
+                        else this.collapseSubtreeByDefault(id);
+                    } else if (collapsed) {
                         this._collapsedGroups.delete(id);
                     } else {
                         this._collapsedGroups.add(id);
@@ -3043,6 +3234,10 @@ export class UIEngine {
                 if (role === 'masked' && !span) {
                     span = document.createElement('div');
                     span.className = 'layer-mask-span';
+                    // Align the grouping guide to these rows' indent (rows use
+                    // padding-left: depth*8 + 4) so it sits at the right level
+                    // rather than pinned to the panel's left edge.
+                    span.style.setProperty('--mask-indent', `${depth * 8 + 4}px`);
                     container.appendChild(span);
                 }
                 renderNode(sid, depth, span ?? container);
@@ -4144,12 +4339,13 @@ export class UIEngine {
         this.scene.transaction(() => {
             const before = new Set(this.scene.getRootNodes());
             this.parseSVGInternal(svgText, patternImages, doc);
-            if (afterImport) {
-                const newRoots = Array.from(this.scene.getRootNodes()).filter(
-                    (id) => !before.has(id),
-                );
-                afterImport(newRoots);
-            }
+            const newRoots = Array.from(this.scene.getRootNodes()).filter(
+                (id) => !before.has(id),
+            );
+            // Imported artwork starts collapsed so a deep SVG tree doesn't flood
+            // the Objects panel; the user expands the parts they care about.
+            for (const rootId of newRoots) this.collapseSubtreeByDefault(rootId);
+            if (afterImport) afterImport(newRoots);
         });
     }
 

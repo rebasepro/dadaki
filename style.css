@@ -1662,6 +1662,13 @@ body.scrubbing * {
     min-height: 0;
 }
 
+/* The list is focusable for keyboard navigation; selected rows already provide
+   the visual cue, so suppress the container's focus ring. */
+#layer-list:focus,
+#layer-list:focus-visible {
+    outline: none;
+}
+
 #layer-list::-webkit-scrollbar {
     width: 4px;
 }
@@ -1912,14 +1919,15 @@ body.scrubbing * {
     min-width: 0;
 }
 
-/* Mask badge on layer rows that act as a mask */
+/* Mask badge on layer rows that act as a mask. Neutral + dim: the badge marks
+   the mask without competing with names or the selection highlight. */
 .layer-mask-badge {
     flex: 0 0 auto;
     margin-right: 4px;
-    font-size: 11px;
+    font-size: 10px;
     line-height: 1;
-    color: var(--accent, #6c8cff);
-    opacity: 0.9;
+    color: var(--text-dim, #808080);
+    opacity: 0.8;
 }
 
 /* Live Paint group: a small pill so the special object reads at a glance. */
@@ -1938,29 +1946,30 @@ body.scrubbing * {
 }
 
 /* Figma-style mask wrapping: the masked rows plus the mask row that bounds
-   them are wrapped in ONE container. Kept minimal — a single thin, muted
-   vertical guide (no bracket ticks, no bright bar) with a faint tint groups
-   the span; the italic names + bold mask row carry the meaning. */
+   them are wrapped in ONE container. Deliberately quiet — no background tint,
+   just a single hairline guide in a neutral (non-accent) tone, aligned to the
+   rows' own indent (--mask-indent). The italic masked names + the mask badge
+   carry the meaning; the guide only hints at the grouping. */
 .layer-mask-span {
     position: relative;
-    background: color-mix(in srgb, var(--accent, #6c8cff) 5%, transparent);
 }
 .layer-mask-span::before {
     content: '';
     position: absolute;
-    left: 8px;
-    top: 3px;
-    bottom: 3px;
+    left: var(--mask-indent, 8px);
+    top: 2px;
+    bottom: 2px;
     width: 1px;
-    background: color-mix(in srgb, var(--accent, #6c8cff) 55%, transparent);
+    background: var(--border-light, #444);
+    opacity: 0.7;
 }
 
 .layer-item.layer-masked .layer-name {
     font-style: italic;
-    opacity: 0.9;
+    opacity: 0.75;
 }
 .layer-item.layer-mask-node .layer-name {
-    font-weight: 600;
+    font-weight: 500;
 }
 .layer-item.layer-mask-node .layer-mask-badge {
     opacity: 1;

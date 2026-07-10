@@ -38,9 +38,9 @@ function makeScene(): WasmScene {
 }
 
 /** Renderer stub: identity view transform + no-op frame/notify hooks. */
-function makeRenderer(): Renderer {
+function makeRenderer(zoom = 1): Renderer {
     return {
-        zoom: 1,
+        zoom,
         pan: { x: 0, y: 0 },
         dpr: 1,
         requestRender() {},
@@ -182,6 +182,23 @@ describe('InputManager — selection move drag', () => {
         const { input } = makeInput(scene);
 
         drag(input, 50, 50, 50, 50); // no movement
+
+        const b = bounds(scene, r);
+        expect(b[0]).toBeCloseTo(0, 3);
+        expect(b[1]).toBeCloseTo(0, 3);
+    });
+
+    it('a press that moves several world units but stays under the screen threshold does not move (zoom-independent)', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const r = e.add_rect(0, 0, 100, 100);
+        e.select_node(r, false);
+        // Zoomed way out: 1 screen px == 10 world units. Client (5,5)→(5.2,5) is
+        // a 2-world-unit drag but only 0.2 screen px — a click, not a move. The
+        // old per-frame 0.5-world threshold would have treated this as a drag.
+        const { input } = makeInput(scene, makeUI(), makeRenderer(0.1));
+
+        drag(input, 5, 5, 5.2, 5);
 
         const b = bounds(scene, r);
         expect(b[0]).toBeCloseTo(0, 3);

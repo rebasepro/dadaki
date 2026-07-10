@@ -18,6 +18,16 @@ import type { Artboard, PathPoint, PenPathPoint, Subpath } from './types';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
 
+/**
+ * Minimum pointer travel, in *screen* pixels, before a press turns into a drag
+ * (a move of the selection, or a marquee). Measured from the mouse-down point so
+ * it's cumulative, not per-frame, and independent of zoom. Below this a press is
+ * treated as a pure click (select / deselect) — this is what stops a click from
+ * accidentally nudging an object or spawning a marquee, especially when zoomed
+ * out where a fraction of a world unit is a fraction of a screen pixel.
+ */
+const DRAG_START_THRESHOLD_PX = 4;
+
 /** 2D affine matrix in DOMMatrix convention: x' = a·x + c·y + e, y' = b·x + d·y + f. */
 interface Mat {
     a: number;
@@ -105,6 +115,25 @@ export class InputManager {
     isMouseDown: boolean;
     startPos: { x: number; y: number };
     currentPos: { x: number; y: number };
+
+    /** Maps plain-letter shortcuts to tool ids. Double-tapping the same letter
+     *  within {@link TOOL_LOCK_WINDOW_MS} locks the tool (keyboard equivalent of
+     *  double-clicking the toolbar button). */
+    private static readonly TOOL_SHORTCUTS: Record<string, string> = {
+        v: 'selection',
+        a: 'artboard',
+        p: 'pen',
+        n: 'pencil',
+        l: 'line',
+        r: 'rect',
+        o: 'ellipse',
+        b: 'paint-bucket',
+        c: 'scissors',
+        t: 'text',
+    };
+    private static readonly TOOL_LOCK_WINDOW_MS = 400;
+    /** Last tool-shortcut press, for double-tap-to-lock detection. */
+    private lastToolKey: { tool: string; at: number } | null = null;
 
     /** The currently-open inline text overlay (edit or create), or null. */
     private activeTextOverlay: { commit: () => void } | null = null;
@@ -673,17 +702,19 @@ export class InputManager {
         // Tool shortcuts — plain letters only; ⇧letter is reserved for actions (flip etc.)
         if (!e.metaKey && !e.ctrlKey) {
             if (!e.shiftKey) {
-                if (e.key === 'v' || e.key === 'V') this.ui.setActiveTool('selection');
-                if (e.key === 'a' || e.key === 'A') this.ui.setActiveTool('artboard');
-                if (e.key === 'p' || e.key === 'P') this.ui.setActiveTool('pen');
-                if (e.key === 'n' || e.key === 'N') this.ui.setActiveTool('pencil');
-                if (e.key === 'l' || e.key === 'L') this.ui.setActiveTool('line');
-                if (e.key === 'r' || e.key === 'R') this.ui.setActiveTool('rect');
-                if (e.key === 'o' || e.key === 'O') this.ui.setActiveTool('ellipse');
-
-                if (e.key === 'b' || e.key === 'B') this.ui.setActiveTool('paint-bucket');
-                if (e.key === 'c' || e.key === 'C') this.ui.setActiveTool('scissors');
-                if (e.key === 't' || e.key === 'T') this.ui.setActiveTool('text');
+                const tool = InputManager.TOOL_SHORTCUTS[e.key.toLowerCase()];
+                if (tool) {
+                    // Double-tapping the same letter locks the tool (keyboard
+                    // equivalent of double-clicking the toolbar button).
+                    const now = performance.now();
+                    const prev = this.lastToolKey;
+                    const lock =
+                        prev?.tool === tool &&
+                        now - prev.at <= InputManager.TOOL_LOCK_WINDOW_MS;
+                    this.ui.setActiveTool(tool, lock);
+                    // Reset after a lock so a third tap starts fresh (unlocked).
+                    this.lastToolKey = lock ? null : { tool, at: now };
+                }
             }
 
             // Shift+H / Shift+V: flip selection in place
@@ -1019,6 +1050,8 @@ export class InputManager {
                     this.scene.engine!.clear_selection();
                     for (const id of this.clipboardIds) {
                         const newId = this.scene.duplicateNode(id);
+                        // Pasted groups start collapsed to keep the panel tidy.
+                        this.ui.collapseSubtreeByDefault(newId);
                         this.scene.selectNode(newId, true);
                     }
                 });
@@ -2277,6 +2310,9 @@ export class InputManager {
             this.scene.engine!.clear_selection();
             for (const id of selection) {
                 const newId = this.scene.duplicateNode(id);
+                // Duplicated groups start collapsed so a large copy doesn't
+                // flood the Objects panel with expanded descendants.
+                this.ui.collapseSubtreeByDefault(newId);
                 this.scene.selectNode(newId, true);
             }
         });
@@ -3362,7 +3398,6 @@ export class InputManager {
 
     onMouseMove(e: MouseEvent) {
         this.lastMouseEvent = e;
-        const lastPos = this.currentPos;
         this.currentPos = this.getPos(e);
         this.shiftKey = e.shiftKey;
         this.altKey = e.altKey;
@@ -3501,19 +3536,16 @@ export class InputManager {
         if (!this.isMouseDown) this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
 
         if (!this.isMouseDown) return;
-        this.onMouseMoveDrag(e, lastPos);
+        this.onMouseMoveDrag(e);
     }
 
     /** Pointer-drag handling — runs only while the mouse button is held. */
-    private onMouseMoveDrag(e: MouseEvent, lastPos: { x: number; y: number }) {
+    private onMouseMoveDrag(e: MouseEvent) {
         // On-canvas gradient handle drag (endpoints / stops / freshly inserted stop)
         if (this.gradientDragActive) {
             this.ui.gradientEdit.moveDrag(this.currentPos, e.shiftKey);
             return;
         }
-
-        const dx = this.currentPos.x - lastPos.x;
-        const dy = this.currentPos.y - lastPos.y;
 
         if (this.ui.activeTool === 'selection') {
             // Corner radius drag
@@ -3917,7 +3949,16 @@ export class InputManager {
         }
 
         if (this.ui.activeTool === 'selection' && this.dragMode === 'move') {
-            if (!this.didMove && (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5)) {
+            // Only commit to a move once the pointer has travelled past the drag
+            // threshold *from the press point*, measured in screen pixels. A
+            // per-frame world-space delta (the old check) made a click far too
+            // easy to turn into an accidental nudge — a fraction of a world unit
+            // is sub-pixel when zoomed out, so the tiniest tremor moved objects.
+            const screenTravel = Math.hypot(
+                (this.currentPos.x - this.startPos.x) * this.renderer.zoom,
+                (this.currentPos.y - this.startPos.y) * this.renderer.zoom,
+            );
+            if (!this.didMove && screenTravel > DRAG_START_THRESHOLD_PX) {
                 this.scene.saveMoveHistory();
                 this.didMove = true;
                 // Snapshot the pre-drag scene (same approach as resize).
@@ -4293,6 +4334,13 @@ export class InputManager {
 
         // Clean up move-drag snapshot
         if (this.moveSnapshot) {
+            // An Alt clone-drag leaves fresh clones as the current selection;
+            // collapse them so a cloned group doesn't flood the Objects panel.
+            if (this.moveClonesActive) {
+                for (const id of this.scene.engine!.get_selection()) {
+                    this.ui.collapseSubtreeByDefault(id);
+                }
+            }
             this.moveSnapshot = null;
             this.moveOriginalIds = [];
             this.moveStartBounds = null;
@@ -4349,6 +4397,9 @@ export class InputManager {
 
         const endPos = this.getPos(e);
         const dist = Math.hypot(endPos.x - this.startPos.x, endPos.y - this.startPos.y);
+        // Same distance in screen pixels — the marquee-vs-click decision has to
+        // feel the same at every zoom level, so it keys off screen travel.
+        const screenDist = dist * this.renderer.zoom;
 
         // Commit direct selection edit
         if (this.ui.activeTool === 'direct' && this.draggingHandleType && this.editingPoints) {
@@ -4376,7 +4427,7 @@ export class InputManager {
         }
 
         // Commit marquee selection
-        if (this.marqueeRect && dist > 3) {
+        if (this.marqueeRect && screenDist > DRAG_START_THRESHOLD_PX) {
             const { x, y, w, h } = this.marqueeRect;
             const nodesInRect = this.scene.getVisibleNodes(x, y, x + w, y + h);
             const isShift = e.shiftKey;

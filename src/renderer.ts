@@ -221,6 +221,9 @@ export class Renderer {
         width: number;
         height: number;
     } | null = null;
+    /** Observes the canvas's CSS box so the drawing buffer resyncs on any
+     *  layout change, not just window resizes. */
+    private _resizeObserver: ResizeObserver | null = null;
     /** Ids (moving roots + full subtrees) re-recorded live during a cached drag. */
     private _dragSubtree: Set<number> | null = null;
     private _dragMovingRoots: number[] = [];
@@ -693,6 +696,28 @@ export class Renderer {
         return out;
     }
 
+    /** True if `rootId` or any descendant is a Live Paint group. Such subtrees
+     *  must never be sprite-cached: the group's faces/edges render live
+     *  in-stream (they mutate as the user paints) and the paint-bucket cursor
+     *  hit-tests the *live* face geometry via query_face_at. A baked snapshot
+     *  freezes and can misalign them, so the fill/highlight would land on a
+     *  different region than what's shown — only visible once zoomed out far
+     *  enough for sprites to engage. Mirrors the engine's `is_lp` guard in
+     *  write_node_recursive, which refuses to sprite-skip a Live Paint group. */
+    private subtreeHasLivePaint(rootId: number): boolean {
+        const stack = [rootId];
+        const seen = new Set<number>();
+        while (stack.length > 0) {
+            const id = stack.pop()!;
+            if (seen.has(id)) continue;
+            seen.add(id);
+            if (this.scene.getNodeLivePaint(id)) return true;
+            const kids = this.scene.getNodeChildren(id);
+            if (kids) for (const k of kids) stack.push(k);
+        }
+        return false;
+    }
+
     /**
      * Start a drag-layer cache for a move of `movingIds`. Only supported when
      * every moving node is a ROOT node (top-level z-split is well-defined and
@@ -1033,6 +1058,14 @@ export class Renderer {
                 this._spriteIneligible.add(rootId);
                 continue;
             }
+            // A Live Paint group (or any root containing one) renders its faces
+            // live and is hit-tested against live geometry — baking it desyncs
+            // the paint-bucket fill/highlight from what's shown at low zoom.
+            if (this.subtreeHasLivePaint(rootId)) {
+                this._spriteIneligible.add(rootId);
+                this.dropGroupSprite(rootId); // drop any sprite baked before this guard
+                continue;
+            }
             const b = this.scene.getNodeBounds(rootId);
             if (b[2] < vMinX || b[0] > vMaxX || b[3] < vMinY || b[1] > vMaxY) continue;
             if (!this._groupSprites.has(rootId)) {
@@ -1113,10 +1146,26 @@ export class Renderer {
         this.grContext = ckAny.MakeGrContext(this.glContext);
         this.onResize();
         window.addEventListener('resize', () => this.onResize());
+        // A window 'resize' fires only when the WINDOW changes size — not when
+        // just the canvas's CSS box does (a side panel opening/closing, the
+        // properties panel appearing on selection, any layout reflow). Without
+        // catching those, the drawing-buffer size goes stale: the scene is
+        // bitmap-scaled to fit the new box while pointer→world mapping still
+        // uses the live client rect, so hover/paint lands on the wrong spot —
+        // worst far from the canvas origin (a right-hand artboard looks most
+        // off). A ResizeObserver on the canvas catches every box change.
+        if (typeof ResizeObserver !== 'undefined') {
+            this._resizeObserver = new ResizeObserver(() => this.onResize());
+            this._resizeObserver.observe(this.canvas);
+        }
     }
 
     destroy() {
         this.isRunning = false;
+        if (this._resizeObserver) {
+            this._resizeObserver.disconnect();
+            this._resizeObserver = null;
+        }
         if (this._tileBakeTimer !== null) {
             window.clearTimeout(this._tileBakeTimer);
             this._tileBakeTimer = null;
@@ -1148,11 +1197,22 @@ export class Renderer {
 
     onResize() {
         try {
+            const dpr = window.devicePixelRatio;
+            const w = Math.round(this.canvas.clientWidth * dpr);
+            const h = Math.round(this.canvas.clientHeight * dpr);
+            // Nothing to size to yet (hidden/detached/zero-box). A later resize
+            // — or the ResizeObserver — re-fires once the canvas has a real box.
+            if (w === 0 || h === 0) return;
+            // No actual size change: the ResizeObserver emits an initial
+            // callback and can fire on unrelated reflows, so skip the costly
+            // surface recreate + reallocation when the buffer already matches.
+            if (this.surface && this.canvas.width === w && this.canvas.height === h) {
+                return;
+            }
             // Snapshots are sized to the old surface — rebuildable, so drop.
             this.endDragLayerCache();
-            const dpr = window.devicePixelRatio;
-            this.canvas.width = this.canvas.clientWidth * dpr;
-            this.canvas.height = this.canvas.clientHeight * dpr;
+            this.canvas.width = w;
+            this.canvas.height = h;
 
             if (this.surface) {
                 this.surface.delete();
@@ -1446,6 +1506,23 @@ export class Renderer {
         // Group nesting depth — 0 means the next START_GROUP is a root group
         // (the sprite-cache unit).
         let groupDepth = 0;
+        // Stack of enclosing group nodeIds, so an in-stream Live Paint
+        // face/edge command (CMD_LP_FACES/EDGES, emitted right after its
+        // group's START_GROUP) can be attributed to its group. During a
+        // drag/snapshot pass only the moving subtree is re-recorded; the engine
+        // still emits every group's bracket + LP faces unconditionally (only
+        // LEAF draws honor the visible-id subset), so without this the moving
+        // group's fills bake into the static snapshot at their rest position
+        // and stay behind as a ghost when the group moves.
+        const groupIdStack: number[] = [];
+        // Non-null only on a subset pass (sprite bake, or drag/snapshot): LP
+        // faces/edges whose enclosing group is outside the re-recorded subset
+        // must be skipped, or they leak into that pass's output (a sprite/
+        // snapshot bitmap) at their rest position. Mirrors the `needsSubset`
+        // active-subset selection below.
+        const lpPassSubset =
+            this._bakeSubset ??
+            (dragActive || snapshotPass !== null ? this._dragSubtree : null);
 
         for (let i = 0; i < commandCount; i++) {
             const recordLen = reader.u32();
@@ -1457,6 +1534,7 @@ export class Renderer {
                 // CMD_START_GROUP
                 const isRootLevel = groupDepth === 0;
                 groupDepth++;
+                groupIdStack.push(nodeId);
                 // A group arriving as a geometric clip's mask node can't be
                 // captured as a single clip path — convert the span back to
                 // the alpha saveLayer protocol before the group renders. A
@@ -1521,6 +1599,7 @@ export class Renderer {
             } else if (cmdType === 3) {
                 // CMD_END_GROUP
                 groupDepth--;
+                groupIdStack.pop();
                 canvas.restore();
             } else if (cmdType === 4) {
                 // CMD_BEGIN_MASK
@@ -1599,7 +1678,14 @@ export class Renderer {
                     if (span && span.mode === 2 && span.converted) canvas.restore();
                 }
             } else if (cmdType === 7) {
-                // CMD_LP_FACES (Live Paint face fills)
+                // CMD_LP_FACES (Live Paint face fills). On a drag/snapshot pass,
+                // skip drawing (but still read, to stay frame-aligned) when the
+                // enclosing group isn't in the re-recorded subset — otherwise
+                // the moving group's fills bake into the static snapshot and
+                // ghost behind the moved shapes.
+                const lpSkip =
+                    lpPassSubset !== null &&
+                    !lpPassSubset.has(groupIdStack[groupIdStack.length - 1]);
                 const faceCount = reader.u32();
                 p.setStyle(this.ck.PaintStyle.Fill);
                 p.setShader(null);
@@ -1610,12 +1696,18 @@ export class Renderer {
                         bb = reader.f32(),
                         aa = reader.f32();
                     const path = this.readOutlinePath(reader, true);
-                    p.setColor(this.ck.Color4f(r, gg, bb, aa));
-                    canvas.drawPath(path, p);
+                    if (!lpSkip) {
+                        p.setColor(this.ck.Color4f(r, gg, bb, aa));
+                        canvas.drawPath(path, p);
+                    }
                     path.delete();
                 }
             } else if (cmdType === 8) {
-                // CMD_LP_EDGES (Live Paint painted edges)
+                // CMD_LP_EDGES (Live Paint painted edges). Same drag/snapshot
+                // subset gate as CMD_LP_FACES above.
+                const lpSkip =
+                    lpPassSubset !== null &&
+                    !lpPassSubset.has(groupIdStack[groupIdStack.length - 1]);
                 const edgeCount = reader.u32();
                 p.setStyle(this.ck.PaintStyle.Stroke);
                 p.setShader(null);
@@ -1629,9 +1721,11 @@ export class Renderer {
                         aa = reader.f32();
                     const width = reader.f32();
                     const path = this.readOutlinePath(reader, false);
-                    p.setColor(this.ck.Color4f(r, gg, bb, aa));
-                    p.setStrokeWidth(width > 0 ? width : 2);
-                    canvas.drawPath(path, p);
+                    if (!lpSkip) {
+                        p.setColor(this.ck.Color4f(r, gg, bb, aa));
+                        p.setStrokeWidth(width > 0 ? width : 2);
+                        canvas.drawPath(path, p);
+                    }
                     path.delete();
                 }
                 p.setStrokeCap(this.ck.StrokeCap.Butt);
