@@ -14,6 +14,9 @@ import type { AutosaveManager } from './persistence';
 import type { Renderer } from './renderer';
 import type { Artboard, SceneData, Subpath, Transform2D } from './types';
 
+/** Shared empty typed array for the common "no sprite roots" render path. */
+const EMPTY_U32 = new Uint32Array(0);
+
 export class WasmScene {
     engine: Engine | null = null;
     history: History | null = null;
@@ -151,11 +154,13 @@ export class WasmScene {
         return ok;
     }
 
-    getRenderData(visibleIds: Uint32Array): DataView {
+    getRenderData(visibleIds: Uint32Array, spriteRoots?: Uint32Array): DataView {
         if (!this.engine || !this.wasm) throw new Error('WasmScene not initialized');
 
-        // Tell engine to update the binary render buffer
-        this.engine.update_render_buffer(visibleIds);
+        // Tell engine to update the binary render buffer. `spriteRoots` lists
+        // groups the renderer will draw as a cached GPU sprite this frame; the
+        // engine emits their bracket but skips descending into the subtree.
+        this.engine.update_render_buffer(visibleIds, spriteRoots ?? EMPTY_U32);
 
         const ptr = this.engine.get_render_buffer();
         const size = this.engine.get_render_buffer_size();
@@ -167,6 +172,26 @@ export class WasmScene {
         // ArrayBuffer"). A view into our own copy can never be detached. The
         // render buffer is geometry-only (image/font bytes stay in the engine,
         // referenced by id), so it stays small and this copy is cheap.
+        return new DataView(this.wasm.memory.buffer.slice(ptr, ptr + size));
+    }
+
+    /** Like getRenderData, but the engine runs the R-tree viewport cull
+     *  internally — no visible-id array is marshalled across the boundary and
+     *  the tree is walked once instead of twice. Used for ordinary frames that
+     *  don't need a JS-side id subset (drag/snapshot/bake passes still use
+     *  getVisibleNodes + getRenderData). `spriteRoots` lists sprite-drawn
+     *  groups whose subtrees the engine skips. */
+    getRenderDataCulled(
+        minX: number,
+        minY: number,
+        maxX: number,
+        maxY: number,
+        spriteRoots?: Uint32Array,
+    ): DataView {
+        if (!this.engine || !this.wasm) throw new Error('WasmScene not initialized');
+        this.engine.update_render_buffer_culled(minX, minY, maxX, maxY, spriteRoots ?? EMPTY_U32);
+        const ptr = this.engine.get_render_buffer();
+        const size = this.engine.get_render_buffer_size();
         return new DataView(this.wasm.memory.buffer.slice(ptr, ptr + size));
     }
 

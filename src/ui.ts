@@ -4851,7 +4851,22 @@ export class UIEngine {
                 resolveAttr(el, 'stroke-width', inlineStyles, inherited, '1'),
                 1,
             );
-            const op = parseFloat(resolveAttr(el, 'opacity', inlineStyles, inherited, '1') || '1');
+            // Element opacity. Must be a bare number or percentage per SVG; an
+            // invalid value (units like "0.1mm", junk) is ignored → the 1.0
+            // default. parseFloat is too lenient here ("0.1mm" → 0.1), so match
+            // strictly. This matters now that opacity is folded into the emitted
+            // fill/stroke alpha. clipPath children ignore opacity entirely
+            // (handled where the clip group is built).
+            let op = 1;
+            {
+                const s = (resolveAttr(el, 'opacity', inlineStyles, inherited, '1') || '1').trim();
+                const m = s.match(/^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)(%?)$/);
+                if (m) {
+                    let v = parseFloat(m[1]);
+                    if (m[2]) v /= 100;
+                    if (Number.isFinite(v)) op = Math.max(0, Math.min(1, v));
+                }
+            }
 
             // Parse fill-opacity and stroke-opacity (multiply into paint alpha)
             const fillOpacity = parseFloat(
@@ -5380,6 +5395,27 @@ export class UIEngine {
                         processElement(dc, composedMat, inherited, useRefStack, true);
                     }
                     const maskIds = createdIds.slice(maskStart);
+
+                    // A <clipPath> uses only its children's GEOMETRY — their
+                    // paint and opacity have no effect on the clip. Element
+                    // opacity is now folded into fill alpha (so shadows render
+                    // correctly), which would otherwise thin a clip shape's
+                    // coverage and let clipped content leak through partly.
+                    // Force opacity back to 1 on clip shapes. (<mask> children
+                    // DO contribute their opacity, so this is clipPath-only.)
+                    if (defTag === 'clippath') {
+                        for (const mid of maskIds) {
+                            try {
+                                const st = this.scene.getNodeStyle(mid);
+                                if (st && st.opacity !== 1) {
+                                    st.opacity = 1;
+                                    this.scene.setNodeStyleNoHistory(mid, JSON.stringify(st));
+                                }
+                            } catch {
+                                /* noop */
+                            }
+                        }
+                    }
 
                     // An empty/invalid clipPath or mask clips the element away
                     // entirely (SVG semantics) — remove the content we created.

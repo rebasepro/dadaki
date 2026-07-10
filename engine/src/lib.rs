@@ -822,7 +822,14 @@ fn write_outline_points(buf: &mut Vec<u8>, pts: &[PathPoint]) {
     }
 }
 
-fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>) {
+/// Serialize a fill/stroke paint. `opacity` is the node's element-level
+/// `opacity` (0..1): SVG applies it to the whole rendered element, so for a
+/// leaf it's folded into the emitted alpha here (fills/strokes are drawn, then
+/// this scales their coverage). For a blur/shadow effect this is exact — those
+/// filters are linear, so scaling the source alpha equals scaling the filtered
+/// result. Patterns carry no alpha channel in the stream, so element opacity on
+/// a pattern fill is not represented (rare).
+fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>, opacity: f32) {
     match paint {
         None => {
             buf.extend_from_slice(&0u32.to_le_bytes()); // type: none
@@ -841,7 +848,7 @@ fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>) {
             buf.extend_from_slice(&c.r.to_le_bytes());
             buf.extend_from_slice(&c.g.to_le_bytes());
             buf.extend_from_slice(&c.b.to_le_bytes());
-            buf.extend_from_slice(&c.a.to_le_bytes());
+            buf.extend_from_slice(&(c.a * opacity).to_le_bytes());
         }
         Some(Paint::Gradient(g)) => {
             let type_tag = match g.gradient_type {
@@ -855,7 +862,7 @@ fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>) {
                 buf.extend_from_slice(&stop.color.r.to_le_bytes());
                 buf.extend_from_slice(&stop.color.g.to_le_bytes());
                 buf.extend_from_slice(&stop.color.b.to_le_bytes());
-                buf.extend_from_slice(&stop.color.a.to_le_bytes());
+                buf.extend_from_slice(&(stop.color.a * opacity).to_le_bytes());
             }
             buf.extend_from_slice(&g.start_x.to_le_bytes());
             buf.extend_from_slice(&g.start_y.to_le_bytes());
@@ -1019,14 +1026,50 @@ impl Engine {
         RENDER_PROTOCOL_VERSION
     }
 
-    pub fn update_render_buffer(&mut self, visible_ids: Vec<u32>) {
+    pub fn update_render_buffer(&mut self, visible_ids: Vec<u32>, sprite_roots: Vec<u32>) {
         // Live Paint faces render in-stream at each group's z, so the network
         // must be current before we walk the tree (any flagged group counts).
         if self.has_live_paint() {
             self.ensure_network_clean();
         }
-        self.render_buffer.clear();
         let visible_set: HashSet<u32> = visible_ids.into_iter().collect();
+        self.build_render_buffer(visible_set, sprite_roots);
+    }
+
+    /// Cull + build in one call: run the R-tree viewport query internally and
+    /// build the render buffer directly, avoiding the ordered visible-id Vec,
+    /// its marshal across the wasm boundary, and the redundant second tree walk
+    /// that the separate `get_visible_nodes` + `update_render_buffer` pair does.
+    /// Used for ordinary frames; the renderer keeps the split path only for the
+    /// drag/snapshot/bake passes that need a JS-side id subset.
+    pub fn update_render_buffer_culled(
+        &mut self,
+        min_x: f32,
+        min_y: f32,
+        max_x: f32,
+        max_y: f32,
+        sprite_roots: Vec<u32>,
+    ) {
+        if self.has_live_paint() {
+            self.ensure_network_clean();
+        }
+        let envelope = AABB::from_corners([min_x, min_y], [max_x, max_y]);
+        let visible_set: HashSet<u32> = self
+            .spatial_index
+            .locate_in_envelope_intersecting(&envelope)
+            .map(|node| node.id)
+            .collect();
+        self.build_render_buffer(visible_set, sprite_roots);
+    }
+
+    fn build_render_buffer(&mut self, visible_set: HashSet<u32>, sprite_roots: Vec<u32>) {
+        self.render_buffer.clear();
+        // Groups the renderer will draw as a cached GPU sprite this frame: emit
+        // their START_GROUP/END_GROUP bracket (so the sprite draws inside the
+        // group's opacity/blend layer) but skip descending into the subtree.
+        // For a doc of many heavy groups this turns the per-frame tree walk from
+        // O(total nodes) into O(groups) + non-sprited nodes.
+        let sprite_set: HashSet<u32> = sprite_roots.into_iter().collect();
 
         // Header: magic + version, then a placeholder for the command count.
         self.render_buffer.extend_from_slice(&RENDER_PROTOCOL_MAGIC.to_le_bytes());
@@ -1041,7 +1084,7 @@ impl Engine {
         // stray flag can never clip the whole document.
         let root_nodes = self.scene.root_nodes.clone();
         for root_id in root_nodes {
-            self.write_node_recursive(root_id, &visible_set, &mut total_nodes);
+            self.write_node_recursive(root_id, &visible_set, &sprite_set, &mut total_nodes);
         }
 
         // Fill in the total node count (number of "commands")
@@ -1073,6 +1116,7 @@ impl Engine {
         &mut self,
         siblings: &[u32],
         visible_set: &HashSet<u32>,
+        sprite_set: &HashSet<u32>,
         total_nodes: &mut u32,
     ) {
         let mut open_mask = false;
@@ -1090,11 +1134,11 @@ impl Engine {
                     self.emit_mask_cmd(CMD_END_MASK, child_id, 0, total_nodes);
                 }
                 self.emit_mask_cmd(CMD_BEGIN_MASK, child_id, mt, total_nodes);
-                self.write_node_recursive(child_id, visible_set, total_nodes);
+                self.write_node_recursive(child_id, visible_set, sprite_set, total_nodes);
                 self.emit_mask_cmd(CMD_BEGIN_MASKED_CONTENT, child_id, 0, total_nodes);
                 open_mask = true;
             } else {
-                self.write_node_recursive(child_id, visible_set, total_nodes);
+                self.write_node_recursive(child_id, visible_set, sprite_set, total_nodes);
             }
         }
         if open_mask {
@@ -1140,6 +1184,7 @@ impl Engine {
         &mut self,
         id: u32,
         visible_set: &HashSet<u32>,
+        sprite_set: &HashSet<u32>,
         total_nodes: &mut u32
     ) {
         // Every command must start 4-byte aligned so the JS reader can take
@@ -1182,20 +1227,34 @@ impl Engine {
             end_record(&mut self.render_buffer, rec);
             *total_nodes += 1;
 
-            // Children are a sibling list — same mask-span semantics as roots.
-            // Cloned up front so `node`'s borrow ends before the &mut self calls.
-            let children = node.children.clone();
-
             // This group is a Live Paint group → its faces render here (bottom of
             // the group, under the members' strokes), and its painted edges just
             // before END_GROUP (on top of the members). Every flagged group
             // renders its own faces, so multiple groups coexist.
             let is_lp = self.scene.nodes.get(&id).map_or(false, |n| n.live_paint);
+
+            // Sprite-cached plain group: the renderer draws its baked GPU image
+            // inside this group's opacity/blend layer, so close the bracket now
+            // and skip descending into the whole subtree. Live Paint groups are
+            // never sprited (they compute faces/edges in-stream).
+            if !is_lp && sprite_set.contains(&id) {
+                let rec = begin_record(&mut self.render_buffer);
+                self.render_buffer.extend_from_slice(&CMD_END_GROUP.to_le_bytes());
+                self.render_buffer.extend_from_slice(&id.to_le_bytes());
+                end_record(&mut self.render_buffer, rec);
+                *total_nodes += 1;
+                return;
+            }
+
+            // Children are a sibling list — same mask-span semantics as roots.
+            // Cloned up front so `node`'s borrow ends before the &mut self calls.
+            let children = node.children.clone();
+
             if is_lp {
                 self.write_lp_faces(id, total_nodes);
             }
 
-            self.write_siblings_with_masks(&children, visible_set, total_nodes);
+            self.write_siblings_with_masks(&children, visible_set, sprite_set, total_nodes);
 
             if is_lp {
                 self.write_lp_edges(id, total_nodes);
@@ -1248,14 +1307,14 @@ impl Engine {
             let active_fills = if suppress_fills { Vec::new() } else { s.fills.clone() };
             self.render_buffer.extend_from_slice(&(active_fills.len() as u32).to_le_bytes());
             for fill in &active_fills {
-                write_paint(&mut self.render_buffer, &Some(fill.clone()));
+                write_paint(&mut self.render_buffer, &Some(fill.clone()), s.opacity);
             }
 
             // Strokes
             let active_strokes = s.strokes.clone();
             self.render_buffer.extend_from_slice(&(active_strokes.len() as u32).to_le_bytes());
             for st in &active_strokes {
-                write_paint(&mut self.render_buffer, &st.paint);
+                write_paint(&mut self.render_buffer, &st.paint, s.opacity);
                 self.render_buffer.extend_from_slice(&st.width.to_le_bytes());
                 self.render_buffer.extend_from_slice(&(st.cap as u32).to_le_bytes());
                 self.render_buffer.extend_from_slice(&(st.join as u32).to_le_bytes());
@@ -1426,13 +1485,13 @@ impl Engine {
         // Fills
         self.render_buffer.extend_from_slice(&(style.fills.len() as u32).to_le_bytes());
         for fill in &style.fills {
-            write_paint(&mut self.render_buffer, &Some(fill.clone()));
+            write_paint(&mut self.render_buffer, &Some(fill.clone()), style.opacity);
         }
 
         // Strokes
         self.render_buffer.extend_from_slice(&(style.strokes.len() as u32).to_le_bytes());
         for st in &style.strokes {
-            write_paint(&mut self.render_buffer, &st.paint);
+            write_paint(&mut self.render_buffer, &st.paint, style.opacity);
             self.render_buffer.extend_from_slice(&st.width.to_le_bytes());
             self.render_buffer.extend_from_slice(&(st.cap as u32).to_le_bytes());
             self.render_buffer.extend_from_slice(&(st.join as u32).to_le_bytes());
@@ -6180,7 +6239,7 @@ mod tests {
         );
         let g = engine.group_nodes(&format!("[{},{}]", r, e));
         let visible = vec![r, e, t, p, g];
-        engine.update_render_buffer(visible);
+        engine.update_render_buffer(visible, vec![]);
 
         let buf = &engine.render_buffer;
         assert!(buf.len() >= 12, "buffer must have a header");
@@ -6220,7 +6279,7 @@ mod tests {
         let g = engine.group_nodes(&format!("[{},{}]", a, b));
         engine.set_node_live_paint(g, true);
         engine.set_live_paint_group(g);
-        engine.update_render_buffer(vec![a, b, g]);
+        engine.update_render_buffer(vec![a, b, g], vec![]);
 
         let buf = &engine.render_buffer;
         let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
@@ -6266,7 +6325,7 @@ mod tests {
         engine.set_face_fill(f1 as u32, 1.0, 0.0, 0.0, 1.0);
         engine.set_face_fill(f2 as u32, 0.0, 0.0, 1.0, 1.0);
 
-        engine.update_render_buffer(vec![r1, r2, g1, g2]);
+        engine.update_render_buffer(vec![r1, r2, g1, g2], vec![]);
         let buf = &engine.render_buffer;
         let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
         let count = rd(8);
@@ -6297,7 +6356,7 @@ mod tests {
         let g = engine.group_nodes(&format!("[{},{}]", mask, content));
         engine.set_node_is_mask(mask, true);
 
-        engine.update_render_buffer(vec![mask, content, g]);
+        engine.update_render_buffer(vec![mask, content, g], vec![]);
         let buf = &engine.render_buffer;
         let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
 
@@ -6316,7 +6375,7 @@ mod tests {
 
         // Turning the mask off collapses back to two plain draws.
         engine.set_node_is_mask(mask, false);
-        engine.update_render_buffer(vec![mask, content, g]);
+        engine.update_render_buffer(vec![mask, content, g], vec![]);
         let buf = &engine.render_buffer;
         let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
         let count = rd(8);
@@ -6341,7 +6400,7 @@ mod tests {
         let content = engine.add_rect(200.0, 200.0, 200.0, 200.0);  // above it
         engine.set_node_is_mask(mask, true);
 
-        engine.update_render_buffer(vec![mask, content]);
+        engine.update_render_buffer(vec![mask, content], vec![]);
         let buf = &engine.render_buffer;
         let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
         let count = rd(8);
@@ -6365,7 +6424,7 @@ mod tests {
         let g = engine.group_nodes(&format!("[{},{}]", content, mask)); // mask is LAST → on top
         engine.set_node_is_mask(mask, true);
 
-        engine.update_render_buffer(vec![mask, content, g]);
+        engine.update_render_buffer(vec![mask, content, g], vec![]);
         let buf = &engine.render_buffer;
         let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
         let count = rd(8);

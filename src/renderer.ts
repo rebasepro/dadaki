@@ -265,11 +265,18 @@ export class Renderer {
     /** Subtree filter for the sprite-bake render pass. */
     private _bakeSubset: Set<number> | null = null;
     private static readonly SPRITE_MIN_SUBTREE = 30;
-    // Per-sprite texture budget (2048² ≈ 16 MB RGBA). Past the cap the group
-    // renders directly — at deep zoom few groups are visible, so direct is
-    // cheap, and this keeps 20+ sprites well under GPU memory pressure.
-    private static readonly SPRITE_MAX_DIM = 2048;
-    private static readonly SPRITE_MAX_PIXELS = 4_000_000;
+    // Per-sprite texture budget. 4096² ≈ 64 MB RGBA, but only groups on screen
+    // bake, and at the deep zoom where a group needs this many pixels only one
+    // or two are visible — so peak memory stays bounded while a zoomed-in group
+    // can bake sharp enough to avoid an upscaled (pixelated) sprite.
+    private static readonly SPRITE_MAX_DIM = 4096;
+    private static readonly SPRITE_MAX_PIXELS = 16_000_000;
+    // A sprite is drawn (rather than falling back to direct vector rendering)
+    // only while the on-screen scale is within this factor of the baked scale.
+    // Kept tight so an upscaled sprite never shows visible softening/pixelation:
+    // past it, the group renders as sharp vectors (few groups are visible when
+    // zoomed in, so direct is cheap), and a re-bake at the new scale is queued.
+    private static readonly SPRITE_USABLE_UPSCALE = 1.15;
 
     // ─── Gradient shader cache ───
     private _gradientCache: Map<string, ReturnType<CanvasKit['Shader']['MakeLinearGradient']>> =
@@ -562,7 +569,9 @@ export class Renderer {
             ip.setColor(this.ck.Color4f(1, 1, 1, 1));
             ip.setAlphaf(alpha);
             const src = this.ck.XYWHRect(0, 0, img.width(), img.height());
-            canvas.drawImageRect(img, src, dst, ip);
+            // Mitchell cubic so a zoomed raster / filter tile up-scales smoothly
+            // instead of showing blocky (nearest-neighbour) pixels.
+            canvas.drawImageRectCubic(img, src, dst, 1 / 3, 1 / 3, ip);
         } else {
             // Decode failed / missing bytes — draw a magenta placeholder.
             ip.setColor(this.ck.Color4f(1, 0, 1, 0.6 * alpha));
@@ -952,19 +961,26 @@ export class Renderer {
         ip.setStyle(this.ck.PaintStyle.Fill);
         ip.setColor(this.ck.Color4f(1, 1, 1, 1));
         ip.setAlphaf(1);
-        canvas.drawImageRect(
+        // Mitchell cubic resample so any residual up/down-scale of the sprite is
+        // smooth, never blocky (nearest-neighbour reads as "pixelated").
+        canvas.drawImageRectCubic(
             sprite.img,
             this.ck.XYWHRect(0, 0, sprite.img.width(), sprite.img.height()),
             this.ck.XYWHRect(sprite.x, sprite.y, sprite.w, sprite.h),
+            1 / 3,
+            1 / 3,
             ip,
         );
         if (delta) canvas.restore();
 
         // Queue a re-bake when the settled zoom wants a meaningfully different
-        // resolution than the sprite has — but never chase past the cap.
+        // resolution than the sprite has — but never chase past the cap. Upscale
+        // threshold matches the usable factor so a zoomed-in sprite re-sharpens
+        // before it would drift out of the usable range; downscale is looser
+        // (a too-large sprite only wastes memory, it never looks wrong).
         const target = Math.min(Math.max(0.05, devScale), this.spriteMaxScale(sprite.w, sprite.h));
         const ratio = target / sprite.scale;
-        if (ratio > 1.4 || ratio < 1 / 1.4) {
+        if (ratio > 1.05 || ratio < 1 / 2.5) {
             this._spriteWanted.add(rootId);
             this.scheduleSpriteBakes();
         }
@@ -1328,60 +1344,64 @@ export class Renderer {
             dimTarget === null &&
             this.editingTextId === null &&
             (this.inputManager?.penSourceNodeId ?? null) == null;
-        // Sprites sharp enough for this frame's resolution; groups whose
-        // sprite is past its texture cap fall back to direct rendering.
-        let usableSpriteRoots: Set<number> | null = null;
+        // Groups drawn as a cached sprite THIS pass: a usable sprite (sharp
+        // enough for the current zoom — past its texture cap it renders
+        // direct), restricted to the active stream subset so a drag/snapshot
+        // pass never paints a group that belongs to a different layer. The
+        // engine is told to emit these groups' brackets but skip descending
+        // into their subtrees (see getRenderData → update_render_buffer).
+        let spriteDrawRoots: Set<number> | null = null;
         if (spriteMode && this._groupSprites.size > 0) {
-            usableSpriteRoots = new Set();
+            const passSubset = dragActive || snapshotPass !== null ? this._dragSubtree : null;
+            spriteDrawRoots = new Set();
             for (const [rootId, s] of this._groupSprites) {
-                if (this.zoom * dpr <= s.scale * 1.6) usableSpriteRoots.add(rootId);
+                // Sprite too low-res for this zoom → render direct (sharp).
+                if (this.zoom * dpr > s.scale * Renderer.SPRITE_USABLE_UPSCALE) continue;
+                if (passSubset && !passSubset.has(rootId)) continue;
+                spriteDrawRoots.add(rootId);
             }
         }
 
-        // Draw Scene Objects via binary command stream (Phase 3: No JSON Tax)
-        let visibleIds = this.scene.getVisibleNodes(
-            viewportMinX,
-            viewportMinY,
-            viewportMaxX,
-            viewportMaxY,
-        );
-        if (this._bakeSubset) {
-            // Sprite-bake pass: record only the group being baked.
-            const sub = this._bakeSubset;
+        // Draw Scene Objects via binary command stream (Phase 3: No JSON Tax).
+        // Hand the engine the groups it should bracket-but-not-descend (their
+        // sprite is drawn here instead), so it skips walking those subtrees.
+        const spriteRootsArr =
+            spriteDrawRoots && spriteDrawRoots.size > 0
+                ? Uint32Array.from(spriteDrawRoots)
+                : undefined;
+
+        // The bake/drag/snapshot passes need a JS-side id subset, so they query
+        // the visible ids, filter, and pass the list. Ordinary frames skip all
+        // that: the engine culls to the viewport internally (one tree walk, no
+        // id array marshalled across the boundary).
+        const needsSubset =
+            this._bakeSubset != null ||
+            ((dragActive || snapshotPass !== null) && this._dragSubtree != null);
+        let view: DataView;
+        if (needsSubset) {
+            let visibleIds = this.scene.getVisibleNodes(
+                viewportMinX,
+                viewportMinY,
+                viewportMaxX,
+                viewportMaxY,
+            );
+            const sub = this._bakeSubset ?? this._dragSubtree!;
             const tmp = new Uint32Array(visibleIds.length);
             let n = 0;
             for (let i = 0; i < visibleIds.length; i++) {
                 if (sub.has(visibleIds[i])) tmp[n++] = visibleIds[i];
             }
             visibleIds = tmp.subarray(0, n);
+            view = this.scene.getRenderData(visibleIds, spriteRootsArr);
         } else {
-            // Drag-layer subsetting: snapshot passes record only the static side,
-            // drag frames record only the moving subtree.
-            if ((dragActive || snapshotPass !== null) && this._dragSubtree) {
-                const sub = this._dragSubtree;
-                const tmp = new Uint32Array(visibleIds.length);
-                let n = 0;
-                for (let i = 0; i < visibleIds.length; i++) {
-                    if (sub.has(visibleIds[i])) tmp[n++] = visibleIds[i];
-                }
-                visibleIds = tmp.subarray(0, n);
-            }
-            // Sprite subsetting: descendants of a usable cached group never
-            // enter the stream — its START_GROUP draws the baked image.
-            if (usableSpriteRoots && usableSpriteRoots.size > 0) {
-                const idx = this._spriteSubtreeIndex;
-                const tmp = new Uint32Array(visibleIds.length);
-                let n = 0;
-                for (let i = 0; i < visibleIds.length; i++) {
-                    const root = idx.get(visibleIds[i]);
-                    if (root === undefined || !usableSpriteRoots.has(root)) {
-                        tmp[n++] = visibleIds[i];
-                    }
-                }
-                visibleIds = tmp.subarray(0, n);
-            }
+            view = this.scene.getRenderDataCulled(
+                viewportMinX,
+                viewportMinY,
+                viewportMaxX,
+                viewportMaxY,
+                spriteRootsArr,
+            );
         }
-        const view = this.scene.getRenderData(visibleIds);
         const reader = new BinaryReader(view);
 
         // Validate the protocol header before trusting any offsets. A magic or
@@ -1472,32 +1492,28 @@ export class Renderer {
                     canvas.save();
                 }
 
-                // Group sprite: a cached root group draws as one baked image
-                // (its descendants were excluded from the stream). Unknown
-                // roots are queued for an eligibility check + bake; sprites
-                // past their texture cap render direct but may still re-bake
-                // toward the cap.
-                //
-                // IMPORTANT: the engine always emits group brackets — only
-                // LEAVES honor the visible-id subset. So when a drag frame or
-                // snapshot pass subsets the stream, excluded groups still
-                // arrive here as empty brackets, and drawing their sprite
-                // would paint them into the wrong layer (e.g. the moving
-                // group baked into the static drag snapshot — a "ghost" copy
-                // at its pre-drag position). Only treat the group as renderable
-                // if the active subset contains it.
-                const streamSubset =
-                    dragActive || snapshotPass !== null ? this._dragSubtree : this._bakeSubset;
-                if (isRootLevel && spriteMode && (!streamSubset || streamSubset.has(nodeId))) {
+                // Group sprite: a cached root group in spriteDrawRoots draws as
+                // one baked image (the engine emitted only its bracket, having
+                // skipped the subtree). Root groups NOT drawn as a sprite this
+                // pass are queued: an eligibility check + first bake when
+                // uncached, or a re-bake toward the texture cap when the current
+                // sprite is too low-res for the zoom.
+                if (isRootLevel && spriteMode) {
+                    const drawSprite = spriteDrawRoots?.has(nodeId) ?? false;
                     const sprite = this._groupSprites.get(nodeId);
-                    if (sprite && usableSpriteRoots?.has(nodeId)) {
+                    if (drawSprite && sprite) {
                         this.drawGroupSprite(canvas, nodeId, sprite, clipMaskDevScale);
                     } else if (sprite) {
+                        // Rendered direct because the sprite is too low-res for
+                        // this zoom: queue a re-bake at the achievable scale so it
+                        // becomes usable again once the view settles. Threshold
+                        // just above the usable factor so a settled zoom always
+                        // converges back to the (fast) sprite path.
                         const target = Math.min(
                             clipMaskDevScale,
                             this.spriteMaxScale(sprite.w, sprite.h),
                         );
-                        if (target / sprite.scale > 1.4) this._spriteWanted.add(nodeId);
+                        if (target / sprite.scale > 1.05) this._spriteWanted.add(nodeId);
                     } else if (!this._spriteIneligible.has(nodeId)) {
                         this._spriteWanted.add(nodeId);
                     }
@@ -2043,6 +2059,13 @@ export class Renderer {
                                 fill.focal,
                                 fill.transform,
                             );
+                            // A shader is still modulated by the paint's alpha,
+                            // and a prior solid/semi-transparent fill may have
+                            // left it < 1 (e.g. an opacity-folded shadow drawn
+                            // just before). nodeAlpha is already baked into the
+                            // shader's stop colors, so force the paint opaque or
+                            // the gradient renders washed out.
+                            p.setAlphaf(1);
                             p.setShader(fillShader);
                         } else if (fill.type === 4) {
                             p.setColor(this.ck.Color4f(1, 1, 1, nodeAlpha)); // alpha via color
@@ -2109,6 +2132,8 @@ export class Renderer {
                                 st.paint.focal,
                                 st.paint.transform,
                             );
+                            // Reset any leftover paint alpha (see fill gradient).
+                            p.setAlphaf(1);
                             p.setShader(strokeShader);
                         } else if (st.paint.type === 4) {
                             p.setColor(this.ck.Color4f(1, 1, 1, nodeAlpha));

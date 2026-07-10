@@ -162,6 +162,19 @@ export class InputManager {
     moveOriginalIds: number[] = [];
     /** Union bounds of the selection at move-drag start, used for snapping. */
     moveStartBounds: { x: number; y: number; w: number; h: number } | null = null;
+    /** True while an Alt clone-drag has live clones in the scene, so the next
+     *  frame must full-restore (deserialize) to remove them rather than take
+     *  the fast per-target transform reset. */
+    private moveClonesActive = false;
+
+    /**
+     * Per-target pristine LOCAL transforms captured at the start of a
+     * transform-only gesture (move / rotate / group-resize). Resetting just
+     * these nodes each frame is far cheaper than deserializing the whole scene
+     * (~5 ms for a 20-group doc) when only the gesture targets move. Null when
+     * no fast-reset gesture is active. See captureGesturePristine.
+     */
+    private gesturePristine: Map<number, number[]> | null = null;
 
     // --- Snapping ---
     /** Snap engine; targets are collected at drag start. Hold Cmd/Ctrl to bypass. */
@@ -1240,6 +1253,8 @@ export class InputManager {
             this.moveSnapshot = null;
             this.moveOriginalIds = [];
             this.moveStartBounds = null;
+            this.gesturePristine = null;
+            this.moveClonesActive = false;
         }
         if (this.resizeSnapshot) {
             this.scene.engine!.deserialize_scene(this.resizeSnapshot);
@@ -1264,6 +1279,8 @@ export class InputManager {
         this.dragMode = 'none';
         this.isMouseDown = false;
         this.didMove = false;
+        this.gesturePristine = null;
+        this.moveClonesActive = false;
         this.snap.end();
         this.activeSnapGuides = [];
         this.canvas.style.cursor = 'default';
@@ -1755,6 +1772,10 @@ export class InputManager {
                 );
                 // Snapshot scene state so we can restore-then-resize each frame
                 this.resizeSnapshot = this.scene.engine!.serialize_scene();
+                // Pristine transforms for the fast per-frame reset used when
+                // every target is a group (a group resize only scales the
+                // group's transform, so no full deserialize is needed).
+                this.captureGesturePristine(this.resizeTargetIds);
                 // A single text node always uses the oriented pipeline: its
                 // resize scales the font size from the JS-measured text bounds
                 // (the engine has no font metrics, so the legacy world-space
@@ -1809,6 +1830,9 @@ export class InputManager {
                               .rotation_deg
                         : null;
                 this.rotateSnapshot = this.scene.engine!.serialize_scene();
+                // Pristine transforms for the fast per-frame reset (rotation is
+                // transform-only, so no full deserialize is needed each frame).
+                this.captureGesturePristine(this.rotateTargetIds);
                 this.scene.saveMoveHistory();
                 this.canvas.style.cursor = this.rotateCursorForCorner(rotateHandle.type, frame);
                 return;
@@ -3647,14 +3671,20 @@ export class InputManager {
                     m: this.matMul(F0.m, { a: 1, b: 0, c: 0, d: 1, e: moveX, f: moveY }),
                 };
 
-                // Restore pristine state, then apply the resize in local space.
-                this.scene.engine!.deserialize_scene(this.resizeSnapshot);
                 const id = this.resizeTargetIds[0];
+                const nodeType = this.scene.getNodeType(id);
+                // Restore pristine state, then apply the resize in local space.
+                // A group resize only scales the group's transform, so resetting
+                // just that node is enough; other node types change geometry, so
+                // they need the full deserialize.
+                if (nodeType === 3) {
+                    this.resetGesturePristine();
+                } else {
+                    this.scene.engine!.deserialize_scene(this.resizeSnapshot);
+                }
                 const kx = newW / F0.w,
                     ky = newH / F0.h;
                 const lb = this.resizeLocalBounds;
-
-                const nodeType = this.scene.getNodeType(id);
                 if (nodeType === 3) {
                     // Group: scale the local transform about the local-bounds
                     // anchor so the whole subtree scales along the frame axes.
@@ -3700,7 +3730,16 @@ export class InputManager {
                     this.anchorNodeToFrameTopLeft(id);
                 }
 
-                this.scene.invalidateCache();
+                // A group resize only scales the group's transform (subtree
+                // geometry is unchanged), so it's transform-only — keep the
+                // group's sprite and let it follow the scale delta. Text and
+                // geometry resizes mutate local geometry, so they need the full
+                // invalidation to rebuild the affected path cache.
+                if (nodeType === 3) {
+                    this.scene.invalidateCacheTransformOnly(this.resizeTargetIds);
+                } else {
+                    this.scene.invalidateCache();
+                }
                 this.ui.syncWithSelection({ interactive: true });
                 return;
             }
@@ -3815,7 +3854,13 @@ export class InputManager {
                 // at the scaled position. The post-resize move corrects for
                 // geometry that resizes about a point other than its top-left
                 // corner (e.g. ellipses resize about their center).
-                this.scene.engine!.deserialize_scene(this.resizeSnapshot);
+                // All-group selections resize transform-only, so a per-target
+                // reset stands in for the full deserialize.
+                if (this.resizeTargetIds.every((tid) => this.scene.getNodeType(tid) === 3)) {
+                    this.resetGesturePristine();
+                } else {
+                    this.scene.engine!.deserialize_scene(this.resizeSnapshot);
+                }
                 const scaleX = newW / Math.max(bounds.w, 1e-6);
                 const scaleY = newH / Math.max(bounds.h, 1e-6);
                 const live = this.liveResizeBounds;
@@ -3853,7 +3898,18 @@ export class InputManager {
                     }
                 }
 
-                this.scene.invalidateCache();
+                // Resizing a group only scales its transform (transform-only),
+                // so cached group sprites survive and follow the scale delta.
+                // A leaf resize changes local geometry and needs the full cache
+                // rebuild; a mixed selection falls back to full to stay safe.
+                const allGroups = this.resizeTargetIds.every(
+                    (id) => this.scene.getNodeType(id) === 3,
+                );
+                if (allGroups) {
+                    this.scene.invalidateCacheTransformOnly(this.resizeTargetIds);
+                } else {
+                    this.scene.invalidateCache();
+                }
                 // Pass interactive to skip expensive context bar / breadcrumb / layer list rebuilds during drag
                 this.ui.syncWithSelection({ interactive: true });
                 return;
@@ -3869,6 +3925,9 @@ export class InputManager {
                 this.moveSnapshot = this.scene.engine!.serialize_scene();
                 this.moveOriginalIds = [...this.scene.engine!.get_selection()];
                 this.moveStartBounds = this.getSelectionBounds();
+                // Pristine transforms for the fast per-frame reset (non-Alt moves).
+                this.captureGesturePristine(this.moveOriginalIds);
+                this.moveClonesActive = false;
                 this.snap.begin(this.scene, this.moveOriginalIds);
                 // Cache the static scene into GPU layers so each drag frame
                 // only re-records the moving nodes (falls back silently when
@@ -3877,8 +3936,19 @@ export class InputManager {
             }
 
             if (this.didMove && this.moveSnapshot) {
-                // Restore pristine pre-drag state
-                this.scene.engine!.deserialize_scene(this.moveSnapshot);
+                // Restore pristine pre-drag state. An Alt clone-drag spawns
+                // fresh duplicate nodes each frame, so it needs the full
+                // deserialize to remove the previous frame's clones; the frame
+                // right after releasing Alt also full-restores once to clean
+                // them up. A plain move only shifts the selected roots, so
+                // resetting just their transforms is far cheaper than
+                // deserializing the whole scene.
+                if (e.altKey || this.moveClonesActive) {
+                    this.scene.engine!.deserialize_scene(this.moveSnapshot);
+                    this.moveClonesActive = e.altKey;
+                } else {
+                    this.resetGesturePristine();
+                }
 
                 // Compute total displacement from drag start
                 let totalDx = this.currentPos.x - this.startPos.x;
@@ -4226,6 +4296,8 @@ export class InputManager {
             this.moveSnapshot = null;
             this.moveOriginalIds = [];
             this.moveStartBounds = null;
+            this.gesturePristine = null;
+            this.moveClonesActive = false;
             this.scene.invalidateCache();
             this.scene.autosave?.trigger();
             this.ui.updateLayerList();
@@ -4251,6 +4323,7 @@ export class InputManager {
             this.rotateTargetIds = [];
             this.rotatePivot = null;
             this.rotateSingleStartDeg = null;
+            this.gesturePristine = null;
             this.scene.invalidateCache();
             this.scene.autosave?.trigger();
             this.ui.syncWithSelection();
@@ -4266,6 +4339,7 @@ export class InputManager {
             this.resizeFrame = null;
             this.resizeLocalBounds = null;
             this.liveFrame = null;
+            this.gesturePristine = null;
             this.scene.invalidateCache();
             this.scene.autosave?.trigger();
             // Final sync to update layer list
@@ -4442,6 +4516,23 @@ export class InputManager {
     private maybeRevertTool() {
         if (this.ui.toolLocked) return;
         this.ui.setActiveTool('selection');
+    }
+
+    /** Capture pristine LOCAL transforms of `ids` for a transform-only gesture,
+     *  enabling per-frame fast reset in place of a full-scene deserialize. */
+    private captureGesturePristine(ids: number[]) {
+        const m = new Map<number, number[]>();
+        for (const id of ids) m.set(id, Array.from(this.scene.getNodeLocalTransform(id)));
+        this.gesturePristine = m;
+    }
+
+    /** Reset the captured gesture targets to their pristine local transforms.
+     *  Cheap stand-in for deserialize_scene when only these nodes moved. */
+    private resetGesturePristine() {
+        if (!this.gesturePristine) return;
+        for (const [id, t] of this.gesturePristine) {
+            this.scene.engine!.set_node_transform_matrix(id, JSON.stringify(t));
+        }
     }
 
     /** Union of the selected nodes' world bounds, or null if nothing is selected. */
@@ -4673,7 +4764,9 @@ export class InputManager {
      */
     private applyRotationDrag(deltaRad: number) {
         if (!this.rotateSnapshot || !this.rotatePivot) return;
-        this.scene.engine!.deserialize_scene(this.rotateSnapshot);
+        // Reset only the rotated targets to pristine (rotation never adds or
+        // removes nodes), rather than deserializing the whole scene each frame.
+        this.resetGesturePristine();
 
         const cos = Math.cos(deltaRad),
             sin = Math.sin(deltaRad);
@@ -4707,7 +4800,11 @@ export class InputManager {
             this.scene.engine!.set_node_transform_matrix(id, JSON.stringify(col));
         }
 
-        this.scene.invalidateCache();
+        // Rotation is transform-only for every node type (local geometry is
+        // untouched; the new matrix is applied at draw time), so renderer
+        // path/shader caches and group sprites stay valid — a rotated cached
+        // group follows the delta transform instead of being re-recorded.
+        this.scene.invalidateCacheTransformOnly(this.rotateTargetIds);
         this.ui.syncWithSelection({ interactive: true });
     }
 
