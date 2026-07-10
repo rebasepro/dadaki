@@ -5,9 +5,9 @@
  * subpaths via Path.toCmds().
  */
 import type { CanvasKit, Path } from 'canvaskit-wasm';
+import { logAppEvent } from './analytics';
 import type { PathPoint, Subpath } from './types';
 import type { WasmScene } from './wasm_scene';
-import { logAppEvent } from './analytics';
 
 export type BoolOp = 'union' | 'subtract' | 'intersect' | 'exclude';
 
@@ -175,7 +175,7 @@ function nodeToWorldPath(ck: CanvasKit, scene: WasmScene, id: number): Path | nu
 }
 
 /** Append engine subpaths (cubic beziers via cp1/cp2) onto a CanvasKit path. */
-function appendSubpathsToPath(path: Path, subpaths: Subpath[]) {
+export function appendSubpathsToPath(path: Path, subpaths: Subpath[]) {
     for (const sp of subpaths) {
         const pts = sp.points;
         if (pts.length < 2) continue;

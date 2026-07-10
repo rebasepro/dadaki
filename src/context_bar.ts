@@ -412,6 +412,43 @@ export class ContextBar {
             ),
         );
 
+        // Offset Path — only for a Path node. A small distance field (negative =
+        // inset) plus a button; creates a new parallel path.
+        if (info.selectedNodes[0]?.node_type === 'Path') {
+            const wrap = document.createElement('div');
+            wrap.style.display = 'inline-flex';
+            wrap.style.alignItems = 'center';
+            wrap.style.gap = '4px';
+            const amt = document.createElement('input');
+            amt.type = 'number';
+            amt.value = String(this.input.lastOffsetAmount);
+            amt.title = 'Offset distance (negative = inset)';
+            amt.style.width = '46px';
+            amt.style.height = '22px';
+            amt.style.background = 'var(--bg-input, #333)';
+            amt.style.color = 'var(--text-main, #e0e0e0)';
+            amt.style.border = '1px solid var(--border, #444)';
+            amt.style.borderRadius = '4px';
+            amt.style.padding = '0 4px';
+            amt.style.fontSize = '11px';
+            const applyOffset = () => {
+                const d = parseFloat(amt.value);
+                if (Number.isFinite(d) && d !== 0) this.input.offsetSelectedPath(d);
+            };
+            amt.addEventListener('click', (e) => e.stopPropagation());
+            amt.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    applyOffset();
+                }
+            });
+            const offsetIcon =
+                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><rect x="9" y="9" width="12" height="12" rx="2"/></svg>';
+            wrap.appendChild(amt);
+            wrap.appendChild(this.createButton('Offset', offsetIcon, applyOffset));
+            this.el.appendChild(wrap);
+        }
+
         this.appendTransformActions(info, { flatten: true });
         this.appendLifecycleActions();
     }

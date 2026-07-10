@@ -2,6 +2,7 @@ import type { DocumentManager } from './document_manager';
 import type { FileService } from './file_service';
 import { DEFAULT_TEXT_FONT, ensureFontCSS, loadGoogleFontData } from './fonts';
 import type { GuideHit, GuidesController } from './guides';
+import { offsetPath } from './offset_path';
 import { outlineStroke } from './outline_stroke';
 import {
     addAnchorPoint,
@@ -2635,6 +2636,26 @@ export class InputManager {
     }
 
     /** Join two selected path nodes by connecting their nearest endpoints. */
+    /** Last-used Offset Path distance, remembered across invocations. */
+    lastOffsetAmount = 10;
+
+    /** Offset the single selected Path by `distance` world units (positive =
+     *  outset, negative = inset), creating a new parallel path above it. */
+    offsetSelectedPath(distance = this.lastOffsetAmount) {
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length !== 1) return;
+        const id = selection[0];
+        if (!this.scene.getNodeGeometry(id)?.Path) return;
+        this.lastOffsetAmount = distance;
+        const newId = offsetPath(this.ui.ck, this.scene, id, distance);
+        if (newId == null) return;
+        this.scene.engine!.clear_selection();
+        this.scene.selectNode(newId, false);
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
     joinSelectedPaths() {
         const selection = Array.from(this.scene.engine!.get_selection());
         if (selection.length !== 2) return;
