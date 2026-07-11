@@ -6,7 +6,7 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 ## Status board
 - [x] Tier 1 baseline (eyedropper, swatches/global colors, rulers+guides+grid, transform reference point) — committed `8486fe2`
 - [x] 1. Offset Path — committed `cceab38` (src/offset_path.ts; context-bar distance control, negative=inset)
-- [~] 2. Text on a path — WORKING (render + UX) committed `6051b50`; persistence (Phase B) + SVG export remain (see note)
+- [x] 2. Text on a path — render + UX + PERSISTENCE done (`6051b50`, `52137d3`); links survive save/reload. Only SVG `<textPath>` export remains (PNG export already correct, see note)
 - [ ] 3. Shape Builder tool — BLOCKED without plumbing (see note)
 - [x] 4. Variable-width stroke (width profile) — committed `15d3a77` (src/width_profile.ts; one-shot tapered outline via ContourMeasure; context-bar Width dropdown: Uniform/Taper/Taper both/Bulge, open-path only)
 - [ ] 5. Clipping frame (clip_content) — DEFERRED, data-model mismatch (see note)
@@ -24,9 +24,9 @@ was wrong) and **corner radius already works for paths** (ui.ts applyRadius sets
 per-vertex corner_radius; engine expands it). Don't rebuild those.
 
 Good remaining candidates:
-- **Finish text-on-path (Follow-up A: persistence)** — RECOMMENDED next; the flagship works
-  in-session but the link vanishes on reload. ~25 min mechanical engine change (see the
-  item-2 note below). Then Follow-up B (SVG `<textPath>` export). Completes the flagship.
+- **components/symbols** — the big remaining flagship (a focused window). High perceived value.
+- **text-on-path SVG `<textPath>` export** — the last piece of the text-on-path flagship
+  (render + UX + persistence already done). See item-2 note; coordinate-space care needed.
 - **Reverse path direction** (flip winding — matters for compound paths / holes), or
   **Average points** (align selected anchors) — small, single-action path utilities.
 - Smart-measurements polish: equal-spacing detection (highlight when gaps match).
@@ -63,13 +63,18 @@ Built the flagship this session (`6051b50`). What works, end-to-end via the UI:
 - UX: 'On Path' button (Text+Path selected) in renderMultiSelect; 'Detach from path' on a
   linked text in renderTextSelected. Link stored in `WasmScene.textPathLinks` (Map).
 
-**Follow-up A — persistence (Phase B):** the link map is in-session only; it vanishes on
-reload. persistTextPaths()/reloadTextPaths() are stubs. Do it like swatches_json: add
-`text_paths_json: String` to the engine Scene + ProtoDocument (next free proto tag) + all
-Scene/ProtoDocument struct literals + wasm get/set + rebuild pkg; serialize in
-persistTextPaths, load in reloadTextPaths, and CALL reloadTextPaths after document open/undo
-(document_manager). ~25 min, mechanical.
-**Follow-up B — SVG export:** emit `<textPath xlink:href="#pathId">` in svg_export.
+**Follow-up A — persistence: DONE** (`52137d3`). Added `text_paths_json` (tag 17) to engine
+Scene + ProtoDocument mirroring swatches_json; getTextPath lazily reloads on invalidateCache
+(covers all deserialize paths — undo/redo/load), so links stay fresh with no per-site hooks.
+Verified: link survives serialize/deserialize round-trip AND a full IndexedDB reload.
+**Follow-up B — SVG `<textPath>` export (only remaining piece):** currently an on-path text
+exports as `<text x=0 y=0>` at its node transform (path center) — WRONG for SVG. PNG export
+is already correct (it rasterizes the canvas via drawTextOnPath). To fix SVG: thread the
+link map into SVGExportInput (`textPaths: Record<number,number>`), emit the linked path as
+`<path id="tp-{id}" d=…>` in defs, and the text as `<text><textPath href="#tp-{id}">…`.
+Watch the coordinate spaces (text node transform vs path transform vs textPath user space) —
+non-trivial; do it carefully, not rushed. Until then, consider omitting on-path text from SVG
+(lossy) vs the current wrong-position output.
 **Nice-to-haves:** start-offset drag, flip-to-other-side, selection box hugging the on-path
 text (currently the culling box at the path center).
 
@@ -153,3 +158,13 @@ text (currently the culling box at the path center).
   + SVG export are the two documented follow-ups (see item-2 note). tsc + biome + vitest (221)
   green. Note: a mid-session "renderer frozen" CDP timeout was a test-harness artifact
   (monkeypatch + double-rAF), not a real hang — the render is stable.
+- 2026-07-11 22:07 (Sat) — **Text-on-path persistence (Phase B)** done + committed (`52137d3`),
+  completing the flagship's core (render + UX + persistence). Added `text_paths_json` (proto
+  tag 17) to engine Scene + ProtoDocument mirroring swatches_json (all struct literals incl.
+  proto tests; wasm get/set; rebuilt pkg). JS: getTextPath lazily reloads the link map on
+  invalidateCache, so it stays consistent with the engine across every deserialize (undo/redo/
+  load) with no per-callsite hooks. Verified: link `{"25":24}` survives a serialize/deserialize
+  round-trip AND a full page reload from IndexedDB — "Persist me" still renders on the path
+  (screenshot). Engine tests (87) + tsc + biome + vitest (221) all green. Only SVG <textPath>
+  export remains (PNG export already correct since it rasterizes the canvas). Next: components
+  flagship, or the SVG textPath export.
