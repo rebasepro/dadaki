@@ -104,6 +104,86 @@ export function applyBooleanOp(
     return resultId;
 }
 
+/** Destructive Pathfinder ops that depend on stacking order (front vs back). */
+export type PathfinderOp = 'minus-back' | 'crop';
+
+/**
+ * Pathfinder ops, resolved by z-order (front = topmost in root order):
+ *  - **minus-back**: the front shape with everything behind it removed
+ *    (front − union(rest)). Keeps the front's style.
+ *  - **crop**: the parts of the lower shapes that fall inside the front shape,
+ *    with the front discarded (union(rest) ∩ front). Keeps the bottom's style.
+ * Replaces the selection with a single path. Returns the new id, or null.
+ */
+export function applyPathfinder(
+    ck: CanvasKit,
+    scene: WasmScene,
+    ids: number[],
+    op: PathfinderOp,
+): number | null {
+    if (ids.length < 2) return null;
+
+    // Order by z: front (topmost, drawn last) first.
+    const order = Array.from(scene.getRootNodes());
+    const rank = (id: number) => order.indexOf(id);
+    const sorted = [...ids].sort((a, b) => rank(b) - rank(a));
+    const front = sorted[0];
+    const rest = sorted.slice(1);
+
+    const frontPath = nodeToWorldPath(ck, scene, front);
+    if (!frontPath) return null;
+
+    // Union of everything behind the front shape.
+    let restUnion: Path | null = null;
+    for (const id of rest) {
+        const p = nodeToWorldPath(ck, scene, id);
+        if (!p) {
+            frontPath.delete();
+            restUnion?.delete();
+            return null;
+        }
+        if (!restUnion) {
+            restUnion = p;
+        } else {
+            const u = ck.Path.MakeFromOp(restUnion, p, ck.PathOp.Union);
+            restUnion.delete();
+            p.delete();
+            if (!u) {
+                frontPath.delete();
+                return null;
+            }
+            restUnion = u;
+        }
+    }
+    if (!restUnion) {
+        frontPath.delete();
+        return null;
+    }
+
+    const result =
+        op === 'minus-back'
+            ? ck.Path.MakeFromOp(frontPath, restUnion, ck.PathOp.Difference)
+            : ck.Path.MakeFromOp(restUnion, frontPath, ck.PathOp.Intersect);
+    frontPath.delete();
+    restUnion.delete();
+    if (!result) return null;
+
+    const subpaths = pathToSubpaths(ck, result);
+    const fillRule = result.getFillType() === ck.FillType.EvenOdd ? 1 : 0;
+    result.delete();
+    if (subpaths.length === 0) return null;
+
+    // minus-back keeps the front's appearance; crop keeps the bottom shape's.
+    const styleSource = op === 'minus-back' ? front : sorted[sorted.length - 1];
+    const style = scene.getNodeStyle(styleSource);
+    const styleJson = JSON.stringify({ ...style, fill_rule: fillRule });
+    const resultId = scene.replaceNodesWithPath(ids, JSON.stringify(subpaths), styleJson);
+    if (resultId !== null) {
+        logAppEvent('boolean_operation', { op: op, count: ids.length, type: 'pathfinder' });
+    }
+    return resultId;
+}
+
 /** Build a world-space CanvasKit path for a node (recursing into groups). */
 export function nodeToWorldPath(ck: CanvasKit, scene: WasmScene, id: number): Path | null {
     const node = scene.getNode(id);

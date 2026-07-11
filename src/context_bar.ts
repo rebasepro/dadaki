@@ -18,8 +18,8 @@
 
 import type { AlignMode } from './align';
 import { alignSelection, distributeSelection } from './align';
-import type { BoolOp } from './boolean_ops';
-import { BOOL_OP_BY_INDEX } from './boolean_ops';
+import type { BoolOp, PathfinderOp } from './boolean_ops';
+import { applyPathfinder, BOOL_OP_BY_INDEX } from './boolean_ops';
 import { colorToHex, createColorSwatch, parseHex } from './color_picker';
 import type { ContextInfo } from './context';
 import { getEditorContext } from './context';
@@ -732,6 +732,33 @@ export class ContextBar {
                     })),
                 ),
             );
+
+            // Pathfinder — destructive, stacking-order ops that the shape-mode
+            // booleans above don't cover (kept in a separate dropdown, like
+            // Illustrator's Pathfinder row).
+            if (info.selectedIds.length >= 2) {
+                const runPathfinder = (op: PathfinderOp) => {
+                    const id = applyPathfinder(this.ui.ck, this.scene, [...info.selectedIds], op);
+                    if (id != null) {
+                        this.ui.syncWithSelection();
+                        this.ui.updateLayerList();
+                    }
+                };
+                this.el.appendChild(
+                    this.createDropdown('Pathfinder', iconBoolSubtract(14), [
+                        {
+                            label: 'Minus Back',
+                            icon: iconBoolSubtract(14),
+                            onSelect: () => runPathfinder('minus-back'),
+                        },
+                        {
+                            label: 'Crop',
+                            icon: iconBoolIntersect(14),
+                            onSelect: () => runPathfinder('crop'),
+                        },
+                    ]),
+                );
+            }
         }
 
         // Blend — exactly two combinable shapes: generate in-between shapes.
