@@ -4,8 +4,14 @@ import type { Canvas, CanvasKit, Paint, Path, Surface } from 'canvaskit-wasm';
 type OutlinePt = { x: number; y: number; cp1: number[]; cp2: number[] };
 
 import { adaptiveTileSources, maxTileScale, rasterizeAdaptiveTile } from './adaptive_tiles';
-import { invertAffine } from './boolean_ops';
-import { buildFontProvider, isFontLoaded, loadGoogleFontData, onFontLoaded } from './fonts';
+import { invertAffine, nodeToWorldPath } from './boolean_ops';
+import {
+    buildFontProvider,
+    getFontData,
+    isFontLoaded,
+    loadGoogleFontData,
+    onFontLoaded,
+} from './fonts';
 
 /** Helper for efficient zero-copy parsing of the WASM binary render buffer. */
 class BinaryReader {
@@ -204,6 +210,12 @@ export class Renderer {
     // node id — building one costs a path copy + transform in wasm, which
     // shows up at 60fps × several clip spans. Invalidated with _pathCache.
     private _clipPathCache: Map<number, { path: Path; key: string }> = new Map();
+
+    /** Typefaces built from loaded font data, for text-on-path RSXform layout. */
+    private _typefaceCache = new Map<
+        string,
+        ReturnType<CanvasKit['Typeface']['MakeFreeTypeFaceFromData']> | null
+    >();
 
     // ─── Drag-layer cache ───
     // Re-recording every node's draw commands is CPU-bound (~12µs/node), so
@@ -2762,6 +2774,14 @@ export class Renderer {
             // in for it — skip drawing the underlying node so it isn't doubled.
             if (this._editingTextId === nodeId) return;
 
+            // Text on a path: flow the glyphs along the linked path (the text
+            // node's transform is identity, so we draw in world space directly).
+            const onPathId = this.scene.getTextPath(nodeId);
+            if (onPathId != null && this.scene.getNode(onPathId)) {
+                this.drawTextOnPath(canvas, nodeId, content, fontSize, fontFamily, onPathId, paint);
+                return;
+            }
+
             // Map text_align to CanvasKit TextAlign enum
             const ckTextAlign =
                 textAlign === 1
@@ -3376,6 +3396,92 @@ export class Renderer {
             // Resize handles when selected.
             if (selected) this.drawArtboardHandles(canvas, ab);
         }
+    }
+
+    /** A real typeface for `family` (from loaded font bytes), or null to fall
+     *  back to CanvasKit's default face. Cached. */
+    private getTypeface(family: string) {
+        if (this._typefaceCache.has(family)) return this._typefaceCache.get(family) ?? null;
+        let tf: ReturnType<CanvasKit['Typeface']['MakeFreeTypeFaceFromData']> | null = null;
+        const data = getFontData(family);
+        if (data) {
+            try {
+                tf = this.ck.Typeface.MakeFreeTypeFaceFromData(data);
+            } catch {
+                tf = null;
+            }
+        }
+        this._typefaceCache.set(family, tf);
+        return tf;
+    }
+
+    /**
+     * Render `content` with its baseline flowing along the world outline of the
+     * `pathId` node. Glyphs are placed by arc length via ContourMeasure and
+     * rotated to the path tangent with per-glyph RSXforms. The text node's own
+     * transform (which keeps its bounds over the path for culling) is undone
+     * first so the glyphs land in world space along the path.
+     */
+    private drawTextOnPath(
+        canvas: Canvas,
+        textId: number,
+        content: string,
+        fontSize: number,
+        fontFamily: string,
+        pathId: number,
+        paint: Paint,
+    ) {
+        const worldPath = nodeToWorldPath(this.ck, this.scene, pathId);
+        if (!worldPath) return;
+
+        // The text node has a transform (kept so its bounds overlap the path and
+        // it isn't culled). Undo it so we can place glyphs in world space along
+        // the path's world outline.
+        const inv = invertAffine(this.scene.getTransform(textId));
+        canvas.save();
+        if (inv) canvas.concat(inv);
+        const iter = new this.ck.ContourMeasureIter(worldPath, false, 1);
+        const measure = iter.next();
+        if (!measure) {
+            canvas.restore();
+            worldPath.delete();
+            return;
+        }
+        const len = measure.length();
+
+        const font = new this.ck.Font(this.getTypeface(fontFamily), fontSize);
+        const text = content.replace(/\n/g, ' ');
+        const glyphIDs = font.getGlyphIDs(text);
+        const widths = font.getGlyphWidths(glyphIDs);
+
+        const glyphs: number[] = [];
+        const xforms: number[] = [];
+        let d = 0;
+        for (let i = 0; i < glyphIDs.length; i++) {
+            const gw = widths[i];
+            const center = d + gw / 2;
+            d += gw;
+            if (center > len) break; // ran off the end of the path
+            const pt = measure.getPosTan(center); // [px, py, tanx, tany] (unit tangent)
+            const scos = pt[2];
+            const ssin = pt[3];
+            // Place the glyph so its horizontal midpoint sits on the path point,
+            // rotated to the tangent (baseline on the curve).
+            glyphs.push(glyphIDs[i]);
+            xforms.push(scos, ssin, pt[0] - scos * (gw / 2), pt[1] - ssin * (gw / 2));
+        }
+
+        if (glyphs.length > 0) {
+            const blob = this.ck.TextBlob.MakeFromRSXformGlyphs(glyphs, xforms, font);
+            if (blob) {
+                canvas.drawTextBlob(blob, 0, 0, paint);
+                blob.delete();
+            }
+        }
+        canvas.restore();
+        font.delete();
+        measure.delete();
+        worldPath.delete();
     }
 
     private drawArtboardLabel(canvas: Canvas, ab: Artboard, selected: boolean) {

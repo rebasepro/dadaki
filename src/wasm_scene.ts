@@ -25,6 +25,10 @@ export class WasmScene {
     autosave: AutosaveManager | null = null;
     ck: CanvasKit;
 
+    /** Text-on-path links: text node id → the path node it flows along. Persisted
+     *  via the engine (text_paths_json); this in-memory mirror is the fast read. */
+    textPathLinks = new Map<number, number>();
+
     /** Cached scene data, invalidated on mutation. */
     private _cachedSceneData: SceneData | null = null;
     private _sceneDataDirty: boolean = true;
@@ -170,6 +174,63 @@ export class WasmScene {
     setSwatches(list: import('./types').Color[]): void {
         this.engine!.set_swatches_json(JSON.stringify(list));
         this.autosave?.trigger();
+    }
+
+    // ─── Text on a path ────────────────────────────────────────────────────────
+
+    /** The path node a text flows along, or null. */
+    getTextPath(textId: number): number | null {
+        return this.textPathLinks.get(textId) ?? null;
+    }
+
+    /** Link a text node to a path so its glyphs flow along it. */
+    setTextPath(textId: number, pathId: number): void {
+        this.saveHistory();
+        this.textPathLinks.set(textId, pathId);
+        // Park the text node's transform at the path's center. The glyphs are
+        // drawn from the path's world outline (the renderer undoes this transform),
+        // so its only job is to give the text node bounds that overlap the path —
+        // otherwise the node would be viewport-culled and never reach the renderer.
+        const b = this.getNodeBounds(pathId);
+        if (b && b.length >= 4) {
+            this.setNodeTransformComponents(textId, {
+                x: (b[0] + b[2]) / 2,
+                y: (b[1] + b[3]) / 2,
+                rotation_deg: 0,
+                skew_x_deg: 0,
+                skew_y_deg: 0,
+                scale_x: 1,
+                scale_y: 1,
+            });
+        }
+        this.persistTextPaths();
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** Remove a text-on-path link (text returns to normal layout). */
+    clearTextPath(textId: number): void {
+        if (!this.textPathLinks.has(textId)) return;
+        this.saveHistory();
+        this.textPathLinks.delete(textId);
+        this.persistTextPaths();
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /**
+     * TODO(text-on-path persistence): the link map currently lives only in this
+     * session. Phase B persists it in the engine scene as `text_paths_json`
+     * (mirroring `swatches_json`): add the Scene field + proto tag + wasm
+     * get/set, then serialize here and load in `reloadTextPaths()` after open/undo.
+     */
+    private persistTextPaths(): void {
+        /* Phase B: write `text_paths_json` to the engine. */
+    }
+
+    /** Reload the link map from the engine after a document open/undo (Phase B). */
+    reloadTextPaths(): void {
+        /* Phase B: read `text_paths_json` from the engine. */
     }
 
     removeArtboard(id: number): boolean {

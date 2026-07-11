@@ -564,6 +564,17 @@ export class ContextBar {
             ),
         );
 
+        // Detach — only when this text is flowing along a path.
+        if (this.scene.getTextPath(nodeId) != null) {
+            this.el.appendChild(
+                this.createButton('Detach from path', iconLink(14), () => {
+                    this.scene.clearTextPath(nodeId);
+                    this.ui.syncWithSelection();
+                    this.ui.updateLayerList();
+                }),
+            );
+        }
+
         this.appendTransformActions(info, { flatten: false });
         this.appendLifecycleActions();
     }
@@ -670,6 +681,29 @@ export class ContextBar {
     private renderMultiSelect(info: ContextInfo) {
         this.el.appendChild(this.createBadge(`${info.selectedIds.length} selected`));
         this.el.appendChild(this.createSeparator());
+
+        // Text on a path — exactly one Text + one Path selected.
+        if (info.selectedIds.length === 2) {
+            const types = info.selectedNodes.map((n) => n.node_type);
+            const ti = types.indexOf('Text');
+            const pi = types.indexOf('Path');
+            if (ti >= 0 && pi >= 0) {
+                const textId = info.selectedIds[ti];
+                const pathId = info.selectedIds[pi];
+                const icon =
+                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15c5 0 5-8 10-8s5 6 8 6"/><path d="M7 9V7h6M10 7v4"/></svg>';
+                this.el.appendChild(
+                    this.createButton('On Path', icon, () => {
+                        this.scene.setTextPath(textId, pathId);
+                        this.scene.engine?.clear_selection();
+                        this.scene.selectNode(textId, false);
+                        this.ui.syncWithSelection();
+                        this.ui.updateLayerList();
+                    }),
+                );
+                this.el.appendChild(this.createSeparator());
+            }
+        }
 
         // Align / distribute
         const alignActions: Array<[string, string, AlignMode]> = [
