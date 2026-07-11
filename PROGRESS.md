@@ -15,6 +15,7 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 - [x] 8. Simplify Path — committed `06e8630` (src/simplify_path.ts; RDP + Catmull-Rom refit; context-bar tolerance field, progressive-disclosed at 6+ pts)
 - [x] 9. Smart measurements (Figma hover-distances) — committed `c9d7226` (renderer drawMeasurements; pink gap lines + labels, anchored to selection center axes)
 - [x] 10. Measurements while dragging — committed `95bb2ce` (drawMeasurements also fires during a move drag, tracking the nearest object via renderer.nearestNode)
+- [x] 11. Pathfinder: Minus Back + Crop — committed `a210fd9` (boolean_ops.applyPathfinder, z-order aware; context-bar 'Pathfinder' dropdown)
 
 ## Next step
 NOTE (verified this session): **distribute spacing (equal gaps) is ALREADY done**
@@ -23,12 +24,16 @@ was wrong) and **corner radius already works for paths** (ui.ts applyRadius sets
 per-vertex corner_radius; engine expands it). Don't rebuild those.
 
 Good remaining candidates:
-- **Pathfinder ops (face-graph-free)** via CanvasKit path-ops on the selection: Minus
-  Back (front minus union-of-rest — reverse of existing Subtract, genuinely missing),
-  Crop (lower shapes ∩ top, discard top). Extend boolean_ops; low risk. **← recommended next**
-- **Reverse path direction**, **Average points** — small path utilities.
+- **Reverse path direction** (flip winding — matters for compound paths / holes), or
+  **Average points** (align selected anchors) — small, single-action path utilities.
 - Smart-measurements polish: equal-spacing detection (highlight when gaps match), or
   measure to multiple neighbors during drag (currently the single nearest).
+- A meatier one worth a focused window: **text-on-path** (all enablers proven now —
+  ContourMeasure + typeface-from-fonts.ts + RSXform; needs engine link field + `<textPath>`
+  export + attach/detach UX) or **components/symbols**.
+- Consider whether to keep doing small ops vs. investing a window in one flagship
+  (text-on-path / components) — lots of small path-ops have shipped; a big one may add
+  more perceived value now.
 
 Bigger/blocked items below need dedicated sessions:
 
@@ -118,3 +123,13 @@ dedicated session; the ContourMeasure + typeface pieces are the key enablers.
   delete method is remove_node / scene.removeNode, NOT delete_node) for clean visual tests.
   tsc + biome + vitest (221) green. Next (recommended): face-graph-free Pathfinder (Minus
   Back = front − union-of-rest; Crop) extending boolean_ops.
+- 2026-07-11 14:07 (Sat) — Item 11 **Pathfinder (Minus Back + Crop)** done + committed
+  (`a210fd9`). boolean_ops.applyPathfinder resolves front-vs-back by root z-order:
+  Minus Back = front − union(rest) (front's style); Crop = union(rest) ∩ front, front
+  discarded (bottom's style). Exposed as a compact 'Pathfinder' dropdown next to Boolean
+  (2+ combinable shapes), mirroring Illustrator's Shape-Modes vs Pathfinders split. Verified
+  end-to-end by clicking through the actual UI dropdown: Crop of two overlapping 200×200 rects
+  → the 100×100 overlap square in the back's green; Minus Back → the front's orange L-shape
+  (6 pts). tsc + biome + vitest (221) green. Reflection: many small single-action path ops
+  have now shipped (offset/simplify/width/blend/pathfinder) — next window might be better
+  spent on a flagship (text-on-path, all enablers now proven) for more perceived value.
