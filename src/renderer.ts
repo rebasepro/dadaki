@@ -2282,6 +2282,8 @@ export class Renderer {
             this.drawGuides(canvas, viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
             // Draw snapping alignment guides
             this.drawSnapGuides(canvas, viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
+            // Draw smart measurements (selection ↔ hovered object distances)
+            this.drawMeasurements(canvas);
         }
 
         canvas.restore();
@@ -3712,6 +3714,110 @@ export class Renderer {
             path.close();
         }
         return path;
+    }
+
+    /**
+     * Smart measurements (Figma-style): with exactly one object selected and the
+     * cursor hovering a different object, draw the clear-space gaps between the
+     * two bounding boxes as pink lines with distance labels.
+     */
+    private drawMeasurements(canvas: Canvas) {
+        const im = this.inputManager;
+        if (!im || im.isMouseDown || im.ui.activeTool !== 'selection') return;
+        if (im.editingNodeId != null) return;
+        const sel = this.scene.engine!.get_selection();
+        if (sel.length !== 1) return;
+        const hoverId = im.hoverNodeId;
+        if (hoverId == null || hoverId === sel[0]) return;
+        const S = this.scene.getNodeBounds(sel[0]);
+        const H = this.scene.getNodeBounds(hoverId);
+        if (!S || S.length < 4 || !H || H.length < 4) return;
+        const [sx0, sy0, sx1, sy1] = S;
+        const [hx0, hy0, hx1, hy1] = H;
+
+        const paint = new this.ck.Paint();
+        paint.setColor(this.ck.Color(255, 45, 120, 0.95));
+        paint.setStyle(this.ck.PaintStyle.Stroke);
+        paint.setStrokeWidth(1 / this.zoom);
+        paint.setAntiAlias(true);
+        const cap = 4 / this.zoom; // half-length of the end ticks
+
+        // Each gap line is anchored to the SELECTED object's center axis. This
+        // reads as "measuring from the selection" and keeps the horizontal and
+        // vertical labels apart (one sits beside the selection, one below it).
+        const selCx = (sx0 + sx1) / 2;
+        const selCy = (sy0 + sy1) / 2;
+        if (sx1 < hx0) this.drawGap(canvas, paint, sx1, hx0, selCy, 'h', cap);
+        else if (hx1 < sx0) this.drawGap(canvas, paint, hx1, sx0, selCy, 'h', cap);
+        if (sy1 < hy0) this.drawGap(canvas, paint, sy1, hy0, selCx, 'v', cap);
+        else if (hy1 < sy0) this.drawGap(canvas, paint, hy1, sy0, selCx, 'v', cap);
+
+        paint.delete();
+    }
+
+    /** One gap measurement: a line between `a`→`b` on `axis` at fixed `pos`,
+     *  end ticks, and a distance label at the midpoint. */
+    private drawGap(
+        canvas: Canvas,
+        paint: Paint,
+        a: number,
+        b: number,
+        pos: number,
+        axis: 'h' | 'v',
+        cap: number,
+    ) {
+        const dist = Math.abs(b - a);
+        if (dist < 0.5) return;
+        if (axis === 'h') {
+            canvas.drawLine(a, pos, b, pos, paint);
+            canvas.drawLine(a, pos - cap, a, pos + cap, paint);
+            canvas.drawLine(b, pos - cap, b, pos + cap, paint);
+            this.drawMeasureLabel(canvas, (a + b) / 2, pos, `${Math.round(dist)}`);
+        } else {
+            canvas.drawLine(pos, a, pos, b, paint);
+            canvas.drawLine(pos - cap, a, pos + cap, a, paint);
+            canvas.drawLine(pos - cap, b, pos + cap, b, paint);
+            this.drawMeasureLabel(canvas, pos, (a + b) / 2, `${Math.round(dist)}`);
+        }
+    }
+
+    /** A pink pill with white text at world (cx, cy), sized in screen pixels. */
+    private drawMeasureLabel(canvas: Canvas, cx: number, cy: number, text: string) {
+        const size = 11 / this.zoom;
+        const font = new this.ck.Font(null, size);
+        let w = 0;
+        try {
+            const widths = font.getGlyphWidths(font.getGlyphIDs(text));
+            for (let i = 0; i < widths.length; i++) w += widths[i];
+        } catch {
+            w = text.length * size * 0.6;
+        }
+        const padX = 5 / this.zoom;
+        const padY = 3 / this.zoom;
+        const halfW = w / 2 + padX;
+        const halfH = size * 0.62 + padY;
+
+        const bg = new this.ck.Paint();
+        bg.setColor(this.ck.Color(255, 45, 120, 1.0));
+        bg.setStyle(this.ck.PaintStyle.Fill);
+        bg.setAntiAlias(true);
+        const r = 3 / this.zoom;
+        canvas.drawRRect(
+            this.ck.RRectXY(this.ck.LTRBRect(cx - halfW, cy - halfH, cx + halfW, cy + halfH), r, r),
+            bg,
+        );
+
+        const tp = new this.ck.Paint();
+        tp.setColor(this.ck.Color(255, 255, 255, 1.0));
+        tp.setAntiAlias(true);
+        const blob = this.ck.TextBlob.MakeFromText(text, font);
+        if (blob) {
+            canvas.drawTextBlob(blob, cx - w / 2, cy + size * 0.35, tp);
+            blob.delete();
+        }
+        bg.delete();
+        tp.delete();
+        font.delete();
     }
 
     /** Magenta alignment guides for active snaps, spanning the viewport. */
