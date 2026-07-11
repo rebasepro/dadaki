@@ -3723,14 +3723,24 @@ export class Renderer {
      */
     private drawMeasurements(canvas: Canvas) {
         const im = this.inputManager;
-        if (!im || im.isMouseDown || im.ui.activeTool !== 'selection') return;
-        if (im.editingNodeId != null) return;
+        if (!im) return;
+        if (im.ui.activeTool !== 'selection' || im.editingNodeId != null) return;
         const sel = this.scene.engine!.get_selection();
         if (sel.length !== 1) return;
-        const hoverId = im.hoverNodeId;
-        if (hoverId == null || hoverId === sel[0]) return;
-        const S = this.scene.getNodeBounds(sel[0]);
-        const H = this.scene.getNodeBounds(hoverId);
+        const selId = sel[0];
+
+        // Target = the object hovered while idle, or the nearest object while
+        // dragging the selection (Figma shows live spacing during a move).
+        let targetId: number | null = null;
+        if (im.isMouseDown && im.dragMode === 'move') {
+            targetId = this.nearestNode(selId);
+        } else if (!im.isMouseDown && im.hoverNodeId != null && im.hoverNodeId !== selId) {
+            targetId = im.hoverNodeId;
+        }
+        if (targetId == null) return;
+
+        const S = this.scene.getNodeBounds(selId);
+        const H = this.scene.getNodeBounds(targetId);
         if (!S || S.length < 4 || !H || H.length < 4) return;
         const [sx0, sy0, sx1, sy1] = S;
         const [hx0, hy0, hx1, hy1] = H;
@@ -3753,6 +3763,35 @@ export class Renderer {
         else if (hy1 < sy0) this.drawGap(canvas, paint, hy1, sy0, selCx, 'v', cap);
 
         paint.delete();
+    }
+
+    /** Nearest top-level object to `selId` by center distance, excluding the
+     *  selection and its ancestors. Used for live measurements during a drag. */
+    private nearestNode(selId: number): number | null {
+        const S = this.scene.getNodeBounds(selId);
+        if (!S || S.length < 4) return null;
+        const scx = (S[0] + S[2]) / 2;
+        const scy = (S[1] + S[3]) / 2;
+        // Exclude the selected node and every ancestor (its own root/group).
+        const skip = new Set<number>();
+        let p = selId;
+        while (p >= 0) {
+            skip.add(p);
+            p = this.scene.getNodeParent(p);
+        }
+        let best: number | null = null;
+        let bestD = Infinity;
+        for (const id of this.scene.getRootNodes()) {
+            if (skip.has(id) || !this.scene.getNodeVisible(id)) continue;
+            const b = this.scene.getNodeBounds(id);
+            if (!b || b.length < 4) continue;
+            const d = Math.hypot((b[0] + b[2]) / 2 - scx, (b[1] + b[3]) / 2 - scy);
+            if (d < bestD) {
+                bestD = d;
+                best = id;
+            }
+        }
+        return best;
     }
 
     /** One gap measurement: a line between `a`→`b` on `axis` at fixed `pos`,
