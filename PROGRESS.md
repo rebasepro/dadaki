@@ -24,16 +24,13 @@ was wrong) and **corner radius already works for paths** (ui.ts applyRadius sets
 per-vertex corner_radius; engine expands it). Don't rebuild those.
 
 Good remaining candidates:
+- **Finish text-on-path (Follow-up A: persistence)** — RECOMMENDED next; the flagship works
+  in-session but the link vanishes on reload. ~25 min mechanical engine change (see the
+  item-2 note below). Then Follow-up B (SVG `<textPath>` export). Completes the flagship.
 - **Reverse path direction** (flip winding — matters for compound paths / holes), or
   **Average points** (align selected anchors) — small, single-action path utilities.
-- Smart-measurements polish: equal-spacing detection (highlight when gaps match), or
-  measure to multiple neighbors during drag (currently the single nearest).
-- A meatier one worth a focused window: **text-on-path** (all enablers proven now —
-  ContourMeasure + typeface-from-fonts.ts + RSXform; needs engine link field + `<textPath>`
-  export + attach/detach UX) or **components/symbols**.
-- Consider whether to keep doing small ops vs. investing a window in one flagship
-  (text-on-path / components) — lots of small path-ops have shipped; a big one may add
-  more perceived value now.
+- Smart-measurements polish: equal-spacing detection (highlight when gaps match).
+- **components/symbols** — the other big flagship (a focused window).
 
 Bigger/blocked items below need dedicated sessions:
 
