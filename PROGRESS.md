@@ -8,15 +8,19 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 - [x] 1. Offset Path — committed `cceab38` (src/offset_path.ts; context-bar distance control, negative=inset)
 - [ ] 2. Text on a path — DEFERRED (needs a dedicated session; see note below)
 - [ ] 3. Shape Builder tool — BLOCKED without plumbing (see note)
-- [ ] 4. Variable-width stroke (width profile)
+- [x] 4. Variable-width stroke (width profile) — committed `15d3a77` (src/width_profile.ts; one-shot tapered outline via ContourMeasure; context-bar Width dropdown: Uniform/Taper/Taper both/Bulge, open-path only)
 - [ ] 5. Clipping frame (clip_content) — DEFERRED, data-model mismatch (see note)
 - [x] 6. Blend tool — committed `ae02e44` (src/blend.ts; ContourMeasure arc-length morph + color lerp, grouped; context-bar steps field)
 - [ ] 7. Reusable components / symbols (stretch)
 - [x] 8. Simplify Path — committed `06e8630` (src/simplify_path.ts; RDP + Catmull-Rom refit; context-bar tolerance field, progressive-disclosed at 6+ pts)
 
 ## Next step
-Recommend **item 4 — Variable-width stroke (width profile)** OR pick another
-single-action path op. Note the two blocks discovered this session before choosing:
+Good remaining candidates (single-action path ops keep landing cleanly at the
+"no half-features" bar): **Distribute spacing (equal gaps)** — a genuine gap in the
+current center-based distribute, small and Figma-core; or **Pathfinder ops that
+don't need the face graph** (Crop = intersect all with the top shape; Minus Back =
+top minus union of the rest; Outline) via CanvasKit path-ops on the selection,
+extending boolean_ops. Bigger/blocked items below need dedicated sessions:
 
 - **Item 5 (clip_content) — deferred:** on THIS branch a group's bounds == its children's
   extent, so "clip to own bounds" is a no-op. A real frame needs either an explicit stored
@@ -74,3 +78,14 @@ dedicated session; the ContourMeasure + typeface pieces are the key enablers.
   preview_* MCP to claude-in-chrome (navigate + javascript_tool + computer screenshot on a
   numeric tabId); same http://localhost:5312 target. Next: item 4 (variable-width) or another
   single-action path op / Pathfinder.
+- 2026-07-11 02:06 (Sat) — Item 4 **Width profiles** done + committed (`15d3a77`). Delivered
+  the completable version of variable-width stroke: a one-shot tapered OUTLINE (not live
+  rendering, which needs an engine stroke-generation change). Samples the open path's
+  centerline via ContourMeasure, offsets each side by half a profile-scaled width → closed
+  ribbon; profiles Uniform/Taper/Taper-both/Bulge in a context-bar 'Width' dropdown (open
+  paths only). Verified in browser: stroked wave → clean leaf-taper calligraphic ribbon,
+  dropdown with per-profile shape icons. Also fixed a latent bug: the context-bar signature
+  didn't hash single-path geometry, so in-place edits (Simplify/Offset/Width) left stale
+  gated controls — now hashed (point count + open/closed). tsc + biome + vitest (221) green.
+  Browser tooling: claude-in-chrome (tabId 1269983887). Next: Distribute spacing (equal gaps)
+  or a face-graph-free Pathfinder (Crop/Minus-Back/Outline).
