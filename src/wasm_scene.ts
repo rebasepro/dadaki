@@ -28,6 +28,9 @@ export class WasmScene {
     /** Text-on-path links: text node id → the path node it flows along. Persisted
      *  via the engine (text_paths_json); this in-memory mirror is the fast read. */
     textPathLinks = new Map<number, number>();
+    /** False when `textPathLinks` may be stale vs the engine (after a deserialize);
+     *  the next getTextPath() reloads it. */
+    private _textPathsLoaded = false;
 
     /** Cached scene data, invalidated on mutation. */
     private _cachedSceneData: SceneData | null = null;
@@ -178,8 +181,13 @@ export class WasmScene {
 
     // ─── Text on a path ────────────────────────────────────────────────────────
 
-    /** The path node a text flows along, or null. */
+    /** The path node a text flows along, or null. Lazily re-reads the persisted
+     *  links from the engine after a deserialize. */
     getTextPath(textId: number): number | null {
+        if (!this._textPathsLoaded) {
+            this.reloadTextPaths();
+            this._textPathsLoaded = true;
+        }
         return this.textPathLinks.get(textId) ?? null;
     }
 
@@ -218,19 +226,29 @@ export class WasmScene {
         this.autosave?.trigger();
     }
 
-    /**
-     * TODO(text-on-path persistence): the link map currently lives only in this
-     * session. Phase B persists it in the engine scene as `text_paths_json`
-     * (mirroring `swatches_json`): add the Scene field + proto tag + wasm
-     * get/set, then serialize here and load in `reloadTextPaths()` after open/undo.
-     */
+    /** Serialize the link map into the engine so it persists with the document
+     *  (rides the protobuf snapshot, like swatches). */
     private persistTextPaths(): void {
-        /* Phase B: write `text_paths_json` to the engine. */
+        if (!this.engine) return;
+        const obj: Record<string, number> = {};
+        for (const [t, p] of this.textPathLinks) obj[t] = p;
+        this.engine.set_text_paths_json(JSON.stringify(obj));
     }
 
-    /** Reload the link map from the engine after a document open/undo (Phase B). */
+    /** Reload the link map from the engine (after a document open, or when undo/
+     *  redo restores a scene snapshot that carried different links). */
     reloadTextPaths(): void {
-        /* Phase B: read `text_paths_json` from the engine. */
+        this.textPathLinks.clear();
+        if (!this.engine) return;
+        try {
+            const obj = JSON.parse(this.engine.get_text_paths_json() || '{}') as Record<
+                string,
+                number
+            >;
+            for (const k of Object.keys(obj)) this.textPathLinks.set(Number(k), obj[k]);
+        } catch {
+            /* keep empty */
+        }
     }
 
     removeArtboard(id: number): boolean {
@@ -316,6 +334,9 @@ export class WasmScene {
         this._sceneDataDirty = true;
         this._cachedSceneData = null;
         this._cachedArtboards = null;
+        // The text-on-path link cache may be stale after any deserialize (undo/
+        // redo/load); re-read it lazily on the next getTextPath().
+        this._textPathsLoaded = false;
         if (isMutation) {
             this.changeCounter++;
             this.onMutate?.();

@@ -482,6 +482,9 @@ pub struct ProtoDocument {
     /// Document color swatches (editor-owned JSON blob).
     #[prost(string, tag = "16")]
     pub swatches_json: String,
+    /// Text-on-path links (editor-owned JSON blob, `{textId: pathId}`).
+    #[prost(string, tag = "17")]
+    pub text_paths_json: String,
 }
 
 /// A history/undo/drag snapshot. Wraps a full document plus the transient
@@ -1087,6 +1090,7 @@ impl ProtoDocument {
             guides_x: scene.guides_x.clone(),
             guides_y: scene.guides_y.clone(),
             swatches_json: scene.swatches_json.clone(),
+            text_paths_json: scene.text_paths_json.clone(),
         }
     }
 
@@ -1175,6 +1179,7 @@ impl ProtoDocument {
             guides_x: self.guides_x.clone(),
             guides_y: self.guides_y.clone(),
             swatches_json: self.swatches_json.clone(),
+            text_paths_json: self.text_paths_json.clone(),
         };
 
         let next_id = if self.next_id > 0 {
@@ -1364,6 +1369,7 @@ mod tests {
             guides_x: Vec::new(),
             guides_y: Vec::new(),
             swatches_json: String::new(),
+            text_paths_json: String::new(),
         };
 
         let bytes = v1_doc.encode_to_vec();
@@ -1404,6 +1410,7 @@ mod tests {
             guides_x: Vec::new(),
             guides_y: Vec::new(),
             swatches_json: String::new(),
+            text_paths_json: String::new(),
         };
         doc.nodes.push(ProtoNode {
             id: 1,
@@ -1517,6 +1524,7 @@ mod tests {
             guides_x: Vec::new(),
             guides_y: Vec::new(),
             swatches_json: String::new(),
+            text_paths_json: String::new(),
         };
 
         let bytes = serialize_to_proto(&scene, 8);
@@ -1567,6 +1575,7 @@ mod tests {
             guides_x: Vec::new(),
             guides_y: Vec::new(),
             swatches_json: String::new(),
+            text_paths_json: String::new(),
         }
     }
 
@@ -1615,6 +1624,7 @@ mod tests {
             guides_x: Vec::new(),
             guides_y: Vec::new(),
             swatches_json: String::new(),
+            text_paths_json: String::new(),
         };
         let bytes = old.encode_to_vec();
         let (scene, _) = deserialize_from_proto(&bytes).unwrap();

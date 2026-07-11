@@ -978,6 +978,10 @@ pub struct Scene {
     /// treats it as an opaque blob; the editor defines the schema).
     #[serde(default)]
     pub swatches_json: String,
+    /// Text-on-path links, as a JS-owned JSON object string (`{textId: pathId}`).
+    /// Opaque to the engine — the editor defines the schema.
+    #[serde(default)]
+    pub text_paths_json: String,
 }
 
 fn default_document_size() -> f32 { 1000.0 }
@@ -1011,6 +1015,7 @@ impl Engine {
                 guides_x: Vec::new(),
                 guides_y: Vec::new(),
                 swatches_json: String::new(),
+                text_paths_json: String::new(),
             },
             next_id: 1,
             global_transforms: HashMap::new(),
@@ -4974,6 +4979,14 @@ impl Engine {
 
     pub fn set_swatches_json(&mut self, json: String) {
         self.scene.swatches_json = json;
+    }
+
+    pub fn get_text_paths_json(&self) -> String {
+        self.scene.text_paths_json.clone()
+    }
+
+    pub fn set_text_paths_json(&mut self, json: String) {
+        self.scene.text_paths_json = json;
     }
 }
 
