@@ -6,7 +6,7 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 ## Status board
 - [x] Tier 1 baseline (eyedropper, swatches/global colors, rulers+guides+grid, transform reference point) — committed `8486fe2`
 - [x] 1. Offset Path — committed `cceab38` (src/offset_path.ts; context-bar distance control, negative=inset)
-- [ ] 2. Text on a path — DEFERRED (needs a dedicated session; see note below)
+- [~] 2. Text on a path — WORKING (render + UX) committed `6051b50`; persistence (Phase B) + SVG export remain (see note)
 - [ ] 3. Shape Builder tool — BLOCKED without plumbing (see note)
 - [x] 4. Variable-width stroke (width profile) — committed `15d3a77` (src/width_profile.ts; one-shot tapered outline via ContourMeasure; context-bar Width dropdown: Uniform/Taper/Taper both/Bulge, open-path only)
 - [ ] 5. Clipping frame (clip_content) — DEFERRED, data-model mismatch (see note)
@@ -54,15 +54,27 @@ item 4 (variable-width). For a safe next single-window win, consider more single
 ops (they've all landed cleanly): e.g. a Pathfinder that works via CanvasKit path-ops on the
 selection directly (Divide-by-boolean, Outline), or "Distribute spacing (equal gaps)".
 
-### Deferred: item 2 — Text on a path
-Investigated this session. It's genuinely multi-part: (a) persist the text→path link
-(engine field on the Text node, following guides/swatches proto pattern), (b) render via
-per-glyph RSXform layout — `font.getGlyphIDs`/`getGlyphWidths` DO work here, and a real
-Typeface can be built from the loaded Google-font bytes (see fonts.ts) for accurate
-metrics + drawTextBlob with RSXform along an arc-length-sampled path (use ContourMeasure,
-now proven working — see blend.ts), (c) SVG `<textPath>` export, (d) attach/detach UX.
-Too much for one ~1h window at the "no half-features" bar, so it was reordered. Give it a
-dedicated session; the ContourMeasure + typeface pieces are the key enablers.
+### Item 2 — Text on a path: WORKING, 2 scoped follow-ups remain
+Built the flagship this session (`6051b50`). What works, end-to-end via the UI:
+- Renderer.drawTextOnPath — glyphs along the linked path's world outline via ContourMeasure
+  + per-glyph RSXform, real typeface via getFontData()+MakeFreeTypeFaceFromData, rotated to
+  the tangent. Verified visually (screenshots): text flows on a wave, glyphs on the curve.
+- Coordinate model: text node's transform is undone in-render (concat invertAffine(getTransform))
+  so glyphs draw in world space; the transform is PARKED at the path's bbox center so the text
+  node's bounds overlap the path — otherwise it gets viewport-culled and never rendered (this
+  was the key gotcha; identity transform → culled → nothing drawn).
+- UX: 'On Path' button (Text+Path selected) in renderMultiSelect; 'Detach from path' on a
+  linked text in renderTextSelected. Link stored in `WasmScene.textPathLinks` (Map).
+
+**Follow-up A — persistence (Phase B):** the link map is in-session only; it vanishes on
+reload. persistTextPaths()/reloadTextPaths() are stubs. Do it like swatches_json: add
+`text_paths_json: String` to the engine Scene + ProtoDocument (next free proto tag) + all
+Scene/ProtoDocument struct literals + wasm get/set + rebuild pkg; serialize in
+persistTextPaths, load in reloadTextPaths, and CALL reloadTextPaths after document open/undo
+(document_manager). ~25 min, mechanical.
+**Follow-up B — SVG export:** emit `<textPath xlink:href="#pathId">` in svg_export.
+**Nice-to-haves:** start-offset drag, flip-to-other-side, selection box hugging the on-path
+text (currently the culling box at the path center).
 
 ## Log
 - 2026-07-10 13:47 (Fri) — Baseline committed (`8486fe2`). Plan + timers set up.
@@ -133,3 +145,14 @@ dedicated session; the ContourMeasure + typeface pieces are the key enablers.
   (6 pts). tsc + biome + vitest (221) green. Reflection: many small single-action path ops
   have now shipped (offset/simplify/width/blend/pathfinder) — next window might be better
   spent on a flagship (text-on-path, all enablers now proven) for more perceived value.
+- 2026-07-11 18:18 (Sat) — **Text on a path** flagship WORKING + committed (`6051b50`).
+  Spent the window on the flagship (as flagged). Spiked the render first (make-or-break):
+  MakeFreeTypeFaceFromData + MakeFromRSXformGlyphs + ContourMeasure all exist; glyphs lay
+  along the curve beautifully with the real Inter face. Two gotchas solved: (1) coordinate
+  space — undo the text node's transform in-render (concat inverse) to draw in world space;
+  (2) culling — an identity-transform text node's bounds sit off-screen and get culled, so
+  park the transform at the path's bbox center. Full UX verified via clicking the actual
+  context-bar buttons: On Path links + renders; Detach reverts. Persistence (in-session only)
+  + SVG export are the two documented follow-ups (see item-2 note). tsc + biome + vitest (221)
+  green. Note: a mid-session "renderer frozen" CDP timeout was a test-harness artifact
+  (monkeypatch + double-rAF), not a real hang — the render is stable.
