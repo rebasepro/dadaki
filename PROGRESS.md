@@ -14,6 +14,7 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 - [ ] 7. Reusable components / symbols (stretch)
 - [x] 8. Simplify Path — committed `06e8630` (src/simplify_path.ts; RDP + Catmull-Rom refit; context-bar tolerance field, progressive-disclosed at 6+ pts)
 - [x] 9. Smart measurements (Figma hover-distances) — committed `c9d7226` (renderer drawMeasurements; pink gap lines + labels, anchored to selection center axes)
+- [x] 10. Measurements while dragging — committed `95bb2ce` (drawMeasurements also fires during a move drag, tracking the nearest object via renderer.nearestNode)
 
 ## Next step
 NOTE (verified this session): **distribute spacing (equal gaps) is ALREADY done**
@@ -24,10 +25,10 @@ per-vertex corner_radius; engine expands it). Don't rebuild those.
 Good remaining candidates:
 - **Pathfinder ops (face-graph-free)** via CanvasKit path-ops on the selection: Minus
   Back (front minus union-of-rest — reverse of existing Subtract, genuinely missing),
-  Crop (lower shapes ∩ top, discard top). Extend boolean_ops; low risk.
-- **Measurement while dragging** — extend the new smart-measurements to also show gaps
-  during a move drag (currently hover-only). Small, high-value follow-on.
+  Crop (lower shapes ∩ top, discard top). Extend boolean_ops; low risk. **← recommended next**
 - **Reverse path direction**, **Average points** — small path utilities.
+- Smart-measurements polish: equal-spacing detection (highlight when gaps match), or
+  measure to multiple neighbors during drag (currently the single nearest).
 
 Bigger/blocked items below need dedicated sessions:
 
@@ -107,3 +108,13 @@ dedicated session; the ContourMeasure + typeface pieces are the key enablers.
   -only. Discovered en route: distribute-spacing (equal gaps) and path corner-radius are
   ALREADY implemented (corrected the plan). tsc + biome + vitest (221) green. Next:
   face-graph-free Pathfinder (Minus Back/Crop) or measurement-while-dragging.
+- 2026-07-11 10:03 (Sat) — Item 10 **Measurements while dragging** done + committed (`95bb2ce`).
+  Extended drawMeasurements: during a move drag it measures to the nearest top-level object
+  (renderer.nearestNode, center-distance, excludes selection ancestors) instead of the hover
+  target, so you get live spacing feedback while moving — Figma-style. Verified in browser by
+  simulating the drag state: a rect being dragged shows a '120' gap line to its nearest
+  neighbor. Renderer-only. Test note: the persisted doc accumulates clutter across sessions;
+  clear it with `for (const id of Array.from(scene.getRootNodes())) scene.removeNode(id)` (the
+  delete method is remove_node / scene.removeNode, NOT delete_node) for clean visual tests.
+  tsc + biome + vitest (221) green. Next (recommended): face-graph-free Pathfinder (Minus
+  Back = front − union-of-rest; Crop) extending boolean_ops.
