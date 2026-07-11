@@ -13,14 +13,23 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 - [x] 6. Blend tool — committed `ae02e44` (src/blend.ts; ContourMeasure arc-length morph + color lerp, grouped; context-bar steps field)
 - [ ] 7. Reusable components / symbols (stretch)
 - [x] 8. Simplify Path — committed `06e8630` (src/simplify_path.ts; RDP + Catmull-Rom refit; context-bar tolerance field, progressive-disclosed at 6+ pts)
+- [x] 9. Smart measurements (Figma hover-distances) — committed `c9d7226` (renderer drawMeasurements; pink gap lines + labels, anchored to selection center axes)
 
 ## Next step
-Good remaining candidates (single-action path ops keep landing cleanly at the
-"no half-features" bar): **Distribute spacing (equal gaps)** — a genuine gap in the
-current center-based distribute, small and Figma-core; or **Pathfinder ops that
-don't need the face graph** (Crop = intersect all with the top shape; Minus Back =
-top minus union of the rest; Outline) via CanvasKit path-ops on the selection,
-extending boolean_ops. Bigger/blocked items below need dedicated sessions:
+NOTE (verified this session): **distribute spacing (equal gaps) is ALREADY done**
+(align.ts::distributeSelection computes equal gaps, not center-based — my earlier note
+was wrong) and **corner radius already works for paths** (ui.ts applyRadius sets
+per-vertex corner_radius; engine expands it). Don't rebuild those.
+
+Good remaining candidates:
+- **Pathfinder ops (face-graph-free)** via CanvasKit path-ops on the selection: Minus
+  Back (front minus union-of-rest — reverse of existing Subtract, genuinely missing),
+  Crop (lower shapes ∩ top, discard top). Extend boolean_ops; low risk.
+- **Measurement while dragging** — extend the new smart-measurements to also show gaps
+  during a move drag (currently hover-only). Small, high-value follow-on.
+- **Reverse path direction**, **Average points** — small path utilities.
+
+Bigger/blocked items below need dedicated sessions:
 
 - **Item 5 (clip_content) — deferred:** on THIS branch a group's bounds == its children's
   extent, so "clip to own bounds" is a no-op. A real frame needs either an explicit stored
@@ -89,3 +98,12 @@ dedicated session; the ContourMeasure + typeface pieces are the key enablers.
   gated controls — now hashed (point count + open/closed). tsc + biome + vitest (221) green.
   Browser tooling: claude-in-chrome (tabId 1269983887). Next: Distribute spacing (equal gaps)
   or a face-graph-free Pathfinder (Crop/Minus-Back/Outline).
+- 2026-07-11 06:06 (Sat) — Item 9 **Smart measurements** done + committed (`c9d7226`).
+  Figma's hover-to-show distances: with one object selected, hovering another draws the
+  clear-space gaps as pink lines + distance labels with end ticks. First pass had the H/V
+  labels colliding in the diagonal case; fixed by anchoring each gap line to the SELECTED
+  object's center axis (reads as "measure from selection", keeps labels apart) — verified
+  clean in a screenshot. Reuses the artboard-label screen-constant text approach; renderer
+  -only. Discovered en route: distribute-spacing (equal gaps) and path corner-radius are
+  ALREADY implemented (corrected the plan). tsc + biome + vitest (221) green. Next:
+  face-graph-free Pathfinder (Minus Back/Crop) or measurement-while-dragging.
