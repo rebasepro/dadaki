@@ -55,6 +55,7 @@ import type { InputManager } from './input';
 import type { Renderer } from './renderer';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
+import type { WidthProfile } from './width_profile';
 
 /** What each tool does, shown while the tool is armed and nothing is selected. */
 const TOOL_HINTS: Record<string, string> = {
@@ -173,7 +174,19 @@ export class ContextBar {
             info.context === 'group-selected' && info.selectedIds.length === 1
                 ? `|bop${this.scene.getBooleanOp(info.selectedIds[0])}`
                 : '';
-        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}`;
+        // Single-shape path controls (Simplify point-count gate, Width open-path
+        // gate) depend on the path's geometry, which in-place edits mutate — hash
+        // it so the bar rebuilds after Simplify/Offset/Width.
+        let geoSig = '';
+        if (info.context === 'single-shape' && info.selectedIds.length === 1) {
+            const subs = this.scene.getNodeGeometry(info.selectedIds[0])?.Path?.subpaths;
+            if (subs) {
+                const pts = subs.reduce((n, s) => n + s.points.length, 0);
+                const anyOpen = subs.some((s) => !s.closed) ? 'o' : 'c';
+                geoSig = `|geo${pts}${anyOpen}`;
+            }
+        }
+        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}${geoSig}`;
     }
 
     /** Rebuild the bar DOM based on context info. */
@@ -470,6 +483,50 @@ export class ContextBar {
                 sWrap.appendChild(tol);
                 sWrap.appendChild(this.createButton('Simplify', simplifyIcon, applySimplify));
                 this.el.appendChild(sWrap);
+            }
+
+            // Width profile — only for an OPEN path (that's what a profile shapes).
+            // A single dropdown of profiles that outline the stroke into a tapered
+            // filled shape (matches the Boolean dropdown pattern).
+            const hasOpen = this.scene
+                .getNodeGeometry(info.selectedIds[0])
+                ?.Path?.subpaths?.some((sp) => !sp.closed);
+            if (hasOpen) {
+                const sw = (d: string) =>
+                    `<svg width="14" height="10" viewBox="0 0 28 20" fill="currentColor">${d}</svg>`;
+                const profiles: Array<{ id: WidthProfile; label: string; icon: string }> = [
+                    {
+                        id: 'uniform',
+                        label: 'Uniform',
+                        icon: sw('<rect x="2" y="8" width="24" height="4"/>'),
+                    },
+                    {
+                        id: 'taper-end',
+                        label: 'Taper',
+                        icon: sw('<path d="M2 6 L26 10 L2 14 Z"/>'),
+                    },
+                    {
+                        id: 'taper-both',
+                        label: 'Taper both',
+                        icon: sw('<path d="M2 10 Q14 3 26 10 Q14 17 2 10 Z"/>'),
+                    },
+                    {
+                        id: 'bulge',
+                        label: 'Bulge',
+                        icon: sw('<path d="M2 8 Q14 0 26 8 L26 12 Q14 20 2 12 Z"/>'),
+                    },
+                ];
+                this.el.appendChild(
+                    this.createDropdown(
+                        'Width',
+                        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12 Q12 4 21 12 Q12 20 3 12 Z"/></svg>',
+                        profiles.map((p) => ({
+                            label: p.label,
+                            icon: p.icon,
+                            onSelect: () => this.input.applyWidthProfileToSelection(p.id),
+                        })),
+                    ),
+                );
             }
         }
 

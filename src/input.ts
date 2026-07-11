@@ -21,6 +21,7 @@ import { textNodeToSubpaths } from './text_outlines';
 import type { Artboard, PathPoint, PenPathPoint, Subpath } from './types';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
+import { applyWidthProfile, type WidthProfile } from './width_profile';
 
 /** 2D affine matrix in DOMMatrix convention: x' = a·x + c·y + e, y' = b·x + d·y + f. */
 interface Mat {
@@ -2671,6 +2672,17 @@ export class InputManager {
         if (groupId == null) return;
         this.scene.engine!.clear_selection();
         this.scene.selectNode(groupId, false);
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
+    /** Apply a stroke width profile to the single selected open Path, outlining
+     *  it into a filled variable-width (calligraphic) shape. */
+    applyWidthProfileToSelection(profile: WidthProfile) {
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length !== 1) return;
+        if (!applyWidthProfile(this.ui.ck, this.scene, selection[0], profile)) return;
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
         this.renderer.requestRender();
