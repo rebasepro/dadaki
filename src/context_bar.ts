@@ -449,9 +449,9 @@ export class ContextBar {
             });
             const offsetIcon =
                 '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><rect x="9" y="9" width="12" height="12" rx="2"/></svg>';
-            this.makeScrubbable(amt, applyOffset);
+            this.makeScrubbable(amt);
             wrap.appendChild(amt);
-            wrap.appendChild(this.createButton('Offset', offsetIcon, applyOffset));
+            wrap.appendChild(this.createButton('Offset Copy', offsetIcon, applyOffset));
             this.el.appendChild(wrap);
 
             // Simplify — only surfaces when the path has enough points to be worth
@@ -480,7 +480,7 @@ export class ContextBar {
                 });
                 const simplifyIcon =
                     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c4 0 5-10 9-10s5 6 9 6"/></svg>';
-                this.makeScrubbable(tol, applySimplify);
+                this.makeScrubbable(tol);
                 sWrap.appendChild(tol);
                 sWrap.appendChild(this.createButton('Simplify', simplifyIcon, applySimplify));
                 this.el.appendChild(sWrap);
@@ -828,7 +828,7 @@ export class ContextBar {
             });
             const blendIcon =
                 '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 8.5l7 7" stroke-dasharray="2 2"/></svg>';
-            this.makeScrubbable(steps, doBlend);
+            this.makeScrubbable(steps);
             wrap.appendChild(steps);
             wrap.appendChild(this.createButton('Blend', blendIcon, doBlend));
             this.el.appendChild(wrap);
@@ -1154,9 +1154,10 @@ export class ContextBar {
 
     /** Make a context-bar number field scrub on horizontal drag — the same feel
      *  as the properties-panel dimension fields (drag = adjust, Shift = ×10, a
-     *  plain click still focuses to type). The value settles on release, at which
-     *  point `apply` runs so a scrubbed value is applied just like pressing Enter. */
-    private makeScrubbable(input: HTMLInputElement, apply: () => void) {
+     *  plain click still focuses to type). Scrubbing ONLY sets the value; the
+     *  action is a separate explicit step (its button, or Enter), so dragging the
+     *  distance never triggers the action repeatedly. */
+    private makeScrubbable(input: HTMLInputElement) {
         input.classList.add('cb-num-scrub');
         input.addEventListener('pointerdown', (e: PointerEvent) => {
             if (e.button !== 0) return;
@@ -1190,7 +1191,6 @@ export class ContextBar {
                 try {
                     input.releasePointerCapture(e.pointerId);
                 } catch {}
-                if (moved) apply();
             };
             input.addEventListener('pointermove', onMove);
             input.addEventListener('pointerup', onUp);

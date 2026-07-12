@@ -2774,12 +2774,18 @@ export class InputManager {
     addAnchorPointsToSelection() {
         const selection = Array.from(this.scene.engine!.get_selection());
         if (selection.length !== 1) return;
-        const subs = this.scene.getNodeGeometry(selection[0])?.Path?.subpaths;
+        const id = selection[0];
+        const subs = this.scene.getNodeGeometry(id)?.Path?.subpaths;
         if (!subs || subs.length === 0) return;
         this.scene.transaction(() => {
-            this.scene.replaceGeometryWithPath(selection[0], addAnchorPointsToSubpaths(subs));
+            this.scene.replaceGeometryWithPath(id, addAnchorPointsToSubpaths(subs));
         });
-        this.ui.syncWithSelection();
+        // The new anchors sit on the existing edges, so the outline is unchanged —
+        // reveal them by dropping into path-edit (direct-select) mode, which also
+        // re-reads the denser geometry into the anchor overlay. Otherwise it looks
+        // like nothing happened.
+        this.ui.setActiveTool('direct');
+        this.enterPathEditMode(id);
         this.renderer.requestRender();
     }
 
