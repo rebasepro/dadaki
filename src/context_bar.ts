@@ -98,6 +98,73 @@ const TOOLS_WITH_STROKE = new Set([
     'paint-bucket',
 ]);
 
+/** Hover descriptions for every action, keyed by its label/title. Applied
+ *  centrally in createButton / createIconButton / createDropdown so nothing in the
+ *  bar is a mystery. An unmapped action falls back to its own label. */
+const ACTION_TOOLTIPS: Record<string, string> = {
+    // Lifecycle + transform (always present)
+    Duplicate: 'Make a copy of the selection.',
+    Delete: 'Remove the selection.',
+    'Flip Horizontal': 'Mirror the selection left ↔ right.',
+    'Flip Vertical': 'Mirror the selection top ↕ bottom.',
+    Flatten: 'Merge the selection into a single path.',
+    // Single shape / path
+    'Edit Path': 'Edit this path’s anchor points.',
+    'Offset Copy…':
+        'Create a new shape parallel to this path at a distance you set (negative = inset). The original is kept.',
+    'Simplify…': 'Reduce the number of anchor points while keeping the shape.',
+    'Reverse direction':
+        'Flip the path’s direction — swaps start/end arrowheads, reverses text-on-path, and flips which subpaths are compound-path holes. No visible change on a plain shape.',
+    'Outline: Taper': 'Convert the stroke into a filled shape that tapers to a point at the end.',
+    'Outline: Taper both': 'Convert the stroke into a filled shape that tapers at both ends.',
+    'Outline: Bulge': 'Convert the stroke into a filled shape that bulges in the middle.',
+    'Release compound': 'Split a compound path back into separate paths.',
+    // Text
+    'Edit Text': 'Edit this text’s content.',
+    'Create Outlines': 'Convert the text into editable vector paths (no longer editable as text).',
+    'Detach from path': 'Stop this text from flowing along its path.',
+    'On Path': 'Make the selected text flow along the selected path.',
+    // Group / live paint
+    Group: 'Group the selected objects together.',
+    Ungroup: 'Break the group back into its objects.',
+    Edit: 'Enter the group to edit its contents.',
+    Expand: 'Expand into editable objects.',
+    'Make Live Paint Group':
+        'Turn the selection into a Live Paint group you can fill region by region.',
+    Release: 'Release back into editable shapes.',
+    // Combine (multi-select)
+    Boolean: 'Combine the shapes into a non-destructive boolean group — children stay editable.',
+    Union: 'Merge the shapes into one.',
+    Subtract: 'Cut the upper shapes out of the bottom one.',
+    Intersect: 'Keep only the region where the shapes overlap.',
+    Exclude: 'Keep everything except the overlapping region.',
+    More: 'More operations for this selection.',
+    'Blend…': 'Generate a row of in-between shapes between the two selected objects.',
+    'Compound path': 'Combine into one path where overlaps become holes (subpaths stay editable).',
+    'Minus Back': 'Subtract everything behind the front shape from it.',
+    'Join paths': 'Connect the endpoints of two open paths into one.',
+    Join: 'Connect the endpoints of two open paths into one.',
+    // Align / distribute
+    'Align left': 'Align the left edges.',
+    'Align center': 'Align horizontal centers.',
+    'Align right': 'Align the right edges.',
+    'Align top': 'Align the top edges.',
+    'Align middle': 'Align vertical centers.',
+    'Align bottom': 'Align the bottom edges.',
+    'Distribute horizontally': 'Even out the horizontal gaps between objects.',
+    'Distribute vertically': 'Even out the vertical gaps between objects.',
+    // Path editing
+    'Add Point': 'Click a segment to insert an anchor point where you click.',
+    'Delete Point': 'Click an anchor point to remove it.',
+    'Cut at Point': 'Split the path at the selected anchor point.',
+    Done: 'Finish editing this path.',
+    Finish: 'Finish and keep the path.',
+    Cancel: 'Discard the path.',
+    // Guides
+    Lock: 'Lock this guide so it can’t be moved.',
+    Unlock: 'Unlock this guide so it can be moved again.',
+};
+
 /** Node types the boolean operations can combine. */
 const BOOLEAN_COMPATIBLE = new Set(['Path', 'Rect', 'Ellipse', 'Group']);
 
@@ -273,6 +340,7 @@ export class ContextBar {
                 () => this.input.deleteSelectedGuide(),
                 true,
                 '⌫',
+                'Delete this guide.',
             ),
         );
     }
@@ -1406,6 +1474,7 @@ export class ContextBar {
             shortcut?: string;
             danger?: boolean;
             active?: boolean;
+            tooltip?: string;
             onSelect: () => void;
         }>,
         tooltip?: string,
@@ -1415,7 +1484,7 @@ export class ContextBar {
 
         const btn = document.createElement('button');
         btn.className = 'cb-btn cb-dropdown-btn';
-        if (tooltip) btn.setAttribute('data-tooltip', tooltip);
+        btn.setAttribute('data-tooltip', tooltip ?? ACTION_TOOLTIPS[label] ?? label);
         btn.innerHTML = `<span class="cb-btn-icon">${icon}</span><span class="cb-btn-text">${label}</span><span class="cb-caret">▾</span>`;
         wrap.appendChild(btn);
 
@@ -1440,12 +1509,16 @@ export class ContextBar {
                     'cb-menu-item' +
                     (it.danger ? ' cb-menu-item-danger' : '') +
                     (it.active ? ' cb-menu-item-active' : '');
+                const desc = it.tooltip ?? ACTION_TOOLTIPS[it.label];
                 mi.innerHTML =
                     `<span class="cb-btn-icon">${it.icon}</span>` +
                     `<span class="cb-menu-item-label">${it.label}</span>` +
                     (it.shortcut
                         ? `<span class="cb-menu-item-shortcut">${it.shortcut}</span>`
                         : '');
+                // Menus sit outside #context-bar (custom tooltip CSS won't reach),
+                // so use a native title for the description.
+                if (desc && desc !== it.label) mi.title = desc;
                 mi.addEventListener('click', (e) => {
                     e.stopPropagation();
                     close();
@@ -1482,7 +1555,7 @@ export class ContextBar {
     ): HTMLElement {
         const btn = document.createElement('button');
         btn.className = 'cb-btn cb-btn-icon-only';
-        btn.setAttribute('data-tooltip', title);
+        btn.setAttribute('data-tooltip', ACTION_TOOLTIPS[title] ?? title);
         if (shortcut) btn.setAttribute('data-shortcut', shortcut);
         btn.innerHTML = icon;
         btn.addEventListener('click', (e) => {
@@ -1505,8 +1578,9 @@ export class ContextBar {
     ): HTMLElement {
         const btn = document.createElement('button');
         btn.className = `cb-btn${danger ? ' cb-btn-danger' : ''}`;
-        const tip = tooltip ?? (shortcut ? title : undefined);
-        if (tip) btn.setAttribute('data-tooltip', tip);
+        // Every action gets a hover tooltip: explicit > central description > label.
+        const tip = tooltip ?? ACTION_TOOLTIPS[title] ?? title;
+        btn.setAttribute('data-tooltip', tip);
         if (shortcut) btn.setAttribute('data-shortcut', shortcut);
         btn.innerHTML = `<span class="cb-btn-icon">${icon}</span><span class="cb-btn-text">${title}</span>`;
         btn.addEventListener('click', (e) => {
