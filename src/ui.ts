@@ -2956,7 +2956,10 @@ export class UIEngine {
             const hasOpen = this.scene
                 .getNodeGeometry(pid)
                 ?.Path?.subpaths?.some((sp) => !sp.closed);
-            if (hasOpen) this.appendArrowheads(pid);
+            // Markers render in the stroke color, so they're invisible without a
+            // stroke — only offer them when there's a stroke to draw them on.
+            const hasStroke = (this.scene.getNodeStyle(pid)?.strokes?.length ?? 0) > 0;
+            if (hasOpen && hasStroke) this.appendArrowheads(pid);
         }
     }
 

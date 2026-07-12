@@ -174,16 +174,21 @@ export class ContextBar {
             info.context === 'group-selected' && info.selectedIds.length === 1
                 ? `|bop${this.scene.getBooleanOp(info.selectedIds[0])}`
                 : '';
-        // Single-shape path controls (Simplify point-count gate, Width open-path
-        // gate) depend on the path's geometry, which in-place edits mutate — hash
-        // it so the bar rebuilds after Simplify/Offset/Width.
+        // Single-shape path controls (Simplify point-count gate, Outline Width
+        // open-stroked-path gate) depend on the path's geometry and whether it has
+        // a stroke, both of which in-place edits mutate — hash them so the bar
+        // rebuilds after Simplify/Offset/adding or removing a stroke.
         let geoSig = '';
         if (info.context === 'single-shape' && info.selectedIds.length === 1) {
             const subs = this.scene.getNodeGeometry(info.selectedIds[0])?.Path?.subpaths;
             if (subs) {
                 const pts = subs.reduce((n, s) => n + s.points.length, 0);
                 const anyOpen = subs.some((s) => !s.closed) ? 'o' : 'c';
-                geoSig = `|geo${pts}${anyOpen}`;
+                const hasStroke =
+                    (this.scene.getNodeStyle(info.selectedIds[0])?.strokes?.length ?? 0) > 0
+                        ? 's'
+                        : '';
+                geoSig = `|geo${pts}${anyOpen}${hasStroke}`;
             }
         }
         return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}${geoSig}`;
