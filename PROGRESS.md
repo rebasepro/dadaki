@@ -18,6 +18,7 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 - [x] 11. Pathfinder: Minus Back + Crop — committed `a210fd9` (boolean_ops.applyPathfinder, z-order aware; context-bar 'Pathfinder' dropdown)
 - [x] 12. Reverse Path Direction — committed `47f963e` (path_ops.reverseSubpaths; context-bar 'Reverse'; pairs with text-on-path)
 - [x] 13. Add Anchor Points — committed `a796ab2` (path_ops.addAnchorPointsToSubpaths; de Casteljau midpoints; context-bar 'Add Points'; complement of Simplify)
+- [x] 14. Average Points — committed `a8dc4a9` (input.averageSelectedPoints h/v/both; path-edit context-bar 'Average' dropdown; aligns selected anchors)
 
 ## Next step
 NOTE (verified this session): **distribute spacing (equal gaps) is ALREADY done**
@@ -189,3 +190,15 @@ text (currently the culling box at the path center).
   Next: components/symbols flagship (needs render-protocol engine work to emit instance
   geometry — plan a multi-window effort), or more small wins (Average Points needs the
   anchor-point-selection key mapping; arrowheads need a stroke-marker data model).
+- 2026-07-12 10:0x (Sun) — **Average Points** done + committed (`a8dc4a9`). Illustrator's
+  Object › Path › Average: in path-edit mode with 2+ anchors selected, a context-bar 'Average'
+  dropdown (Horizontal/Vertical/Both) moves them onto the average Y / average X / centroid;
+  handles translate with the anchor to preserve curvature. Mirrors the mergeSelectedPoints
+  pattern (parse "subpath:point" keys, updatePathPoints for one undo step). Pure geometry →
+  auto-persists, no engine change. Verified in browser: 3 anchors x=100/200/320 → all x=207
+  (vertical), Y kept, 4th untouched; dropdown renders natively (screenshot).
+  Next: the big remaining item is **components/symbols** (needs render-protocol engine work
+  to emit instance geometry — plan a multi-window effort). Or **arrowheads / line endings**
+  (a real missing feature; needs a stroke-marker data model [scene json blob like
+  text_paths_json] + endpoint marker rendering via ContourMeasure getPosTan(0)/(len) rotated
+  to tangent + a stroke-panel Start/End selector — ~full window, likely won't finish in one).
