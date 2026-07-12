@@ -52,6 +52,37 @@ function crossMid(a: Proj, b: Proj): number {
     return (Math.max(a.clo, b.clo) + Math.min(a.chi, b.chi)) / 2;
 }
 
+/** Which artboard (rect) contains the point, or null if none. */
+function artboardAt(
+    artboards: { id: number; x: number; y: number; w: number; h: number }[],
+    cx: number,
+    cy: number,
+): number | null {
+    for (const ab of artboards) {
+        if (cx >= ab.x && cx <= ab.x + ab.w && cy >= ab.y && cy <= ab.y + ab.h) return ab.id;
+    }
+    return null;
+}
+
+/** Bounds of the candidate measurement peers: top-level objects (excluding the
+ *  moving ones) whose centre lies in the SAME artboard as the moving selection —
+ *  so spacing never snaps across artboards. Objects in no artboard peer with each
+ *  other. */
+function peerBounds(scene: WasmScene, movingIds: number[], S: Bounds): Bounds[] {
+    const moving = new Set(movingIds);
+    const artboards = scene.getArtboards();
+    const targetAb = artboardAt(artboards, (S[0] + S[2]) / 2, (S[1] + S[3]) / 2);
+    const out: Bounds[] = [];
+    for (const id of scene.getRootNodes()) {
+        if (moving.has(id)) continue;
+        const b = scene.getNodeBounds(id);
+        if (!b || b.length < 4) continue;
+        if (artboardAt(artboards, (b[0] + b[2]) / 2, (b[1] + b[3]) / 2) !== targetAb) continue;
+        out.push([b[0], b[1], b[2], b[3]]);
+    }
+    return out;
+}
+
 interface Candidate {
     center: number; // target main-axis center for the moving object
     gap: number;
@@ -131,13 +162,7 @@ export interface DragGap extends GapSeg {
  *  each side (that share a row/column) — the live readout Figma shows throughout a
  *  drag, equal or not. */
 export function neighborGaps(scene: WasmScene, movingIds: number[], S: Bounds): DragGap[] {
-    const moving = new Set(movingIds);
-    const others: Bounds[] = [];
-    for (const id of scene.getRootNodes()) {
-        if (moving.has(id)) continue;
-        const b = scene.getNodeBounds(id);
-        if (b && b.length >= 4) others.push([b[0], b[1], b[2], b[3]]);
-    }
+    const others = peerBounds(scene, movingIds, S);
 
     const out: DragGap[] = [];
     for (const axis of ['x', 'y'] as const) {
@@ -167,12 +192,6 @@ export function computeEqualSpacing(
     movingIds: number[],
     S: Bounds,
 ): { x: EqualMatch | null; y: EqualMatch | null } {
-    const moving = new Set(movingIds);
-    const others: Bounds[] = [];
-    for (const id of scene.getRootNodes()) {
-        if (moving.has(id)) continue;
-        const b = scene.getNodeBounds(id);
-        if (b && b.length >= 4) others.push([b[0], b[1], b[2], b[3]]);
-    }
+    const others = peerBounds(scene, movingIds, S);
     return { x: axisMatch(S, others, 'x'), y: axisMatch(S, others, 'y') };
 }
