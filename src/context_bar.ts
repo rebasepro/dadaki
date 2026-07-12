@@ -55,6 +55,7 @@ import type { InputManager } from './input';
 import type { Renderer } from './renderer';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
+import type { WidthProfile } from './width_profile';
 
 /** What each tool does, shown while the tool is armed and nothing is selected. */
 const TOOL_HINTS: Record<string, string> = {
@@ -504,9 +505,55 @@ export class ContextBar {
                 this.el.appendChild(sWrap);
             }
 
-            // NOTE: variable-width profile and arrowheads/line-endings are stroke
-            // PROPERTIES, not actions — they live in the right-panel Stroke section
-            // (see renderStrokesList in ui.ts), the same place Illustrator keeps them.
+            // Arrowheads / line-endings are a stroke PROPERTY → they live in the
+            // right-panel Stroke section (see appendArrowheads in ui.ts).
+            //
+            // The variable-width "profile", by contrast, is a destructive one-shot
+            // ACTION — it replaces the stroked open path with a filled tapered shape —
+            // so it stays here as an action, only for an open path with a stroke.
+            const openWithStroke =
+                this.scene
+                    .getNodeGeometry(info.selectedIds[0])
+                    ?.Path?.subpaths?.some((sp) => !sp.closed) &&
+                (this.scene.getNodeStyle(info.selectedIds[0])?.strokes?.length ?? 0) > 0;
+            if (openWithStroke) {
+                const sw = (d: string) =>
+                    `<svg width="14" height="10" viewBox="0 0 28 20" fill="currentColor">${d}</svg>`;
+                const profiles: Array<{ id: WidthProfile; label: string; icon: string }> = [
+                    {
+                        id: 'uniform',
+                        label: 'Uniform',
+                        icon: sw('<rect x="2" y="8" width="24" height="4"/>'),
+                    },
+                    {
+                        id: 'taper-end',
+                        label: 'Taper',
+                        icon: sw('<path d="M2 6 L26 10 L2 14 Z"/>'),
+                    },
+                    {
+                        id: 'taper-both',
+                        label: 'Taper both',
+                        icon: sw('<path d="M2 10 Q14 3 26 10 Q14 17 2 10 Z"/>'),
+                    },
+                    {
+                        id: 'bulge',
+                        label: 'Bulge',
+                        icon: sw('<path d="M2 8 Q14 0 26 8 L26 12 Q14 20 2 12 Z"/>'),
+                    },
+                ];
+                this.el.appendChild(
+                    this.createDropdown(
+                        'Outline Width',
+                        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12 Q12 4 21 12 Q12 20 3 12 Z"/></svg>',
+                        profiles.map((p) => ({
+                            label: p.label,
+                            icon: p.icon,
+                            onSelect: () => this.input.applyWidthProfileToSelection(p.id),
+                        })),
+                        'Converts this stroked path into a filled shape, tapering its width along the profile you pick. This replaces the stroke — it is not reversible except by undo.',
+                    ),
+                );
+            }
 
             // Reverse path direction — flips winding (compound-path holes) and
             // the direction any text-on-path flows.
@@ -1244,12 +1291,14 @@ export class ContextBar {
             active?: boolean;
             onSelect: () => void;
         }>,
+        tooltip?: string,
     ): HTMLElement {
         const wrap = document.createElement('div');
         wrap.className = 'cb-dropdown';
 
         const btn = document.createElement('button');
         btn.className = 'cb-btn cb-dropdown-btn';
+        if (tooltip) btn.setAttribute('data-tooltip', tooltip);
         btn.innerHTML = `<span class="cb-btn-icon">${icon}</span><span class="cb-btn-text">${label}</span><span class="cb-caret">▾</span>`;
         wrap.appendChild(btn);
 

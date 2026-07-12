@@ -59,7 +59,6 @@ import type {
 } from './types';
 import { isGradient, isPattern, StrokeAlignment } from './types';
 import type { WasmScene } from './wasm_scene';
-import type { WidthProfile } from './width_profile';
 
 /** Element tags a <clipPath> may legally contain (basic shapes, text, use).
  *  image/switch/symbol/etc. are invalid clip children and are ignored. */
@@ -2946,44 +2945,24 @@ export class UIEngine {
             this.strokesList.appendChild(optsRow);
         }
 
-        // Line endings (arrowheads) + variable-width profile are stroke PROPERTIES,
-        // so they belong here — not in the action bar. Only meaningful for a single
-        // open path (arrowheads sit at the two open endpoints; a profile shapes an
-        // open stroke).
+        // Arrowheads / line endings are a stroke PROPERTY (they persist on the node
+        // and re-render), so they belong here. Only meaningful for a single open path
+        // (the two open endpoints). NB: the variable-width *profile* is NOT here — it
+        // destructively outlines the stroke into a filled shape, so it's an action in
+        // the context bar, not a reversible property.
         const sel = Array.from(this.scene.engine?.get_selection() ?? []);
         if (sel.length === 1) {
             const pid = sel[0];
             const hasOpen = this.scene
                 .getNodeGeometry(pid)
                 ?.Path?.subpaths?.some((sp) => !sp.closed);
-            if (hasOpen) this.appendLineEndings(pid);
+            if (hasOpen) this.appendArrowheads(pid);
         }
     }
 
-    /** Arrowheads (start/end markers) + width profile for a single open path,
-     *  rendered inside the Stroke section where these stroke properties belong.
-     *  Two rows (2 controls each) so the selects never truncate. */
-    private appendLineEndings(nodeId: number) {
-        const optGroup = (label: string, title: string, sel: HTMLSelectElement) => {
-            const group = document.createElement('label');
-            group.className = 'stroke-opt';
-            group.title = title;
-            const lab = document.createElement('span');
-            lab.className = 'stroke-opt-label';
-            lab.textContent = label;
-            group.appendChild(lab);
-            group.appendChild(sel);
-            return group;
-        };
-        const makeSelect = (opts: [string, string][], value: string) => {
-            const sel = document.createElement('select');
-            sel.className = 'prop-select';
-            sel.innerHTML = opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
-            sel.value = value;
-            return sel;
-        };
-
-        // ── Arrowheads: Start + End markers ──
+    /** Arrowheads (start/end line-ending markers) for a single open path, rendered
+     *  inside the Stroke section where this stroke property belongs. */
+    private appendArrowheads(nodeId: number) {
         const markers = this.scene.getNodeMarkers(nodeId) ?? {};
         const MARKER_OPTS: [MarkerKind, string][] = [
             ['none', 'None'],
@@ -2991,41 +2970,31 @@ export class UIEngine {
             ['circle', 'Circle'],
             ['square', 'Square'],
         ];
-        const endsRow = document.createElement('div');
-        endsRow.className = 'fill-stroke-row stroke-opts-row';
+        const row = document.createElement('div');
+        row.className = 'fill-stroke-row stroke-opts-row';
         for (const which of ['start', 'end'] as const) {
-            const sel = makeSelect(MARKER_OPTS, markers[which] ?? 'none');
+            const label = which === 'start' ? 'Start' : 'End';
+            const group = document.createElement('label');
+            group.className = 'stroke-opt';
+            group.title = `${label} line ending`;
+            const lab = document.createElement('span');
+            lab.className = 'stroke-opt-label';
+            lab.textContent = label;
+            const sel = document.createElement('select');
+            sel.className = 'prop-select';
+            sel.innerHTML = MARKER_OPTS.map(([v, t]) => `<option value="${v}">${t}</option>`).join(
+                '',
+            );
+            sel.value = markers[which] ?? 'none';
             sel.addEventListener('change', () => {
                 this.scene.setNodeMarker(nodeId, which, sel.value as MarkerKind);
                 this.syncWithSelection();
             });
-            const label = which === 'start' ? 'Start' : 'End';
-            endsRow.appendChild(optGroup(label, `${label} line ending`, sel));
+            group.appendChild(lab);
+            group.appendChild(sel);
+            row.appendChild(group);
         }
-        this.strokesList.appendChild(endsRow);
-
-        // ── Width profile: applies a tapered outline to the open stroke ──
-        const PROFILE_OPTS: [WidthProfile, string][] = [
-            ['uniform', 'Uniform'],
-            ['taper-end', 'Taper'],
-            ['taper-both', 'Taper both'],
-            ['bulge', 'Bulge'],
-        ];
-        const profSel = makeSelect(PROFILE_OPTS, 'uniform');
-        profSel.addEventListener('change', () => {
-            this.scene.renderer?.inputManager?.applyWidthProfileToSelection(
-                profSel.value as WidthProfile,
-            );
-        });
-        const widthRow = document.createElement('div');
-        widthRow.className = 'fill-stroke-row stroke-opts-row';
-        widthRow.appendChild(optGroup('Width', 'Variable width profile', profSel));
-        // keep the lone Width control at half-width (aligned with the row above)
-        const spacer = document.createElement('span');
-        spacer.className = 'stroke-opt';
-        spacer.style.visibility = 'hidden';
-        widthRow.appendChild(spacer);
-        this.strokesList.appendChild(widthRow);
+        this.strokesList.appendChild(row);
     }
 
     private updateNodeStyle(
