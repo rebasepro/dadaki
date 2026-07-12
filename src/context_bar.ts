@@ -195,7 +195,12 @@ export class ContextBar {
                 geoSig = `|geo${pts}${anyOpen}${hasStroke}`;
             }
         }
-        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}${geoSig}`;
+        // Guide selection (+ its lock state) drives the guide bar.
+        const g = this.input.selectedGuide;
+        const guideSig = g
+            ? `|guide${g.axis}${g.index}${this.input.selectedGuideLocked() ? 'L' : ''}`
+            : '';
+        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}${geoSig}${guideSig}`;
     }
 
     /** Rebuild the bar DOM based on context info. */
@@ -232,7 +237,44 @@ export class ContextBar {
             case 'path-editing':
                 this.renderPathEditing(info);
                 break;
+            case 'guide-selected':
+                this.renderGuideSelected();
+                break;
         }
+    }
+
+    /** A ruler guide is selected: lock/unlock it or delete it. */
+    private renderGuideSelected() {
+        const axis = this.input.selectedGuide?.axis;
+        this.el.appendChild(this.createBadge(axis === 'x' ? 'Vertical guide' : 'Horizontal guide'));
+        this.el.appendChild(this.createSeparator());
+
+        const locked = this.input.selectedGuideLocked();
+        const lockIcon = locked
+            ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>'
+            : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+        this.el.appendChild(
+            this.createButton(
+                locked ? 'Unlock' : 'Lock',
+                lockIcon,
+                () => this.input.toggleSelectedGuideLock(),
+                false,
+                undefined,
+                locked
+                    ? 'Unlock this guide so it can be moved again.'
+                    : 'Lock this guide in place so it can’t be moved by dragging.',
+            ),
+        );
+
+        this.el.appendChild(
+            this.createButton(
+                'Delete',
+                iconTrash(14),
+                () => this.input.deleteSelectedGuide(),
+                true,
+                '⌫',
+            ),
+        );
     }
 
     // ─── Context Renderers ──────────────────────────────────────────

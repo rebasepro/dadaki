@@ -4188,6 +4188,8 @@ export class Renderer {
         const guides = this.scene.getGuides();
         if (guides.x.length === 0 && guides.y.length === 0) return;
         const hi = this.inputManager?.highlightedGuide ?? null;
+        const sel = this.inputManager?.selectedGuide ?? null;
+        const guidesCtl = this.inputManager?.guides ?? null;
 
         const base = new this.ck.Paint();
         base.setColor(this.ck.Color(0, 200, 255, 0.7));
@@ -4201,16 +4203,28 @@ export class Renderer {
         strong.setStrokeWidth(1.5 / this.zoom);
         strong.setAntiAlias(true);
 
+        // Locked guides read as muted grey so they're visibly "fixed".
+        const locked = new this.ck.Paint();
+        locked.setColor(this.ck.Color(150, 150, 150, 0.9));
+        locked.setStyle(this.ck.PaintStyle.Stroke);
+        locked.setStrokeWidth(1 / this.zoom);
+        locked.setAntiAlias(true);
+
+        const paintFor = (axis: 'x' | 'y', i: number) => {
+            const isSel = sel?.axis === axis && sel.index === i;
+            const isHi = hi?.axis === axis && hi.index === i;
+            if (guidesCtl?.isLocked({ axis, index: i })) return locked;
+            return isSel || isHi ? strong : base;
+        };
         guides.x.forEach((gx, i) => {
-            const p = hi && hi.axis === 'x' && hi.index === i ? strong : base;
-            canvas.drawLine(gx, minY, gx, maxY, p);
+            canvas.drawLine(gx, minY, gx, maxY, paintFor('x', i));
         });
         guides.y.forEach((gy, i) => {
-            const p = hi && hi.axis === 'y' && hi.index === i ? strong : base;
-            canvas.drawLine(minX, gy, maxX, gy, p);
+            canvas.drawLine(minX, gy, maxX, gy, paintFor('y', i));
         });
         base.delete();
         strong.delete();
+        locked.delete();
     }
 
     private drawSnapGuides(canvas: Canvas, minX: number, minY: number, maxX: number, maxY: number) {

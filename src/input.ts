@@ -225,6 +225,8 @@ export class InputManager {
     guides: GuidesController | null = null;
     /** Guide highlighted by hover or an in-progress drag (drawn emphasized). */
     highlightedGuide: GuideHit | null = null;
+    /** Guide clicked/selected (drives the guide action bar: Lock, Delete). */
+    selectedGuide: GuideHit | null = null;
     /** The ruler guide currently being dragged on the canvas, if any. */
     private draggingGuide: GuideHit | null = null;
 
@@ -777,7 +779,9 @@ export class InputManager {
         // Delete — in path editing mode, delete the selected anchor point(s);
         // with a gradient stop focused, delete the stop instead of the node.
         if (e.key === 'Backspace' || e.key === 'Delete') {
-            if (this.editingNodeId !== null && this.selectedPoints.size > 0) {
+            if (this.selectedGuide) {
+                this.deleteSelectedGuide();
+            } else if (this.editingNodeId !== null && this.selectedPoints.size > 0) {
                 this.deleteSelectedPoints();
             } else if (this.ui.gradientEdit.isActive() && this.ui.gradientEdit.stopFocused) {
                 if (this.ui.gradientEdit.deleteStop(this.ui.gradientEdit.stopIndex)) {
@@ -1760,6 +1764,9 @@ export class InputManager {
         this.startPos = this.getPos(e);
         this.currentPos = { ...this.startPos };
         this.hoverNodeId = null;
+        // Any fresh press deselects the current guide; the guide-grab block below
+        // re-selects one if the press landed on it.
+        this.selectedGuide = null;
         // Hide the pen rubber-band while a press is in progress.
         this.penHoverPos = null;
         this.penHoverClosing = false;
@@ -1791,10 +1798,19 @@ export class InputManager {
                 5 / this.renderer.zoom,
             );
             if (hit) {
-                this.draggingGuide = hit;
-                this.highlightedGuide = hit;
-                this.scene.pushHistorySnapshot();
-                this.canvas.style.cursor = hit.axis === 'x' ? 'col-resize' : 'row-resize';
+                // Select the guide (drives the guide action bar) and clear any node
+                // selection so the two don't fight.
+                this.selectedGuide = hit;
+                this.scene.engine!.clear_selection();
+                // A locked guide can be selected (to unlock/delete) but not dragged.
+                if (!this.guides.isLocked(hit)) {
+                    this.draggingGuide = hit;
+                    this.highlightedGuide = hit;
+                    this.scene.pushHistorySnapshot();
+                    this.canvas.style.cursor = hit.axis === 'x' ? 'col-resize' : 'row-resize';
+                }
+                this.ui.syncWithSelection();
+                this.renderer.requestRender();
                 return;
             }
         }
@@ -2839,6 +2855,26 @@ export class InputManager {
         this.scene.transaction(() => {
             this.scene.replaceGeometryWithPath(selection[0], reverseSubpaths(subs));
         });
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
+    // ─── Guide actions (drive the guide action bar) ──────────────────────────
+    /** True when the selected guide is locked (can't be moved). */
+    selectedGuideLocked(): boolean {
+        return !!(this.selectedGuide && this.guides?.isLocked(this.selectedGuide));
+    }
+    /** Lock/unlock the selected guide (a locked guide can't be dragged). */
+    toggleSelectedGuideLock() {
+        if (!this.selectedGuide || !this.guides) return;
+        this.guides.setLocked(this.selectedGuide, !this.guides.isLocked(this.selectedGuide));
+        this.ui.syncWithSelection();
+    }
+    /** Delete the selected guide. */
+    deleteSelectedGuide() {
+        if (!this.selectedGuide || !this.guides) return;
+        this.guides.deleteGuide(this.selectedGuide);
+        this.selectedGuide = null;
         this.ui.syncWithSelection();
         this.renderer.requestRender();
     }
