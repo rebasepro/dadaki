@@ -6,7 +6,7 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 ## Status board
 - [x] Tier 1 baseline (eyedropper, swatches/global colors, rulers+guides+grid, transform reference point) — committed `8486fe2`
 - [x] 1. Offset Path — committed `cceab38` (src/offset_path.ts; context-bar distance control, negative=inset)
-- [x] 2. Text on a path — render + UX + PERSISTENCE done (`6051b50`, `52137d3`); links survive save/reload. Only SVG `<textPath>` export remains (PNG export already correct, see note)
+- [x] 2. Text on a path — COMPLETE: render + UX + persistence + SVG `<textPath>` export (`6051b50`, `52137d3`, `328d429`). Flagship done.
 - [ ] 3. Shape Builder tool — BLOCKED without plumbing (see note)
 - [x] 4. Variable-width stroke (width profile) — committed `15d3a77` (src/width_profile.ts; one-shot tapered outline via ContourMeasure; context-bar Width dropdown: Uniform/Taper/Taper both/Bulge, open-path only)
 - [ ] 5. Clipping frame (clip_content) — DEFERRED, data-model mismatch (see note)
@@ -23,14 +23,13 @@ NOTE (verified this session): **distribute spacing (equal gaps) is ALREADY done*
 was wrong) and **corner radius already works for paths** (ui.ts applyRadius sets
 per-vertex corner_radius; engine expands it). Don't rebuild those.
 
-Good remaining candidates:
-- **components/symbols** — the big remaining flagship (a focused window). High perceived value.
-- **text-on-path SVG `<textPath>` export** — the last piece of the text-on-path flagship
-  (render + UX + persistence already done). See item-2 note; coordinate-space care needed.
+Good remaining candidates (text-on-path flagship is now fully DONE):
+- **components/symbols** — the big remaining flagship (a focused, likely multi-window effort).
+  High perceived value: one master, many instances, edit-once-update-all, per-instance overrides.
+  Design it so each committed phase stands on its own.
 - **Reverse path direction** (flip winding — matters for compound paths / holes), or
-  **Average points** (align selected anchors) — small, single-action path utilities.
+  **Average points** (align selected anchors) — small, single-action path utilities; safe wins.
 - Smart-measurements polish: equal-spacing detection (highlight when gaps match).
-- **components/symbols** — the other big flagship (a focused window).
 
 Bigger/blocked items below need dedicated sessions:
 
@@ -168,3 +167,12 @@ text (currently the culling box at the path center).
   (screenshot). Engine tests (87) + tsc + biome + vitest (221) all green. Only SVG <textPath>
   export remains (PNG export already correct since it rasterizes the canvas). Next: components
   flagship, or the SVG textPath export.
+- 2026-07-12 02:06 (Sun) — **Text-on-path SVG `<textPath>` export** done + committed (`328d429`),
+  COMPLETING the flagship (render + UX + persistence + SVG export). SVGExportInput gains a
+  textPaths map {textId:{pathId, world-space d}}; on-path text bypasses its parked node
+  transform (drawn in world space) and emits `<text><textPath href="#tp-{id}">…` + a
+  `<path id>` def in <defs>; UIEngine.textPathsForExport builds the world d from the path's
+  resolved subpaths × world transform, wired into both export paths. Verified by rendering
+  the exported SVG string in-page: "Export me" flows along the wave, matching the canvas.
+  tsc + biome + vitest (221, incl. svg roundtrip) green. Next: components/symbols flagship,
+  or small safe wins (reverse path direction / average points).
