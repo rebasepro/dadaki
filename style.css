@@ -2407,6 +2407,24 @@ body.scrubbing * {
     cursor: text;
 }
 
+/* Small value popover a context-bar command opens to collect a number
+   (e.g. Offset Copy…), Illustrator-dialog style — not a permanent bar field. */
+.cb-value-popover {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    background: var(--bg-panel, #2b2b2b);
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+    z-index: 1000;
+}
+.cb-value-popover-label {
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
 /* Badge */
 .cb-badge {
     background: var(--accent-dim);

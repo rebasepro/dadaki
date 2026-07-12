@@ -430,13 +430,12 @@ export class ContextBar {
             ),
         );
 
-        // Inline path actions: Edit Path (primary) + Offset Copy, which keeps its
-        // distance field because the value is the whole point of the action. Every
-        // other occasional op (Simplify, Reverse, Outline, Release) goes in the one
-        // "More" menu, so the bar reads the same in every view: primary → Offset →
-        // More → transform → Duplicate/Delete.
+        // Edit Path is the only path action important enough to sit inline. Every
+        // occasional op is a command in the one "More" menu — including Offset Copy,
+        // which (like Illustrator's Object › Path › Offset Path) opens a little value
+        // popover when picked instead of parking a number field in the bar. So the
+        // bar reads the same in every view: primary → More → transform → Dup/Delete.
         if (info.selectedNodes[0]?.node_type === 'Path') {
-            this.el.appendChild(this.buildOffsetControl());
             this.el.appendChild(this.buildPathMoreMenu(info));
         }
 
@@ -444,54 +443,88 @@ export class ContextBar {
         this.appendLifecycleActions();
     }
 
-    /** Offset Copy — an inline distance field (scrub or type, negative = inset) plus
-     *  the action button. Kept inline because the distance is the point of it. */
-    private buildOffsetControl(): HTMLElement {
-        const wrap = document.createElement('div');
-        wrap.style.display = 'inline-flex';
-        wrap.style.alignItems = 'center';
-        wrap.style.gap = '4px';
+    /** Offset Copy the Illustrator way: the command opens a small value popover
+     *  (distance field, Enter/Apply to run, Esc/outside to cancel) instead of
+     *  parking a number field in the bar. Applies once, creating a new parallel
+     *  path — nothing happens until you confirm. */
+    private openOffsetPopover(anchor: HTMLElement) {
+        document.querySelector('.cb-value-popover')?.remove();
 
-        const amt = document.createElement('input');
-        amt.type = 'number';
-        amt.className = 'cb-num';
-        amt.value = String(this.input.lastOffsetAmount);
-        amt.title = 'Offset distance (negative = inset)';
-        const applyOffset = () => {
-            const d = parseFloat(amt.value);
+        const pop = document.createElement('div');
+        pop.className = 'cb-value-popover';
+
+        const label = document.createElement('span');
+        label.className = 'cb-value-popover-label';
+        label.textContent = 'Offset';
+
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.className = 'cb-num';
+        input.value = String(this.input.lastOffsetAmount);
+        input.title = 'Offset distance (negative = inset)';
+        this.makeScrubbable(input);
+
+        const close = () => {
+            pop.remove();
+            document.removeEventListener('pointerdown', onDoc, true);
+        };
+        const apply = () => {
+            const d = parseFloat(input.value);
+            close();
             if (Number.isFinite(d) && d !== 0) this.input.offsetSelectedPath(d);
         };
-        amt.addEventListener('click', (e) => e.stopPropagation());
-        amt.addEventListener('keydown', (e) => {
+        const onDoc = (e: PointerEvent) => {
+            if (!pop.contains(e.target as Node)) close();
+        };
+        input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
-                applyOffset();
+                apply();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                close();
             }
         });
-        this.makeScrubbable(amt);
 
-        const offsetIcon =
-            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><rect x="9" y="9" width="12" height="12" rx="2"/></svg>';
-        wrap.appendChild(amt);
-        wrap.appendChild(
-            this.createButton(
-                'Offset Copy',
-                offsetIcon,
-                applyOffset,
-                false,
-                undefined,
-                'Creates a new shape parallel to this path at the distance on the left (negative = inset). Drag the number or type it. The original is kept.',
-            ),
+        const applyBtn = this.createButton(
+            'Apply',
+            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 6"/></svg>',
+            apply,
         );
-        return wrap;
+
+        pop.appendChild(label);
+        pop.appendChild(input);
+        pop.appendChild(applyBtn);
+        pop.style.position = 'fixed';
+        pop.style.visibility = 'hidden';
+        document.body.appendChild(pop);
+
+        const r = anchor.getBoundingClientRect();
+        const h = pop.offsetHeight;
+        pop.style.left = `${Math.round(r.left)}px`;
+        pop.style.top = `${Math.round(r.top - h - 8)}px`;
+        pop.style.visibility = 'visible';
+
+        // Defer so the click that opened the popover doesn't immediately close it.
+        setTimeout(() => document.addEventListener('pointerdown', onDoc, true), 0);
+        input.focus();
+        input.select();
     }
 
-    /** The "More" overflow menu for a single Path — the occasional ops that don't
-     *  warrant inline space (Offset stays inline; it needs its distance field). */
+    /** The "More" overflow menu for a single Path — every occasional path op is a
+     *  command here (Offset opens a value popover; the rest run immediately). */
     private buildPathMoreMenu(info: ContextInfo): HTMLElement {
         const id = info.selectedIds[0];
         type Item = { label: string; icon: string; onSelect: () => void; danger?: boolean };
         const items: Item[] = [];
+
+        const offsetIcon =
+            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><rect x="9" y="9" width="12" height="12" rx="2"/></svg>';
+        items.push({
+            label: 'Offset Copy…',
+            icon: offsetIcon,
+            onSelect: () => this.openOffsetPopover(this.el),
+        });
 
         // Simplify only when the path has enough points to be worth reducing.
         if (this.input.selectedPathPointCount() >= 6) {
