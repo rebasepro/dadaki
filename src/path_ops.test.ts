@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeSelectedAnchors } from './path_ops';
+import { mergeSelectedAnchors, reverseSubpaths } from './path_ops';
 import type { PathPoint, Subpath } from './types';
 
 /** Corner-style anchor (retracted handles) at (x, y). */
@@ -14,6 +14,29 @@ function open(...points: PathPoint[]): Subpath {
 function closed(...points: PathPoint[]): Subpath {
     return { points, closed: true };
 }
+
+describe('reverseSubpaths', () => {
+    it('reverses point order and swaps each point handles (cp1 <-> cp2)', () => {
+        const a: PathPoint = { x: 0, y: 0, cp1: [-1, -1], cp2: [1, 1] };
+        const b: PathPoint = { x: 10, y: 0, cp1: [9, -2], cp2: [11, 2] };
+        const c: PathPoint = { x: 20, y: 0, cp1: [19, 3], cp2: [21, -3] };
+        const out = reverseSubpaths([open(a, b, c)]);
+        const p = out[0].points;
+        expect(out[0].closed).toBe(false);
+        expect(p.map((q) => q.x)).toEqual([20, 10, 0]); // order reversed
+        // c is now first with its handles swapped
+        expect(p[0]).toMatchObject({ x: 20, y: 0, cp1: [21, -3], cp2: [19, 3] });
+        // a is now last with its handles swapped
+        expect(p[2]).toMatchObject({ x: 0, y: 0, cp1: [1, 1], cp2: [-1, -1] });
+    });
+
+    it('preserves closed flag and per-vertex corner radius', () => {
+        const out = reverseSubpaths([closed(pt(0, 0, { corner_radius: 5 }), pt(10, 0), pt(10, 10))]);
+        expect(out[0].closed).toBe(true);
+        // The radius rides with its vertex to the new (last) position.
+        expect(out[0].points[out[0].points.length - 1].corner_radius).toBe(5);
+    });
+});
 
 describe('mergeSelectedAnchors', () => {
     it('returns null for fewer than 2 selected points', () => {

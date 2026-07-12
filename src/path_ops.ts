@@ -397,6 +397,27 @@ function reverseSubpath(sp: Subpath): void {
  * @param bEnd     Which end of B to connect ('start' or 'end').
  * @returns        New subpaths array with the joined subpath.
  */
+/**
+ * Reverse the direction of every subpath: reverse the point order and swap each
+ * point's incoming/outgoing handles (cp1 ↔ cp2), which exactly reverses each
+ * cubic segment. Preserves closed state and per-vertex corner radii.
+ */
+export function reverseSubpaths(subpaths: Subpath[]): Subpath[] {
+    return subpaths.map((sp) => ({
+        closed: sp.closed,
+        points: [...sp.points].reverse().map((p) => {
+            const rev: PathPoint = {
+                x: p.x,
+                y: p.y,
+                cp1: [p.cp2[0], p.cp2[1]],
+                cp2: [p.cp1[0], p.cp1[1]],
+            };
+            if (p.corner_radius !== undefined) rev.corner_radius = p.corner_radius;
+            return rev;
+        }),
+    }));
+}
+
 export function joinSubpaths(
     subpaths: Subpath[],
     aIdx: number,

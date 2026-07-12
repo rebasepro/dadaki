@@ -528,6 +528,16 @@ export class ContextBar {
                     ),
                 );
             }
+
+            // Reverse path direction — flips winding (compound-path holes) and
+            // the direction any text-on-path flows.
+            const reverseIcon =
+                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h14"/><path d="M13 6l6 6-6 6"/><path d="M3 12V8"/></svg>';
+            this.el.appendChild(
+                this.createButton('Reverse', reverseIcon, () => {
+                    this.input.reverseSelectedPath();
+                }),
+            );
         }
 
         this.appendTransformActions(info, { flatten: true });

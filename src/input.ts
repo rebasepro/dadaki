@@ -10,6 +10,7 @@ import {
     findNearestSegment,
     joinSubpaths,
     mergeSelectedAnchors,
+    reverseSubpaths,
     type SegmentHitResult,
     splitPathAtPoint,
     splitPathAtSegment,
@@ -2684,6 +2685,20 @@ export class InputManager {
         if (selection.length !== 1) return;
         if (!applyWidthProfile(this.ui.ck, this.scene, selection[0], profile)) return;
         this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
+    /** Reverse the single selected Path's direction in place (flips winding, and
+     *  flips which way any text-on-path flows). One undo step. */
+    reverseSelectedPath() {
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length !== 1) return;
+        const subs = this.scene.getNodeGeometry(selection[0])?.Path?.subpaths;
+        if (!subs || subs.length === 0) return;
+        this.scene.transaction(() => {
+            this.scene.replaceGeometryWithPath(selection[0], reverseSubpaths(subs));
+        });
         this.ui.syncWithSelection();
         this.renderer.requestRender();
     }
