@@ -2295,7 +2295,12 @@ body.scrubbing * {
     font-weight: 500;
     padding: 4px 8px;
     border-radius: 4px;
-    white-space: nowrap;
+    /* Wrap longer explanatory tooltips instead of overflowing the screen. */
+    white-space: normal;
+    width: max-content;
+    max-width: 240px;
+    text-align: center;
+    line-height: 1.35;
     pointer-events: none;
     opacity: 0;
     transition: opacity 0.15s ease;

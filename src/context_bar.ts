@@ -451,7 +451,16 @@ export class ContextBar {
                 '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><rect x="9" y="9" width="12" height="12" rx="2"/></svg>';
             this.makeScrubbable(amt);
             wrap.appendChild(amt);
-            wrap.appendChild(this.createButton('Offset Copy', offsetIcon, applyOffset));
+            wrap.appendChild(
+                this.createButton(
+                    'Offset Copy',
+                    offsetIcon,
+                    applyOffset,
+                    false,
+                    undefined,
+                    'Creates a new shape parallel to this path, at the distance on the left (negative = inset). The original is kept.',
+                ),
+            );
             this.el.appendChild(wrap);
 
             // Simplify — only surfaces when the path has enough points to be worth
@@ -482,7 +491,16 @@ export class ContextBar {
                     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c4 0 5-10 9-10s5 6 9 6"/></svg>';
                 this.makeScrubbable(tol);
                 sWrap.appendChild(tol);
-                sWrap.appendChild(this.createButton('Simplify', simplifyIcon, applySimplify));
+                sWrap.appendChild(
+                    this.createButton(
+                        'Simplify',
+                        simplifyIcon,
+                        applySimplify,
+                        false,
+                        undefined,
+                        'Removes redundant anchor points while keeping the shape. Higher tolerance (left) = fewer points.',
+                    ),
+                );
                 this.el.appendChild(sWrap);
             }
 
@@ -495,9 +513,16 @@ export class ContextBar {
             const reverseIcon =
                 '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h14"/><path d="M13 6l6 6-6 6"/><path d="M3 12V8"/></svg>';
             this.el.appendChild(
-                this.createButton('Reverse', reverseIcon, () => {
-                    this.input.reverseSelectedPath();
-                }),
+                this.createButton(
+                    'Reverse',
+                    reverseIcon,
+                    () => {
+                        this.input.reverseSelectedPath();
+                    },
+                    false,
+                    undefined,
+                    "Flips the path's direction. Affects which way arrowheads point, how text-on-path flows, and holes in compound paths.",
+                ),
             );
 
             // Add anchor points — insert a midpoint on every segment (complement
@@ -506,9 +531,16 @@ export class ContextBar {
                 const addPtsIcon =
                     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18c0-8 16-8 16 0" fill="none"/><circle cx="4" cy="18" r="1.6" fill="currentColor"/><circle cx="20" cy="18" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/></svg>';
                 this.el.appendChild(
-                    this.createButton('Add Points', addPtsIcon, () => {
-                        this.input.addAnchorPointsToSelection();
-                    }),
+                    this.createButton(
+                        'Add Points',
+                        addPtsIcon,
+                        () => {
+                            this.input.addAnchorPointsToSelection();
+                        },
+                        false,
+                        undefined,
+                        'Adds an anchor at the midpoint of every segment (doubling the count), then opens path editing so you can drag the new points.',
+                    ),
                 );
             }
 
@@ -1294,21 +1326,22 @@ export class ContextBar {
         return btn;
     }
 
-    /** Labeled button. Shortcuts never appear in the label — only in the
-     *  tooltip, so a tooltip is added exactly when the action has a shortcut. */
+    /** Labeled button. Pass `tooltip` to explain what a non-obvious action does
+     *  (shown on hover, wraps to a few lines). Shortcuts never appear in the label
+     *  — only in the tooltip; a bare shortcut falls back to the label as tooltip. */
     private createButton(
         title: string,
         icon: string,
         onClick: () => void,
         danger = false,
         shortcut?: string,
+        tooltip?: string,
     ): HTMLElement {
         const btn = document.createElement('button');
         btn.className = `cb-btn${danger ? ' cb-btn-danger' : ''}`;
-        if (shortcut) {
-            btn.setAttribute('data-tooltip', title);
-            btn.setAttribute('data-shortcut', shortcut);
-        }
+        const tip = tooltip ?? (shortcut ? title : undefined);
+        if (tip) btn.setAttribute('data-tooltip', tip);
+        if (shortcut) btn.setAttribute('data-shortcut', shortcut);
         btn.innerHTML = `<span class="cb-btn-icon">${icon}</span><span class="cb-btn-text">${title}</span>`;
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
