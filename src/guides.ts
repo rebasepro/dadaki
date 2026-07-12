@@ -260,30 +260,26 @@ export class GuidesController {
     }
 
     // ─── Lock + delete ───────────────────────────────────────────────────────
-    // Locked guides are keyed by axis+position (not index, which shifts when other
-    // guides are removed). A locked guide can't move, so its position is stable.
-    private lockedKeys = new Set<string>();
-
-    private guideKey(hit: GuideHit): string {
+    // Locks live in the scene (persisted via guide_locks_json) and are keyed by
+    // axis+position, not index — index shifts when other guides are removed, and a
+    // locked guide can't move so its position is stable.
+    private guidePos(hit: GuideHit): number {
         const g = this.scene.getGuides();
-        const pos = hit.axis === 'x' ? g.x[hit.index] : g.y[hit.index];
-        return `${hit.axis}:${pos}`;
+        return hit.axis === 'x' ? g.x[hit.index] : g.y[hit.index];
     }
 
     isLocked(hit: GuideHit): boolean {
-        return this.lockedKeys.has(this.guideKey(hit));
+        return this.scene.isGuideLocked(hit.axis, this.guidePos(hit));
     }
 
     setLocked(hit: GuideHit, locked: boolean): void {
-        const k = this.guideKey(hit);
-        if (locked) this.lockedKeys.add(k);
-        else this.lockedKeys.delete(k);
+        this.scene.setGuideLocked(hit.axis, this.guidePos(hit), locked);
         this.renderer.requestRender();
     }
 
     /** Remove a guide (and drop any lock it held). One undo step. */
     deleteGuide(hit: GuideHit): void {
-        this.lockedKeys.delete(this.guideKey(hit));
+        this.scene.setGuideLocked(hit.axis, this.guidePos(hit), false);
         this.scene.pushHistorySnapshot();
         this.scene.removeGuide(hit.axis, hit.index);
         this.renderer.requestRender();

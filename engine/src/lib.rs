@@ -986,6 +986,10 @@ pub struct Scene {
     /// `{nodeId:{start,end}}`). Opaque to the engine.
     #[serde(default)]
     pub markers_json: String,
+    /// Locked ruler guides (editor-owned JSON `{"x":[pos…],"y":[pos…]}`, the
+    /// positions that can't be dragged). Opaque to the engine.
+    #[serde(default)]
+    pub guide_locks_json: String,
 }
 
 fn default_document_size() -> f32 { 1000.0 }
@@ -1021,6 +1025,7 @@ impl Engine {
                 swatches_json: String::new(),
                 text_paths_json: String::new(),
                 markers_json: String::new(),
+                guide_locks_json: String::new(),
             },
             next_id: 1,
             global_transforms: HashMap::new(),
@@ -5009,6 +5014,14 @@ impl Engine {
 
     pub fn set_markers_json(&mut self, json: String) {
         self.scene.markers_json = json;
+    }
+
+    pub fn get_guide_locks_json(&self) -> String {
+        self.scene.guide_locks_json.clone()
+    }
+
+    pub fn set_guide_locks_json(&mut self, json: String) {
+        self.scene.guide_locks_json = json;
     }
 }
 

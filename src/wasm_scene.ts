@@ -37,6 +37,11 @@ export class WasmScene {
     markerLinks = new Map<number, import('./types').NodeMarkers>();
     private _markersLoaded = false;
 
+    /** Locked ruler guides as `axis:pos` keys. Persisted via the engine
+     *  (guide_locks_json); this in-memory Set is the fast read. */
+    guideLocks = new Set<string>();
+    private _guideLocksLoaded = false;
+
     /** Cached scene data, invalidated on mutation. */
     private _cachedSceneData: SceneData | null = null;
     private _sceneDataDirty: boolean = true;
@@ -301,6 +306,58 @@ export class WasmScene {
         }
     }
 
+    // ─── Guide locks (persisted via engine guide_locks_json) ─────────────────
+    private guideLockKey(axis: 'x' | 'y', pos: number): string {
+        return `${axis}:${pos}`;
+    }
+
+    private ensureGuideLocks(): void {
+        if (this._guideLocksLoaded) return;
+        this.reloadGuideLocks();
+        this._guideLocksLoaded = true;
+    }
+
+    isGuideLocked(axis: 'x' | 'y', pos: number): boolean {
+        this.ensureGuideLocks();
+        return this.guideLocks.has(this.guideLockKey(axis, pos));
+    }
+
+    setGuideLocked(axis: 'x' | 'y', pos: number, locked: boolean): void {
+        this.ensureGuideLocks();
+        const key = this.guideLockKey(axis, pos);
+        if (locked) this.guideLocks.add(key);
+        else this.guideLocks.delete(key);
+        this.persistGuideLocks();
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    private persistGuideLocks(): void {
+        if (!this.engine) return;
+        const x: number[] = [];
+        const y: number[] = [];
+        for (const k of this.guideLocks) {
+            const [axis, pos] = k.split(':');
+            (axis === 'x' ? x : y).push(Number(pos));
+        }
+        this.engine.set_guide_locks_json(JSON.stringify({ x, y }));
+    }
+
+    reloadGuideLocks(): void {
+        this.guideLocks.clear();
+        if (!this.engine) return;
+        try {
+            const obj = JSON.parse(this.engine.get_guide_locks_json() || '{}') as {
+                x?: number[];
+                y?: number[];
+            };
+            for (const p of obj.x ?? []) this.guideLocks.add(this.guideLockKey('x', p));
+            for (const p of obj.y ?? []) this.guideLocks.add(this.guideLockKey('y', p));
+        } catch {
+            /* keep empty */
+        }
+    }
+
     removeArtboard(id: number): boolean {
         this.saveHistory();
         const ok = this.engine!.remove_artboard(id);
@@ -388,6 +445,7 @@ export class WasmScene {
         // redo/load); re-read it lazily on the next getTextPath().
         this._textPathsLoaded = false;
         this._markersLoaded = false;
+        this._guideLocksLoaded = false;
         if (isMutation) {
             this.changeCounter++;
             this.onMutate?.();
