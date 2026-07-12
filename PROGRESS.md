@@ -20,6 +20,7 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 - [x] 13. Add Anchor Points — committed `a796ab2` (path_ops.addAnchorPointsToSubpaths; de Casteljau midpoints; context-bar 'Add Points'; complement of Simplify)
 - [x] 14. Average Points — committed `a8dc4a9` (input.averageSelectedPoints h/v/both; path-edit context-bar 'Average' dropdown; aligns selected anchors)
 - [x] 15. Arrowheads / line endings — committed `486f6e6` (engine markers_json tag 18; renderer.drawNodeMarkers arrow/circle/square at open-path ends, tangent-aligned, stroke color; context-bar 'Arrow' dropdown = END marker; persists). Follow-up: SVG marker export + start-marker UI.
+- [x] 16. Compound Path (Make + Release) — committed `528f908` (input.makeCompoundPath/releaseCompoundPath; even-odd holes, subpaths stay editable; context-bar 'Compound'/'Release'; pure geometry)
 
 ## Next step
 NOTE (verified this session): **distribute spacing (equal gaps) is ALREADY done**
@@ -216,3 +217,14 @@ text (currently the culling box at the path center).
   it rasterizes the canvas), a start-marker UI control (data model already supports both ends),
   more marker kinds (bar, diamond). Next big item remains components/symbols (multi-window,
   render-protocol engine work).
+- 2026-07-12 18:0x (Sun) — **Compound Path (Make + Release)** done + committed (`528f908`).
+  Distinct from the destructive booleans: Make combines the selected shapes' world subpaths
+  (via nodeToWorldPath+pathToSubpaths, so rect/ellipse/path all work) into ONE path node with
+  even-odd fill so overlaps read as holes, and the subpaths stay individually editable.
+  Release splits a 2+-subpath path back to one node per subpath (transformSubpaths to world →
+  add_path each). Context-bar 'Compound' (2+ combinable shapes) + 'Release' (single path, 2+
+  subpaths). Pure geometry → auto-persists, no engine change. Verified in browser: big+small
+  concentric circles → a clean blue donut (even-odd hole); Release → back to 2 paths
+  (screenshot). tsc + biome + vitest (225) green. Next big item remains components/symbols
+  (multi-window, render-protocol engine work). Small polish left: arrowheads SVG <marker>
+  export + start-marker UI; smart-measurements equal-spacing detection.
