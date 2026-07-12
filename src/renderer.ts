@@ -4047,25 +4047,6 @@ export class Renderer {
         const im = this.inputManager;
         if (!im) return;
         if (im.ui.activeTool !== 'selection' || im.editingNodeId != null) return;
-        const sel = this.scene.engine!.get_selection();
-        if (sel.length !== 1) return;
-        const selId = sel[0];
-
-        // Target = the object hovered while idle, or the nearest object while
-        // dragging the selection (Figma shows live spacing during a move).
-        let targetId: number | null = null;
-        if (im.isMouseDown && im.dragMode === 'move') {
-            targetId = this.nearestNode(selId);
-        } else if (!im.isMouseDown && im.hoverNodeId != null && im.hoverNodeId !== selId) {
-            targetId = im.hoverNodeId;
-        }
-        if (targetId == null) return;
-
-        const S = this.scene.getNodeBounds(selId);
-        const H = this.scene.getNodeBounds(targetId);
-        if (!S || S.length < 4 || !H || H.length < 4) return;
-        const [sx0, sy0, sx1, sy1] = S;
-        const [hx0, hy0, hx1, hy1] = H;
 
         const paint = new this.ck.Paint();
         paint.setColor(this.ck.Color(255, 45, 120, 0.95));
@@ -4074,19 +4055,51 @@ export class Renderer {
         paint.setAntiAlias(true);
         const cap = 4 / this.zoom; // half-length of the end ticks
 
-        // Outline the object being measured TO, so the numbers have an obvious
-        // referent ("the gap between the thing I'm dragging and this one").
-        const targetOutline = new this.ck.Paint();
-        targetOutline.setColor(this.ck.Color(255, 45, 120, 0.9));
-        targetOutline.setStyle(this.ck.PaintStyle.Stroke);
-        targetOutline.setStrokeWidth(1.5 / this.zoom);
-        targetOutline.setAntiAlias(true);
-        canvas.drawRect(this.ck.LTRBRect(hx0, hy0, hx1, hy1), targetOutline);
-        targetOutline.delete();
+        // While dragging: Figma-style equal-spacing hints. The drag has already
+        // snapped the object to where its gaps are equal, so we draw both equal
+        // gaps (same number on each) as confirmation.
+        if (im.isMouseDown && im.dragMode === 'move') {
+            for (const m of im.equalSpacing ?? []) {
+                const axis = m.axis === 'x' ? 'h' : 'v';
+                for (const seg of m.segs) {
+                    this.drawGap(canvas, paint, seg.a, seg.b, seg.pos, axis, cap);
+                }
+            }
+            paint.delete();
+            return;
+        }
 
-        // Each gap line is anchored to the SELECTED object's center axis. This
-        // reads as "measuring from the selection" and keeps the horizontal and
-        // vertical labels apart (one sits beside the selection, one below it).
+        // Idle: measure the gap to the hovered object — but only while Alt is held
+        // (Figma's deliberate measure gesture, not an always-on readout).
+        const sel = this.scene.engine!.get_selection();
+        if (
+            !im.hoverAlt ||
+            im.hoverNodeId == null ||
+            sel.length !== 1 ||
+            im.hoverNodeId === sel[0]
+        ) {
+            paint.delete();
+            return;
+        }
+        const S = this.scene.getNodeBounds(sel[0]);
+        const H = this.scene.getNodeBounds(im.hoverNodeId);
+        if (!S || S.length < 4 || !H || H.length < 4) {
+            paint.delete();
+            return;
+        }
+        const [sx0, sy0, sx1, sy1] = S;
+        const [hx0, hy0, hx1, hy1] = H;
+
+        // Outline the object being measured to, so the numbers have an obvious
+        // referent ("the gap between the selection and this one").
+        const outline = new this.ck.Paint();
+        outline.setColor(this.ck.Color(255, 45, 120, 0.9));
+        outline.setStyle(this.ck.PaintStyle.Stroke);
+        outline.setStrokeWidth(1.5 / this.zoom);
+        outline.setAntiAlias(true);
+        canvas.drawRect(this.ck.LTRBRect(hx0, hy0, hx1, hy1), outline);
+        outline.delete();
+
         const selCx = (sx0 + sx1) / 2;
         const selCy = (sy0 + sy1) / 2;
         if (sx1 < hx0) this.drawGap(canvas, paint, sx1, hx0, selCy, 'h', cap);
@@ -4095,35 +4108,6 @@ export class Renderer {
         else if (hy1 < sy0) this.drawGap(canvas, paint, hy1, sy0, selCx, 'v', cap);
 
         paint.delete();
-    }
-
-    /** Nearest top-level object to `selId` by center distance, excluding the
-     *  selection and its ancestors. Used for live measurements during a drag. */
-    private nearestNode(selId: number): number | null {
-        const S = this.scene.getNodeBounds(selId);
-        if (!S || S.length < 4) return null;
-        const scx = (S[0] + S[2]) / 2;
-        const scy = (S[1] + S[3]) / 2;
-        // Exclude the selected node and every ancestor (its own root/group).
-        const skip = new Set<number>();
-        let p = selId;
-        while (p >= 0) {
-            skip.add(p);
-            p = this.scene.getNodeParent(p);
-        }
-        let best: number | null = null;
-        let bestD = Infinity;
-        for (const id of this.scene.getRootNodes()) {
-            if (skip.has(id) || !this.scene.getNodeVisible(id)) continue;
-            const b = this.scene.getNodeBounds(id);
-            if (!b || b.length < 4) continue;
-            const d = Math.hypot((b[0] + b[2]) / 2 - scx, (b[1] + b[3]) / 2 - scy);
-            if (d < bestD) {
-                bestD = d;
-                best = id;
-            }
-        }
-        return best;
     }
 
     /** One gap measurement: a line between `a`→`b` on `axis` at fixed `pos`,
