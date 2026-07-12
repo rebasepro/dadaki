@@ -2619,6 +2619,49 @@ export class InputManager {
         this.ui.syncWithSelection();
     }
 
+    /**
+     * Average the selected anchors onto a common line (Illustrator's Object ›
+     * Path › Average). `h` = align to the average Y (horizontal line), `v` = the
+     * average X (vertical line), `both` = collapse to the centroid. Handles move
+     * with their anchor so curvature is preserved. One undo step.
+     */
+    averageSelectedPoints(axis: 'h' | 'v' | 'both') {
+        if (this.editingNodeId === null || !this.editingPoints) return;
+        if (this.selectedPoints.size < 2) return;
+        const sel = Array.from(this.selectedPoints).map((key) => {
+            const [subpathIdx, pointIdx] = key.split(':').map(Number);
+            return { subpathIdx, pointIdx };
+        });
+
+        let sumX = 0;
+        let sumY = 0;
+        for (const { subpathIdx, pointIdx } of sel) {
+            const p = this.editingPoints[subpathIdx].points[pointIdx];
+            sumX += p.x;
+            sumY += p.y;
+        }
+        const avgX = sumX / sel.length;
+        const avgY = sumY / sel.length;
+
+        const next: Subpath[] = JSON.parse(JSON.stringify(this.editingPoints));
+        for (const { subpathIdx, pointIdx } of sel) {
+            const p = next[subpathIdx].points[pointIdx];
+            const dx = axis !== 'h' ? avgX - p.x : 0;
+            const dy = axis !== 'v' ? avgY - p.y : 0;
+            p.x += dx;
+            p.y += dy;
+            p.cp1[0] += dx;
+            p.cp1[1] += dy;
+            p.cp2[0] += dx;
+            p.cp2[1] += dy;
+        }
+        this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(next));
+        this.editingPoints = next;
+        this.ui.contextBar?.refresh();
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
     /** Scissors without aiming: split the edited path at the single selected
      *  anchor. Same operation as a scissors-tool click on that anchor. */
     cutAtSelectedPoint() {

@@ -981,6 +981,35 @@ export class ContextBar {
                     '⌘J',
                 ),
             );
+
+            // Average the selected anchors onto a common line (Illustrator's Average).
+            const avgIcon = (d: string) =>
+                `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">${d}</svg>`;
+            this.el.appendChild(
+                this.createDropdown(
+                    'Average',
+                    avgIcon(
+                        '<circle cx="6" cy="8" r="1.6" fill="currentColor" stroke="none"/><circle cx="18" cy="16" r="1.6" fill="currentColor" stroke="none"/><path d="M4 12h16"/>',
+                    ),
+                    [
+                        {
+                            label: 'Horizontal',
+                            icon: avgIcon('<path d="M4 12h16"/>'),
+                            onSelect: () => this.input.averageSelectedPoints('h'),
+                        },
+                        {
+                            label: 'Vertical',
+                            icon: avgIcon('<path d="M12 4v16"/>'),
+                            onSelect: () => this.input.averageSelectedPoints('v'),
+                        },
+                        {
+                            label: 'Both',
+                            icon: avgIcon('<circle cx="12" cy="12" r="4"/>'),
+                            onSelect: () => this.input.averageSelectedPoints('both'),
+                        },
+                    ],
+                ),
+            );
         }
 
         this.el.appendChild(this.createSeparator());
