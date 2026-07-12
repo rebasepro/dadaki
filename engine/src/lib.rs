@@ -3663,6 +3663,13 @@ impl Engine {
     /// The cloned nodes have fresh IDs and correct parent/children pointers.
     /// The cloned root's parent is set to None (caller is responsible for reparenting).
     fn deep_clone_subtree(&mut self, id: u32) -> u32 {
+        self.deep_clone_subtree_inner(id, true)
+    }
+
+    /// Inner recursion for [`Self::deep_clone_subtree`]. The `apply_copy_suffix`
+    /// flag is only true for the top-level node being duplicated, so the
+    /// " copy" suffix lands on the copied root and not on every descendant.
+    fn deep_clone_subtree_inner(&mut self, id: u32, apply_copy_suffix: bool) -> u32 {
         let new_id = self.next_id;
         self.next_id += 1;
 
@@ -3670,7 +3677,9 @@ impl Engine {
             let old_children = node.children.clone();
             let mut new_node = node;
             new_node.id = new_id;
-            new_node.name = format!("{} copy", new_node.name);
+            if apply_copy_suffix {
+                new_node.name = format!("{} copy", new_node.name);
+            }
             new_node.children = Vec::new();
             new_node.parent = None;
 
@@ -3686,7 +3695,7 @@ impl Engine {
 
             // Recursively clone children and reparent them
             for child_id in old_children {
-                let new_child_id = self.deep_clone_subtree(child_id);
+                let new_child_id = self.deep_clone_subtree_inner(child_id, false);
                 // set_parent handles adding to children vec and updating parent pointer
                 if let Some(child_node) = self.scene.nodes.get_mut(&new_child_id) {
                     child_node.parent = Some(new_id);
