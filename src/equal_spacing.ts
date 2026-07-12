@@ -168,19 +168,25 @@ export function neighborGaps(scene: WasmScene, movingIds: number[], S: Bounds): 
     for (const axis of ['x', 'y'] as const) {
         const s = project(S, axis);
         const draw = axis === 'x' ? 'h' : 'v';
-        let L: Proj | undefined;
-        let R: Proj | undefined;
-        for (const b of others) {
-            const p = project(b, axis);
-            if (crossOverlap(p, s) <= 0.5) continue;
-            if (p.hi <= s.lo) {
-                if (!L || p.hi > L.hi) L = p; // nearest on the low side
-            } else if (p.lo >= s.hi) {
-                if (!R || p.lo < R.lo) R = p; // nearest on the high side
-            }
+        const row = others.map((b) => project(b, axis)).filter((p) => crossOverlap(p, s) > 0.5);
+        const lefts = row.filter((p) => p.hi <= s.lo).sort((a, b) => b.hi - a.hi); // nearest first
+        const rights = row.filter((p) => p.lo >= s.hi).sort((a, b) => a.lo - b.lo);
+        const gap = (a: number, b: number, pos: number) => out.push({ a, b, pos, axis: draw });
+
+        // Left: the current gap to the nearest neighbour, PLUS the reference gap
+        // just beyond it (so you can see the spacing you're trying to match).
+        const L = lefts[0];
+        if (L && s.lo - L.hi > 0.5) {
+            gap(L.hi, s.lo, crossMid(L, s));
+            const L2 = lefts.find((p) => p.hi <= L.lo);
+            if (L2 && L.lo - L2.hi > 0.5) gap(L2.hi, L.lo, crossMid(L2, L));
         }
-        if (L && s.lo - L.hi > 0.5) out.push({ a: L.hi, b: s.lo, pos: crossMid(L, s), axis: draw });
-        if (R && R.lo - s.hi > 0.5) out.push({ a: s.hi, b: R.lo, pos: crossMid(R, s), axis: draw });
+        const R = rights[0];
+        if (R && R.lo - s.hi > 0.5) {
+            gap(s.hi, R.lo, crossMid(R, s));
+            const R2 = rights.find((p) => p.lo >= R.hi);
+            if (R2 && R2.lo - R.hi > 0.5) gap(R.hi, R2.lo, crossMid(R, R2));
+        }
     }
     return out;
 }

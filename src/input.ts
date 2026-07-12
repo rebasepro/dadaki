@@ -4395,7 +4395,9 @@ export class InputManager {
                     // already claim, so the two systems don't fight.
                     const hasX = this.activeSnapGuides.some((g) => g.axis === 'x');
                     const hasY = this.activeSnapGuides.some((g) => g.axis === 'y');
-                    const thr = 8 / this.renderer.zoom;
+                    // A touch grabbier than edge alignment — an exact equal-spacing
+                    // position is harder to hit by hand than a shared edge.
+                    const thr = 12 / this.renderer.zoom;
                     const es = computeEqualSpacing(this.scene, this.moveOriginalIds, [
                         sb.x + totalDx,
                         sb.y + totalDy,
