@@ -2394,8 +2394,6 @@ export class Renderer {
             this.drawGuides(canvas, viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
             // Draw snapping alignment guides
             this.drawSnapGuides(canvas, viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
-            // Draw smart measurements (selection ↔ hovered object distances)
-            this.drawMeasurements(canvas);
         }
 
         canvas.restore();
@@ -2405,6 +2403,9 @@ export class Renderer {
             this.drawHoverOutline(canvas, dpr);
             // Draw selection overlay
             this.renderSelectionOverlay(canvas, dpr);
+            // Smart measurements — drawn AFTER the selection overlay so the gap
+            // numbers/lines sit above the resize handles instead of under them.
+            this.drawMeasurements(canvas, dpr);
             // Draw gradient editing handles (axis + stops on the shape)
             this.drawGradientOverlay(canvas, dpr);
             // Draw direct selection edit handles
@@ -4044,11 +4045,22 @@ export class Renderer {
      * cursor hovering a different object, draw the clear-space gaps between the
      * two bounding boxes as pink lines with distance labels.
      */
-    private drawMeasurements(canvas: Canvas) {
+    private drawMeasurements(canvas: Canvas, dpr: number) {
         const im = this.inputManager;
         if (!im) return;
         if (im.ui.activeTool !== 'selection' || im.editingNodeId != null) return;
+        // Runs after the device-space overlay pass so the gap numbers/lines sit
+        // ABOVE the resize handles — re-apply the camera transform to draw in world
+        // space, then pop it.
+        canvas.save();
+        canvas.scale(dpr, dpr);
+        canvas.translate(this.pan.x, this.pan.y);
+        canvas.scale(this.zoom, this.zoom);
+        this.drawMeasurementsInner(canvas, im);
+        canvas.restore();
+    }
 
+    private drawMeasurementsInner(canvas: Canvas, im: InputManager): void {
         const paint = new this.ck.Paint();
         paint.setColor(this.ck.Color(255, 45, 120, 0.95));
         paint.setStyle(this.ck.PaintStyle.Stroke);
