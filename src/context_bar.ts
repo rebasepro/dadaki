@@ -577,24 +577,10 @@ export class ContextBar {
                 ),
             );
 
-            // Add anchor points — insert a midpoint on every segment (complement
-            // of Simplify). Only worth showing above a couple of points.
-            if (this.input.selectedPathPointCount() >= 2) {
-                const addPtsIcon =
-                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18c0-8 16-8 16 0" fill="none"/><circle cx="4" cy="18" r="1.6" fill="currentColor"/><circle cx="20" cy="18" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/></svg>';
-                this.el.appendChild(
-                    this.createButton(
-                        'Add Points',
-                        addPtsIcon,
-                        () => {
-                            this.input.addAnchorPointsToSelection();
-                        },
-                        false,
-                        undefined,
-                        'Adds an anchor at the midpoint of every segment (doubling the count), then opens path editing so you can drag the new points.',
-                    ),
-                );
-            }
+            // NOTE: no blunt "add a midpoint to every segment" button here — that
+            // doubles the point count and is useless (and a footgun) on a dense
+            // path. The precise way to add anchors is the Add Point (+) toggle in
+            // path-edit mode: arm it and click exactly where you want a point.
 
             // Release Compound Path — only when the path has 2+ subpaths (i.e. it
             // could be a compound). Splits it back into separate paths.

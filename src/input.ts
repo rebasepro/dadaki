@@ -8,7 +8,6 @@ import { offsetPath } from './offset_path';
 import { outlineStroke } from './outline_stroke';
 import {
     addAnchorPoint,
-    addAnchorPointsToSubpaths,
     findNearestSegment,
     joinSubpaths,
     mergeSelectedAnchors,
@@ -2771,24 +2770,6 @@ export class InputManager {
 
     /** Add an anchor at the midpoint of every segment of the selected Path (the
      *  complement of Simplify). Curve unchanged. One undo step. */
-    addAnchorPointsToSelection() {
-        const selection = Array.from(this.scene.engine!.get_selection());
-        if (selection.length !== 1) return;
-        const id = selection[0];
-        const subs = this.scene.getNodeGeometry(id)?.Path?.subpaths;
-        if (!subs || subs.length === 0) return;
-        this.scene.transaction(() => {
-            this.scene.replaceGeometryWithPath(id, addAnchorPointsToSubpaths(subs));
-        });
-        // The new anchors sit on the existing edges, so the outline is unchanged —
-        // reveal them by dropping into path-edit (direct-select) mode, which also
-        // re-reads the denser geometry into the anchor overlay. Otherwise it looks
-        // like nothing happened.
-        this.ui.setActiveTool('direct');
-        this.enterPathEditMode(id);
-        this.renderer.requestRender();
-    }
-
     /** Make Compound Path: combine the selected shapes into one path whose
      *  subpaths use the even-odd rule, so overlaps read as holes (donuts, letters
      *  with counters). Non-destructive — the subpaths stay individually editable,
