@@ -122,6 +122,44 @@ function axisMatch(S: Bounds, others: Bounds[], axis: 'x' | 'y'): EqualMatch | n
     return { axis, delta: best.center - center, gap: best.gap, segs: best.segs };
 }
 
+/** A live gap to draw while dragging, tagged with its orientation. */
+export interface DragGap extends GapSeg {
+    axis: 'h' | 'v';
+}
+
+/** The current gaps from the moving selection `S` to its immediate neighbours on
+ *  each side (that share a row/column) — the live readout Figma shows throughout a
+ *  drag, equal or not. */
+export function neighborGaps(scene: WasmScene, movingIds: number[], S: Bounds): DragGap[] {
+    const moving = new Set(movingIds);
+    const others: Bounds[] = [];
+    for (const id of scene.getRootNodes()) {
+        if (moving.has(id)) continue;
+        const b = scene.getNodeBounds(id);
+        if (b && b.length >= 4) others.push([b[0], b[1], b[2], b[3]]);
+    }
+
+    const out: DragGap[] = [];
+    for (const axis of ['x', 'y'] as const) {
+        const s = project(S, axis);
+        const draw = axis === 'x' ? 'h' : 'v';
+        let L: Proj | undefined;
+        let R: Proj | undefined;
+        for (const b of others) {
+            const p = project(b, axis);
+            if (crossOverlap(p, s) <= 0.5) continue;
+            if (p.hi <= s.lo) {
+                if (!L || p.hi > L.hi) L = p; // nearest on the low side
+            } else if (p.lo >= s.hi) {
+                if (!R || p.lo < R.lo) R = p; // nearest on the high side
+            }
+        }
+        if (L && s.lo - L.hi > 0.5) out.push({ a: L.hi, b: s.lo, pos: crossMid(L, s), axis: draw });
+        if (R && R.lo - s.hi > 0.5) out.push({ a: s.hi, b: R.lo, pos: crossMid(R, s), axis: draw });
+    }
+    return out;
+}
+
 /** Detect the best horizontal and vertical equal-spacing match for the moving
  *  selection `S` (each may be null). The caller snaps when the delta is small. */
 export function computeEqualSpacing(

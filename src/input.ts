@@ -227,9 +227,6 @@ export class InputManager {
     /** Alt/Option held during the current hover — gates the measure-to-hovered
      *  readout (Figma only measures on Alt-hover, not always). */
     hoverAlt = false;
-    /** Active equal-spacing matches for the current move drag (Figma-style), drawn
-     *  by the renderer. Null when not dragging or no gaps are equal. */
-    equalSpacing: import('./equal_spacing').EqualMatch[] | null = null;
     /** Guide highlighted by hover or an in-progress drag (drawn emphasized). */
     highlightedGuide: GuideHit | null = null;
     /** Guide clicked/selected (drives the guide action bar: Lock, Delete). */
@@ -4373,7 +4370,6 @@ export class InputManager {
                 // geometry. Cmd/Ctrl bypasses snapping; with Shift only the
                 // free axis snaps so the constraint is never broken.
                 this.activeSnapGuides = [];
-                this.equalSpacing = null;
                 if (!e.metaKey && !e.ctrlKey && this.moveStartBounds) {
                     const sb = this.moveStartBounds;
                     const snapped = this.snap.snapBounds(
@@ -4401,16 +4397,12 @@ export class InputManager {
                         sb.x + totalDx + sb.w,
                         sb.y + totalDy + sb.h,
                     ]);
-                    const matches: import('./equal_spacing').EqualMatch[] = [];
                     if (!hasX && !xLocked && es.x && Math.abs(es.x.delta) < thr) {
                         totalDx += es.x.delta;
-                        matches.push(es.x);
                     }
                     if (!hasY && !yLocked && es.y && Math.abs(es.y.delta) < thr) {
                         totalDy += es.y.delta;
-                        matches.push(es.y);
                     }
-                    if (matches.length) this.equalSpacing = matches;
                 }
 
                 let moveTargets: number[];
@@ -4695,7 +4687,6 @@ export class InputManager {
         this.penHandleDragging = false;
         this.snap.end();
         this.activeSnapGuides = [];
-        this.equalSpacing = null;
 
         // Finish a ruler-guide drag: dropping it back over a ruler (or off the
         // canvas) deletes it; otherwise persist the new position.

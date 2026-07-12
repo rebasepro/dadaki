@@ -5,6 +5,7 @@ type OutlinePt = { x: number; y: number; cp1: number[]; cp2: number[] };
 
 import { adaptiveTileSources, maxTileScale, rasterizeAdaptiveTile } from './adaptive_tiles';
 import { appendSubpathsToPath, invertAffine, nodeToWorldPath } from './boolean_ops';
+import { neighborGaps } from './equal_spacing';
 import {
     buildFontProvider,
     getFontData,
@@ -4055,14 +4056,26 @@ export class Renderer {
         paint.setAntiAlias(true);
         const cap = 4 / this.zoom; // half-length of the end ticks
 
-        // While dragging: Figma-style equal-spacing hints. The drag has already
-        // snapped the object to where its gaps are equal, so we draw both equal
-        // gaps (same number on each) as confirmation.
+        // While dragging: show the live gap to the neighbours on each side (Figma
+        // shows spacing throughout a drag, not only when it's equal). The equal-
+        // spacing snap makes matching gaps line up on the same number.
         if (im.isMouseDown && im.dragMode === 'move') {
-            for (const m of im.equalSpacing ?? []) {
-                const axis = m.axis === 'x' ? 'h' : 'v';
-                for (const seg of m.segs) {
-                    this.drawGap(canvas, paint, seg.a, seg.b, seg.pos, axis, cap);
+            const selIds = Array.from(this.scene.engine!.get_selection());
+            let x0 = Infinity;
+            let y0 = Infinity;
+            let x1 = -Infinity;
+            let y1 = -Infinity;
+            for (const id of selIds) {
+                const b = this.scene.getNodeBounds(id);
+                if (!b || b.length < 4) continue;
+                x0 = Math.min(x0, b[0]);
+                y0 = Math.min(y0, b[1]);
+                x1 = Math.max(x1, b[2]);
+                y1 = Math.max(y1, b[3]);
+            }
+            if (Number.isFinite(x0)) {
+                for (const g of neighborGaps(this.scene, selIds, [x0, y0, x1, y1])) {
+                    this.drawGap(canvas, paint, g.a, g.b, g.pos, g.axis, cap);
                 }
             }
             paint.delete();
