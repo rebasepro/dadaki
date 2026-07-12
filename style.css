@@ -2373,38 +2373,24 @@ body.scrubbing * {
     appearance: none;
 }
 
-/* Compact numeric input for context-bar controls (e.g. Offset distance). */
-.cb-num {
-    width: 44px;
-    height: 22px;
-    border: 1px solid var(--border-light);
-    border-radius: 4px;
-    background: var(--bg-input);
-    color: var(--text-main);
-    font-size: 11px;
-    font-family: inherit;
-    padding: 0 6px;
+/* Numeric field for context-bar controls (Offset, Blend). Reuses the panel's
+   .dim-input structure — a draggable .dim-label handle + text input — so the
+   scrub "slider" is identical everywhere; this only sets the bar sizing. */
+.cb-dim-input {
+    width: 72px;
+    height: 24px;
+    border-color: var(--border-light);
+}
+.cb-dim-input input {
     text-align: right;
+    padding-right: 6px;
     -webkit-appearance: none;
     appearance: none;
 }
-.cb-num::-webkit-inner-spin-button,
-.cb-num::-webkit-outer-spin-button {
+.cb-dim-input input::-webkit-inner-spin-button,
+.cb-dim-input input::-webkit-outer-spin-button {
     -webkit-appearance: none;
     margin: 0;
-}
-.cb-num:focus {
-    outline: none;
-    border-color: var(--accent);
-}
-/* Scrubbable action-bar fields: drag horizontally to adjust (like the panel
-   dimension fields). The resize cursor hints the affordance; a plain click
-   still focuses to type. While focused, restore the text caret. */
-.cb-num-scrub {
-    cursor: ew-resize;
-}
-.cb-num-scrub:focus {
-    cursor: text;
 }
 
 /* Small value popover a context-bar command opens to collect a number
@@ -2420,11 +2406,6 @@ body.scrubbing * {
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
     z-index: 1000;
 }
-.cb-value-popover-label {
-    font-size: 11px;
-    color: var(--text-dim);
-}
-
 /* Badge */
 .cb-badge {
     background: var(--accent-dim);

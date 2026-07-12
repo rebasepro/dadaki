@@ -454,20 +454,11 @@ export class ContextBar {
         const pop = document.createElement('div');
         pop.className = 'cb-value-popover';
 
-        const label = document.createElement('span');
-        label.className = 'cb-value-popover-label';
-        label.textContent = 'Offset';
-
         const nodeId = Array.from(this.scene.engine?.get_selection() ?? [])[0];
-
-        const input = document.createElement('input');
-        input.type = 'number';
-        input.className = 'cb-num';
-        input.value = String(this.input.lastOffsetAmount);
-        input.title = 'Offset distance (negative = inset)';
 
         // Live preview: recompute the offset outline for the current value and hand
         // it to the renderer as a world-space ghost. Cleared on apply/cancel.
+        let input!: HTMLInputElement;
         const updatePreview = () => {
             const dist = parseFloat(input.value);
             if (nodeId == null || !Number.isFinite(dist) || dist === 0) {
@@ -490,8 +481,13 @@ export class ContextBar {
             this.input.offsetPreview = null;
             this.scene.renderer?.requestRender();
         };
-        this.makeScrubbable(input, updatePreview);
-        input.addEventListener('input', updatePreview);
+
+        // Same scrub field as the properties panel: a draggable "Offset" handle + input.
+        const field = this.createScrubField('Offset', this.input.lastOffsetAmount, {
+            title: 'Offset distance (negative = inset)',
+            onChange: updatePreview,
+        });
+        input = field.input;
 
         const close = () => {
             clearPreview();
@@ -522,8 +518,7 @@ export class ContextBar {
             apply,
         );
 
-        pop.appendChild(label);
-        pop.appendChild(input);
+        pop.appendChild(field.wrap);
         pop.appendChild(applyBtn);
         pop.style.position = 'fixed';
         pop.style.visibility = 'hidden';
@@ -902,17 +897,15 @@ export class ContextBar {
             wrap.style.display = 'inline-flex';
             wrap.style.alignItems = 'center';
             wrap.style.gap = '4px';
-            const steps = document.createElement('input');
-            steps.type = 'number';
-            steps.className = 'cb-num';
-            steps.min = '1';
-            steps.value = String(this.input.lastBlendSteps);
-            steps.title = 'Number of in-between shapes';
+            const { wrap: stepsWrap, input: steps } = this.createScrubField(
+                '#',
+                this.input.lastBlendSteps,
+                { min: 1, title: 'Number of in-between shapes' },
+            );
             const doBlend = () => {
                 const n = Math.max(1, Math.round(parseFloat(steps.value) || 0));
                 if (n >= 1) this.input.blendSelection(n);
             };
-            steps.addEventListener('click', (e) => e.stopPropagation());
             steps.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') {
                     e.preventDefault();
@@ -921,8 +914,7 @@ export class ContextBar {
             });
             const blendIcon =
                 '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 8.5l7 7" stroke-dasharray="2 2"/></svg>';
-            this.makeScrubbable(steps);
-            wrap.appendChild(steps);
+            wrap.appendChild(stepsWrap);
             wrap.appendChild(this.createButton('Blend', blendIcon, doBlend));
             this.el.appendChild(wrap);
         }
@@ -1245,15 +1237,45 @@ export class ContextBar {
         return hint;
     }
 
-    /** Make a context-bar number field scrub on horizontal drag — the same feel
-     *  as the properties-panel dimension fields (drag = adjust, Shift = ×10, a
-     *  plain click still focuses to type). Scrubbing ONLY sets the value; the
-     *  action is a separate explicit step (its button, or Enter), so dragging the
-     *  distance never triggers the action repeatedly. */
-    private makeScrubbable(input: HTMLInputElement, onChange?: () => void) {
-        input.classList.add('cb-num-scrub');
-        input.addEventListener('pointerdown', (e: PointerEvent) => {
+    /** A context-bar numeric field that matches the properties panel exactly: a
+     *  `.dim-input` box with a draggable `.dim-label` handle (the Figma "slider" —
+     *  drag = adjust, Shift = ×10) and a plain text input for typing. `onChange`
+     *  fires on every value change (scrub or type). */
+    private createScrubField(
+        label: string,
+        value: number,
+        opts?: { min?: number; step?: number; title?: string; onChange?: () => void },
+    ): { wrap: HTMLElement; input: HTMLInputElement } {
+        const wrap = document.createElement('div');
+        wrap.className = 'dim-input cb-dim-input';
+
+        const handle = document.createElement('span');
+        handle.className = 'dim-label';
+        handle.textContent = label;
+        if (opts?.title) handle.title = opts.title;
+
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.value = String(value);
+        if (opts?.min !== undefined) input.min = String(opts.min);
+        if (opts?.step !== undefined) input.step = String(opts.step);
+        input.addEventListener('click', (e) => e.stopPropagation());
+        if (opts?.onChange) input.addEventListener('input', opts.onChange);
+
+        this.makeScrubbable(handle, input, opts?.onChange);
+
+        wrap.appendChild(handle);
+        wrap.appendChild(input);
+        return { wrap, input };
+    }
+
+    /** Scrub `input`'s value by dragging `handle` (the `.dim-label`) — matches the
+     *  properties panel: drag = adjust, Shift = ×10, plain click focuses the input
+     *  to type. `onChange` fires on each change. */
+    private makeScrubbable(handle: HTMLElement, input: HTMLInputElement, onChange?: () => void) {
+        handle.addEventListener('pointerdown', (e: PointerEvent) => {
             if (e.button !== 0) return;
+            e.preventDefault();
             const startX = e.clientX;
             const startVal = parseFloat(input.value) || 0;
             const step = parseFloat(input.step) || 1;
@@ -1261,14 +1283,13 @@ export class ContextBar {
             const max = input.max !== '' ? parseFloat(input.max) : Number.POSITIVE_INFINITY;
             let moved = false;
             try {
-                input.setPointerCapture(e.pointerId);
+                handle.setPointerCapture(e.pointerId);
             } catch {}
 
             const onMove = (ev: PointerEvent) => {
                 const dx = ev.clientX - startX;
                 if (!moved && Math.abs(dx) < 3) return; // click-vs-drag threshold
                 moved = true;
-                ev.preventDefault();
                 document.body.classList.add('scrubbing');
                 const mult = ev.shiftKey ? 10 : 1;
                 const raw = startVal + Math.round(dx) * step * mult;
@@ -1280,17 +1301,21 @@ export class ContextBar {
                 }
             };
             const onUp = () => {
-                input.removeEventListener('pointermove', onMove);
-                input.removeEventListener('pointerup', onUp);
-                input.removeEventListener('pointercancel', onUp);
+                handle.removeEventListener('pointermove', onMove);
+                handle.removeEventListener('pointerup', onUp);
+                handle.removeEventListener('pointercancel', onUp);
                 document.body.classList.remove('scrubbing');
                 try {
-                    input.releasePointerCapture(e.pointerId);
+                    handle.releasePointerCapture(e.pointerId);
                 } catch {}
+                if (!moved) {
+                    input.focus();
+                    input.select();
+                }
             };
-            input.addEventListener('pointermove', onMove);
-            input.addEventListener('pointerup', onUp);
-            input.addEventListener('pointercancel', onUp);
+            handle.addEventListener('pointermove', onMove);
+            handle.addEventListener('pointerup', onUp);
+            handle.addEventListener('pointercancel', onUp);
         });
     }
 
