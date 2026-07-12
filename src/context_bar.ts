@@ -449,6 +449,7 @@ export class ContextBar {
             });
             const offsetIcon =
                 '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><rect x="9" y="9" width="12" height="12" rx="2"/></svg>';
+            this.makeScrubbable(amt, applyOffset);
             wrap.appendChild(amt);
             wrap.appendChild(this.createButton('Offset', offsetIcon, applyOffset));
             this.el.appendChild(wrap);
@@ -479,6 +480,7 @@ export class ContextBar {
                 });
                 const simplifyIcon =
                     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c4 0 5-10 9-10s5 6 9 6"/></svg>';
+                this.makeScrubbable(tol, applySimplify);
                 sWrap.appendChild(tol);
                 sWrap.appendChild(this.createButton('Simplify', simplifyIcon, applySimplify));
                 this.el.appendChild(sWrap);
@@ -826,6 +828,7 @@ export class ContextBar {
             });
             const blendIcon =
                 '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 8.5l7 7" stroke-dasharray="2 2"/></svg>';
+            this.makeScrubbable(steps, doBlend);
             wrap.appendChild(steps);
             wrap.appendChild(this.createButton('Blend', blendIcon, doBlend));
             this.el.appendChild(wrap);
@@ -1147,6 +1150,52 @@ export class ContextBar {
         hint.className = 'cb-hint';
         hint.textContent = text;
         return hint;
+    }
+
+    /** Make a context-bar number field scrub on horizontal drag — the same feel
+     *  as the properties-panel dimension fields (drag = adjust, Shift = ×10, a
+     *  plain click still focuses to type). The value settles on release, at which
+     *  point `apply` runs so a scrubbed value is applied just like pressing Enter. */
+    private makeScrubbable(input: HTMLInputElement, apply: () => void) {
+        input.classList.add('cb-num-scrub');
+        input.addEventListener('pointerdown', (e: PointerEvent) => {
+            if (e.button !== 0) return;
+            const startX = e.clientX;
+            const startVal = parseFloat(input.value) || 0;
+            const step = parseFloat(input.step) || 1;
+            const min = input.min !== '' ? parseFloat(input.min) : Number.NEGATIVE_INFINITY;
+            const max = input.max !== '' ? parseFloat(input.max) : Number.POSITIVE_INFINITY;
+            let moved = false;
+            try {
+                input.setPointerCapture(e.pointerId);
+            } catch {}
+
+            const onMove = (ev: PointerEvent) => {
+                const dx = ev.clientX - startX;
+                if (!moved && Math.abs(dx) < 3) return; // click-vs-drag threshold
+                moved = true;
+                ev.preventDefault();
+                document.body.classList.add('scrubbing');
+                const mult = ev.shiftKey ? 10 : 1;
+                const raw = startVal + Math.round(dx) * step * mult;
+                const val = Math.max(min, Math.min(max, raw));
+                const next = String(Math.round(val * 100) / 100);
+                if (next !== input.value) input.value = next;
+            };
+            const onUp = () => {
+                input.removeEventListener('pointermove', onMove);
+                input.removeEventListener('pointerup', onUp);
+                input.removeEventListener('pointercancel', onUp);
+                document.body.classList.remove('scrubbing');
+                try {
+                    input.releasePointerCapture(e.pointerId);
+                } catch {}
+                if (moved) apply();
+            };
+            input.addEventListener('pointermove', onMove);
+            input.addEventListener('pointerup', onUp);
+            input.addEventListener('pointercancel', onUp);
+        });
     }
 
     /** A labeled button that opens a small popup menu (Figma-style split control).

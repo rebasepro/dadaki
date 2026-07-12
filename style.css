@@ -2392,6 +2392,15 @@ body.scrubbing * {
     outline: none;
     border-color: var(--accent);
 }
+/* Scrubbable action-bar fields: drag horizontally to adjust (like the panel
+   dimension fields). The resize cursor hints the affordance; a plain click
+   still focuses to type. While focused, restore the text caret. */
+.cb-num-scrub {
+    cursor: ew-resize;
+}
+.cb-num-scrub:focus {
+    cursor: text;
+}
 
 /* Badge */
 .cb-badge {
