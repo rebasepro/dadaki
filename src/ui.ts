@@ -3801,6 +3801,33 @@ export class UIEngine {
         URL.revokeObjectURL(url);
     }
 
+    /** Build the text-on-path export data for the nodes being exported: for each
+     *  text→path link where both nodes are in the export, the path's outline in
+     *  WORLD coordinates as an SVG `d` string (so `<textPath>` flows correctly). */
+    private textPathsForExport(nodes: SVGExportInput['nodes']): SVGExportInput['textPaths'] {
+        const out: NonNullable<SVGExportInput['textPaths']> = {};
+        for (const [textId, pathId] of this.scene.textPathLinks) {
+            if (!nodes[textId] || !nodes[pathId]) continue;
+            const subs = this.scene.getResolvedSubpaths(pathId);
+            const t = this.scene.getTransform(pathId); // row-major world affine
+            const wx = (x: number, y: number) => t[0] * x + t[1] * y + t[2];
+            const wy = (x: number, y: number) => t[3] * x + t[4] * y + t[5];
+            let d = '';
+            for (const sp of subs) {
+                if (sp.points.length < 2) continue;
+                d += `M ${wx(sp.points[0].x, sp.points[0].y)} ${wy(sp.points[0].x, sp.points[0].y)} `;
+                for (let i = 1; i < sp.points.length; i++) {
+                    const prev = sp.points[i - 1];
+                    const p = sp.points[i];
+                    d += `C ${wx(prev.cp2[0], prev.cp2[1])} ${wy(prev.cp2[0], prev.cp2[1])} ${wx(p.cp1[0], p.cp1[1])} ${wy(p.cp1[0], p.cp1[1])} ${wx(p.x, p.y)} ${wy(p.x, p.y)} `;
+                }
+                if (sp.closed) d += 'Z ';
+            }
+            if (d) out[textId] = { pathId, d: d.trim() };
+        }
+        return out;
+    }
+
     /** Build a high-fidelity SVG string containing ONLY the selected shape nodes and their children. */
     buildSVGStringForSelection(
         selection: number[],
@@ -3899,6 +3926,7 @@ export class UIEngine {
             imageDataUris,
             viewBox: bounds,
             background,
+            textPaths: this.textPathsForExport(nodes),
         });
 
         return svg;
@@ -4166,6 +4194,7 @@ export class UIEngine {
             imageDataUris,
             viewBox: bounds,
             background,
+            textPaths: this.textPathsForExport(nodes),
         });
 
         // Embed the binary .dataki payload for round-tripping

@@ -98,6 +98,9 @@ export interface SVGExportInput {
     livePaint?: LivePaintRenderData;
     /** Optional data-URI per image id (for exporting Image nodes as <image>). */
     imageDataUris?: Record<number, string>;
+    /** Text-on-path links: text node id → its path id and that path's outline in
+     *  WORLD coordinates (a `d` string). Emits `<textPath>` referencing a def. */
+    textPaths?: Record<number, { pathId: number; d: string }>;
     /**
      * Optional export bounds (a specific artboard, or the whole canvas). When
      * given, the SVG viewBox is `x y w h` and width/height are `w×h`; content is
@@ -126,6 +129,7 @@ export function buildSVGFromData(input: SVGExportInput): string {
         imageDataUris,
         viewBox,
         background,
+        textPaths,
     } = input;
 
     // ─── Live Paint compositing (mirrors the render writer) ──────────────────
@@ -232,6 +236,9 @@ export function buildSVGFromData(input: SVGExportInput): string {
     // Collect <pattern> defs (tiled-image pattern fills)
     const patternDefs: string[] = [];
     let patternIdCounter = 0;
+
+    // Collect <path> defs referenced by text-on-path <textPath> elements.
+    const textPathDefs: string[] = [];
 
     /** Build a <filter> def for a node's effects, returning its id (or null). */
     const buildFilterDef = (effects: NonNullable<NodeStyle['effects']>): string | null => {
@@ -479,8 +486,16 @@ export function buildSVGFromData(input: SVGExportInput): string {
         const node = nodes[id];
         if (!node) return '';
 
+        // On-path text is drawn in WORLD space (its <textPath> references a
+        // world-space path def), so its node transform is bypassed — the glyphs
+        // follow the path, not the node's parked position.
+        const onPath =
+            node.node_type === 'Text' && node.geometry.Text ? textPaths?.[id] : undefined;
+
         // Use local (column-major) transform, falling back to identity
-        const localTransform = localTransforms[id] || [1, 0, 0, 0, 1, 0, 0, 0, 1];
+        const localTransform = onPath
+            ? [1, 0, 0, 0, 1, 0, 0, 0, 1]
+            : localTransforms[id] || [1, 0, 0, 0, 1, 0, 0, 0, 1];
         const matrix = matrixToSVGTransform(localTransform);
 
         // Build <g> attributes: transform + visibility
@@ -570,7 +585,12 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 const lsAttr = ls ? ` letter-spacing="${ls}"` : '';
                 const content = geo.Text.content;
                 const lines = content.split('\n');
-                if (lines.length <= 1) {
+                if (onPath) {
+                    // Text on a path: reference a world-space path def via <textPath>.
+                    const defId = `tp-${id}`;
+                    textPathDefs.push(`<path id="${defId}" d="${onPath.d}" fill="none"/>`);
+                    nodeSvg += `<text font-size="${geo.Text.font_size}"${fontFamily}${weightAttr}${styleAttr}${lsAttr} ${attrs}><textPath href="#${defId}">${escapeXml(content.replace(/\n/g, ' '))}</textPath></text>`;
+                } else if (lines.length <= 1) {
                     nodeSvg += `<text x="0" y="0" font-size="${geo.Text.font_size}"${fontFamily}${textAnchor}${lineHeightAttr}${weightAttr}${styleAttr}${lsAttr} ${attrs}>${escapeXml(content)}</text>`;
                 } else {
                     const lh = geo.Text.line_height || 1.2;
@@ -622,14 +642,15 @@ export function buildSVGFromData(input: SVGExportInput): string {
         }
     }
 
-    // Insert <defs> (gradients + masks + filters + patterns) if any were collected
+    // Insert <defs> (gradients + masks + filters + patterns + text paths) if any
     if (
         gradientDefs.length > 0 ||
         maskDefs.length > 0 ||
         filterDefs.length > 0 ||
-        patternDefs.length > 0
+        patternDefs.length > 0 ||
+        textPathDefs.length > 0
     ) {
-        const defsBlock = `<defs>${gradientDefs.join('')}${maskDefs.join('')}${filterDefs.join('')}${patternDefs.join('')}</defs>`;
+        const defsBlock = `<defs>${gradientDefs.join('')}${maskDefs.join('')}${filterDefs.join('')}${patternDefs.join('')}${textPathDefs.join('')}</defs>`;
         // Insert after the opening <svg ...> tag
         const insertIdx = svg.indexOf('>') + 1;
         svg = svg.slice(0, insertIdx) + defsBlock + svg.slice(insertIdx);
