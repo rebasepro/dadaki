@@ -4086,8 +4086,21 @@ export class Renderer {
                 y1 = Math.max(y1, b[3]);
             }
             if (Number.isFinite(x0)) {
+                // On an axis that snapped to equal spacing, draw the MATCHED pair —
+                // both the existing reference gap and the new one, so you see the
+                // spacing you locked onto. On other axes, the live neighbour gap.
+                const matches = im.equalSpacing ?? [];
+                const matched = new Set(matches.map((m) => (m.axis === 'x' ? 'h' : 'v')));
+                for (const m of matches) {
+                    const draw = m.axis === 'x' ? 'h' : 'v';
+                    for (const seg of m.segs) {
+                        this.drawGap(canvas, paint, seg.a, seg.b, seg.pos, draw, cap);
+                    }
+                }
                 for (const g of neighborGaps(this.scene, selIds, [x0, y0, x1, y1])) {
-                    this.drawGap(canvas, paint, g.a, g.b, g.pos, g.axis, cap);
+                    if (!matched.has(g.axis)) {
+                        this.drawGap(canvas, paint, g.a, g.b, g.pos, g.axis, cap);
+                    }
                 }
             }
             paint.delete();
