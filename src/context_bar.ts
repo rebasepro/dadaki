@@ -430,12 +430,13 @@ export class ContextBar {
             ),
         );
 
-        // Edit Path is the only path action important enough to sit inline. The
-        // occasional operations (Offset, Simplify, Reverse, Outline, Release) go in
-        // one "More" overflow menu, so the bar reads the same in every view: primary
-        // action → (More) → transform → Duplicate/Delete. Parametric ops apply with
-        // their last-used value (shown in the label); tune it, then it sticks.
+        // Inline path actions: Edit Path (primary) + Offset Copy, which keeps its
+        // distance field because the value is the whole point of the action. Every
+        // other occasional op (Simplify, Reverse, Outline, Release) goes in the one
+        // "More" menu, so the bar reads the same in every view: primary → Offset →
+        // More → transform → Duplicate/Delete.
         if (info.selectedNodes[0]?.node_type === 'Path') {
+            this.el.appendChild(this.buildOffsetControl());
             this.el.appendChild(this.buildPathMoreMenu(info));
         }
 
@@ -443,22 +444,54 @@ export class ContextBar {
         this.appendLifecycleActions();
     }
 
-    /** The "More" overflow menu for a single Path — every occasional path op, so
-     *  only Edit Path sits inline. Parametric ops carry their last-used value in the
-     *  label and apply with it. */
+    /** Offset Copy — an inline distance field (scrub or type, negative = inset) plus
+     *  the action button. Kept inline because the distance is the point of it. */
+    private buildOffsetControl(): HTMLElement {
+        const wrap = document.createElement('div');
+        wrap.style.display = 'inline-flex';
+        wrap.style.alignItems = 'center';
+        wrap.style.gap = '4px';
+
+        const amt = document.createElement('input');
+        amt.type = 'number';
+        amt.className = 'cb-num';
+        amt.value = String(this.input.lastOffsetAmount);
+        amt.title = 'Offset distance (negative = inset)';
+        const applyOffset = () => {
+            const d = parseFloat(amt.value);
+            if (Number.isFinite(d) && d !== 0) this.input.offsetSelectedPath(d);
+        };
+        amt.addEventListener('click', (e) => e.stopPropagation());
+        amt.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                applyOffset();
+            }
+        });
+        this.makeScrubbable(amt);
+
+        const offsetIcon =
+            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><rect x="9" y="9" width="12" height="12" rx="2"/></svg>';
+        wrap.appendChild(amt);
+        wrap.appendChild(
+            this.createButton(
+                'Offset Copy',
+                offsetIcon,
+                applyOffset,
+                false,
+                undefined,
+                'Creates a new shape parallel to this path at the distance on the left (negative = inset). Drag the number or type it. The original is kept.',
+            ),
+        );
+        return wrap;
+    }
+
+    /** The "More" overflow menu for a single Path — the occasional ops that don't
+     *  warrant inline space (Offset stays inline; it needs its distance field). */
     private buildPathMoreMenu(info: ContextInfo): HTMLElement {
         const id = info.selectedIds[0];
         type Item = { label: string; icon: string; onSelect: () => void; danger?: boolean };
         const items: Item[] = [];
-
-        const offsetIcon =
-            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><rect x="9" y="9" width="12" height="12" rx="2"/></svg>';
-        const d = this.input.lastOffsetAmount || 10;
-        items.push({
-            label: `Offset Copy (${d})`,
-            icon: offsetIcon,
-            onSelect: () => this.input.offsetSelectedPath(d),
-        });
 
         // Simplify only when the path has enough points to be worth reducing.
         if (this.input.selectedPathPointCount() >= 6) {
