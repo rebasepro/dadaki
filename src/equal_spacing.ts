@@ -1,11 +1,14 @@
 /**
  * equal_spacing.ts — Figma-style equal-spacing detection during a move drag.
  *
- * When the dragged object sits between a neighbor on each side (that overlaps it
- * on the perpendicular axis), and the two gaps are (nearly) equal, we report a
- * match: the exact delta that makes them equal (so the drag can SNAP to it) plus
- * the two gap segments to draw as pink measurements. This is the useful half of
- * Figma's smart measurements — "these gaps are now equal" — not a raw readout.
+ * While dragging an object, Figma snaps it to positions where spacing is equal and
+ * draws the matching gaps. It covers two situations, both handled here:
+ *   (a) the object sits BETWEEN two neighbours with equal gaps on each side, and
+ *   (b) the object's gap to a neighbour MATCHES an existing gap in the same row
+ *       (i.e. it continues an even distribution).
+ * For each axis we gather candidate snap positions, pick the one nearest the
+ * object's current position, and report the delta to snap there plus the two gap
+ * segments to draw (each labelled with the same distance).
  */
 import type { WasmScene } from './wasm_scene';
 
@@ -24,20 +27,103 @@ export interface EqualMatch {
     delta: number;
     /** The equal gap value (world units). */
     gap: number;
-    /** The two gap segments (already at the snapped position) to draw. */
+    /** The two equal gap segments (at the snapped position) to draw. */
     segs: [GapSeg, GapSeg];
 }
 
-/** Do the 1-D ranges [a0,a1] and [b0,b1] overlap (with a hair of margin)? */
-function overlaps(a0: number, a1: number, b0: number, b1: number): boolean {
-    return Math.min(a1, b1) - Math.max(a0, b0) > 0.5;
+/** A bounds projected onto a main axis: `lo`/`hi` along it, `clo`/`chi` across it. */
+interface Proj {
+    lo: number;
+    hi: number;
+    clo: number;
+    chi: number;
+}
+function project(b: Bounds, axis: 'x' | 'y'): Proj {
+    return axis === 'x'
+        ? { lo: b[0], hi: b[2], clo: b[1], chi: b[3] }
+        : { lo: b[1], hi: b[3], clo: b[0], chi: b[2] };
+}
+/** Overlap length of two ranges on the cross axis (>0.5 ⇒ "same row/column"). */
+function crossOverlap(a: Proj, b: Proj): number {
+    return Math.min(a.chi, b.chi) - Math.max(a.clo, b.clo);
+}
+/** Cross-axis center of the band where two objects overlap — where to draw a gap. */
+function crossMid(a: Proj, b: Proj): number {
+    return (Math.max(a.clo, b.clo) + Math.min(a.chi, b.chi)) / 2;
 }
 
-/**
- * Detect equal-spacing candidates for the moving selection `S`. Returns the best
- * horizontal and vertical match (or null each). The caller decides whether to
- * snap, based on each match's `delta` vs a pixel threshold.
- */
+interface Candidate {
+    center: number; // target main-axis center for the moving object
+    gap: number;
+    segs: [GapSeg, GapSeg];
+}
+
+/** Best equal-spacing match for one axis, or null. */
+function axisMatch(S: Bounds, others: Bounds[], axis: 'x' | 'y'): EqualMatch | null {
+    const s = project(S, axis);
+    const size = s.hi - s.lo;
+    const center = (s.lo + s.hi) / 2;
+
+    // Objects that share a row/column with the moving object.
+    const row = others.map((b) => project(b, axis)).filter((p) => crossOverlap(p, s) > 0.5);
+    const left = row.filter((p) => p.hi <= s.lo).sort((a, b) => b.hi - a.hi); // nearest first
+    const right = row.filter((p) => p.lo >= s.hi).sort((a, b) => a.lo - b.lo);
+    const L = left[0];
+    const R = right[0];
+
+    const seg = (a: number, b: number, pos: number): GapSeg => ({ a, b, pos });
+    const cands: Candidate[] = [];
+
+    // (a) Centred between the immediate left and right neighbours (equal both sides).
+    if (L && R) {
+        const gap = (R.lo - L.hi - size) / 2;
+        if (gap > 0.5) {
+            const c = (L.hi + R.lo) / 2;
+            cands.push({
+                center: c,
+                gap,
+                segs: [
+                    seg(L.hi, c - size / 2, crossMid(L, s)),
+                    seg(c + size / 2, R.lo, crossMid(R, s)),
+                ],
+            });
+        }
+    }
+    // (b) Match the gap that already exists to the LEFT of the left neighbour.
+    if (L) {
+        const L2 = left.find((p) => p.hi <= L.lo && crossOverlap(p, L) > 0.5);
+        const g = L2 ? L.lo - L2.hi : -1;
+        if (L2 && g > 0.5) {
+            const nlo = L.hi + g;
+            cands.push({
+                center: nlo + size / 2,
+                gap: g,
+                segs: [seg(L2.hi, L.lo, crossMid(L2, L)), seg(L.hi, nlo, crossMid(L, s))],
+            });
+        }
+    }
+    // (c) Match the gap that already exists to the RIGHT of the right neighbour.
+    if (R) {
+        const R2 = right.find((p) => p.lo >= R.hi && crossOverlap(p, R) > 0.5);
+        const g = R2 ? R2.lo - R.hi : -1;
+        if (R2 && g > 0.5) {
+            const nhi = R.lo - g;
+            cands.push({
+                center: nhi - size / 2,
+                gap: g,
+                segs: [seg(R.hi, R2.lo, crossMid(R, R2)), seg(nhi, R.lo, crossMid(R, s))],
+            });
+        }
+    }
+
+    if (cands.length === 0) return null;
+    cands.sort((a, b) => Math.abs(a.center - center) - Math.abs(b.center - center));
+    const best = cands[0];
+    return { axis, delta: best.center - center, gap: best.gap, segs: best.segs };
+}
+
+/** Detect the best horizontal and vertical equal-spacing match for the moving
+ *  selection `S` (each may be null). The caller snaps when the delta is small. */
 export function computeEqualSpacing(
     scene: WasmScene,
     movingIds: number[],
@@ -50,76 +136,5 @@ export function computeEqualSpacing(
         const b = scene.getNodeBounds(id);
         if (b && b.length >= 4) others.push([b[0], b[1], b[2], b[3]]);
     }
-
-    const [sx0, sy0, sx1, sy1] = S;
-    const scx = (sx0 + sx1) / 2;
-    const scy = (sy0 + sy1) / 2;
-    const sw = sx1 - sx0;
-    const sh = sy1 - sy0;
-
-    // ── Horizontal: nearest neighbor left + right that overlap S vertically ──
-    let x: EqualMatch | null = null;
-    {
-        let L: Bounds | null = null;
-        let R: Bounds | null = null;
-        for (const o of others) {
-            if (!overlaps(sy0, sy1, o[1], o[3])) continue;
-            if (o[2] <= sx0) {
-                if (!L || o[2] > L[2]) L = o; // closest left (largest right edge)
-            } else if (o[0] >= sx1) {
-                if (!R || o[0] < R[0]) R = o; // closest right (smallest left edge)
-            }
-        }
-        if (L && R) {
-            const gap = (R[0] - L[2] - sw) / 2;
-            if (gap > 0.5) {
-                const targetCx = (L[2] + R[0]) / 2;
-                const ns0 = targetCx - sw / 2;
-                const ns1 = targetCx + sw / 2;
-                x = {
-                    axis: 'x',
-                    delta: targetCx - scx,
-                    gap,
-                    segs: [
-                        { a: L[2], b: ns0, pos: scy },
-                        { a: ns1, b: R[0], pos: scy },
-                    ],
-                };
-            }
-        }
-    }
-
-    // ── Vertical: nearest neighbor above + below that overlap S horizontally ──
-    let y: EqualMatch | null = null;
-    {
-        let T: Bounds | null = null;
-        let B: Bounds | null = null;
-        for (const o of others) {
-            if (!overlaps(sx0, sx1, o[0], o[2])) continue;
-            if (o[3] <= sy0) {
-                if (!T || o[3] > T[3]) T = o;
-            } else if (o[1] >= sy1) {
-                if (!B || o[1] < B[1]) B = o;
-            }
-        }
-        if (T && B) {
-            const gap = (B[1] - T[3] - sh) / 2;
-            if (gap > 0.5) {
-                const targetCy = (T[3] + B[1]) / 2;
-                const ns0 = targetCy - sh / 2;
-                const ns1 = targetCy + sh / 2;
-                y = {
-                    axis: 'y',
-                    delta: targetCy - scy,
-                    gap,
-                    segs: [
-                        { a: T[3], b: ns0, pos: scx },
-                        { a: ns1, b: B[1], pos: scx },
-                    ],
-                };
-            }
-        }
-    }
-
-    return { x, y };
+    return { x: axisMatch(S, others, 'x'), y: axisMatch(S, others, 'y') };
 }
