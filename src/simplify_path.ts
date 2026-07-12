@@ -116,23 +116,32 @@ export function pathPointCount(scene: WasmScene, nodeId: number): number {
  * world units (larger = fewer points). Returns the new total point count, or
  * null if the node isn't a path.
  */
-export function simplifyPath(scene: WasmScene, nodeId: number, tolerance: number): number | null {
-    const geom = scene.getNodeGeometry(nodeId);
-    const subpaths = geom?.Path?.subpaths;
+/** Compute the simplified geometry (node LOCAL space) without mutating the scene.
+ *  Pure — also backs the live preview. Null if there's nothing to simplify. */
+export function computeSimplifiedSubpaths(
+    scene: WasmScene,
+    nodeId: number,
+    tolerance: number,
+): Subpath[] | null {
+    const subpaths = scene.getNodeGeometry(nodeId)?.Path?.subpaths;
     if (!subpaths || subpaths.length === 0) return null;
     const eps = Math.max(0.01, tolerance);
-
-    const simplified: Subpath[] = subpaths.map((sp) => {
+    return subpaths.map((sp) => {
         if (sp.points.length < 3) return sp; // nothing worth simplifying
         const reduced = rdp(flatten(sp), eps);
         if (reduced.length < 2) return sp;
         return { points: refit(reduced, sp.closed), closed: sp.closed };
     });
+}
 
-    let count = 0;
+export function simplifyPath(scene: WasmScene, nodeId: number, tolerance: number): number | null {
+    const simplified = computeSimplifiedSubpaths(scene, nodeId, tolerance);
+    if (!simplified) return null;
+
     scene.transaction(() => {
         scene.replaceGeometryWithPath(nodeId, simplified);
     });
+    let count = 0;
     for (const sp of simplified) count += sp.points.length;
     return count;
 }

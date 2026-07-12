@@ -12,7 +12,7 @@
  */
 import type { CanvasKit } from 'canvaskit-wasm';
 import { nodeToWorldPath } from './boolean_ops';
-import type { Color, PathPoint } from './types';
+import type { Color, PathPoint, Subpath } from './types';
 import type { WasmScene } from './wasm_scene';
 
 const SAMPLES = 64;
@@ -71,6 +71,35 @@ function solidFill(scene: WasmScene, id: number): Color | null {
  * Create `steps` in-between shapes between nodes A and B, grouped with them.
  * Returns the blend group id, or null if either shape has no usable contour.
  */
+/** Compute the in-between blend outlines in WORLD space, without mutating the
+ *  scene. Pure — also backs the live preview. Null if either shape can't sample. */
+export function computeBlendSubpaths(
+    ck: CanvasKit,
+    scene: WasmScene,
+    idA: number,
+    idB: number,
+    steps: number,
+): Subpath[] | null {
+    if (steps < 1 || !Number.isFinite(steps)) return null;
+    const cA = worldContour(ck, scene, idA, SAMPLES);
+    const cB = worldContour(ck, scene, idB, SAMPLES);
+    if (!cA || !cB) return null;
+    const closed = cA.closed && cB.closed;
+
+    const out: Subpath[] = [];
+    for (let i = 1; i <= steps; i++) {
+        const t = i / (steps + 1);
+        const points: PathPoint[] = [];
+        for (let k = 0; k < SAMPLES; k++) {
+            const x = lerp(cA.pts[k][0], cB.pts[k][0], t);
+            const y = lerp(cA.pts[k][1], cB.pts[k][1], t);
+            points.push({ x, y, cp1: [x, y], cp2: [x, y] });
+        }
+        out.push({ points, closed });
+    }
+    return out;
+}
+
 export function blendNodes(
     ck: CanvasKit,
     scene: WasmScene,
@@ -78,28 +107,19 @@ export function blendNodes(
     idB: number,
     steps: number,
 ): number | null {
-    if (steps < 1 || !Number.isFinite(steps)) return null;
-    const cA = worldContour(ck, scene, idA, SAMPLES);
-    const cB = worldContour(ck, scene, idB, SAMPLES);
-    if (!cA || !cB) return null;
-    const closed = cA.closed && cB.closed;
+    const subs = computeBlendSubpaths(ck, scene, idA, idB, steps);
+    if (!subs) return null;
     const fillA = solidFill(scene, idA);
     const fillB = solidFill(scene, idB);
 
     let groupId = -1;
     scene.transaction(() => {
         const newIds: number[] = [];
-        for (let i = 1; i <= steps; i++) {
-            const t = i / (steps + 1);
-            const points: PathPoint[] = [];
-            for (let k = 0; k < SAMPLES; k++) {
-                const x = lerp(cA.pts[k][0], cB.pts[k][0], t);
-                const y = lerp(cA.pts[k][1], cB.pts[k][1], t);
-                points.push({ x, y, cp1: [x, y], cp2: [x, y] });
-            }
+        subs.forEach((sp, idx) => {
+            const t = (idx + 1) / (steps + 1);
             // Duplicate A (keeps style), swap in world geometry + identity transform.
             const id = scene.duplicateNode(idA);
-            scene.replaceGeometryWithPath(id, [{ points, closed }]);
+            scene.replaceGeometryWithPath(id, [sp]);
             scene.setNodeTransformComponents(id, IDENTITY);
             if (fillA && fillB) {
                 const style = scene.getNodeStyle(id);
@@ -112,7 +132,7 @@ export function blendNodes(
                 scene.setNodeStyleNoHistory(id, JSON.stringify({ ...style, fills: [fill] }));
             }
             newIds.push(id);
-        }
+        });
         groupId = scene.groupNodes([idA, ...newIds, idB]);
     });
     return groupId >= 0 ? groupId : null;

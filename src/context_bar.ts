@@ -18,6 +18,7 @@
 
 import type { AlignMode } from './align';
 import { alignSelection, distributeSelection } from './align';
+import { computeBlendSubpaths } from './blend';
 import type { BoolOp, PathfinderOp } from './boolean_ops';
 import { applyPathfinder, BOOL_OP_BY_INDEX, transformSubpaths } from './boolean_ops';
 import { colorToHex, createColorSwatch, parseHex } from './color_picker';
@@ -54,6 +55,8 @@ import {
 import type { InputManager } from './input';
 import { computeOffsetSubpaths } from './offset_path';
 import type { Renderer } from './renderer';
+import { computeSimplifiedSubpaths } from './simplify_path';
+import type { Subpath } from './types';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
 import type { WidthProfile } from './width_profile';
@@ -444,60 +447,51 @@ export class ContextBar {
         this.appendLifecycleActions();
     }
 
-    /** Offset Copy the Illustrator way: the command opens a small value popover
-     *  (distance field, Enter/Apply to run, Esc/outside to cancel) instead of
-     *  parking a number field in the bar. Applies once, creating a new parallel
-     *  path — nothing happens until you confirm. */
-    private openOffsetPopover(anchor: HTMLElement) {
+    /** Hand a world-space ghost to the renderer (or clear it). */
+    private setShapePreview(subpaths: Subpath[] | null, fillRule = 0) {
+        this.input.shapePreview = subpaths?.length ? { subpaths, fillRule } : null;
+        this.scene.renderer?.requestRender();
+    }
+
+    /** A small value dialog (Illustrator's Offset-Path model) that any customizable
+     *  command opens: a scrub field + Apply, Enter to run, Esc/outside to cancel,
+     *  with an optional live preview. Nothing happens until you confirm. */
+    private openValuePopover(
+        anchor: HTMLElement,
+        opts: {
+            label: string;
+            value: number;
+            min?: number;
+            step?: number;
+            title?: string;
+            onPreview?: (value: number) => void;
+            onClearPreview?: () => void;
+            onApply: (value: number) => void;
+        },
+    ) {
         document.querySelector('.cb-value-popover')?.remove();
 
         const pop = document.createElement('div');
         pop.className = 'cb-value-popover';
 
-        const nodeId = Array.from(this.scene.engine?.get_selection() ?? [])[0];
-
-        // Live preview: recompute the offset outline for the current value and hand
-        // it to the renderer as a world-space ghost. Cleared on apply/cancel.
         let input!: HTMLInputElement;
-        const updatePreview = () => {
-            const dist = parseFloat(input.value);
-            if (nodeId == null || !Number.isFinite(dist) || dist === 0) {
-                this.input.offsetPreview = null;
-            } else {
-                const local = computeOffsetSubpaths(this.ui.ck, this.scene, nodeId, dist);
-                this.input.offsetPreview = local
-                    ? {
-                          subpaths: transformSubpaths(
-                              local.subpaths,
-                              this.scene.getTransform(nodeId),
-                          ),
-                          fillRule: local.fillRule,
-                      }
-                    : null;
-            }
-            this.scene.renderer?.requestRender();
-        };
-        const clearPreview = () => {
-            this.input.offsetPreview = null;
-            this.scene.renderer?.requestRender();
-        };
-
-        // Same scrub field as the properties panel: a draggable "Offset" handle + input.
-        const field = this.createScrubField('Offset', this.input.lastOffsetAmount, {
-            title: 'Offset distance (negative = inset)',
-            onChange: updatePreview,
+        const field = this.createScrubField(opts.label, opts.value, {
+            min: opts.min,
+            step: opts.step,
+            title: opts.title,
+            onChange: () => opts.onPreview?.(parseFloat(input.value)),
         });
         input = field.input;
 
         const close = () => {
-            clearPreview();
+            opts.onClearPreview?.();
             pop.remove();
             document.removeEventListener('pointerdown', onDoc, true);
         };
         const apply = () => {
-            const d = parseFloat(input.value);
+            const v = parseFloat(input.value);
             close();
-            if (Number.isFinite(d) && d !== 0) this.input.offsetSelectedPath(d);
+            if (Number.isFinite(v)) opts.onApply(v);
         };
         const onDoc = (e: PointerEvent) => {
             if (!pop.contains(e.target as Node)) close();
@@ -534,7 +528,7 @@ export class ContextBar {
         setTimeout(() => document.addEventListener('pointerdown', onDoc, true), 0);
         input.focus();
         input.select();
-        updatePreview(); // show the ghost immediately for the current value
+        opts.onPreview?.(parseFloat(input.value)); // show the ghost immediately
     }
 
     /** The "More" overflow menu for a single Path — every occasional path op is a
@@ -549,7 +543,28 @@ export class ContextBar {
         items.push({
             label: 'Offset Copy…',
             icon: offsetIcon,
-            onSelect: () => this.openOffsetPopover(this.el),
+            onSelect: () =>
+                this.openValuePopover(this.el, {
+                    label: 'Offset',
+                    value: this.input.lastOffsetAmount,
+                    title: 'Offset distance (negative = inset)',
+                    onPreview: (v) => {
+                        const local =
+                            Number.isFinite(v) && v !== 0
+                                ? computeOffsetSubpaths(this.ui.ck, this.scene, id, v)
+                                : null;
+                        this.setShapePreview(
+                            local
+                                ? transformSubpaths(local.subpaths, this.scene.getTransform(id))
+                                : null,
+                            local?.fillRule ?? 0,
+                        );
+                    },
+                    onClearPreview: () => this.setShapePreview(null),
+                    onApply: (v) => {
+                        if (v !== 0) this.input.offsetSelectedPath(v);
+                    },
+                }),
         });
 
         // Simplify only when the path has enough points to be worth reducing.
@@ -557,9 +572,30 @@ export class ContextBar {
             const simplifyIcon =
                 '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c4 0 5-10 9-10s5 6 9 6"/></svg>';
             items.push({
-                label: 'Simplify',
+                label: 'Simplify…',
                 icon: simplifyIcon,
-                onSelect: () => this.input.simplifySelectedPath(this.input.lastSimplifyTolerance),
+                onSelect: () =>
+                    this.openValuePopover(this.el, {
+                        label: 'Amount',
+                        value: this.input.lastSimplifyTolerance,
+                        min: 0,
+                        title: 'Simplify tolerance (larger = fewer points)',
+                        onPreview: (v) => {
+                            const local =
+                                Number.isFinite(v) && v >= 0
+                                    ? computeSimplifiedSubpaths(this.scene, id, v)
+                                    : null;
+                            this.setShapePreview(
+                                local
+                                    ? transformSubpaths(local, this.scene.getTransform(id))
+                                    : null,
+                            );
+                        },
+                        onClearPreview: () => this.setShapePreview(null),
+                        onApply: (v) => {
+                            if (v >= 0) this.input.simplifySelectedPath(v);
+                        },
+                    }),
             });
         }
 
@@ -893,30 +929,36 @@ export class ContextBar {
         // Blend — exactly two combinable shapes: generate in-between shapes.
         // Minimal UI: a steps field + a Blend button (matches the Offset control).
         if (allBoolCompatible && info.selectedIds.length === 2) {
-            const wrap = document.createElement('div');
-            wrap.style.display = 'inline-flex';
-            wrap.style.alignItems = 'center';
-            wrap.style.gap = '4px';
-            const { wrap: stepsWrap, input: steps } = this.createScrubField(
-                '#',
-                this.input.lastBlendSteps,
-                { min: 1, title: 'Number of in-between shapes' },
-            );
-            const doBlend = () => {
-                const n = Math.max(1, Math.round(parseFloat(steps.value) || 0));
-                if (n >= 1) this.input.blendSelection(n);
-            };
-            steps.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    doBlend();
-                }
-            });
+            const [idA, idB] = info.selectedIds;
             const blendIcon =
                 '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 8.5l7 7" stroke-dasharray="2 2"/></svg>';
-            wrap.appendChild(stepsWrap);
-            wrap.appendChild(this.createButton('Blend', blendIcon, doBlend));
-            this.el.appendChild(wrap);
+            this.el.appendChild(
+                this.createButton(
+                    'Blend…',
+                    blendIcon,
+                    () =>
+                        this.openValuePopover(this.el, {
+                            label: 'Steps',
+                            value: this.input.lastBlendSteps,
+                            min: 1,
+                            step: 1,
+                            title: 'Number of in-between shapes',
+                            onPreview: (v) => {
+                                const n = Math.max(1, Math.round(v));
+                                this.setShapePreview(
+                                    Number.isFinite(v)
+                                        ? computeBlendSubpaths(this.ui.ck, this.scene, idA, idB, n)
+                                        : null,
+                                );
+                            },
+                            onClearPreview: () => this.setShapePreview(null),
+                            onApply: (v) => this.input.blendSelection(Math.max(1, Math.round(v))),
+                        }),
+                    false,
+                    undefined,
+                    'Generate in-between shapes between the two selected objects.',
+                ),
+            );
         }
 
         this.el.appendChild(this.createSeparator());

@@ -2377,11 +2377,11 @@ body.scrubbing * {
    .dim-input structure — a draggable .dim-label handle + text input — so the
    scrub "slider" is identical everywhere; this only sets the bar sizing. */
 .cb-dim-input {
-    width: 72px;
     height: 24px;
     border-color: var(--border-light);
 }
 .cb-dim-input input {
+    flex: 0 0 46px;
     text-align: right;
     padding-right: 6px;
     -webkit-appearance: none;

@@ -2381,8 +2381,8 @@ export class Renderer {
         if (!exporting && snapshotPass === null) {
             // Draw live preview shape (while user is dragging to create)
             this.drawPreview(canvas);
-            // Draw the Offset-Copy preview (ghost of the result while adjusting)
-            this.drawOffsetPreview(canvas);
+            // Draw the parametric-action preview (ghost of Offset/Simplify/Blend)
+            this.drawShapePreview(canvas);
             // Draw pen tool in-progress path
             this.drawPenPreview(canvas);
             // Draw paint bucket hover preview
@@ -3950,10 +3950,10 @@ export class Renderer {
     }
 
     /** Live preview stroke for the line and pencil tools (point-based, not a box). */
-    /** Ghost of the Offset-Copy result, drawn in world space while the Offset
-     *  popover is open so the distance can be dialed in with live feedback. */
-    private drawOffsetPreview(canvas: Canvas) {
-        const preview = this.inputManager?.offsetPreview;
+    /** Ghost of a parametric action's result (Offset/Simplify/Blend), drawn in
+     *  world space while its value dialog is open for live feedback. */
+    private drawShapePreview(canvas: Canvas) {
+        const preview = this.inputManager?.shapePreview;
         if (!preview || preview.subpaths.length === 0) return;
 
         const path = new this.ck.Path();
