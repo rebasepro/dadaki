@@ -16,6 +16,8 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 - [x] 9. Smart measurements (Figma hover-distances) — committed `c9d7226` (renderer drawMeasurements; pink gap lines + labels, anchored to selection center axes)
 - [x] 10. Measurements while dragging — committed `95bb2ce` (drawMeasurements also fires during a move drag, tracking the nearest object via renderer.nearestNode)
 - [x] 11. Pathfinder: Minus Back + Crop — committed `a210fd9` (boolean_ops.applyPathfinder, z-order aware; context-bar 'Pathfinder' dropdown)
+- [x] 12. Reverse Path Direction — committed `47f963e` (path_ops.reverseSubpaths; context-bar 'Reverse'; pairs with text-on-path)
+- [x] 13. Add Anchor Points — committed `a796ab2` (path_ops.addAnchorPointsToSubpaths; de Casteljau midpoints; context-bar 'Add Points'; complement of Simplify)
 
 ## Next step
 NOTE (verified this session): **distribute spacing (equal gaps) is ALREADY done**
@@ -176,3 +178,14 @@ text (currently the culling box at the path center).
   the exported SVG string in-page: "Export me" flows along the wave, matching the canvas.
   tsc + biome + vitest (221, incl. svg roundtrip) green. Next: components/symbols flagship,
   or small safe wins (reverse path direction / average points).
+- 2026-07-12 06:07 (Sun) — Two complete pure-JS path ops (components flagship judged too
+  risky/multi-window for a single clean landing, so delivered safe complete wins instead):
+  **Reverse Path Direction** (`47f963e`) — reverses each subpath's points + swaps cp1<->cp2;
+  verified geometrically AND via the text-on-path synergy (reversing the path flips which way
+  the text flows, upside-down like Illustrator — screenshot). **Add Anchor Points** (`a796ab2`)
+  — de Casteljau midpoint on every segment, curve unchanged (ellipse 4->8 anchors, identical
+  bounds); complement of Simplify. Both: context-bar buttons on a single Path, pure geometry
+  so they auto-persist (no engine change), with unit tests. tsc + biome + vitest (225) green.
+  Next: components/symbols flagship (needs render-protocol engine work to emit instance
+  geometry — plan a multi-window effort), or more small wins (Average Points needs the
+  anchor-point-selection key mapping; arrowheads need a stroke-marker data model).
