@@ -796,8 +796,11 @@ body, html {
     line-height: 1.4;
 }
 .swatches-empty {
+    /* span the whole grid so the message isn't squeezed into one 22px column */
+    grid-column: 1 / -1;
     font-size: 11px;
     color: var(--text-dim);
+    line-height: 1.4;
     padding: 2px 0 6px;
 }
 
