@@ -1,4 +1,5 @@
 import { blendNodes } from './blend';
+import { nodeToWorldPath, pathToSubpaths, transformSubpaths } from './boolean_ops';
 import type { DocumentManager } from './document_manager';
 import type { FileService } from './file_service';
 import { DEFAULT_TEXT_FONT, ensureFontCSS, loadGoogleFontData } from './fonts';
@@ -2743,6 +2744,62 @@ export class InputManager {
         this.scene.transaction(() => {
             this.scene.replaceGeometryWithPath(selection[0], addAnchorPointsToSubpaths(subs));
         });
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
+    /** Make Compound Path: combine the selected shapes into one path whose
+     *  subpaths use the even-odd rule, so overlaps read as holes (donuts, letters
+     *  with counters). Non-destructive — the subpaths stay individually editable,
+     *  unlike a boolean. Returns to a single path node. One undo step. */
+    makeCompoundPath() {
+        const sel = Array.from(this.scene.engine!.get_selection());
+        if (sel.length < 2) return;
+        const all: Subpath[] = [];
+        for (const id of sel) {
+            const wp = nodeToWorldPath(this.ui.ck, this.scene, id);
+            if (!wp) return; // unsupported node (e.g. text) — abort cleanly
+            all.push(...pathToSubpaths(this.ui.ck, wp));
+            wp.delete();
+        }
+        if (all.length < 2) return;
+        // Even-odd fill so overlapping subpaths cut holes. Keep the bottom node's
+        // appearance (the world subpaths are identity-placed by add_path).
+        const style = { ...this.scene.getNodeStyle(sel[0]), fill_rule: 1 };
+        const newId = this.scene.replaceNodesWithPath(
+            sel,
+            JSON.stringify(all),
+            JSON.stringify(style),
+        );
+        if (newId == null) return;
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
+    /** Release Compound Path: split the selected multi-subpath path back into one
+     *  path node per subpath (each nonzero fill). One undo step. */
+    releaseCompoundPath() {
+        const sel = Array.from(this.scene.engine!.get_selection());
+        if (sel.length !== 1) return;
+        const id = sel[0];
+        const subs = this.scene.getNodeGeometry(id)?.Path?.subpaths;
+        if (!subs || subs.length < 2) return;
+        const world = transformSubpaths(subs, this.scene.getTransform(id));
+        const style = JSON.stringify({ ...this.scene.getNodeStyle(id), fill_rule: 0 });
+        const newIds: number[] = [];
+        this.scene.transaction(() => {
+            for (const sp of world) {
+                const nid = this.scene.engine!.add_path(JSON.stringify([sp]));
+                this.scene.engine!.set_node_style(nid, style);
+                newIds.push(nid);
+            }
+            this.scene.engine!.remove_node(id);
+        });
+        this.scene.invalidateCache();
+        this.scene.engine!.clear_selection();
+        for (const nid of newIds) this.scene.selectNode(nid, true);
+        this.ui.updateLayerList();
         this.ui.syncWithSelection();
         this.renderer.requestRender();
     }

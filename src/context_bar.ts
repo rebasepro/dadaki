@@ -591,6 +591,20 @@ export class ContextBar {
                     }),
                 );
             }
+
+            // Release Compound Path — only when the path has 2+ subpaths (i.e. it
+            // could be a compound). Splits it back into separate paths.
+            const subCount =
+                this.scene.getNodeGeometry(info.selectedIds[0])?.Path?.subpaths?.length ?? 0;
+            if (subCount >= 2) {
+                const releaseIcon =
+                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="12" r="5"/><circle cx="17" cy="12" r="3"/></svg>';
+                this.el.appendChild(
+                    this.createButton('Release', releaseIcon, () => {
+                        this.input.releaseCompoundPath();
+                    }),
+                );
+            }
         }
 
         this.appendTransformActions(info, { flatten: true });
@@ -856,6 +870,16 @@ export class ContextBar {
                     ]),
                 );
             }
+
+            // Compound Path — combine into one even-odd path (overlaps → holes),
+            // keeping subpaths editable (unlike the destructive booleans).
+            const compoundIcon =
+                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg>';
+            this.el.appendChild(
+                this.createButton('Compound', compoundIcon, () => {
+                    this.input.makeCompoundPath();
+                }),
+            );
         }
 
         // Blend — exactly two combinable shapes: generate in-between shapes.
