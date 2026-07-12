@@ -430,175 +430,101 @@ export class ContextBar {
             ),
         );
 
-        // Offset Path — only for a Path node. A small distance field (negative =
-        // inset) plus a button; creates a new parallel path.
+        // Edit Path is the only path action important enough to sit inline. The
+        // occasional operations (Offset, Simplify, Reverse, Outline, Release) go in
+        // one "More" overflow menu, so the bar reads the same in every view: primary
+        // action → (More) → transform → Duplicate/Delete. Parametric ops apply with
+        // their last-used value (shown in the label); tune it, then it sticks.
         if (info.selectedNodes[0]?.node_type === 'Path') {
-            const wrap = document.createElement('div');
-            wrap.style.display = 'inline-flex';
-            wrap.style.alignItems = 'center';
-            wrap.style.gap = '4px';
-            const amt = document.createElement('input');
-            amt.type = 'number';
-            amt.className = 'cb-num';
-            amt.value = String(this.input.lastOffsetAmount);
-            amt.title = 'Offset distance (negative = inset)';
-            const applyOffset = () => {
-                const d = parseFloat(amt.value);
-                if (Number.isFinite(d) && d !== 0) this.input.offsetSelectedPath(d);
-            };
-            amt.addEventListener('click', (e) => e.stopPropagation());
-            amt.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    applyOffset();
-                }
-            });
-            const offsetIcon =
-                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><rect x="9" y="9" width="12" height="12" rx="2"/></svg>';
-            this.makeScrubbable(amt);
-            wrap.appendChild(amt);
-            wrap.appendChild(
-                this.createButton(
-                    'Offset Copy',
-                    offsetIcon,
-                    applyOffset,
-                    false,
-                    undefined,
-                    'Creates a new shape parallel to this path, at the distance on the left (negative = inset). The original is kept.',
-                ),
-            );
-            this.el.appendChild(wrap);
-
-            // Simplify — only surfaces when the path has enough points to be worth
-            // reducing (progressive disclosure). Tolerance field + button.
-            if (this.input.selectedPathPointCount() >= 6) {
-                const sWrap = document.createElement('div');
-                sWrap.style.display = 'inline-flex';
-                sWrap.style.alignItems = 'center';
-                sWrap.style.gap = '4px';
-                const tol = document.createElement('input');
-                tol.type = 'number';
-                tol.className = 'cb-num';
-                tol.min = '0';
-                tol.value = String(this.input.lastSimplifyTolerance);
-                tol.title = 'Simplify tolerance (larger = fewer points)';
-                const applySimplify = () => {
-                    const t = parseFloat(tol.value);
-                    if (Number.isFinite(t) && t >= 0) this.input.simplifySelectedPath(t);
-                };
-                tol.addEventListener('click', (e) => e.stopPropagation());
-                tol.addEventListener('keydown', (e) => {
-                    if (e.key === 'Enter') {
-                        e.preventDefault();
-                        applySimplify();
-                    }
-                });
-                const simplifyIcon =
-                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c4 0 5-10 9-10s5 6 9 6"/></svg>';
-                this.makeScrubbable(tol);
-                sWrap.appendChild(tol);
-                sWrap.appendChild(
-                    this.createButton(
-                        'Simplify',
-                        simplifyIcon,
-                        applySimplify,
-                        false,
-                        undefined,
-                        'Removes redundant anchor points while keeping the shape. Higher tolerance (left) = fewer points.',
-                    ),
-                );
-                this.el.appendChild(sWrap);
-            }
-
-            // Arrowheads / line-endings are a stroke PROPERTY → they live in the
-            // right-panel Stroke section (see appendArrowheads in ui.ts).
-            //
-            // The variable-width "profile", by contrast, is a destructive one-shot
-            // ACTION — it replaces the stroked open path with a filled tapered shape —
-            // so it stays here as an action, only for an open path with a stroke.
-            const openWithStroke =
-                this.scene
-                    .getNodeGeometry(info.selectedIds[0])
-                    ?.Path?.subpaths?.some((sp) => !sp.closed) &&
-                (this.scene.getNodeStyle(info.selectedIds[0])?.strokes?.length ?? 0) > 0;
-            if (openWithStroke) {
-                const sw = (d: string) =>
-                    `<svg width="14" height="10" viewBox="0 0 28 20" fill="currentColor">${d}</svg>`;
-                const profiles: Array<{ id: WidthProfile; label: string; icon: string }> = [
-                    {
-                        id: 'uniform',
-                        label: 'Uniform',
-                        icon: sw('<rect x="2" y="8" width="24" height="4"/>'),
-                    },
-                    {
-                        id: 'taper-end',
-                        label: 'Taper',
-                        icon: sw('<path d="M2 6 L26 10 L2 14 Z"/>'),
-                    },
-                    {
-                        id: 'taper-both',
-                        label: 'Taper both',
-                        icon: sw('<path d="M2 10 Q14 3 26 10 Q14 17 2 10 Z"/>'),
-                    },
-                    {
-                        id: 'bulge',
-                        label: 'Bulge',
-                        icon: sw('<path d="M2 8 Q14 0 26 8 L26 12 Q14 20 2 12 Z"/>'),
-                    },
-                ];
-                this.el.appendChild(
-                    this.createDropdown(
-                        'Outline Width',
-                        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12 Q12 4 21 12 Q12 20 3 12 Z"/></svg>',
-                        profiles.map((p) => ({
-                            label: p.label,
-                            icon: p.icon,
-                            onSelect: () => this.input.applyWidthProfileToSelection(p.id),
-                        })),
-                        'Converts this stroked path into a filled shape, tapering its width along the profile you pick. This replaces the stroke — it is not reversible except by undo.',
-                    ),
-                );
-            }
-
-            // Reverse path direction — flips winding (compound-path holes) and
-            // the direction any text-on-path flows.
-            const reverseIcon =
-                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h14"/><path d="M13 6l6 6-6 6"/><path d="M3 12V8"/></svg>';
-            this.el.appendChild(
-                this.createButton(
-                    'Reverse',
-                    reverseIcon,
-                    () => {
-                        this.input.reverseSelectedPath();
-                    },
-                    false,
-                    undefined,
-                    "Flips the path's direction. Affects which way arrowheads point, how text-on-path flows, and holes in compound paths.",
-                ),
-            );
-
-            // NOTE: no blunt "add a midpoint to every segment" button here — that
-            // doubles the point count and is useless (and a footgun) on a dense
-            // path. The precise way to add anchors is the Add Point (+) toggle in
-            // path-edit mode: arm it and click exactly where you want a point.
-
-            // Release Compound Path — only when the path has 2+ subpaths (i.e. it
-            // could be a compound). Splits it back into separate paths.
-            const subCount =
-                this.scene.getNodeGeometry(info.selectedIds[0])?.Path?.subpaths?.length ?? 0;
-            if (subCount >= 2) {
-                const releaseIcon =
-                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="12" r="5"/><circle cx="17" cy="12" r="3"/></svg>';
-                this.el.appendChild(
-                    this.createButton('Release', releaseIcon, () => {
-                        this.input.releaseCompoundPath();
-                    }),
-                );
-            }
+            this.el.appendChild(this.buildPathMoreMenu(info));
         }
 
         this.appendTransformActions(info, { flatten: true });
         this.appendLifecycleActions();
+    }
+
+    /** The "More" overflow menu for a single Path — every occasional path op, so
+     *  only Edit Path sits inline. Parametric ops carry their last-used value in the
+     *  label and apply with it. */
+    private buildPathMoreMenu(info: ContextInfo): HTMLElement {
+        const id = info.selectedIds[0];
+        type Item = { label: string; icon: string; onSelect: () => void; danger?: boolean };
+        const items: Item[] = [];
+
+        const offsetIcon =
+            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><rect x="9" y="9" width="12" height="12" rx="2"/></svg>';
+        const d = this.input.lastOffsetAmount || 10;
+        items.push({
+            label: `Offset Copy (${d})`,
+            icon: offsetIcon,
+            onSelect: () => this.input.offsetSelectedPath(d),
+        });
+
+        // Simplify only when the path has enough points to be worth reducing.
+        if (this.input.selectedPathPointCount() >= 6) {
+            const simplifyIcon =
+                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c4 0 5-10 9-10s5 6 9 6"/></svg>';
+            items.push({
+                label: 'Simplify',
+                icon: simplifyIcon,
+                onSelect: () => this.input.simplifySelectedPath(this.input.lastSimplifyTolerance),
+            });
+        }
+
+        const reverseIcon =
+            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h14"/><path d="M13 6l6 6-6 6"/><path d="M3 12V8"/></svg>';
+        items.push({
+            label: 'Reverse direction',
+            icon: reverseIcon,
+            onSelect: () => this.input.reverseSelectedPath(),
+        });
+
+        // Outline Width — destructive: replaces a stroked open path with a filled
+        // tapered shape. Only for an open path that actually has a stroke.
+        const openWithStroke =
+            this.scene.getNodeGeometry(id)?.Path?.subpaths?.some((sp) => !sp.closed) &&
+            (this.scene.getNodeStyle(id)?.strokes?.length ?? 0) > 0;
+        if (openWithStroke) {
+            const sw = (p: string) =>
+                `<svg width="14" height="10" viewBox="0 0 28 20" fill="currentColor">${p}</svg>`;
+            const profiles: Array<{ id: WidthProfile; label: string; icon: string }> = [
+                {
+                    id: 'taper-end',
+                    label: 'Outline: Taper',
+                    icon: sw('<path d="M2 6 L26 10 L2 14 Z"/>'),
+                },
+                {
+                    id: 'taper-both',
+                    label: 'Outline: Taper both',
+                    icon: sw('<path d="M2 10 Q14 3 26 10 Q14 17 2 10 Z"/>'),
+                },
+                {
+                    id: 'bulge',
+                    label: 'Outline: Bulge',
+                    icon: sw('<path d="M2 8 Q14 0 26 8 L26 12 Q14 20 2 12 Z"/>'),
+                },
+            ];
+            for (const p of profiles) {
+                items.push({
+                    label: p.label,
+                    icon: p.icon,
+                    onSelect: () => this.input.applyWidthProfileToSelection(p.id),
+                });
+            }
+        }
+
+        // Release Compound — only when the path has 2+ subpaths.
+        if ((this.scene.getNodeGeometry(id)?.Path?.subpaths?.length ?? 0) >= 2) {
+            items.push({
+                label: 'Release compound',
+                icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="12" r="5"/><circle cx="17" cy="12" r="3"/></svg>',
+                onSelect: () => this.input.releaseCompoundPath(),
+            });
+        }
+
+        const moreIcon =
+            '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
+        return this.createDropdown('More', moreIcon, items, 'Path operations');
     }
 
     /** One Text node selected: text actions, not text properties (those are in the panel). */
