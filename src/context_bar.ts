@@ -858,14 +858,16 @@ export class ContextBar {
             );
         }
 
-        // Boolean operations — only when every selected node is combinable geometry
+        // Boolean — the one primary "combine" action: a dropdown that unites/
+        // subtracts/intersects/excludes into a non-destructive Boolean Group
+        // (children stay editable). The destructive/niche combine variants
+        // (Compound, Minus Back, Crop, Blend, Join) live in the More menu, so the
+        // bar isn't a wall of overlapping combine buttons.
         const allBoolCompatible =
             info.selectedNodes.length === info.selectedIds.length &&
             info.selectedNodes.every((n) => BOOLEAN_COMPATIBLE.has(n.node_type));
         if (allBoolCompatible) {
             this.el.appendChild(this.createSeparator());
-            // Figma-style: a single Boolean dropdown creates a non-destructive
-            // Boolean Group (children stay editable, op re-evaluates live).
             this.el.appendChild(
                 this.createDropdown(
                     'Boolean',
@@ -885,102 +887,13 @@ export class ContextBar {
                             }
                         },
                     })),
-                ),
-            );
-
-            // Pathfinder — destructive, stacking-order ops that the shape-mode
-            // booleans above don't cover (kept in a separate dropdown, like
-            // Illustrator's Pathfinder row).
-            if (info.selectedIds.length >= 2) {
-                const runPathfinder = (op: PathfinderOp) => {
-                    const id = applyPathfinder(this.ui.ck, this.scene, [...info.selectedIds], op);
-                    if (id != null) {
-                        this.ui.syncWithSelection();
-                        this.ui.updateLayerList();
-                    }
-                };
-                this.el.appendChild(
-                    this.createDropdown('Pathfinder', iconBoolSubtract(14), [
-                        {
-                            label: 'Minus Back',
-                            icon: iconBoolSubtract(14),
-                            onSelect: () => runPathfinder('minus-back'),
-                        },
-                        {
-                            label: 'Crop',
-                            icon: iconBoolIntersect(14),
-                            onSelect: () => runPathfinder('crop'),
-                        },
-                    ]),
-                );
-            }
-
-            // Compound Path — combine into one even-odd path (overlaps → holes),
-            // keeping subpaths editable (unlike the destructive booleans).
-            const compoundIcon =
-                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg>';
-            this.el.appendChild(
-                this.createButton('Compound', compoundIcon, () => {
-                    this.input.makeCompoundPath();
-                }),
-            );
-        }
-
-        // Blend — exactly two combinable shapes: generate in-between shapes.
-        // Minimal UI: a steps field + a Blend button (matches the Offset control).
-        if (allBoolCompatible && info.selectedIds.length === 2) {
-            const [idA, idB] = info.selectedIds;
-            const blendIcon =
-                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 8.5l7 7" stroke-dasharray="2 2"/></svg>';
-            this.el.appendChild(
-                this.createButton(
-                    'Blend…',
-                    blendIcon,
-                    () =>
-                        this.openValuePopover(this.el, {
-                            label: 'Steps',
-                            value: this.input.lastBlendSteps,
-                            min: 1,
-                            step: 1,
-                            title: 'Number of in-between shapes',
-                            onPreview: (v) => {
-                                const n = Math.max(1, Math.round(v));
-                                this.setShapePreview(
-                                    Number.isFinite(v)
-                                        ? computeBlendSubpaths(this.ui.ck, this.scene, idA, idB, n)
-                                        : null,
-                                );
-                            },
-                            onClearPreview: () => this.setShapePreview(null),
-                            onApply: (v) => this.input.blendSelection(Math.max(1, Math.round(v))),
-                        }),
-                    false,
-                    undefined,
-                    'Generate in-between shapes between the two selected objects.',
+                    'Combine into a non-destructive boolean group — children stay editable.',
                 ),
             );
         }
 
-        this.el.appendChild(this.createSeparator());
-
-        // Join Paths — only when exactly two Path nodes are selected
-        const twoPaths =
-            info.selectedIds.length === 2 &&
-            info.selectedNodes.length === 2 &&
-            info.selectedNodes.every((n) => n.node_type === 'Path');
-        if (twoPaths) {
-            this.el.appendChild(
-                this.createButton(
-                    'Join',
-                    iconLink(14),
-                    () => {
-                        this.input.joinSelectedPaths();
-                    },
-                    false,
-                    '⌘J',
-                ),
-            );
-        }
+        const moreMenu = this.buildMultiMoreMenu(info, allBoolCompatible);
+        if (moreMenu) this.el.appendChild(moreMenu);
 
         this.el.appendChild(
             this.createButton(
@@ -996,6 +909,86 @@ export class ContextBar {
 
         this.appendTransformActions(info, { flatten: false });
         this.appendLifecycleActions();
+    }
+
+    /** "More" overflow for a multi-selection — the occasional combine/path ops that
+     *  don't warrant their own top-level button (Compound, the destructive
+     *  pathfinders, Blend, Join). Returns null when none apply. */
+    private buildMultiMoreMenu(info: ContextInfo, allBoolCompatible: boolean): HTMLElement | null {
+        type Item = { label: string; icon: string; onSelect: () => void };
+        const items: Item[] = [];
+        const ids = [...info.selectedIds];
+
+        if (allBoolCompatible && info.selectedIds.length === 2) {
+            const [idA, idB] = info.selectedIds;
+            items.push({
+                label: 'Blend…',
+                icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 8.5l7 7" stroke-dasharray="2 2"/></svg>',
+                onSelect: () =>
+                    this.openValuePopover(this.el, {
+                        label: 'Steps',
+                        value: this.input.lastBlendSteps,
+                        min: 1,
+                        step: 1,
+                        title: 'Number of in-between shapes',
+                        onPreview: (v) =>
+                            this.setShapePreview(
+                                Number.isFinite(v)
+                                    ? computeBlendSubpaths(
+                                          this.ui.ck,
+                                          this.scene,
+                                          idA,
+                                          idB,
+                                          Math.max(1, Math.round(v)),
+                                      )
+                                    : null,
+                            ),
+                        onClearPreview: () => this.setShapePreview(null),
+                        onApply: (v) => this.input.blendSelection(Math.max(1, Math.round(v))),
+                    }),
+            });
+        }
+
+        if (allBoolCompatible) {
+            items.push({
+                label: 'Compound path',
+                icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg>',
+                onSelect: () => this.input.makeCompoundPath(),
+            });
+            const runPathfinder = (op: PathfinderOp) => {
+                if (applyPathfinder(this.ui.ck, this.scene, ids, op) != null) {
+                    this.ui.syncWithSelection();
+                    this.ui.updateLayerList();
+                }
+            };
+            items.push({
+                label: 'Minus Back',
+                icon: iconBoolSubtract(14),
+                onSelect: () => runPathfinder('minus-back'),
+            });
+            items.push({
+                label: 'Crop',
+                icon: iconBoolIntersect(14),
+                onSelect: () => runPathfinder('crop'),
+            });
+        }
+
+        const twoPaths =
+            info.selectedIds.length === 2 &&
+            info.selectedNodes.length === 2 &&
+            info.selectedNodes.every((n) => n.node_type === 'Path');
+        if (twoPaths) {
+            items.push({
+                label: 'Join paths',
+                icon: iconLink(14),
+                onSelect: () => this.input.joinSelectedPaths(),
+            });
+        }
+
+        if (items.length === 0) return null;
+        const moreIcon =
+            '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
+        return this.createDropdown('More', moreIcon, items, 'More combine & path operations');
     }
 
     /** Pen tool with a path in progress: progress + commit/cancel. */
