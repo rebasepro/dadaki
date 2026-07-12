@@ -2225,6 +2225,10 @@ export class Renderer {
                         p.setShader(null);
                     }
 
+                    // Arrowhead / line-ending markers (on top of the stroke, in
+                    // the node's local space — so they export with the artwork).
+                    this.drawNodeMarkers(canvas, nodeId, strokes);
+
                     if (strokes.length === 0 && fills.length > 0) {
                         // Keep reader at the end of geometry
                         reader.offset = startGeoOffset + 4 + geoSize;
@@ -3482,6 +3486,93 @@ export class Renderer {
         font.delete();
         measure.delete();
         worldPath.delete();
+    }
+
+    /** Draw arrowhead / line-ending markers at an open subpath's ends, in the
+     *  node's local space (so they export with the artwork), using the stroke
+     *  color and width. Cheap when the node has no markers (map lookup + return). */
+    private drawNodeMarkers(
+        canvas: Canvas,
+        nodeId: number,
+        strokes: {
+            paint?: { type: number; r: number; g: number; b: number; a: number };
+            width: number;
+        }[],
+    ) {
+        const markers = this.scene.getNodeMarkers(nodeId);
+        if (!markers || (!markers.start && !markers.end)) return;
+        const st =
+            strokes.find((s) => s.paint?.type === 1 && s.width > 0) ??
+            strokes.find((s) => s.width > 0);
+        if (!st) return;
+        const sp = this.scene
+            .getResolvedSubpaths(nodeId)
+            .find((s) => !s.closed && s.points.length >= 2);
+        if (!sp) return;
+        const pts = sp.points;
+        const w = st.width;
+
+        const paint = new this.ck.Paint();
+        paint.setStyle(this.ck.PaintStyle.Fill);
+        paint.setAntiAlias(true);
+        paint.setColor(
+            st.paint && st.paint.type === 1
+                ? this.ck.Color4f(st.paint.r, st.paint.g, st.paint.b, st.paint.a)
+                : this.ck.Color4f(0, 0, 0, 1),
+        );
+
+        const norm = (x: number, y: number): [number, number] => {
+            const len = Math.hypot(x, y) || 1;
+            return [x / len, y / len];
+        };
+        if (markers.start && markers.start !== 'none') {
+            const a = pts[0];
+            const cx = a.cp2[0] !== a.x || a.cp2[1] !== a.y ? a.cp2 : [pts[1].x, pts[1].y];
+            const [dx, dy] = norm(a.x - cx[0], a.y - cx[1]);
+            this.drawMarker(canvas, paint, markers.start, a.x, a.y, dx, dy, w);
+        }
+        if (markers.end && markers.end !== 'none') {
+            const a = pts[pts.length - 1];
+            const prev = pts[pts.length - 2];
+            const cx = a.cp1[0] !== a.x || a.cp1[1] !== a.y ? a.cp1 : [prev.x, prev.y];
+            const [dx, dy] = norm(a.x - cx[0], a.y - cx[1]);
+            this.drawMarker(canvas, paint, markers.end, a.x, a.y, dx, dy, w);
+        }
+        paint.delete();
+    }
+
+    /** One marker at (x,y) with outward unit direction (dx,dy), sized to stroke w. */
+    private drawMarker(
+        canvas: Canvas,
+        paint: Paint,
+        kind: 'none' | 'arrow' | 'circle' | 'square',
+        x: number,
+        y: number,
+        dx: number,
+        dy: number,
+        w: number,
+    ) {
+        if (kind === 'circle') {
+            canvas.drawCircle(x, y, w * 1.9, paint);
+            return;
+        }
+        if (kind === 'square') {
+            const h = w * 1.7;
+            canvas.drawRect(this.ck.LTRBRect(x - h, y - h, x + h, y + h), paint);
+            return;
+        }
+        // Arrow: a triangle with its tip at the end pointing outward.
+        const size = w * 3.4;
+        const half = w * 2.1;
+        const px = -dy;
+        const py = dx;
+        const tri = new this.ck.Path();
+        tri.moveTo(x + dx * w * 0.8, y + dy * w * 0.8); // tip just past the endpoint
+        tri.lineTo(x - dx * size + px * half, y - dy * size + py * half);
+        tri.lineTo(x - dx * size - px * half, y - dy * size - py * half);
+        tri.close();
+        canvas.drawPath(tri, paint);
+        tri.delete();
     }
 
     private drawArtboardLabel(canvas: Canvas, ab: Artboard, selected: boolean) {

@@ -53,6 +53,7 @@ import {
 } from './icons';
 import type { InputManager } from './input';
 import type { Renderer } from './renderer';
+import type { MarkerKind } from './types';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
 import type { WidthProfile } from './width_profile';
@@ -525,6 +526,46 @@ export class ContextBar {
                             icon: p.icon,
                             onSelect: () => this.input.applyWidthProfileToSelection(p.id),
                         })),
+                    ),
+                );
+
+                // Arrowhead at the path END (the common case — a line with an
+                // arrow). Sets a marker drawn in the stroke color at the endpoint.
+                const nodeId = info.selectedIds[0];
+                const mk = (d: string) =>
+                    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+                const setEnd = (kind: MarkerKind) => {
+                    this.scene.setNodeMarker(nodeId, 'end', kind);
+                    this.ui.syncWithSelection();
+                };
+                this.el.appendChild(
+                    this.createDropdown(
+                        'Arrow',
+                        mk('<path d="M4 12h13"/><path d="M12 6l6 6-6 6"/>'),
+                        [
+                            {
+                                label: 'None',
+                                icon: mk('<path d="M4 12h16"/>'),
+                                onSelect: () => setEnd('none'),
+                            },
+                            {
+                                label: 'Arrow',
+                                icon: mk('<path d="M4 12h13"/><path d="M12 6l6 6-6 6"/>'),
+                                onSelect: () => setEnd('arrow'),
+                            },
+                            {
+                                label: 'Circle',
+                                icon: mk('<path d="M4 12h11"/><circle cx="18" cy="12" r="3"/>'),
+                                onSelect: () => setEnd('circle'),
+                            },
+                            {
+                                label: 'Square',
+                                icon: mk(
+                                    '<path d="M4 12h11"/><rect x="15" y="9" width="6" height="6"/>',
+                                ),
+                                onSelect: () => setEnd('square'),
+                            },
+                        ],
                     ),
                 );
             }

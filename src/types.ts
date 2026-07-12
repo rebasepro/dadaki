@@ -140,6 +140,15 @@ export type EffectData =
     | { ColorMatrix: { matrix: number[]; linear_rgb?: boolean } };
 
 /** A cubic Bézier path point with incoming/outgoing control points. */
+/** Arrowhead / line-ending marker kind for a path end. */
+export type MarkerKind = 'none' | 'arrow' | 'circle' | 'square';
+
+/** Markers at a path's start and end (Illustrator's stroke arrowheads). */
+export interface NodeMarkers {
+    start?: MarkerKind;
+    end?: MarkerKind;
+}
+
 export interface PathPoint {
     x: number;
     y: number;

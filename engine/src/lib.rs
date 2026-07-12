@@ -982,6 +982,10 @@ pub struct Scene {
     /// Opaque to the engine — the editor defines the schema.
     #[serde(default)]
     pub text_paths_json: String,
+    /// Arrowhead / line-ending markers per node (editor-owned JSON object
+    /// `{nodeId:{start,end}}`). Opaque to the engine.
+    #[serde(default)]
+    pub markers_json: String,
 }
 
 fn default_document_size() -> f32 { 1000.0 }
@@ -1016,6 +1020,7 @@ impl Engine {
                 guides_y: Vec::new(),
                 swatches_json: String::new(),
                 text_paths_json: String::new(),
+                markers_json: String::new(),
             },
             next_id: 1,
             global_transforms: HashMap::new(),
@@ -4987,6 +4992,14 @@ impl Engine {
 
     pub fn set_text_paths_json(&mut self, json: String) {
         self.scene.text_paths_json = json;
+    }
+
+    pub fn get_markers_json(&self) -> String {
+        self.scene.markers_json.clone()
+    }
+
+    pub fn set_markers_json(&mut self, json: String) {
+        self.scene.markers_json = json;
     }
 }
 

@@ -32,6 +32,11 @@ export class WasmScene {
      *  the next getTextPath() reloads it. */
     private _textPathsLoaded = false;
 
+    /** Arrowhead / line-ending markers per node id. Persisted via the engine
+     *  (markers_json); this in-memory mirror is the fast read. */
+    markerLinks = new Map<number, import('./types').NodeMarkers>();
+    private _markersLoaded = false;
+
     /** Cached scene data, invalidated on mutation. */
     private _cachedSceneData: SceneData | null = null;
     private _sceneDataDirty: boolean = true;
@@ -251,6 +256,51 @@ export class WasmScene {
         }
     }
 
+    // ─── Arrowhead / line-ending markers ─────────────────────────────────────
+
+    /** Markers on a node's path ends, or null. Lazily re-reads after deserialize. */
+    getNodeMarkers(nodeId: number): import('./types').NodeMarkers | null {
+        if (!this._markersLoaded) {
+            this.reloadMarkers();
+            this._markersLoaded = true;
+        }
+        return this.markerLinks.get(nodeId) ?? null;
+    }
+
+    /** Set one end's marker kind (creates/updates the node's marker entry). */
+    setNodeMarker(nodeId: number, end: 'start' | 'end', kind: import('./types').MarkerKind): void {
+        this.saveHistory();
+        const cur = { ...(this.getNodeMarkers(nodeId) ?? {}) };
+        if (kind === 'none') delete cur[end];
+        else cur[end] = kind;
+        if (cur.start || cur.end) this.markerLinks.set(nodeId, cur);
+        else this.markerLinks.delete(nodeId);
+        this.persistMarkers();
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    private persistMarkers(): void {
+        if (!this.engine) return;
+        const obj: Record<string, import('./types').NodeMarkers> = {};
+        for (const [id, m] of this.markerLinks) obj[id] = m;
+        this.engine.set_markers_json(JSON.stringify(obj));
+    }
+
+    reloadMarkers(): void {
+        this.markerLinks.clear();
+        if (!this.engine) return;
+        try {
+            const obj = JSON.parse(this.engine.get_markers_json() || '{}') as Record<
+                string,
+                import('./types').NodeMarkers
+            >;
+            for (const k of Object.keys(obj)) this.markerLinks.set(Number(k), obj[k]);
+        } catch {
+            /* keep empty */
+        }
+    }
+
     removeArtboard(id: number): boolean {
         this.saveHistory();
         const ok = this.engine!.remove_artboard(id);
@@ -337,6 +387,7 @@ export class WasmScene {
         // The text-on-path link cache may be stale after any deserialize (undo/
         // redo/load); re-read it lazily on the next getTextPath().
         this._textPathsLoaded = false;
+        this._markersLoaded = false;
         if (isMutation) {
             this.changeCounter++;
             this.onMutate?.();
