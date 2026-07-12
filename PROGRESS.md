@@ -19,6 +19,7 @@ the live state: check off items, keep a dated log, always leave a clear "next st
 - [x] 12. Reverse Path Direction — committed `47f963e` (path_ops.reverseSubpaths; context-bar 'Reverse'; pairs with text-on-path)
 - [x] 13. Add Anchor Points — committed `a796ab2` (path_ops.addAnchorPointsToSubpaths; de Casteljau midpoints; context-bar 'Add Points'; complement of Simplify)
 - [x] 14. Average Points — committed `a8dc4a9` (input.averageSelectedPoints h/v/both; path-edit context-bar 'Average' dropdown; aligns selected anchors)
+- [x] 15. Arrowheads / line endings — committed `486f6e6` (engine markers_json tag 18; renderer.drawNodeMarkers arrow/circle/square at open-path ends, tangent-aligned, stroke color; context-bar 'Arrow' dropdown = END marker; persists). Follow-up: SVG marker export + start-marker UI.
 
 ## Next step
 NOTE (verified this session): **distribute spacing (equal gaps) is ALREADY done**
@@ -202,3 +203,16 @@ text (currently the culling box at the path center).
   (a real missing feature; needs a stroke-marker data model [scene json blob like
   text_paths_json] + endpoint marker rendering via ContourMeasure getPosTan(0)/(len) rotated
   to tangent + a stroke-panel Start/End selector — ~full window, likely won't finish in one).
+- 2026-07-12 14:0x (Sun) — **Arrowheads / line endings** done + committed (`486f6e6`). Engine
+  markers_json (proto tag 18, exact text_paths_json pattern; rebuilt pkg). WasmScene lazy-cache
+  (getNodeMarkers/setNodeMarker) like textPaths. Renderer.drawNodeMarkers hooks right after the
+  stroke pass in CMD_DRAW_NODE (nodeId + stroke color/width in scope, canvas in node-local
+  space → exports with the art via PNG); draws arrow (triangle tip at endpoint) / circle /
+  square, rotated to the endpoint tangent (outward = away from the path body), sized to stroke
+  width. Context-bar 'Arrow' dropdown sets the END marker (the 90% case) for a single open path.
+  Verified in browser: blue arrow-end, red circle-end, green square-end + start-arrow all render
+  correctly in stroke color; survive a full IndexedDB reload (screenshots). Engine tests (87) +
+  tsc + biome + vitest (225) green. Follow-ups: SVG <marker> export (PNG already correct since
+  it rasterizes the canvas), a start-marker UI control (data model already supports both ends),
+  more marker kinds (bar, diamond). Next big item remains components/symbols (multi-window,
+  render-protocol engine work).
