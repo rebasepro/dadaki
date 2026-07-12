@@ -85,8 +85,6 @@ export class UIEngine {
     gradientEdit: GradientEditController;
     contextBar: ContextBar | null = null;
     toolbar: Toolbar | null = null;
-    /** Document swatches panel — refreshed on structural/document changes. */
-    swatchesController: { render(): void } | null = null;
 
     /** Tracks whether we've already taken a history snapshot for the current
      *  property-editing gesture (e.g. a color picker drag). */
@@ -524,9 +522,9 @@ export class UIEngine {
      *  arrow-key navigation. Collapsed groups hide their descendants, so those
      *  rows are correctly absent. */
     private _visibleLayerOrder(): number[] {
-        return Array.from(
-            this.layerList.querySelectorAll('.layer-item[data-node-id]'),
-        ).map((el) => Number((el as HTMLElement).dataset.nodeId));
+        return Array.from(this.layerList.querySelectorAll('.layer-item[data-node-id]')).map((el) =>
+            Number((el as HTMLElement).dataset.nodeId),
+        );
     }
 
     /** Replace the selection with exactly `ids` (engine `select_node` is
@@ -554,9 +552,7 @@ export class UIEngine {
      *  Cmd/Ctrl+click behavior (engine `select_node` can't deselect). */
     private _toggleLayerSelection(id: number) {
         const sel = Array.from(this.scene.getSelection());
-        this._setLayerSelection(
-            sel.includes(id) ? sel.filter((s) => s !== id) : [...sel, id],
-        );
+        this._setLayerSelection(sel.includes(id) ? sel.filter((s) => s !== id) : [...sel, id]);
     }
 
     /** Arrow-key navigation within the Objects panel: move the selection one
@@ -3010,10 +3006,6 @@ export class UIEngine {
     updateLayerList() {
         if (!this.scene.engine) return;
 
-        // The swatch palette is document-level; refresh it alongside the layer
-        // list so undo/redo and document switches keep it in sync.
-        this.swatchesController?.render();
-
         let rootNodes: Uint32Array;
         let selection: number[];
         try {
@@ -4426,9 +4418,7 @@ export class UIEngine {
         this.scene.transaction(() => {
             const before = new Set(this.scene.getRootNodes());
             this.parseSVGInternal(svgText, patternImages, doc);
-            const newRoots = Array.from(this.scene.getRootNodes()).filter(
-                (id) => !before.has(id),
-            );
+            const newRoots = Array.from(this.scene.getRootNodes()).filter((id) => !before.has(id));
             // Imported artwork starts collapsed so a deep SVG tree doesn't flood
             // the Objects panel; the user expands the parts they care about.
             for (const rootId of newRoots) this.collapseSubtreeByDefault(rootId);

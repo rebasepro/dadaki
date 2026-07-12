@@ -12,7 +12,6 @@ import { GuidesController } from './guides';
 import { InputManager } from './input';
 import { PersistenceManager } from './persistence';
 import { Renderer } from './renderer';
-import { SwatchesController } from './swatches';
 import { TabStrip } from './tab_strip';
 import { Toolbar } from './toolbar';
 import { UIEngine } from './ui';
@@ -51,10 +50,6 @@ async function bootstrap() {
     const guides = new GuidesController(canvasContainer, wasmScene, renderer, input);
     input.guides = guides;
     renderer.guidesController = guides;
-
-    // Document color swatches (global colors).
-    const swatches = new SwatchesController(wasmScene, ui, () => renderer.requestRender());
-    ui.swatchesController = swatches;
 
     // ─── File / document lifecycle (multi-tab) ──────────────────────────
     const tabStripEl = document.getElementById('tab-strip') as HTMLElement;
