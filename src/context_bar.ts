@@ -19,7 +19,7 @@
 import type { AlignMode } from './align';
 import { alignSelection, distributeSelection } from './align';
 import { computeBlendSubpaths } from './blend';
-import type { BoolOp, PathfinderOp } from './boolean_ops';
+import type { BoolOp } from './boolean_ops';
 import { applyPathfinder, BOOL_OP_BY_INDEX, transformSubpaths } from './boolean_ops';
 import { colorToHex, createColorSwatch, parseHex } from './color_picker';
 import type { ContextInfo } from './context';
@@ -955,21 +955,19 @@ export class ContextBar {
                 icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg>',
                 onSelect: () => this.input.makeCompoundPath(),
             });
-            const runPathfinder = (op: PathfinderOp) => {
-                if (applyPathfinder(this.ui.ck, this.scene, ids, op) != null) {
-                    this.ui.syncWithSelection();
-                    this.ui.updateLayerList();
-                }
-            };
+            // Minus Back = front shape minus everything behind it (the opposite
+            // direction from Boolean › Subtract). Crop was dropped — for two shapes
+            // it's identical to Boolean › Intersect, and this build doesn't do
+            // Illustrator's real Crop (clip lower objects, keep their own fills).
             items.push({
                 label: 'Minus Back',
                 icon: iconBoolSubtract(14),
-                onSelect: () => runPathfinder('minus-back'),
-            });
-            items.push({
-                label: 'Crop',
-                icon: iconBoolIntersect(14),
-                onSelect: () => runPathfinder('crop'),
+                onSelect: () => {
+                    if (applyPathfinder(this.ui.ck, this.scene, ids, 'minus-back') != null) {
+                        this.ui.syncWithSelection();
+                        this.ui.updateLayerList();
+                    }
+                },
             });
         }
 
