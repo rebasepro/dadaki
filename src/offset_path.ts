@@ -13,15 +13,18 @@
  */
 import type { CanvasKit, Path } from 'canvaskit-wasm';
 import { appendSubpathsToPath, pathToSubpaths } from './boolean_ops';
+import type { Subpath } from './types';
 import type { WasmScene } from './wasm_scene';
 
-/** Offset the given path node by `distance`. Returns the new node id, or null. */
-export function offsetPath(
+/** Compute the offset outline for a path node, in the node's LOCAL space (the same
+ *  space as its stored geometry). Pure — no scene mutation — so it also backs the
+ *  live preview. Returns null if the path can't be offset. */
+export function computeOffsetSubpaths(
     ck: CanvasKit,
     scene: WasmScene,
     nodeId: number,
     distance: number,
-): number | null {
+): { subpaths: Subpath[]; fillRule: number } | null {
     if (!distance || !Number.isFinite(distance)) return null;
     const geom = scene.getNodeGeometry(nodeId);
     const subpaths = geom?.Path?.subpaths;
@@ -63,15 +66,36 @@ export function offsetPath(
     const fillRule = result.getFillType() === ck.FillType.EvenOdd ? 1 : 0;
     result.delete();
     if (offsetSubpaths.length === 0) return null;
+    return { subpaths: offsetSubpaths, fillRule };
+}
 
-    // Non-destructive: duplicate (keeps style + transform), swap in the geometry.
-    // One undo step via transaction().
+/** Offset the given path node by `distance`, creating a new parallel path directly
+ *  BELOW the original (so the original stays on top). Returns the new node id, or
+ *  null. One undo step. */
+export function offsetPath(
+    ck: CanvasKit,
+    scene: WasmScene,
+    nodeId: number,
+    distance: number,
+): number | null {
+    const res = computeOffsetSubpaths(ck, scene, nodeId, distance);
+    if (!res) return null;
+
     let newId = -1;
     scene.transaction(() => {
+        // duplicate keeps the style + transform, but it also nudges the clone by
+        // +20,+20 and drops it at the top of the stack — undo the nudge so the
+        // offset is concentric, then tuck it directly below the original.
         newId = scene.duplicateNode(nodeId);
-        scene.replaceGeometryWithPath(newId, offsetSubpaths);
+        scene.engine!.move_node(newId, -20, -20);
+        scene.replaceGeometryWithPath(newId, res.subpaths);
         const style = scene.getNodeStyle(newId);
-        scene.setNodeStyleNoHistory(newId, JSON.stringify({ ...style, fill_rule: fillRule }));
+        scene.setNodeStyleNoHistory(newId, JSON.stringify({ ...style, fill_rule: res.fillRule }));
+
+        const parent = scene.getNodeParent(nodeId); // -1 == root
+        const siblings = parent < 0 ? scene.getRootNodes() : scene.getNodeChildren(parent);
+        const idx = Array.from(siblings).indexOf(nodeId);
+        if (idx >= 0) scene.reorderNode(newId, parent < 0 ? null : parent, idx);
     });
     return newId >= 0 ? newId : null;
 }

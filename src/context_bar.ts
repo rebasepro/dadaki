@@ -19,7 +19,7 @@
 import type { AlignMode } from './align';
 import { alignSelection, distributeSelection } from './align';
 import type { BoolOp, PathfinderOp } from './boolean_ops';
-import { applyPathfinder, BOOL_OP_BY_INDEX } from './boolean_ops';
+import { applyPathfinder, BOOL_OP_BY_INDEX, transformSubpaths } from './boolean_ops';
 import { colorToHex, createColorSwatch, parseHex } from './color_picker';
 import type { ContextInfo } from './context';
 import { getEditorContext } from './context';
@@ -52,6 +52,7 @@ import {
     iconUngroup,
 } from './icons';
 import type { InputManager } from './input';
+import { computeOffsetSubpaths } from './offset_path';
 import type { Renderer } from './renderer';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
@@ -457,14 +458,43 @@ export class ContextBar {
         label.className = 'cb-value-popover-label';
         label.textContent = 'Offset';
 
+        const nodeId = Array.from(this.scene.engine?.get_selection() ?? [])[0];
+
         const input = document.createElement('input');
         input.type = 'number';
         input.className = 'cb-num';
         input.value = String(this.input.lastOffsetAmount);
         input.title = 'Offset distance (negative = inset)';
-        this.makeScrubbable(input);
+
+        // Live preview: recompute the offset outline for the current value and hand
+        // it to the renderer as a world-space ghost. Cleared on apply/cancel.
+        const updatePreview = () => {
+            const dist = parseFloat(input.value);
+            if (nodeId == null || !Number.isFinite(dist) || dist === 0) {
+                this.input.offsetPreview = null;
+            } else {
+                const local = computeOffsetSubpaths(this.ui.ck, this.scene, nodeId, dist);
+                this.input.offsetPreview = local
+                    ? {
+                          subpaths: transformSubpaths(
+                              local.subpaths,
+                              this.scene.getTransform(nodeId),
+                          ),
+                          fillRule: local.fillRule,
+                      }
+                    : null;
+            }
+            this.scene.renderer?.requestRender();
+        };
+        const clearPreview = () => {
+            this.input.offsetPreview = null;
+            this.scene.renderer?.requestRender();
+        };
+        this.makeScrubbable(input, updatePreview);
+        input.addEventListener('input', updatePreview);
 
         const close = () => {
+            clearPreview();
             pop.remove();
             document.removeEventListener('pointerdown', onDoc, true);
         };
@@ -509,6 +539,7 @@ export class ContextBar {
         setTimeout(() => document.addEventListener('pointerdown', onDoc, true), 0);
         input.focus();
         input.select();
+        updatePreview(); // show the ghost immediately for the current value
     }
 
     /** The "More" overflow menu for a single Path — every occasional path op is a
@@ -1219,7 +1250,7 @@ export class ContextBar {
      *  plain click still focuses to type). Scrubbing ONLY sets the value; the
      *  action is a separate explicit step (its button, or Enter), so dragging the
      *  distance never triggers the action repeatedly. */
-    private makeScrubbable(input: HTMLInputElement) {
+    private makeScrubbable(input: HTMLInputElement, onChange?: () => void) {
         input.classList.add('cb-num-scrub');
         input.addEventListener('pointerdown', (e: PointerEvent) => {
             if (e.button !== 0) return;
@@ -1243,7 +1274,10 @@ export class ContextBar {
                 const raw = startVal + Math.round(dx) * step * mult;
                 const val = Math.max(min, Math.min(max, raw));
                 const next = String(Math.round(val * 100) / 100);
-                if (next !== input.value) input.value = next;
+                if (next !== input.value) {
+                    input.value = next;
+                    onChange?.();
+                }
             };
             const onUp = () => {
                 input.removeEventListener('pointermove', onMove);

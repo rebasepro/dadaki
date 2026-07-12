@@ -4,7 +4,7 @@ import type { Canvas, CanvasKit, Paint, Path, Surface } from 'canvaskit-wasm';
 type OutlinePt = { x: number; y: number; cp1: number[]; cp2: number[] };
 
 import { adaptiveTileSources, maxTileScale, rasterizeAdaptiveTile } from './adaptive_tiles';
-import { invertAffine, nodeToWorldPath } from './boolean_ops';
+import { appendSubpathsToPath, invertAffine, nodeToWorldPath } from './boolean_ops';
 import {
     buildFontProvider,
     getFontData,
@@ -1535,8 +1535,7 @@ export class Renderer {
         // snapshot bitmap) at their rest position. Mirrors the `needsSubset`
         // active-subset selection below.
         const lpPassSubset =
-            this._bakeSubset ??
-            (dragActive || snapshotPass !== null ? this._dragSubtree : null);
+            this._bakeSubset ?? (dragActive || snapshotPass !== null ? this._dragSubtree : null);
 
         for (let i = 0; i < commandCount; i++) {
             const recordLen = reader.u32();
@@ -2382,6 +2381,8 @@ export class Renderer {
         if (!exporting && snapshotPass === null) {
             // Draw live preview shape (while user is dragging to create)
             this.drawPreview(canvas);
+            // Draw the Offset-Copy preview (ghost of the result while adjusting)
+            this.drawOffsetPreview(canvas);
             // Draw pen tool in-progress path
             this.drawPenPreview(canvas);
             // Draw paint bucket hover preview
@@ -3949,6 +3950,36 @@ export class Renderer {
     }
 
     /** Live preview stroke for the line and pencil tools (point-based, not a box). */
+    /** Ghost of the Offset-Copy result, drawn in world space while the Offset
+     *  popover is open so the distance can be dialed in with live feedback. */
+    private drawOffsetPreview(canvas: Canvas) {
+        const preview = this.inputManager?.offsetPreview;
+        if (!preview || preview.subpaths.length === 0) return;
+
+        const path = new this.ck.Path();
+        appendSubpathsToPath(path, preview.subpaths);
+        path.setFillType(
+            preview.fillRule === 1 ? this.ck.FillType.EvenOdd : this.ck.FillType.Winding,
+        );
+
+        const fill = new this.ck.Paint();
+        fill.setStyle(this.ck.PaintStyle.Fill);
+        fill.setColor(this.ck.Color(0, 162, 255, 0.12));
+        fill.setAntiAlias(true);
+        canvas.drawPath(path, fill);
+
+        const stroke = new this.ck.Paint();
+        stroke.setStyle(this.ck.PaintStyle.Stroke);
+        stroke.setColor(this.ck.Color(0, 162, 255, 1.0));
+        stroke.setStrokeWidth(1.5 / this.zoom);
+        stroke.setAntiAlias(true);
+        canvas.drawPath(path, stroke);
+
+        path.delete();
+        fill.delete();
+        stroke.delete();
+    }
+
     private drawStrokePreview(canvas: Canvas) {
         const line = this.inputManager?.previewLine;
         const pencil = this.inputManager?.pencilPoints;

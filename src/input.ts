@@ -171,6 +171,9 @@ export class InputManager {
     previewLine: { x1: number; y1: number; x2: number; y2: number } | null = null;
     /** Freehand pencil-tool samples in world coords, read by Renderer each frame. */
     pencilPoints: { x: number; y: number }[] | null = null;
+    /** Live Offset-Copy preview: the offset outline in WORLD coords, drawn as a
+     *  ghost while the Offset popover is open. Null when not previewing. */
+    offsetPreview: { subpaths: import('./types').Subpath[]; fillRule: number } | null = null;
     /** Accumulated pen-tool anchor points for the current path being drawn. */
     currentPathPoints: PenPathPoint[] = [];
     isDraggingHandle: boolean = false;
