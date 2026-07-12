@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeSelectedAnchors, reverseSubpaths } from './path_ops';
+import { addAnchorPointsToSubpaths, mergeSelectedAnchors, reverseSubpaths } from './path_ops';
 import type { PathPoint, Subpath } from './types';
 
 /** Corner-style anchor (retracted handles) at (x, y). */
@@ -31,10 +31,28 @@ describe('reverseSubpaths', () => {
     });
 
     it('preserves closed flag and per-vertex corner radius', () => {
-        const out = reverseSubpaths([closed(pt(0, 0, { corner_radius: 5 }), pt(10, 0), pt(10, 10))]);
+        const out = reverseSubpaths([
+            closed(pt(0, 0, { corner_radius: 5 }), pt(10, 0), pt(10, 10)),
+        ]);
         expect(out[0].closed).toBe(true);
         // The radius rides with its vertex to the new (last) position.
         expect(out[0].points[out[0].points.length - 1].corner_radius).toBe(5);
+    });
+});
+
+describe('addAnchorPointsToSubpaths', () => {
+    it('inserts a midpoint on each segment of an open path (n -> 2n-1)', () => {
+        const out = addAnchorPointsToSubpaths([open(pt(0, 0), pt(10, 0), pt(20, 0))]);
+        const p = out[0].points;
+        expect(p.length).toBe(5); // 3 anchors + 2 midpoints
+        expect(p.map((q) => q.x)).toEqual([0, 5, 10, 15, 20]); // midpoints on the line
+        expect(out[0].closed).toBe(false);
+    });
+
+    it('inserts a midpoint on every segment of a closed path, incl. the closing one (n -> 2n)', () => {
+        const out = addAnchorPointsToSubpaths([closed(pt(0, 0), pt(10, 0), pt(10, 10))]);
+        expect(out[0].points.length).toBe(6);
+        expect(out[0].closed).toBe(true);
     });
 });
 

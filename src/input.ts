@@ -7,6 +7,7 @@ import { offsetPath } from './offset_path';
 import { outlineStroke } from './outline_stroke';
 import {
     addAnchorPoint,
+    addAnchorPointsToSubpaths,
     findNearestSegment,
     joinSubpaths,
     mergeSelectedAnchors,
@@ -2685,6 +2686,20 @@ export class InputManager {
         if (selection.length !== 1) return;
         if (!applyWidthProfile(this.ui.ck, this.scene, selection[0], profile)) return;
         this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
+    /** Add an anchor at the midpoint of every segment of the selected Path (the
+     *  complement of Simplify). Curve unchanged. One undo step. */
+    addAnchorPointsToSelection() {
+        const selection = Array.from(this.scene.engine!.get_selection());
+        if (selection.length !== 1) return;
+        const subs = this.scene.getNodeGeometry(selection[0])?.Path?.subpaths;
+        if (!subs || subs.length === 0) return;
+        this.scene.transaction(() => {
+            this.scene.replaceGeometryWithPath(selection[0], addAnchorPointsToSubpaths(subs));
+        });
         this.ui.syncWithSelection();
         this.renderer.requestRender();
     }

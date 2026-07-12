@@ -538,6 +538,18 @@ export class ContextBar {
                     this.input.reverseSelectedPath();
                 }),
             );
+
+            // Add anchor points — insert a midpoint on every segment (complement
+            // of Simplify). Only worth showing above a couple of points.
+            if (this.input.selectedPathPointCount() >= 2) {
+                const addPtsIcon =
+                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18c0-8 16-8 16 0" fill="none"/><circle cx="4" cy="18" r="1.6" fill="currentColor"/><circle cx="20" cy="18" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/></svg>';
+                this.el.appendChild(
+                    this.createButton('Add Points', addPtsIcon, () => {
+                        this.input.addAnchorPointsToSelection();
+                    }),
+                );
+            }
         }
 
         this.appendTransformActions(info, { flatten: true });

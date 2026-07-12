@@ -418,6 +418,51 @@ export function reverseSubpaths(subpaths: Subpath[]): Subpath[] {
     }));
 }
 
+/**
+ * Add an anchor point at the midpoint of every segment (Illustrator's "Add
+ * Anchor Points"). The curve is unchanged — each segment is split at t=0.5 via
+ * de Casteljau, so the new anchors sit exactly on the path and neighbouring
+ * handles are re-fitted. The complement of Simplify.
+ */
+export function addAnchorPointsToSubpaths(subpaths: Subpath[]): Subpath[] {
+    return subpaths.map((sp) => {
+        const pts = sp.points;
+        const n = pts.length;
+        if (n < 2) return sp;
+        const segCount = sp.closed ? n : n - 1;
+        const splits = [];
+        for (let i = 0; i < segCount; i++) {
+            splits.push(deCasteljau(pts[i], pts[(i + 1) % n], 0.5));
+        }
+        // Segment index that ENDS at anchor i (or -1 for an open path's start).
+        const segEndingAt = (i: number) => (sp.closed ? (i - 1 + segCount) % segCount : i - 1);
+
+        const out: PathPoint[] = [];
+        for (let i = 0; i < n; i++) {
+            const outgoing = i < segCount ? splits[i] : undefined; // segment starting at i
+            const incomingIdx = segEndingAt(i);
+            const incoming = incomingIdx >= 0 ? splits[incomingIdx] : undefined;
+            const anchor: PathPoint = {
+                x: pts[i].x,
+                y: pts[i].y,
+                cp1: incoming ? [...incoming.right.end.cp1] : [...pts[i].cp1],
+                cp2: outgoing ? [...outgoing.left.start.cp2] : [...pts[i].cp2],
+            };
+            if (pts[i].corner_radius !== undefined) anchor.corner_radius = pts[i].corner_radius;
+            out.push(anchor);
+            if (outgoing) {
+                out.push({
+                    x: outgoing.point.x,
+                    y: outgoing.point.y,
+                    cp1: [...outgoing.point.cp1],
+                    cp2: [...outgoing.point.cp2],
+                });
+            }
+        }
+        return { closed: sp.closed, points: out };
+    });
+}
+
 export function joinSubpaths(
     subpaths: Subpath[],
     aIdx: number,
