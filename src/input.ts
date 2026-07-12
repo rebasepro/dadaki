@@ -4389,13 +4389,10 @@ export class InputManager {
                         (g) => (g.axis === 'x' && !xLocked) || (g.axis === 'y' && !yLocked),
                     );
 
-                    // Figma-style equal spacing: snap the moving object to the
-                    // position where its gaps to the left/right (or top/bottom)
-                    // neighbours are equal — but only on an axis alignment didn't
-                    // already claim, so the two systems don't fight.
-                    const hasX = this.activeSnapGuides.some((g) => g.axis === 'x');
-                    const hasY = this.activeSnapGuides.some((g) => g.axis === 'y');
-                    // A touch grabbier than edge alignment — an exact equal-spacing
+                    // Figma-style equal spacing. It OVERRIDES edge/grid alignment on
+                    // an axis when the equal position is within reach — otherwise
+                    // alignment or grid snapping there would block it entirely. A
+                    // touch grabbier than edge alignment, since an exact equal
                     // position is harder to hit by hand than a shared edge.
                     const thr = 12 / this.renderer.zoom;
                     const es = computeEqualSpacing(this.scene, this.moveOriginalIds, [
@@ -4405,12 +4402,14 @@ export class InputManager {
                         sb.y + totalDy + sb.h,
                     ]);
                     const matches: import('./equal_spacing').EqualMatch[] = [];
-                    if (!hasX && !xLocked && es.x && Math.abs(es.x.delta) < thr) {
+                    if (!xLocked && es.x && Math.abs(es.x.delta) < thr) {
                         totalDx += es.x.delta;
+                        this.activeSnapGuides = this.activeSnapGuides.filter((g) => g.axis !== 'x');
                         matches.push(es.x);
                     }
-                    if (!hasY && !yLocked && es.y && Math.abs(es.y.delta) < thr) {
+                    if (!yLocked && es.y && Math.abs(es.y.delta) < thr) {
                         totalDy += es.y.delta;
+                        this.activeSnapGuides = this.activeSnapGuides.filter((g) => g.axis !== 'y');
                         matches.push(es.y);
                     }
                     if (matches.length) this.equalSpacing = matches;
