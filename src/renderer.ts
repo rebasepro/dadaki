@@ -4074,6 +4074,16 @@ export class Renderer {
         paint.setAntiAlias(true);
         const cap = 4 / this.zoom; // half-length of the end ticks
 
+        // Outline the object being measured TO, so the numbers have an obvious
+        // referent ("the gap between the thing I'm dragging and this one").
+        const targetOutline = new this.ck.Paint();
+        targetOutline.setColor(this.ck.Color(255, 45, 120, 0.9));
+        targetOutline.setStyle(this.ck.PaintStyle.Stroke);
+        targetOutline.setStrokeWidth(1.5 / this.zoom);
+        targetOutline.setAntiAlias(true);
+        canvas.drawRect(this.ck.LTRBRect(hx0, hy0, hx1, hy1), targetOutline);
+        targetOutline.delete();
+
         // Each gap line is anchored to the SELECTED object's center axis. This
         // reads as "measuring from the selection" and keeps the horizontal and
         // vertical labels apart (one sits beside the selection, one below it).
