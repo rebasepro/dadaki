@@ -17,20 +17,31 @@ dependency on it, and no dependency on any specific backend.
 ## Quick start
 
 ```bash
-pnpm install
+corepack pnpm@11.9.0 install
 
-# Run the demo app (local-only editor)
-./node_modules/.bin/vite packages/app
-# → http://localhost:5173
+# Run the editor standalone — local-only, NO backend or cloud
+pnpm dev
+# → http://localhost:5199
 ```
 
-> This environment's `pnpm run <script>` / `npx` are flaky — invoke the binaries
-> in `node_modules/.bin/` directly (e.g. `./node_modules/.bin/vite`,
-> `./node_modules/.bin/tsc`, `./node_modules/.bin/vitest`).
->
+That's the whole open-source editor: no account, no server, files stay in your
+browser. `pnpm build` produces a static bundle; `pnpm preview` serves it.
+
+### Scripts
+
+| Command          | What it runs                                                        |
+| ---------------- | ------------------------------------------------------------------- |
+| `pnpm dev`       | Standalone editor (no cloud) — http://localhost:5199                |
+| `pnpm build`     | Production build of the standalone editor                           |
+| `pnpm preview`   | Serve the production build locally                                  |
+| `pnpm test`      | Unit tests (vitest)                                                 |
+| `pnpm check`     | Typecheck                                                           |
+| `pnpm lint` / `pnpm format` | Biome lint / format                                      |
+| `pnpm dev:cloud` | The hosted app **if** you have the separate `cloud/` repo checked out locally (backend + frontend via Rebase). Not part of this repo. |
+
 > **pnpm version:** this repo pins pnpm `^11` via `devEngines`. Use pnpm **11.9.0**
-> (`corepack pnpm@11.9.0 install`). Homebrew's pnpm 11.1.0 hits a bug on the
-> `devEngines` field here (`Cannot use 'in' operator to search for 'integrity'`).
+> (`corepack pnpm@11.9.0`). Homebrew's pnpm 11.1.0 hits a bug on the `devEngines`
+> field here (`Cannot use 'in' operator to search for 'integrity'`).
 
 ## Develop
 

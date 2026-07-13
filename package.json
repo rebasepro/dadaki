@@ -5,6 +5,12 @@
     "type": "module",
     "private": true,
     "scripts": {
+        "dev": "vite packages/app --port 5199",
+        "start": "vite packages/app --port 5199",
+        "build": "vite build packages/app",
+        "preview": "vite preview packages/app --port 5199",
+        "dev:cloud": "test -d cloud || { echo 'cloud/ is a separate repo and is not part of the open-source editor — nothing to run here.'; exit 1; }; cd cloud && ./node_modules/.bin/rebase dev",
+        "build:cloud": "test -d cloud || { echo 'cloud/ is a separate repo and is not part of the open-source editor — nothing to run here.'; exit 1; }; cd cloud && ./node_modules/.bin/rebase build",
         "test": "vitest run",
         "check": "tsc --noEmit",
         "lint": "biome check",
