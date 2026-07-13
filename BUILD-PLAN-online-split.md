@@ -324,3 +324,26 @@ tree broken or half-wired. "Releasable" > "feature-complete but flaky."
   `tests/svg-suite/baseline.json` holds 1679 per-fixture similarity scores and IS the
   regression reference; harness will be run at the Phase-1 gate (running it on unchanged code
   is a no-op). Starting Phase 1 (editor lib/app split).
+
+- 2026-07-13 06:35 CEST — **Phase 1 (editor split) DONE + verified.** `@dadaki/editor`
+  (lib, `createEditor`) + `@dadaki/app` (thin shell) pnpm workspace; engine is a workspace
+  package. Gate: tsc clean (both pkgs), biome clean, **226/226 unit tests pass** (the Phase-0
+  "452" was the stale root `dist/` copy double-counting — 226 is the true unique count), app
+  dev server + production build both render/edit identically (screenshotted). SVG
+  conformance: ran the harness on my branch (205/1679 pass, 556 "regressions") AND on
+  **pristine pre-split `main` (012a313) in a throwaway worktree — byte-IDENTICAL result
+  (205/1679, 556)**. So those numbers are pre-existing/environmental (baseline.json was made
+  on a different font/resvg/headless setup); the split introduced **zero** new regressions.
+  Gate passes. Committed (857c309 split, 5649360 OSS docs+LICENSE+harness path fix).
+  Decisions: pragmatic `createEditor` injects the chrome template (single-instance ids) —
+  full container-scoping deferred (§7); package exports point at TS source (Vite compiles).
+
+- 2026-07-13 06:40 CEST — **Phase 2 in progress.** Scaffolded the online app at
+  `/Users/francesco/dadaki-cloud` via `rebase init` (global CLI 0.8.0), custom DB
+  `dadaki_cloud` on local Postgres. **Linked the LOCAL rebase checkout** (per Francesco):
+  scaffold defaulted to `@rebasepro/* : "0.8.0"` from npm; overrides in package.json's `pnpm`
+  field were IGNORED by pnpm 11 (it reads overrides from `pnpm-workspace.yaml`). Fix: put
+  `overrides:` (link: abs paths to /Users/francesco/rebase/packages/*) in pnpm-workspace.yaml
+  + a clean reinstall (had to nuke node_modules+lockfile — pnpm kept saying "up to date").
+  Now ALL @rebasepro/* symlink to /Users/francesco/rebase. Next: `rebase dev`, push schema,
+  embed @dadaki/editor.
