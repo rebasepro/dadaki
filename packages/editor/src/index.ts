@@ -42,6 +42,19 @@ export interface EditorOptions {
     canvasKit: CanvasKit;
     /** Optional analytics sink; if provided it is registered before any event. */
     analyticsSink?: AnalyticsSink;
+    /**
+     * Restore the editor's own persisted session (open tabs) from IndexedDB.
+     * Defaults to true (the standalone app). Hosts that manage documents
+     * themselves (e.g. a cloud app) should pass false and use `initialDocument`
+     * / `loadBytes` to control what's open.
+     */
+    restoreSession?: boolean;
+    /**
+     * When `restoreSession` is false, the single document to open on start.
+     * Provide `bytes` (a `.dataki` snapshot from `exportBytes`) to open an
+     * existing document, or omit to start with a blank one.
+     */
+    initialDocument?: { bytes?: Uint8Array; name?: string };
 }
 
 export interface EditorHandle {
@@ -199,8 +212,20 @@ export async function createEditor(
         onAbout: () => aboutDialog.open(),
     });
 
-    // Restore the previous session (open tabs + active).
-    await documentManager.restoreSession();
+    // Choose the initial document set. Standalone app: restore the previous
+    // session. Embedded host: open exactly one document it controls.
+    if (options.restoreSession === false) {
+        const init = options.initialDocument;
+        if (init?.bytes) {
+            const doc = new Document(init.name ?? 'Untitled');
+            doc.pendingBytes = init.bytes;
+            documentManager.adopt(doc);
+        } else {
+            documentManager.create(init?.name ?? 'Untitled');
+        }
+    } else {
+        await documentManager.restoreSession();
+    }
     ui.updateLayerList();
 
     // Zoom controls
