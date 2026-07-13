@@ -294,7 +294,26 @@ export async function createEditor(
             if (!engine) return null;
             return new Uint8Array(engine.serialize_proto());
         },
-        exportSVG: () => ui.buildSVGString(),
+        exportSVG: () => {
+            // Render the artwork as it looks on the canvas — framed to the
+            // artboard bounds and on a solid canvas — rather than loose shapes
+            // on transparency (which reads as an empty/checkerboard preview).
+            // This is what hosts use for thumbnails. Artboards default to a
+            // transparent background, so fall back to white (the canvas colour
+            // shown in the editor) when there's no opaque fill.
+            const white = { r: 1, g: 1, b: 1, a: 1 };
+            const canvasBg = (bg?: { r: number; g: number; b: number; a: number }) =>
+                bg && bg.a > 0 ? bg : white;
+            const arts = wasmScene.getArtboards();
+            if (arts.length === 1) {
+                const ab = arts[0];
+                return ui.buildSVGString({ x: ab.x, y: ab.y, w: ab.w, h: ab.h }, canvasBg(ab.background));
+            }
+            if (arts.length > 1) {
+                return ui.buildSVGString(renderer.getArtboardsBounds(), canvasBg(arts[0].background));
+            }
+            return ui.buildSVGString(undefined, white);
+        },
         loadBytes: (bytes: Uint8Array, name = 'Untitled') => {
             const doc = new Document(name);
             doc.pendingBytes = bytes;
