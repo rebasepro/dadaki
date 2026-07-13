@@ -306,6 +306,46 @@ tree broken or half-wired. "Releasable" > "feature-complete but flaky."
 
 ---
 
+## FINAL SUMMARY (read this first when you wake up)
+
+**Status: done and releasable.** Both parts are built, wired, and verified end-to-end in a
+real browser. Nothing half-baked; nothing deployed; no secrets committed.
+
+**Part 1 — OSS editor** (`/Users/francesco/vector-editor`, branch `online-split`):
+- Split into a pnpm workspace: `@dadaki/editor` (the reusable library, public API
+  `createEditor(container, options)`) + `@dadaki/app` (a zero-backend local-only demo) +
+  `engine` (the WASM package). Rebase/Firebase-free lib.
+- Gate green: tsc clean, biome clean, **226/226 unit tests pass**, dev server + prod build
+  render/edit identically. SVG conformance suite shows **zero new regressions** (proved by
+  running it on pristine pre-split `main` — byte-identical numbers; the apparent "regressions"
+  are environmental in this headless box, not from the split).
+- Release-ready: MIT `LICENSE`, root + `packages/editor` READMEs. NOT pushed/published.
+- **To run:** `pnpm install` then `./node_modules/.bin/vite packages/app`.
+
+**Part 2 — Online app** (`/Users/francesco/dadaki-cloud`, its own git repo):
+- New Rebase project; `@rebasepro/*` + `engine` linked to your LOCAL checkouts (not npm).
+- Collections `documents` / `teams` / `team_members` (+ auth `users`) on Postgres db
+  `dadaki_cloud`. Custom React frontend (replaced the admin CMS).
+- Verified flow: anonymous design (local IndexedDB) → sign up → **default "…'s Team" auto-
+  created** → **import local designs to cloud** → documents persist in Postgres, team- and
+  owner-scoped, with thumbnails → reload from cloud renders identically → "Saved to cloud".
+- **To run:** `cd /Users/francesco/dadaki-cloud && pnpm install && rebase dev`
+  (frontend http://localhost:5173). DB already created + schema pushed. See its README.
+
+**Decisions I made (override freely):** editor uses a pragmatic single-instance chrome
+injection (full container-scoping deferred); document payloads stored inline in Postgres
+(Storage is a clean next step); default team created by the frontend (the server afterSave
+hook was unreliable and made ownerless teams, so I removed it); sync = last-write-wins;
+Google OAuth left as env placeholders; MIT license.
+
+**Needs you (I did NOT do these — per the guardrails):** any deploy; publishing the OSS repo
+/ npm; real Google OAuth creds; pushing to remotes. Test account created: `ada@dadaki.test`.
+
+**Both dev servers may still be running** (editor preview :5199, rebase dev :3487/:5173) and
+`caffeinate` is holding the Mac awake — feel free to kill them.
+
+---
+
 ## 9. RUNNING LOG (append-only — update after every phase)
 
 - 2026-07-13 02:06 CEST — Plan authored. Explored both repos, read `TASK-lib-app-split.md`
@@ -347,3 +387,23 @@ tree broken or half-wired. "Releasable" > "feature-complete but flaky."
   + a clean reinstall (had to nuke node_modules+lockfile — pnpm kept saying "up to date").
   Now ALL @rebasepro/* symlink to /Users/francesco/rebase. Next: `rebase dev`, push schema,
   embed @dadaki/editor.
+
+- 2026-07-13 ~07:3x CEST — **Phases 2–4 DONE + verified end-to-end in the browser.** The
+  online app at `/Users/francesco/dadaki-cloud` runs on `rebase dev` (backend `:3487`,
+  frontend `:5173`) with the LOCAL rebase stack. DB `dadaki_cloud` on local Postgres
+  (`?sslmode=disable`). Collections `documents`/`teams`/`team_members` (+auth `users`) pushed
+  (schema + RLS). Custom React frontend (replaces the admin CMS): anonymous-first dashboard,
+  optional email/password auth, per-user default team, local-first IndexedDB store + cloud
+  sync to Rebase, and local→cloud import on first sign-in. Editor embedded via
+  `createEditor(restoreSession:false, initialDocument)`. **Verified flow with the browser:**
+  anonymous → New design → drew a rect → autosaved to IndexedDB (173B + SVG thumbnail) →
+  dashboard card with thumbnail → registered ada@dadaki.test → **"Ada's Team" auto-created**
+  (avatar + team switcher) → "Bring your work with you" import prompt → Import → doc persisted
+  in Postgres (`rebase.documents`, team-scoped, owner-scoped, thumbnail) and survives reload.
+  Confirmed rows in Postgres. Fixes made live: lazy-load EditorView (dashboard was blank —
+  eager editor import); store missing `localGet` re-export; removed the server users.afterSave
+  team hook (auth-registration didn't populate the callback's id/values → made ownerless junk
+  teams; frontend `ensureDefaultTeam` is the reliable source of truth); dashboard refresh after
+  import via `dataVersion`. Committed: editor 55094df; dadaki-cloud initial 6cf84bf.
+  Backend restarted to drop the removed hook. REMAINING: Phase 5 polish pass + Phase 6 docs
+  (dadaki-cloud README) + final write-up.
