@@ -110,7 +110,7 @@ async function startServer() {
   if (EXTERNAL_URL) return { url: EXTERNAL_URL, stop: async () => {} };
   const port = await freePort();
   const bin = join(REPO, 'node_modules', '.bin', 'vite');
-  const proc = spawn(bin, ['--port', String(port), '--strictPort'], { cwd: REPO, stdio: 'ignore' });
+  const proc = spawn(bin, [join(REPO, 'packages', 'app'), '--port', String(port), '--strictPort'], { cwd: REPO, stdio: 'ignore' });
   const url = `http://localhost:${port}`;
   // Wait for the server to answer.
   for (let i = 0; i < 100; i++) {
