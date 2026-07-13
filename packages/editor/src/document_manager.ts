@@ -6,10 +6,10 @@
  * (D2 in the plan), so switches are instant and per-document undo is preserved.
  * Restored-but-unviewed tabs stay as serialized bytes until first activation.
  */
-import { Engine, History } from '../engine/pkg/engine';
+import { Engine, History } from 'engine';
+import { logAppEvent } from './analytics';
 import { Document } from './document';
 import { FileIO } from './file_io';
-import { logAppEvent } from './analytics';
 import type { FileService } from './file_service';
 import type { InputManager } from './input';
 import { AutosaveManager, type BackupEntry, PersistenceManager } from './persistence';
@@ -156,7 +156,7 @@ export class DocumentManager {
         this.renderTabs();
         doc.autosave?.trigger();
         this.persistManifest();
-        
+
         const ext = picked.file.name.split('.').pop() || 'unknown';
         logAppEvent('document_opened', { source: 'picker', format: ext });
     }

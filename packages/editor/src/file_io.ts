@@ -9,7 +9,7 @@
  * reuse (or null to force a picker) and receive back the handle that was
  * actually used so they can persist it.
  */
-import type { Engine } from '../engine/pkg/engine';
+import type { Engine } from 'engine';
 
 /** Outcome of a save. `handle` is null when the download fallback was used. */
 export interface SaveResult {

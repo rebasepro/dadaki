@@ -14,7 +14,7 @@
  * reads as dirty — acceptable.
  */
 
-import type { Engine, History } from '../engine/pkg/engine';
+import type { Engine, History } from 'engine';
 import type { AutosaveManager } from './persistence';
 
 let __docSeq = 0;

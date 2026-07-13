@@ -2,8 +2,9 @@
  * Alignment and distribution operations for multi-selections.
  * Works on world-space bounds via the engine's spatial index.
  */
-import type { WasmScene } from './wasm_scene';
+
 import { logAppEvent } from './analytics';
+import type { WasmScene } from './wasm_scene';
 
 export type AlignMode = 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom';
 

@@ -124,7 +124,11 @@ export class ExportDialog {
                     artboardId: raw === 'all' ? 'all' : parseInt(raw, 10),
                     transparent: this.transparentCheckbox.checked,
                 };
-                logAppEvent('export_completed', { format: opts.format, scale: opts.scale, target: raw === 'all' ? 'canvas' : 'artboard' });
+                logAppEvent('export_completed', {
+                    format: opts.format,
+                    scale: opts.scale,
+                    target: raw === 'all' ? 'canvas' : 'artboard',
+                });
                 this.onExport(opts);
             },
         );

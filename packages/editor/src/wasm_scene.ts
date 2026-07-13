@@ -1,5 +1,5 @@
 import type { CanvasKit } from 'canvaskit-wasm';
-import init, { Engine, History } from '../engine/pkg/engine';
+import init, { Engine, History } from 'engine';
 import { logAppEvent } from './analytics';
 import type { BoolOp } from './boolean_ops';
 import {

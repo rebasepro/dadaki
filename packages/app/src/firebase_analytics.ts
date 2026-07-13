@@ -6,9 +6,9 @@
 // them out of source control; access is enforced by Firebase Security Rules /
 // App Check, not by hiding this config.
 
+import type { AnalyticsSink } from '@dadaki/editor';
 import { type Analytics, getAnalytics, logEvent } from 'firebase/analytics';
 import { initializeApp } from 'firebase/app';
-import type { AnalyticsSink } from './analytics';
 
 const firebaseConfig = {
     projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,

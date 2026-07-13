@@ -10,7 +10,7 @@
  * FileSystemFileHandle is structured-cloneable, so it round-trips through
  * IndexedDB; re-permissioning on restore is handled by FileService.
  */
-import type { Engine } from '../engine/pkg/engine';
+import type { Engine } from 'engine';
 
 export interface StoredDoc {
     id: string;

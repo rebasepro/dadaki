@@ -1,3 +1,7 @@
+packages:
+  - engine/pkg
+  - packages/*
+
 allowBuilds:
   '@firebase/util': true
   protobufjs: true

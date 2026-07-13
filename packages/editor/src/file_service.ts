@@ -7,9 +7,9 @@
  * layer carries the state.
  */
 
+import { logAppEvent } from './analytics';
 import type { Document } from './document';
 import { FileIO } from './file_io';
-import { logAppEvent } from './analytics';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
 

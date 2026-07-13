@@ -14,8 +14,8 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import init, { Engine, History } from 'engine';
 import { beforeAll, describe, expect, it } from 'vitest';
-import init, { Engine, History } from '../engine/pkg/engine';
 import { getEditorContext } from './context';
 import type { InputManager } from './input';
 import type { UIEngine } from './ui';

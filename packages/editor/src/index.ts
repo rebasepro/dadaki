@@ -1,13 +1,30 @@
+// @dadaki/editor — public API.
+//
+// The editor is embeddable via a single entry point: `createEditor(container,
+// options)`. It builds the full editor chrome inside `container`, wires up the
+// Rust/WASM scene, renderer, input, panels and document lifecycle, and returns
+// an `EditorHandle` the host can drive.
+//
+// The host is responsible for loading CanvasKit (and, optionally, the `lucide`
+// icon global) and passing the CanvasKit instance in via `options.canvasKit`.
+// The library never imports Firebase, reads env vars, or reaches into any host
+// page structure beyond the `container` it is given.
+//
+// NOTE (v1): the injected chrome uses stable element ids, so only ONE editor
+// instance per document is supported. Full container-scoped, multi-instance
+// isolation is a documented future hardening step — see BUILD-PLAN §7.
+
+import type { CanvasKit } from 'canvaskit-wasm';
 import { AboutDialog } from './about_dialog';
-import { logAppEvent, registerAnalyticsSink } from './analytics';
+import { type AnalyticsSink, logAppEvent, registerAnalyticsSink } from './analytics';
 import { AppMenu } from './app_menu';
 import { BackupDialog } from './backup_dialog';
+import chromeHtml from './chrome.html?raw';
 import { ContextBar } from './context_bar';
 import { Document } from './document';
 import { DocumentManager } from './document_manager';
 import { ExportDialog, type ExportOptions } from './export_dialog';
 import { FileService } from './file_service';
-import { createFirebaseAnalyticsSink } from './firebase_analytics';
 import { GuidesController } from './guides';
 import { InputManager } from './input';
 import { PersistenceManager } from './persistence';
@@ -17,32 +34,68 @@ import { Toolbar } from './toolbar';
 import { UIEngine } from './ui';
 import { WasmScene } from './wasm_scene';
 
-async function bootstrap() {
-    // Wire analytics before anything can emit an event.
-    registerAnalyticsSink(createFirebaseAnalyticsSink());
+export type { AnalyticsSink } from './analytics';
+export { logAppEvent, registerAnalyticsSink } from './analytics';
 
-    // @ts-expect-error - Loaded from script tag in index.html
-    const ck = await CanvasKitInit({
-        locateFile: (file: string) => `/${file}`,
-    });
+export interface EditorOptions {
+    /** A CanvasKit instance (host loads canvaskit.js and passes it here). */
+    canvasKit: CanvasKit;
+    /** Optional analytics sink; if provided it is registered before any event. */
+    analyticsSink?: AnalyticsSink;
+}
+
+export interface EditorHandle {
+    readonly scene: WasmScene;
+    readonly ui: UIEngine;
+    readonly input: InputManager;
+    readonly renderer: Renderer;
+    readonly documentManager: DocumentManager;
+    readonly fileService: FileService;
+    /** The persistence manager (backups live in the host's IndexedDB). */
+    readonly persistence: typeof PersistenceManager;
+    /** Currently active document, or undefined. */
+    activeDocument(): Document | undefined;
+    /** Dev/test convenience: run the shape stress harness. */
+    stress(opts?: import('./dev_stress').StressOptions): Promise<unknown>;
+    /** Tear down the editor: stop rendering and clear the container. */
+    destroy(): void;
+}
+
+export async function createEditor(
+    container: HTMLElement,
+    options: EditorOptions,
+): Promise<EditorHandle> {
+    if (options.analyticsSink) registerAnalyticsSink(options.analyticsSink);
+
+    const ck = options.canvasKit;
+
+    // Build the editor chrome inside the host container.
+    container.innerHTML = chromeHtml;
+    // Render lucide icons if the host provided the global (icons are optional
+    // chrome; the editor still works without them).
+    (window as unknown as { lucide?: { createIcons(): void } }).lucide?.createIcons();
+
+    const el = <T extends HTMLElement>(id: string): T => {
+        const found = container.querySelector<T>(`#${id}`);
+        if (!found) throw new Error(`[dadaki] editor chrome is missing #${id}`);
+        return found;
+    };
 
     const wasmScene = new WasmScene(ck);
     await wasmScene.init();
 
-    const canvas = document.getElementById('editor-canvas') as HTMLCanvasElement;
+    const canvas = el<HTMLCanvasElement>('editor-canvas');
     const renderer = new Renderer(ck, canvas, wasmScene);
     wasmScene.renderer = renderer;
     const ui = new UIEngine(ck, wasmScene);
     const input = new InputManager(canvas, wasmScene, ui, renderer);
     renderer.inputManager = input;
-    (window as any).app = { scene: wasmScene, input: input, ui: ui, renderer: renderer, ck: ck };
 
     // Tool rail — grouped tools with flyouts
-    const toolbarEl = document.getElementById('toolbar') as HTMLElement;
-    ui.toolbar = new Toolbar(toolbarEl, ui);
+    ui.toolbar = new Toolbar(el<HTMLElement>('toolbar'), ui);
 
     // Context bar — floating action bar over the canvas
-    const canvasContainer = document.getElementById('canvas-container') as HTMLElement;
+    const canvasContainer = el<HTMLElement>('canvas-container');
     const contextBar = new ContextBar(canvasContainer, ui, input, wasmScene, renderer);
     ui.contextBar = contextBar;
 
@@ -52,11 +105,7 @@ async function bootstrap() {
     renderer.guidesController = guides;
 
     // ─── File / document lifecycle (multi-tab) ──────────────────────────
-    const tabStripEl = document.getElementById('tab-strip') as HTMLElement;
-
-    // Save button reflects dirty state: "Save" (emphasized) when there are
-    // unsaved changes, "Saved" (muted) otherwise. Clicking saves the .dataki.
-    const saveBtn = document.getElementById('save-btn') as HTMLButtonElement;
+    const saveBtn = el<HTMLButtonElement>('save-btn');
     const saveLabel = saveBtn.querySelector('.save-label') as HTMLElement;
     const updateSaveButton = () => {
         const dirty = fileService.activeDoc.dirty;
@@ -65,13 +114,10 @@ async function bootstrap() {
         saveBtn.title = dirty ? 'Save changes (⌘S)' : 'All changes saved';
     };
 
-    // FileService starts with a placeholder doc; DocumentManager reassigns
-    // activeDoc as soon as it activates the restored/first document. The tab
-    // strip shows the name + dirty dot; the header Save button shows save state.
     const fileService = new FileService(wasmScene, ui, new Document('Untitled'), updateSaveButton);
     saveBtn.addEventListener('click', () => fileService.saveActive().catch(console.error));
 
-    const tabStrip = new TabStrip(tabStripEl, {
+    const tabStrip = new TabStrip(el<HTMLElement>('tab-strip'), {
         onSelect: (id) => documentManager.activate(id),
         onClose: (id) => documentManager.close(id),
         onNew: () => documentManager.create(),
@@ -90,8 +136,7 @@ async function bootstrap() {
     input.fileService = fileService;
     input.documentManager = documentManager;
 
-    // Export dialog + button. Resolves the chosen artboard (or whole canvas)
-    // into export bounds + optional background.
+    // Export dialog + button.
     const exportDialog = new ExportDialog(
         (opts: ExportOptions) => {
             const arts = wasmScene.getArtboards();
@@ -112,7 +157,7 @@ async function bootstrap() {
         () => wasmScene.getArtboards().map((a) => ({ id: a.id, name: a.name })),
     );
     input.openExportDialog = () => exportDialog.open();
-    document.getElementById('export-btn')?.addEventListener('click', () => exportDialog.open());
+    el<HTMLButtonElement>('export-btn').addEventListener('click', () => exportDialog.open());
 
     // Version history (backups) dialog.
     const backupDialog = new BackupDialog({
@@ -125,8 +170,7 @@ async function bootstrap() {
     const aboutDialog = new AboutDialog();
 
     // App menu (top-left)
-    const appMenuBtn = document.getElementById('app-menu-btn') as HTMLButtonElement;
-    new AppMenu(appMenuBtn, {
+    new AppMenu(el<HTMLButtonElement>('app-menu-btn'), {
         onNew: () => documentManager.create(),
         onOpen: () => documentManager.openFromPicker().catch(console.error),
         onSave: () => fileService.saveActive().catch(console.error),
@@ -138,67 +182,44 @@ async function bootstrap() {
         onAbout: () => aboutDialog.open(),
     });
 
-    // Warn before leaving if any open document has unsaved changes. Skipped in
-    // dev — HMR reloads constantly and the prompt is just noise there.
-    if (!import.meta.env.DEV) {
-        window.addEventListener('beforeunload', (e) => {
-            if (documentManager.all().some((d) => d.dirty)) {
-                e.preventDefault();
-                e.returnValue = '';
-            }
-        });
-    }
-
-    // Restore the previous session (open tabs + active) — this activates the
-    // first document, which fits the artboard and paints the chrome.
+    // Restore the previous session (open tabs + active).
     await documentManager.restoreSession();
-
-    // Populate layers & property panel with any restored session data
     ui.updateLayerList();
 
     // Zoom controls
-    document.getElementById('zoom-in')?.addEventListener('click', () => {
+    el<HTMLButtonElement>('zoom-in').addEventListener('click', () => {
         renderer.setZoomCentered(renderer.zoom * 1.25);
         ui.setZoom(renderer.zoom);
     });
-    document.getElementById('zoom-out')?.addEventListener('click', () => {
+    el<HTMLButtonElement>('zoom-out').addEventListener('click', () => {
         renderer.setZoomCentered(renderer.zoom / 1.25);
         ui.setZoom(renderer.zoom);
     });
-    document.getElementById('zoom-fit')?.addEventListener('click', () => {
+    el<HTMLButtonElement>('zoom-fit').addEventListener('click', () => {
         renderer.fitToArtboard();
         ui.setZoom(renderer.zoom);
     });
 
     renderer.start();
 
-    // Dev-only handle for debugging and automated testing
-    if (import.meta.env.DEV) {
-        (window as unknown as Record<string, unknown>).__editor = {
-            scene: wasmScene,
-            ui,
-            input,
-            renderer,
-            contextBar,
-            fileService,
-            documentManager,
-            backupDialog,
-            persistence: PersistenceManager,
-            get doc() {
-                return documentManager.active();
-            },
-            /** Shape stress harness — see src/dev_stress.ts. */
-            stress: async (opts?: import('./dev_stress').StressOptions) => {
-                const { runStress } = await import('./dev_stress');
-                return runStress({ scene: wasmScene, renderer, wasm: wasmScene.wasm }, opts);
-            },
-        };
-    }
-
-    console.log('Dadaki Vector Engine Initialized (Rust Core / CanvasKit)');
     logAppEvent('app_loaded');
-}
 
-bootstrap().catch((err) => {
-    console.error('Failed to initialize engine:', err);
-});
+    return {
+        scene: wasmScene,
+        ui,
+        input,
+        renderer,
+        documentManager,
+        fileService,
+        persistence: PersistenceManager,
+        activeDocument: () => documentManager.active() ?? undefined,
+        stress: async (opts?: import('./dev_stress').StressOptions) => {
+            const { runStress } = await import('./dev_stress');
+            return runStress({ scene: wasmScene, renderer, wasm: wasmScene.wasm }, opts);
+        },
+        destroy: () => {
+            (renderer as { stop?: () => void }).stop?.();
+            container.innerHTML = '';
+        },
+    };
+}

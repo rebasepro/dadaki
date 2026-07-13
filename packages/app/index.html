@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <!-- Viewport configured to block browser zoom for optimal canvas manipulation -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    
+    <title>Dadaki Vector Editor — Professional In-Browser SVG Graphics Editor</title>
+    <meta name="description" content="Dadaki is a high-performance, professional in-browser SVG vector graphics editor. Create, edit, and export vector designs with a CanvasKit & WebAssembly-powered engine.">
+    <meta name="keywords" content="vector editor, svg editor, browser svg editor, online vector design, Rust WASM vector graphics, web graphic design, dadaki, dadaki vector editor">
+    <link rel="canonical" href="https://dadaki.com/">
+    
+    <!-- Favicon Configuration -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    
+    <!-- Open Graph (Facebook, LinkedIn, etc.) -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://dadaki.com/">
+    <meta property="og:title" content="Dadaki Vector Editor — Professional In-Browser SVG Graphics">
+    <meta property="og:description" content="A professional-grade vector design and SVG editor inside your browser, powered by a high-performance CanvasKit and WebAssembly-compiled rendering engine.">
+    <meta property="og:image" content="https://dadaki.com/favicon.svg">
+    <meta property="og:site_name" content="Dadaki">
+    
+    <!-- Twitter Cards -->
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:url" content="https://dadaki.com/">
+    <meta name="twitter:title" content="Dadaki Vector Editor — Professional In-Browser SVG Graphics">
+    <meta name="twitter:description" content="A professional-grade vector design and SVG editor inside your browser, powered by CanvasKit and WebAssembly.">
+    <meta name="twitter:image" content="https://dadaki.com/favicon.svg">
+
+    <!-- Schema.org WebApplication Structured Data for SEO -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebApplication",
+      "name": "Dadaki Vector Editor",
+      "alternateName": "Dadaki",
+      "url": "https://dadaki.com/",
+      "logo": "https://dadaki.com/favicon.svg",
+      "description": "Dadaki is a professional-grade in-browser SVG vector graphics editor powered by a high-performance Rust/WASM-compiled CanvasKit rendering engine.",
+      "applicationCategory": "DesignApplication",
+      "operatingSystem": "All",
+      "browserRequirements": "Requires JavaScript and WebGL",
+      "offers": {
+        "@type": "Offer",
+        "price": "0.00",
+        "priceCurrency": "USD"
+      }
+    }
+    </script>
+
+    <script>
+        // Block browser pinch-to-zoom using wheel, but preserve standard user-scalable accessibility behaviors
+        window.addEventListener('wheel', (e) => {
+            if (e.ctrlKey || e.metaKey) e.preventDefault();
+        }, { passive: false, capture: true });
+    </script>
+    <script src="https://unpkg.com/lucide@0.460.0"></script>
+    <script src="/canvaskit.js"></script>
+    <script type="module" src="/src/main.ts"></script>
+</head>
+<body>
+    <!-- Main accessible heading (screen-reader only) for SEO structure and assistive technologies -->
+    <h1 class="sr-only">Dadaki Vector Editor — Professional In-Browser SVG Graphics Editor</h1>
+    <!-- The editor mounts its entire chrome inside this container via @dadaki/editor createEditor(). -->
+    <div id="app"></div>
+</body>
+</html>

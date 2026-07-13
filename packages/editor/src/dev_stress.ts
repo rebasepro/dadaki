@@ -21,7 +21,7 @@
  *   await window.__editor.stress({ steps: [1e3, 1e5] }) // custom counts
  */
 
-import { Engine } from '../engine/pkg/engine';
+import { Engine } from 'engine';
 import type { Renderer } from './renderer';
 import type { WasmScene } from './wasm_scene';
 

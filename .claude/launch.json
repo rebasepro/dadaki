@@ -4,7 +4,7 @@
     {
       "name": "vector-editor",
       "runtimeExecutable": "./node_modules/.bin/vite",
-      "runtimeArgs": ["--port", "5199", "--strictPort"],
+      "runtimeArgs": ["packages/app", "--port", "5199", "--strictPort"],
       "port": 5199,
       "autoPort": true
     }

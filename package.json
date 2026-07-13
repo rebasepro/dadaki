@@ -1,40 +1,32 @@
 {
-  "name": "dadaki-vector-editor",
-  "version": "1.0.0",
-  "description": "",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
-    "check": "tsc --noEmit",
-    "lint": "biome check",
-    "format": "biome format --write",
-    "test": "vitest run"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "devEngines": {
-    "packageManager": {
-      "name": "pnpm",
-      "version": "^11.1.0",
-      "onFail": "download"
+    "name": "dadaki-vector-editor-workspace",
+    "version": "1.0.0",
+    "description": "Workspace root: @dadaki/editor (OSS library) + @dadaki/app (deployable demo).",
+    "type": "module",
+    "private": true,
+    "scripts": {
+        "test": "vitest run",
+        "check": "tsc --noEmit",
+        "lint": "biome check",
+        "format": "biome format --write"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "MIT",
+    "devEngines": {
+        "packageManager": {
+            "name": "pnpm",
+            "version": "^11.1.0",
+            "onFail": "download"
+        }
+    },
+    "devDependencies": {
+        "@biomejs/biome": "^2.5.3",
+        "@types/node": "^26.1.0",
+        "jsdom": "^29.1.1",
+        "puppeteer": "^25.3.0",
+        "typescript": "^6.0.3",
+        "vite": "^8.1.3",
+        "vitest": "^4.1.9"
     }
-  },
-  "devDependencies": {
-    "@biomejs/biome": "^2.5.3",
-    "@types/node": "^26.1.0",
-    "jsdom": "^29.1.1",
-    "typescript": "^6.0.3",
-    "vite": "^8.1.3",
-    "vitest": "^4.1.9"
-  },
-  "dependencies": {
-    "@types/opentype.js": "^1.3.10",
-    "canvaskit-wasm": "0.39.1",
-    "firebase": "^12.15.0",
-    "opentype.js": "^1.3.4",
-    "puppeteer": "^25.3.0"
-  }
 }

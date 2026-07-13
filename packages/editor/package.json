@@ -1,0 +1,22 @@
+{
+    "name": "@dadaki/editor",
+    "version": "1.0.0",
+    "description": "Dadaki — a high-performance, embeddable in-browser vector graphics editor (CanvasKit + Rust/WASM).",
+    "license": "MIT",
+    "private": true,
+    "type": "module",
+    "types": "./src/index.ts",
+    "exports": {
+        ".": "./src/index.ts",
+        "./style.css": "./style.css"
+    },
+    "files": ["src", "style.css"],
+    "dependencies": {
+        "canvaskit-wasm": "0.39.1",
+        "engine": "workspace:*",
+        "opentype.js": "^1.3.4"
+    },
+    "devDependencies": {
+        "@types/opentype.js": "^1.3.10"
+    }
+}

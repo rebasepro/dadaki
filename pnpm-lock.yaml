@@ -206,22 +206,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@types/opentype.js':
-        specifier: ^1.3.10
-        version: 1.3.10
-      canvaskit-wasm:
-        specifier: 0.39.1
-        version: 0.39.1
-      firebase:
-        specifier: ^12.15.0
-        version: 12.15.0
-      opentype.js:
-        specifier: ^1.3.4
-        version: 1.3.4
-      puppeteer:
-        specifier: ^25.3.0
-        version: 25.3.0
     devDependencies:
       '@biomejs/biome':
         specifier: ^2.5.3
@@ -232,6 +216,9 @@ importers:
       jsdom:
         specifier: ^29.1.1
         version: 29.1.1
+      puppeteer:
+        specifier: ^25.3.0
+        version: 25.3.0
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -241,6 +228,36 @@ importers:
       vitest:
         specifier: ^4.1.9
         version: 4.1.9(@types/node@26.1.0)(jsdom@29.1.1)(vite@8.1.3(@types/node@26.1.0))
+
+  engine/pkg: {}
+
+  packages/app:
+    dependencies:
+      '@dadaki/editor':
+        specifier: workspace:*
+        version: link:../editor
+      canvaskit-wasm:
+        specifier: 0.39.1
+        version: 0.39.1
+      firebase:
+        specifier: ^12.15.0
+        version: 12.15.0
+
+  packages/editor:
+    dependencies:
+      canvaskit-wasm:
+        specifier: 0.39.1
+        version: 0.39.1
+      engine:
+        specifier: workspace:*
+        version: link:../../engine/pkg
+      opentype.js:
+        specifier: ^1.3.4
+        version: 1.3.4
+    devDependencies:
+      '@types/opentype.js':
+        specifier: ^1.3.10
+        version: 1.3.10
 
 packages:
 

@@ -1,0 +1,17 @@
+{
+    "name": "@dadaki/app",
+    "version": "1.0.0",
+    "description": "Deployable open-source demo shell for the Dadaki vector editor (local-only, no backend).",
+    "type": "module",
+    "private": true,
+    "scripts": {
+        "dev": "vite",
+        "build": "tsc && vite build",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "@dadaki/editor": "workspace:*",
+        "canvaskit-wasm": "0.39.1",
+        "firebase": "^12.15.0"
+    }
+}
