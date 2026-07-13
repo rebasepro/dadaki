@@ -27,6 +27,10 @@ pnpm install
 > This environment's `pnpm run <script>` / `npx` are flaky — invoke the binaries
 > in `node_modules/.bin/` directly (e.g. `./node_modules/.bin/vite`,
 > `./node_modules/.bin/tsc`, `./node_modules/.bin/vitest`).
+>
+> **pnpm version:** this repo pins pnpm `^11` via `devEngines`. Use pnpm **11.9.0**
+> (`corepack pnpm@11.9.0 install`). Homebrew's pnpm 11.1.0 hits a bug on the
+> `devEngines` field here (`Cannot use 'in' operator to search for 'integrity'`).
 
 ## Develop
 
@@ -49,9 +53,10 @@ node tests/svg-suite/harness.mjs
 
 ## The engine (Rust/WASM)
 
-`engine/` is the Rust crate; `engine/pkg/` is the prebuilt wasm-bindgen output,
-consumed as the workspace package `engine`. Rebuilding requires the `wasm-pack`
-toolchain (see `engine/`), but day-to-day editor work does **not** need a rebuild.
+`packages/editor/engine/` is the Rust crate; `packages/editor/engine/pkg/` is the
+prebuilt wasm-bindgen output, imported by the editor via a relative path
+(`../engine/pkg/engine`). Rebuilding requires the `wasm-pack` toolchain, but
+day-to-day editor work does **not** need a rebuild.
 
 ## Embedding
 
