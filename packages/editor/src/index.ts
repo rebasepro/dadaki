@@ -55,6 +55,23 @@ export interface EditorHandle {
     readonly persistence: typeof PersistenceManager;
     /** Currently active document, or undefined. */
     activeDocument(): Document | undefined;
+    /**
+     * Serialize the active document to durable bytes (the `.dataki` protobuf
+     * snapshot). Returns null if there is no active document/engine. Use this
+     * to persist a scene to your own backend.
+     */
+    exportBytes(): Uint8Array | null;
+    /** Serialize the active document to an SVG string (good for previews). */
+    exportSVG(): string;
+    /**
+     * Open a document from durable bytes (as produced by `exportBytes`) in a
+     * new tab and activate it.
+     */
+    loadBytes(bytes: Uint8Array, name?: string): void;
+    /** Create a fresh, blank document in a new tab and activate it. */
+    newDocument(name?: string): void;
+    /** Rename the active document. */
+    renameActive(name: string): void;
     /** Dev/test convenience: run the shape stress harness. */
     stress(opts?: import('./dev_stress').StressOptions): Promise<unknown>;
     /** Tear down the editor: stop rendering and clear the container. */
@@ -213,6 +230,25 @@ export async function createEditor(
         fileService,
         persistence: PersistenceManager,
         activeDocument: () => documentManager.active() ?? undefined,
+        exportBytes: () => {
+            const doc = documentManager.active();
+            const engine = doc?.engine;
+            if (!engine) return null;
+            return new Uint8Array(engine.serialize_proto());
+        },
+        exportSVG: () => ui.buildSVGString(),
+        loadBytes: (bytes: Uint8Array, name = 'Untitled') => {
+            const doc = new Document(name);
+            doc.pendingBytes = bytes;
+            documentManager.adopt(doc);
+        },
+        newDocument: (name = 'Untitled') => {
+            documentManager.create(name);
+        },
+        renameActive: (name: string) => {
+            const doc = documentManager.active();
+            if (doc) documentManager.rename(doc.id, name);
+        },
         stress: async (opts?: import('./dev_stress').StressOptions) => {
             const { runStress } = await import('./dev_stress');
             return runStress({ scene: wasmScene, renderer, wasm: wasmScene.wasm }, opts);
