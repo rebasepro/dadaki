@@ -15,3 +15,6 @@ firebase-debug.log
 .env.local
 .env.*.local
 
+
+# Nested online app — its own separate git repo
+/cloud/

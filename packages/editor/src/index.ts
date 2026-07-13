@@ -55,6 +55,13 @@ export interface EditorOptions {
      * existing document, or omit to start with a blank one.
      */
     initialDocument?: { bytes?: Uint8Array; name?: string };
+    /**
+     * Toggle pieces of the built-in chrome for embedding. `header: false` hides
+     * the top header (tabs, undo/redo, zoom, export, save) so the host can
+     * provide its own top bar. Zoom/undo/redo still work via gestures/shortcuts,
+     * and the host can drive export via `openExportDialog()`.
+     */
+    chrome?: { header?: boolean };
 }
 
 export interface EditorHandle {
@@ -85,6 +92,8 @@ export interface EditorHandle {
     newDocument(name?: string): void;
     /** Rename the active document. */
     renameActive(name: string): void;
+    /** Open the built-in export dialog (SVG/PNG, scale, per-artboard). */
+    openExportDialog(): void;
     /** Dev/test convenience: run the shape stress harness. */
     stress(opts?: import('./dev_stress').StressOptions): Promise<unknown>;
     /** Tear down the editor: stop rendering and clear the container. */
@@ -101,6 +110,9 @@ export async function createEditor(
 
     // Build the editor chrome inside the host container.
     container.innerHTML = chromeHtml;
+    if (options.chrome?.header === false) {
+        container.querySelector('#app-container')?.classList.add('no-chrome-header');
+    }
     // Render lucide icons if the host provided the global (icons are optional
     // chrome; the editor still works without them).
     (window as unknown as { lucide?: { createIcons(): void } }).lucide?.createIcons();
@@ -274,6 +286,7 @@ export async function createEditor(
             const doc = documentManager.active();
             if (doc) documentManager.rename(doc.id, name);
         },
+        openExportDialog: () => exportDialog.open(),
         stress: async (opts?: import('./dev_stress').StressOptions) => {
             const { runStress } = await import('./dev_stress');
             return runStress({ scene: wasmScene, renderer, wasm: wasmScene.wasm }, opts);
