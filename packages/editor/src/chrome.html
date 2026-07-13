@@ -1,5 +1,8 @@
     <div id="app-container">
         <header id="header">
+            <!-- Host injection slot (leading). Empty by default; a host app can
+                 mount its own controls here (e.g. a back button). -->
+            <div id="header-slot-leading" class="header-slot"></div>
             <button id="app-menu-btn" class="app-menu-btn" title="Menu">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
             </button>
@@ -27,6 +30,9 @@
                     <span class="save-label">Save</span>
                 </button>
             </div>
+            <!-- Host injection slot (trailing). Empty by default; a host app can
+                 mount its own controls here (e.g. sync status, account menu). -->
+            <div id="header-slot-trailing" class="header-slot"></div>
         </header>
 
         <main id="main-layout">

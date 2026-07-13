@@ -46,6 +46,32 @@ body, html {
     display: none;
 }
 
+/* Host with its own persistence (e.g. cloud autosave) can hide the Save button. */
+#app-container.no-save-btn #save-btn {
+    display: none;
+}
+
+/* Host injection slots — empty (zero-width) until the host mounts controls. */
+.header-slot {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.header-slot:empty {
+    display: none;
+}
+/* A little breathing room when the leading slot has content. */
+#header-slot-leading:not(:empty) {
+    margin-right: 4px;
+    padding-right: 6px;
+    border-right: 1px solid var(--border);
+}
+#header-slot-trailing:not(:empty) {
+    margin-left: 4px;
+    padding-left: 8px;
+    border-left: 1px solid var(--border);
+}
+
 #header {
     height: 36px;
     min-height: 36px;

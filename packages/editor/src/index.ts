@@ -56,12 +56,14 @@ export interface EditorOptions {
      */
     initialDocument?: { bytes?: Uint8Array; name?: string };
     /**
-     * Toggle pieces of the built-in chrome for embedding. `header: false` hides
-     * the top header (tabs, undo/redo, zoom, export, save) so the host can
-     * provide its own top bar. Zoom/undo/redo still work via gestures/shortcuts,
-     * and the host can drive export via `openExportDialog()`.
+     * Toggle/inject into the built-in chrome for embedding.
+     * - `header: false` hides the whole top header (rarely needed).
+     * - `saveButton: false` hides just the built-in Save button — use this when
+     *   the host provides its own persistence (e.g. cloud autosave).
+     * The host injects its own controls into the header via the slots exposed on
+     * `EditorHandle.chrome` (`headerLeading` / `headerTrailing`).
      */
-    chrome?: { header?: boolean };
+    chrome?: { header?: boolean; saveButton?: boolean };
 }
 
 export interface EditorHandle {
@@ -73,6 +75,16 @@ export interface EditorHandle {
     readonly fileService: FileService;
     /** The persistence manager (backups live in the host's IndexedDB). */
     readonly persistence: typeof PersistenceManager;
+    /**
+     * Header injection slots (plain DOM). A host mounts its own controls into
+     * `headerLeading` (far left) and `headerTrailing` (far right) — e.g. a
+     * React portal — to blend host UI into the editor's own top bar.
+     */
+    readonly chrome: {
+        header: HTMLElement;
+        headerLeading: HTMLElement;
+        headerTrailing: HTMLElement;
+    };
     /** Currently active document, or undefined. */
     activeDocument(): Document | undefined;
     /**
@@ -110,8 +122,12 @@ export async function createEditor(
 
     // Build the editor chrome inside the host container.
     container.innerHTML = chromeHtml;
+    const appContainer = container.querySelector('#app-container');
     if (options.chrome?.header === false) {
-        container.querySelector('#app-container')?.classList.add('no-chrome-header');
+        appContainer?.classList.add('no-chrome-header');
+    }
+    if (options.chrome?.saveButton === false) {
+        appContainer?.classList.add('no-save-btn');
     }
     // Render lucide icons if the host provided the global (icons are optional
     // chrome; the editor still works without them).
@@ -266,6 +282,11 @@ export async function createEditor(
         documentManager,
         fileService,
         persistence: PersistenceManager,
+        chrome: {
+            header: el<HTMLElement>('header'),
+            headerLeading: el<HTMLElement>('header-slot-leading'),
+            headerTrailing: el<HTMLElement>('header-slot-trailing'),
+        },
         activeDocument: () => documentManager.active() ?? undefined,
         exportBytes: () => {
             const doc = documentManager.active();
