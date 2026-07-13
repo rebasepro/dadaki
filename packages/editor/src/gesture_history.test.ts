@@ -20,12 +20,12 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import init, { Engine, History } from 'engine';
+import init, { Engine, History } from '../engine/pkg/engine';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { WasmScene } from './wasm_scene';
 
 beforeAll(async () => {
-    await init({ module_or_path: readFileSync(resolve('engine/pkg/engine_bg.wasm')) });
+    await init({ module_or_path: readFileSync(resolve('packages/editor/engine/pkg/engine_bg.wasm')) });
 });
 
 /** A WasmScene wired to the real engine but with no renderer/autosave/persistence

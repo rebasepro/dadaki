@@ -2,8 +2,8 @@ node_modules
 .DS_Store
 dist
 .idea
-engine/target/
-engine/wasm-pack-v0.12.1-x86_64-apple-darwin/
+packages/editor/engine/target/
+packages/editor/engine/wasm-pack-v0.12.1-x86_64-apple-darwin/
 tests/svg-suite/report/
 
 # Firebase cache and logs

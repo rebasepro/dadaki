@@ -13,7 +13,6 @@
     "files": ["src", "style.css"],
     "dependencies": {
         "canvaskit-wasm": "0.39.1",
-        "engine": "workspace:*",
         "opentype.js": "^1.3.4"
     },
     "devDependencies": {

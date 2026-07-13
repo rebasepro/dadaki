@@ -11,14 +11,14 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import init, { Engine } from 'engine';
+import init, { Engine } from '../engine/pkg/engine';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DocumentManager } from './document_manager';
 import { PersistenceManager } from './persistence';
 import { WasmScene } from './wasm_scene';
 
 beforeAll(async () => {
-    await init({ module_or_path: readFileSync(resolve('engine/pkg/engine_bg.wasm')) });
+    await init({ module_or_path: readFileSync(resolve('packages/editor/engine/pkg/engine_bg.wasm')) });
 });
 
 beforeEach(() => {
