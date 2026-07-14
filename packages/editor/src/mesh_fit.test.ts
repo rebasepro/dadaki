@@ -18,12 +18,26 @@ function blobGeometry(): NodeGeometry {
     return { Path: { subpaths: [{ points: pts, closed: true }] } };
 }
 
-/** Distance from a point to the sampled outline. */
+/** True distance from a point to the outline: coarse scan per segment, then
+ *  ternary refinement — a polyline-sampled distance would report a fake
+ *  offset of up to the sampling sagitta for points exactly on the curve. */
 function distToOutline(cubics: Cubic[], p: Vec2): number {
     let best = Infinity;
     for (const c of cubics) {
         for (let i = 0; i <= 64; i++) {
-            const q = evalCubic(c, i / 64);
+            let lo = Math.max(0, (i - 1) / 64);
+            let hi = Math.min(1, (i + 1) / 64);
+            for (let k = 0; k < 40; k++) {
+                const m1 = lo + (hi - lo) / 3;
+                const m2 = hi - (hi - lo) / 3;
+                const q1 = evalCubic(c, m1);
+                const q2 = evalCubic(c, m2);
+                const d1 = Math.hypot(q1[0] - p[0], q1[1] - p[1]);
+                const d2 = Math.hypot(q2[0] - p[0], q2[1] - p[1]);
+                if (d1 < d2) hi = m2;
+                else lo = m1;
+            }
+            const q = evalCubic(c, (lo + hi) / 2);
             best = Math.min(best, Math.hypot(q[0] - p[0], q[1] - p[1]));
         }
     }
@@ -57,7 +71,10 @@ describe('fitMeshToOutline', () => {
                 if (r > 0 && r < mesh.rows && c > 0 && c < mesh.cols) continue; // interior
                 const v = mesh.vertices[vertexIndex(mesh, r, c)];
                 const e = (v.x / 120) ** 2 + (v.y / 90) ** 2;
-                expect(Math.abs(e - 1)).toBeLessThan(0.05);
+                // The node's outline is the standard kappa-bezier ellipse
+                // approximation; vertices are exactly on THAT path, which
+                // deviates from the implicit ellipse by ~0.03% of radius.
+                expect(Math.abs(e - 1)).toBeLessThan(1e-3);
             }
         }
         // Interior vertex (center-ish) stays inside.
@@ -65,32 +82,54 @@ describe('fitMeshToOutline', () => {
         expect((center.x / 120) ** 2 + (center.y / 90) ** 2).toBeLessThan(0.5);
     });
 
-    it('blob path: boundary vertices sit on the outline within tolerance', () => {
+    it('blob path: the boundary IS the outline (exact sub-curves)', () => {
         const geo = blobGeometry();
         const cubics = outlineCubics(geo);
         expect(cubics).not.toBeNull();
         const mesh = fitMeshToOutline(geo, [0.35, 0.7], [0.5]);
         expect(mesh).not.toBeNull();
         if (!mesh || !cubics) return;
-        expect(mesh.cols).toBe(3);
+        // Anchor cuts add grid lines beyond the requested fractions — that's
+        // the price of an exact boundary.
+        expect(mesh.cols).toBeGreaterThanOrEqual(3);
+        // Every boundary vertex lies ON the outline.
         for (let r = 0; r <= mesh.rows; r++) {
             for (let c = 0; c <= mesh.cols; c++) {
                 if (r > 0 && r < mesh.rows && c > 0 && c < mesh.cols) continue;
                 const v = mesh.vertices[vertexIndex(mesh, r, c)];
-                expect(distToOutline(cubics, [v.x, v.y])).toBeLessThan(2);
+                expect(distToOutline(cubics, [v.x, v.y])).toBeLessThan(1e-6);
             }
         }
-        // Boundary edge midpoints follow the outline reasonably (fit quality).
-        const topEdgeMid = evalCubic(
-            [
-                [mesh.vertices[0].x, mesh.vertices[0].y],
-                mesh.vertices[0].handles?.e ?? [0, 0],
-                mesh.vertices[1].handles?.w ?? [0, 0],
-                [mesh.vertices[1].x, mesh.vertices[1].y],
-            ],
-            0.5,
-        );
-        expect(distToOutline(cubics, topEdgeMid)).toBeLessThan(6);
+        // Points ALONG the boundary edges lie on the outline. Edges within a
+        // single path segment are EXACT sub-curves (machine precision); an
+        // edge that crosses an anchor dropped as too close to a corner falls
+        // back to a least-squares fit, so a small overall tolerance applies
+        // while the typical edge must be exact.
+        const stride = mesh.cols + 1;
+        let exactSamples = 0;
+        let totalSamples = 0;
+        const checkEdges = (rowIdx: number) => {
+            for (let c = 0; c < mesh.cols; c++) {
+                const a = mesh.vertices[rowIdx * stride + c];
+                const b = mesh.vertices[rowIdx * stride + c + 1];
+                const edge: Cubic = [
+                    [a.x, a.y],
+                    a.handles?.e ?? [a.x, a.y],
+                    b.handles?.w ?? [b.x, b.y],
+                    [b.x, b.y],
+                ];
+                for (const t of [0.2, 0.5, 0.8]) {
+                    const d = distToOutline(cubics, evalCubic(edge, t));
+                    expect(d).toBeLessThan(0.1);
+                    totalSamples++;
+                    if (d < 1e-6) exactSamples++;
+                }
+            }
+        };
+        checkEdges(0);
+        checkEdges(mesh.rows);
+        // The vast majority of edges must be machine-precision exact.
+        expect(exactSamples / totalSamples).toBeGreaterThan(0.7);
     });
 
     it('open path falls back to null', () => {

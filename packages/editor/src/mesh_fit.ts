@@ -16,7 +16,7 @@
 
 import { sampleGradientColor } from './gradient_edit';
 import type { Cubic, Vec2 } from './mesh_geom';
-import { evalCoons, evalCubic, makeRectMesh, pointToUV } from './mesh_geom';
+import { evalCoons, evalCubic, makeRectMesh, pointToUV, splitCubic } from './mesh_geom';
 import type { Color, MeshGradient, NodeGeometry, Paint } from './types';
 import { isGradient, isMeshGradient, isPattern } from './types';
 
@@ -116,6 +116,9 @@ export function outlineCubics(geo: NodeGeometry): Cubic[] | null {
 // ─── Outline sampling ────────────────────────────────────────────────────
 
 interface OutlineSamples {
+    /** The outline's own cubic segments — the ground truth boundary edges
+     *  subdivide from. */
+    cubics: Cubic[];
     pts: Vec2[];
     /** Cumulative arc length up to each sample; [0] = 0. */
     cum: number[];
@@ -124,7 +127,7 @@ interface OutlineSamples {
     total: number;
 }
 
-const SAMPLES_PER_CUBIC = 32;
+const SAMPLES_PER_CUBIC = 64;
 
 function sampleOutline(cubics: Cubic[]): OutlineSamples {
     const pts: Vec2[] = [];
@@ -148,7 +151,35 @@ function sampleOutline(cubics: Cubic[]): OutlineSamples {
         const l = Math.hypot(dx, dy) || 1;
         tan.push([dx / l, dy / l]);
     }
-    return { pts, cum, tan, total };
+    return { cubics, pts, cum, tan, total };
+}
+
+/** Which outline cubic an arc-length position falls in, and the bezier
+ *  parameter within it (arc-length-interpolated between flat samples). */
+function cubicAt(s: OutlineSamples, len: number): { idx: number; t: number } {
+    const n = s.pts.length;
+    const l = ((len % s.total) + s.total) % s.total;
+    let lo = 0;
+    let hi = n - 1;
+    while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (s.cum[mid] <= l) lo = mid;
+        else hi = mid - 1;
+    }
+    const i = lo;
+    const j = (i + 1) % n;
+    const segLen = (j === 0 ? s.total : s.cum[j]) - s.cum[i];
+    const f = segLen > 1e-9 ? (l - s.cum[i]) / segLen : 0;
+    const idx = Math.floor(i / SAMPLES_PER_CUBIC);
+    const t = Math.min(1, ((i % SAMPLES_PER_CUBIC) + f) / SAMPLES_PER_CUBIC);
+    return { idx, t };
+}
+
+/** Arc-length positions of the outline's anchor points (segment starts). */
+function anchorLengths(s: OutlineSamples): number[] {
+    const out: number[] = [];
+    for (let i = 0; i < s.cubics.length; i++) out.push(s.cum[i * SAMPLES_PER_CUBIC]);
+    return out;
 }
 
 /** Point/tangent at an absolute arc length along the (closed) outline. */
@@ -181,16 +212,43 @@ function atLength(s: OutlineSamples, len: number): { p: Vec2; t: Vec2 } {
 
 // ─── Boundary fitting ────────────────────────────────────────────────────
 
-/** Fit one cubic to the outline stretch starting at `startLen`, walking
- *  FORWARD by `span`: endpoints on the outline, handles along the endpoint
- *  tangents at ⅓ of the stretch length. Endpoint tangents are measured a
- *  little INSIDE the stretch (chord to a 2%-inset point) — the outline's own
- *  tangent at a corner averages both adjoining edges, which would bow the
- *  fitted edge outward (an S-wave past every rect corner). `flip` reverses
- *  the cubic for sides whose outline direction opposes the mesh's +u/+v. */
+/**
+ * The outline stretch [startLen, startLen+span] as ONE cubic.
+ *
+ * EXACT whenever the stretch lies within a single outline segment: the edge
+ * is then the segment's de Casteljau sub-curve — the very same curve as the
+ * shape, not an approximation. Mesh creation cuts the grid at the outline's
+ * anchor points precisely so that every boundary edge qualifies.
+ *
+ * Stretches that still cross an anchor (grid lines deleted by the user, an
+ * anchor added mid-edge later) fall back to a least-squares fit — the best a
+ * single cubic can do across two different curves.
+ */
 function fitEdgeForward(s: OutlineSamples, startLen: number, span: number, flip: boolean): Cubic {
-    const a = atLength(s, startLen);
-    const b = atLength(s, startLen + span);
+    if (span > 1e-9) {
+        const a0 = cubicAt(s, startLen);
+        const b0 = cubicAt(s, startLen + span);
+        // Same segment (allowing the end to sit exactly on the segment's end,
+        // where cubicAt of the wrap reports the NEXT segment at t=0).
+        const sameSeg =
+            (a0.idx === b0.idx && b0.t > a0.t + 1e-6) ||
+            (b0.t < 1e-6 && (a0.idx + 1) % s.cubics.length === b0.idx);
+        if (sameSeg) {
+            const t0 = a0.t;
+            const t1 = b0.t < 1e-6 && a0.idx !== b0.idx ? 1 : b0.t;
+            const [, right] = splitCubic(s.cubics[a0.idx], t0);
+            const local = t0 < 1 - 1e-9 ? (t1 - t0) / (1 - t0) : 1;
+            const [sub] = splitCubic(right, Math.max(0, Math.min(1, local)));
+            return flip ? ([sub[3], sub[2], sub[1], sub[0]] as Cubic) : sub;
+        }
+    }
+    // Fallback endpoints: evaluated on the TRUE outline cubic (atLength
+    // interpolates between flat samples and can sit a sagitta off-curve —
+    // boundary vertices must always lie exactly on the shape).
+    const ca = cubicAt(s, startLen);
+    const cb = cubicAt(s, startLen + span);
+    const a = { p: evalCubic(s.cubics[ca.idx], ca.t) };
+    const b = { p: evalCubic(s.cubics[cb.idx], cb.t) };
     const inset = span * 0.02;
     const aIn = atLength(s, startLen + inset).p;
     const bIn = atLength(s, startLen + span - inset).p;
@@ -198,13 +256,54 @@ function fitEdgeForward(s: OutlineSamples, startLen: number, span: number, flip:
         const l = Math.hypot(dx, dy) || 1;
         return [dx / l, dy / l];
     };
-    const ta = norm(aIn[0] - a.p[0], aIn[1] - a.p[1]);
-    const tb = norm(b.p[0] - bIn[0], b.p[1] - bIn[1]);
-    const h = span / 3;
+    const t1 = norm(aIn[0] - a.p[0], aIn[1] - a.p[1]); // out of P0, into the stretch
+    const t2 = norm(bIn[0] - b.p[0], bIn[1] - b.p[1]); // out of P3, back into the stretch
+
+    // Least squares for the handle lengths α1, α2 with P1 = P0 + α1·t1 and
+    // P2 = P3 + α2·t2: minimize Σ|Q(u_i) − d_i|² over outline samples d_i at
+    // arc-length parameters u_i. Normal equations are a 2×2 system.
+    const K = 14;
+    let c11 = 0;
+    let c12 = 0;
+    let c22 = 0;
+    let x1 = 0;
+    let x2 = 0;
+    for (let i = 1; i < K; i++) {
+        const u = i / K;
+        const d = atLength(s, startLen + span * u).p;
+        const mu = 1 - u;
+        const b0 = mu * mu * mu;
+        const b1 = 3 * mu * mu * u;
+        const b2 = 3 * mu * u * u;
+        const b3 = u * u * u;
+        const a1x = b1 * t1[0];
+        const a1y = b1 * t1[1];
+        const a2x = b2 * t2[0];
+        const a2y = b2 * t2[1];
+        const rx = d[0] - ((b0 + b1) * a.p[0] + (b2 + b3) * b.p[0]);
+        const ry = d[1] - ((b0 + b1) * a.p[1] + (b2 + b3) * b.p[1]);
+        c11 += a1x * a1x + a1y * a1y;
+        c12 += a1x * a2x + a1y * a2y;
+        c22 += a2x * a2x + a2y * a2y;
+        x1 += a1x * rx + a1y * ry;
+        x2 += a2x * rx + a2y * ry;
+    }
+    const det = c11 * c22 - c12 * c12;
+    let alpha1 = span / 3;
+    let alpha2 = span / 3;
+    if (Math.abs(det) > 1e-9) {
+        const s1 = (x1 * c22 - x2 * c12) / det;
+        const s2 = (c11 * x2 - c12 * x1) / det;
+        // Degenerate solutions (non-positive or wild lengths) fall back to ⅓.
+        if (s1 > 1e-6 && s2 > 1e-6 && s1 < span && s2 < span) {
+            alpha1 = s1;
+            alpha2 = s2;
+        }
+    }
     const c: Cubic = [
         a.p,
-        [a.p[0] + ta[0] * h, a.p[1] + ta[1] * h],
-        [b.p[0] - tb[0] * h, b.p[1] - tb[1] * h],
+        [a.p[0] + t1[0] * alpha1, a.p[1] + t1[1] * alpha1],
+        [b.p[0] + t2[0] * alpha2, b.p[1] + t2[1] * alpha2],
         b.p,
     ];
     return flip ? ([c[3], c[2], c[1], c[0]] as Cubic) : c;
@@ -217,11 +316,6 @@ interface Side {
     start: number;
     span: number;
     reverse: boolean;
-}
-
-/** Outline point/tangent at mesh-direction fraction `f` of a side. */
-function sideAt(s: OutlineSamples, side: Side, f: number) {
-    return atLength(s, side.start + side.span * (side.reverse ? 1 - f : f));
 }
 
 /** Cubic fitted to the sub-stretch [f0, f1] (mesh-direction fractions). */
@@ -323,8 +417,56 @@ export function fitMeshToOutline(
     }
     if (Math.min(top.span, right.span, bottom.span, left.span) < s.total * 0.02) return null;
 
-    const us = [0, ...uFractions, 1];
-    const vs = [0, ...vFractions, 1];
+    // Cut the grid at the outline's own anchor points: every boundary edge
+    // then lies within a single outline segment and is its EXACT sub-curve
+    // (see fitEdgeForward) — the mesh boundary IS the shape, not a fit.
+    // Anchors on the top/bottom sides become column lines, left/right ones
+    // become rows; the requested fractions (the user's click) are merged in.
+    const sideAnchorFractions = (side: Side): number[] => {
+        const out: number[] = [];
+        for (const al of anchorLengths(s)) {
+            const fwd = (((al - side.start) % s.total) + s.total) % s.total;
+            if (fwd <= 1e-9 || fwd >= side.span - 1e-9) continue; // corner itself
+            const g = fwd / side.span;
+            out.push(side.reverse ? 1 - g : g);
+        }
+        return out;
+    };
+    const mergeFractions = (requested: number[], anchors: number[]): number[] => {
+        const MIN_GAP = 0.02;
+        const all = [
+            ...anchors.map((f) => ({ f, anchor: true })),
+            ...requested.map((f) => ({ f, anchor: false })),
+        ].sort((a, b) => a.f - b.f);
+        const kept: { f: number; anchor: boolean }[] = [];
+        for (const e of all) {
+            if (e.f < MIN_GAP || e.f > 1 - MIN_GAP) continue;
+            const prev = kept[kept.length - 1];
+            if (prev && e.f - prev.f < MIN_GAP) {
+                // Too close: keep the anchor cut (exactness) over the click.
+                if (e.anchor && !prev.anchor) prev.f = e.f;
+                continue;
+            }
+            kept.push({ ...e });
+        }
+        return kept.map((e) => e.f);
+    };
+    const us = [
+        0,
+        ...mergeFractions(uFractions, [
+            ...sideAnchorFractions(top),
+            ...sideAnchorFractions(bottom),
+        ]),
+        1,
+    ];
+    const vs = [
+        0,
+        ...mergeFractions(vFractions, [
+            ...sideAnchorFractions(left),
+            ...sideAnchorFractions(right),
+        ]),
+        1,
+    ];
     const rows = vs.length - 1;
     const cols = us.length - 1;
 
@@ -336,44 +478,147 @@ export function fitMeshToOutline(
         right: sideEdge(s, right, 0, 1),
     };
 
+    // Boundary edge curves (exact outline sub-curves between cuts). Vertex
+    // positions come from THESE endpoints, so anchors sit exactly on the
+    // outline and adjacent edges share endpoints bit-for-bit.
+    const topEdges: Cubic[] = [];
+    const bottomEdges: Cubic[] = [];
+    for (let c = 0; c < cols; c++) {
+        topEdges.push(sideEdge(s, top, us[c], us[c + 1]));
+        bottomEdges.push(sideEdge(s, bottom, us[c], us[c + 1]));
+    }
+    const leftEdges: Cubic[] = [];
+    const rightEdges: Cubic[] = [];
+    for (let r = 0; r < rows; r++) {
+        leftEdges.push(sideEdge(s, left, vs[r], vs[r + 1]));
+        rightEdges.push(sideEdge(s, right, vs[r], vs[r + 1]));
+    }
+
     const black: Color = { r: 0, g: 0, b: 0, a: 1 };
     const mesh: MeshGradient = { rows, cols, vertices: [] };
     for (let r = 0; r <= rows; r++) {
         for (let c = 0; c <= cols; c++) {
             let p: Vec2;
-            if (r === 0) p = sideAt(s, top, us[c]).p;
-            else if (r === rows) p = sideAt(s, bottom, us[c]).p;
-            else if (c === 0) p = sideAt(s, left, vs[r]).p;
-            else if (c === cols) p = sideAt(s, right, vs[r]).p;
+            if (r === 0) p = c < cols ? topEdges[c][0] : topEdges[cols - 1][3];
+            else if (r === rows) p = c < cols ? bottomEdges[c][0] : bottomEdges[cols - 1][3];
+            else if (c === 0) p = leftEdges[r][0];
+            else if (c === cols) p = rightEdges[r][0];
             else p = evalCoons(coons, us[c], vs[r]);
             mesh.vertices.push({ x: p[0], y: p[1], color: { ...black } });
         }
     }
 
-    // Boundary handles: fit a cubic per boundary edge and store its inner
-    // control points on the edge's two vertices (interior handles stay auto).
+    // Boundary handles: each edge's inner control points, stored on the
+    // edge's two vertices (interior handles stay auto).
     const setH = (r: number, c: number, dirKey: 'e' | 'w' | 's' | 'n', p: Vec2) => {
         const v = mesh.vertices[r * (cols + 1) + c];
         if (!v.handles) v.handles = {};
         v.handles[dirKey] = [p[0], p[1]];
     };
     for (let c = 0; c < cols; c++) {
-        const te = sideEdge(s, top, us[c], us[c + 1]);
-        setH(0, c, 'e', te[1]);
-        setH(0, c + 1, 'w', te[2]);
-        const be = sideEdge(s, bottom, us[c], us[c + 1]);
-        setH(rows, c, 'e', be[1]);
-        setH(rows, c + 1, 'w', be[2]);
+        setH(0, c, 'e', topEdges[c][1]);
+        setH(0, c + 1, 'w', topEdges[c][2]);
+        setH(rows, c, 'e', bottomEdges[c][1]);
+        setH(rows, c + 1, 'w', bottomEdges[c][2]);
     }
     for (let r = 0; r < rows; r++) {
-        const le = sideEdge(s, left, vs[r], vs[r + 1]);
-        setH(r, 0, 's', le[1]);
-        setH(r + 1, 0, 'n', le[2]);
-        const re = sideEdge(s, right, vs[r], vs[r + 1]);
-        setH(r, cols, 's', re[1]);
-        setH(r + 1, cols, 'n', re[2]);
+        setH(r, 0, 's', leftEdges[r][1]);
+        setH(r + 1, 0, 'n', leftEdges[r][2]);
+        setH(r, cols, 's', rightEdges[r][1]);
+        setH(r + 1, cols, 'n', rightEdges[r][2]);
     }
     return mesh;
+}
+
+// ─── Boundary re-snap (mesh follows shape edits) ─────────────────────────
+
+/**
+ * Glue an existing mesh's OUTER RING back onto the node's (edited) outline:
+ * each boundary vertex snaps to its nearest outline point and each boundary
+ * edge re-fits its along-line handles to the outline stretch between its
+ * endpoints. Interior vertices, inward handles, and all colors stay as the
+ * user left them (the engine's bbox affine has already carried gross scaling).
+ *
+ * Returns the snapped mesh, or null when the geometry has no closed outline
+ * or the projection degenerates (callers keep the affine-adapted mesh).
+ */
+export function snapMeshBoundaryToOutline(
+    mesh: MeshGradient,
+    geo: NodeGeometry,
+): MeshGradient | null {
+    const cubics = outlineCubics(geo);
+    if (!cubics) return null;
+    const s = sampleOutline(cubics);
+    if (s.total < 1e-6) return null;
+
+    const rows = mesh.rows;
+    const cols = mesh.cols;
+    const stride = cols + 1;
+    const next: MeshGradient = {
+        rows,
+        cols,
+        vertices: mesh.vertices.map((v) => ({
+            x: v.x,
+            y: v.y,
+            color: { ...v.color },
+            ...(v.handles ? { handles: { ...v.handles } } : {}),
+        })),
+    };
+
+    // Project every boundary vertex to its nearest outline sample.
+    const arcOf = new Map<number, number>();
+    const isBoundary = (r: number, c: number) => r === 0 || r === rows || c === 0 || c === cols;
+    for (let r = 0; r <= rows; r++) {
+        for (let c = 0; c <= cols; c++) {
+            if (!isBoundary(r, c)) continue;
+            const vi = r * stride + c;
+            const v = next.vertices[vi];
+            let best = 0;
+            let bestD = Infinity;
+            for (let i = 0; i < s.pts.length; i++) {
+                const d = (s.pts[i][0] - v.x) ** 2 + (s.pts[i][1] - v.y) ** 2;
+                if (d < bestD) {
+                    bestD = d;
+                    best = i;
+                }
+            }
+            arcOf.set(vi, s.cum[best]);
+            v.x = s.pts[best][0];
+            v.y = s.pts[best][1];
+        }
+    }
+
+    // Re-fit each boundary edge's along-line handles to the outline stretch
+    // between its (snapped) endpoints, walking whichever way is shorter.
+    const setH = (vi: number, dir: 'e' | 'w' | 's' | 'n', p: Vec2) => {
+        const v = next.vertices[vi];
+        if (!v.handles) v.handles = {};
+        v.handles[dir] = [p[0], p[1]];
+    };
+    const refit = (aVi: number, bVi: number, aDir: 'e' | 's', bDir: 'w' | 'n') => {
+        const la = arcOf.get(aVi);
+        const lb = arcOf.get(bVi);
+        if (la === undefined || lb === undefined) return;
+        const fwd = (((lb - la) % s.total) + s.total) % s.total;
+        const bwd = s.total - fwd;
+        const span = Math.min(fwd, bwd);
+        // Coincident endpoints or a stretch that would wrap around most of
+        // the outline → the projection is unreliable; keep existing handles.
+        if (span < s.total * 1e-4 || span > s.total * 0.45) return;
+        const cubic =
+            fwd <= bwd ? fitEdgeForward(s, la, fwd, false) : fitEdgeForward(s, lb, bwd, true);
+        setH(aVi, aDir, cubic[1]);
+        setH(bVi, bDir, cubic[2]);
+    };
+    for (let c = 0; c < cols; c++) {
+        refit(c, c + 1, 'e', 'w'); // top row
+        refit(rows * stride + c, rows * stride + c + 1, 'e', 'w'); // bottom row
+    }
+    for (let r = 0; r < rows; r++) {
+        refit(r * stride, (r + 1) * stride, 's', 'n'); // left column
+        refit(r * stride + cols, (r + 1) * stride + cols, 's', 'n'); // right column
+    }
+    return next;
 }
 
 // ─── Color seeding ───────────────────────────────────────────────────────

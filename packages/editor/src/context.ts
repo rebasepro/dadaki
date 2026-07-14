@@ -24,6 +24,7 @@ export type EditorContext =
     | 'multi-select' // 2+ nodes selected
     | 'live-paint-object' // a Live Paint group selected (Selection tool)
     | 'live-paint' // paint-bucket tool active (wins over selection)
+    | 'mesh' // mesh tool active (wins over selection)
     | 'pen-drawing' // input.currentPathPoints.length > 0
     | 'path-editing' // input.editingNodeId != null
     | 'guide-selected'; // input.selectedGuide != null (a ruler guide is clicked)
@@ -122,6 +123,9 @@ export function getEditorContext(ui: UIEngine, input: InputManager, scene: WasmS
         // Live Paint is a mode: the tool wins over the current selection so the
         // bar always shows paint options (color, gaps, Make Live Paint Group).
         context = 'live-paint';
+    } else if (activeTool === 'mesh') {
+        // Mesh editing is a mode too: the bar shows mesh point actions.
+        context = 'mesh';
     } else if (
         selectedIds.length === 1 &&
         primaryNodeType === 'Group' &&

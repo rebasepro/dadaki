@@ -383,3 +383,8 @@ export function iconTextAlignRight(size: number = 16): string {
 export function iconCreateOutlines(size: number = 16): string {
     return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16"/><path d="M7 4h10l-5 16"/><path d="M9.5 4l-3 12"/><path d="M14.5 4l3 12"/></svg>`;
 }
+
+/** Mesh grid (mesh gradient editing) — matches the Mesh tool's rail icon. */
+export function iconMeshGrid(size: number = 14): string {
+    return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/></svg>`;
+}

@@ -1319,7 +1319,26 @@ export class Renderer {
         if (!this.isRunning) return;
         if (this._needsRender) {
             this._needsRender = false;
-            this.render();
+            // Self-heal a stale drawing buffer before painting: if a resize
+            // event was missed (some environments drop window-resize /
+            // ResizeObserver delivery), the buffer no longer matches the
+            // canvas box and everything renders bitmap-scaled and misaligned.
+            const dpr = window.devicePixelRatio || 1;
+            const bw = Math.round(this.canvas.clientWidth * dpr);
+            const bh = Math.round(this.canvas.clientHeight * dpr);
+            if (bw > 0 && bh > 0 && (this.canvas.width !== bw || this.canvas.height !== bh)) {
+                this.onResize(); // renders internally
+                requestAnimationFrame(() => this.loop());
+                return;
+            }
+            // One bad frame must never kill the app: an uncaught throw here
+            // would end the rAF chain silently — rendering, resize redraws
+            // and the grid all stop until a full reload.
+            try {
+                this.render();
+            } catch (err) {
+                console.error('render frame failed:', err);
+            }
         }
         requestAnimationFrame(() => this.loop());
     }
@@ -2210,8 +2229,22 @@ export class Renderer {
                         } else if (fill.type === 5) {
                             // Mesh gradient: a cached raster of the tessellated
                             // mesh, applied as an image shader through the
-                            // ordinary fill draw (same flow as patterns).
-                            const meshShader = this.getMeshFillShader(canvas, fill.mesh, nodeAlpha);
+                            // ordinary fill draw (same flow as patterns). The
+                            // geometry bounds size the raster so the boundary
+                            // flood covers the whole path (peek restores the
+                            // reader offset).
+                            const gb = this.peekGeometryBounds(
+                                nodeType,
+                                reader,
+                                cornerRadius,
+                                nodeId,
+                            );
+                            const meshShader = this.getMeshFillShader(
+                                canvas,
+                                fill.mesh,
+                                nodeAlpha,
+                                gb,
+                            );
                             if (meshShader) {
                                 // Alpha lives in the raster; force the paint
                                 // opaque like the gradient branch above.
@@ -2801,48 +2834,82 @@ export class Renderer {
             y: number;
             w: number;
             h: number;
+            bytes: number;
         }
     >();
+
+    /**
+     * While true, mesh rasters are built at reduced resolution. Set for the
+     * duration of a mesh edit gesture (vertex/handle drag): every frame
+     * mutates the mesh, so every frame is a cache miss and must re-rasterize
+     * on the CPU — the cost is linear in raster pixels, and full resolution
+     * costs ~34ms/frame (≈30fps) on a mid-size mesh. Quarter-area drafts run
+     * ~4x faster; the drag-end render restores full quality.
+     */
+    meshDraftMode = false;
 
     /**
      * Shader that paints a mesh-gradient fill in node-local coordinates —
      * plugged into the ordinary fill pass exactly like pattern shaders.
      *
-     * The mesh is tessellated (zoom-adaptive Coons subdivision) and rendered
-     * with drawVertices on an offscreen CPU raster at device resolution; the
-     * raster becomes a Decal-tiled image shader whose local matrix maps it
-     * onto the mesh's node-local bounds. The indirection is deliberate: on
-     * the onscreen WebGL surface this CanvasKit build silently discards both
-     * drawVertices and image blits issued under a non-rectangular clipPath
-     * (verified empirically), so the mesh must reach the screen through
-     * drawPath + shader — the one fill path proven to work everywhere. The
-     * raster + shader are cached by content, so static frames cost nothing.
+     * The mesh is tessellated (curvature-adaptive Coons subdivision) and
+     * rendered with drawVertices on an offscreen CPU raster at device
+     * resolution; the raster becomes a Decal-tiled image shader whose local
+     * matrix maps it onto the mesh's node-local bounds. The indirection is
+     * deliberate: on the onscreen WebGL surface this CanvasKit build silently
+     * discards both drawVertices and image blits issued under a
+     * non-rectangular clipPath (verified empirically), so the mesh must reach
+     * the screen through drawPath + shader — the one fill path proven to work
+     * everywhere. The raster + shader are cached by content, so static frames
+     * cost nothing.
      */
     private getMeshFillShader(
         canvas: Canvas,
         mesh: MeshGradient,
         alphaScale: number,
+        pathBounds: [number, number, number, number] | null = null,
     ): Shader | null {
         // Device px per node-local unit, from the live canvas matrix (covers
         // zoom, dpr, node transform, and export supersampling in one go).
         const m = canvas.getTotalMatrix();
         let scale = Math.sqrt(Math.abs(m[0] * m[4] - m[1] * m[3])) || 1;
+        // Quantize to power-of-two buckets: a continuous zoom then KEEPS
+        // hitting the same cache entry (the shader rescales it, error ≤ √2×)
+        // instead of re-rasterizing megabytes on every frame — which stalled
+        // whole frames and starved the rest of the UI during zooms.
+        scale = 2 ** Math.round(Math.log2(scale));
+        // Mid-gesture: half-scale raster (a quarter of the pixels, ~4x faster
+        // to build). Slightly soft while dragging; the drag-end frame rebuilds
+        // at full scale.
+        if (this.meshDraftMode) scale /= 2;
         const b = meshBounds(mesh);
         if (b.w <= 0 || b.h <= 0) return null;
-        // Padding for the 2px boundary-outset strip plus 1 device px so
-        // linear sampling never reads the raster edge.
-        const pad = 3 / scale;
-        const bx = b.x - pad;
-        const by = b.y - pad;
-        const bw = b.w + 2 * pad;
-        const bh = b.h + 2 * pad;
+        // The raster must cover the whole FILL PATH, not just the mesh hull:
+        // a shape-fitted boundary can undershoot a many-point outline by
+        // whole lobes, and anything past the raster samples Decal-transparent.
+        let x0 = b.x;
+        let y0 = b.y;
+        let x1 = b.x + b.w;
+        let y1 = b.y + b.h;
+        if (pathBounds) {
+            x0 = Math.min(x0, pathBounds[0]);
+            y0 = Math.min(y0, pathBounds[1]);
+            x1 = Math.max(x1, pathBounds[2]);
+            y1 = Math.max(y1, pathBounds[3]);
+        }
+        // 1 device px so linear sampling never reads the raster edge.
+        const pad = 1 / scale;
+        const bx = x0 - pad;
+        const by = y0 - pad;
+        const bw = x1 - x0 + 2 * pad;
+        const bh = y1 - y0 + 2 * pad;
         // Cap the raster to a sane device budget; beyond it the mesh renders
         // slightly soft (upscaled), which at 2048px is imperceptible.
         const maxDim = Math.max(bw, bh) * scale;
         if (maxDim > 2048) scale *= 2048 / maxDim;
         const pw = Math.max(1, Math.ceil(bw * scale));
         const ph = Math.max(1, Math.ceil(bh * scale));
-        const key = `${meshContentHash(mesh)}:${pw}x${ph}:${alphaScale.toFixed(3)}`;
+        const key = `${meshContentHash(mesh)}:${pw}x${ph}:${bx.toFixed(1)},${by.toFixed(1)}:${alphaScale.toFixed(3)}`;
 
         let entry = this._meshRasterCache.get(key);
         if (entry) {
@@ -2859,10 +2926,11 @@ export class Renderer {
                 oc.scale(pw / bw, ph / bh);
                 oc.translate(-bx, -by);
                 const { u, v } = subdivisionCounts(mesh, scale);
-                // Extrude boundary colors ~2 device px outward so a
-                // shape-fitted boundary that undershoots the path edge shows
-                // the edge color there, never a transparent sliver.
-                const tess = tessellate(mesh, u, v, alphaScale, 2 / scale);
+                // Flood the boundary colors across the whole raster (strip is
+                // drawn UNDER the patches): wherever the fitted boundary
+                // undershoots the path, the fill shows the nearest boundary
+                // color instead of a transparent hole. The path clip caps it.
+                const tess = tessellate(mesh, u, v, alphaScale, Math.hypot(bw, bh));
                 const verts = this.ck.MakeVertices(
                     this.ck.VertexMode.Triangles,
                     tess.positions,
@@ -2919,13 +2987,23 @@ export class Renderer {
                 this.ck.MipmapMode.None,
                 [bw / pw, 0, bx, 0, bh / ph, by, 0, 0, 1],
             );
-            entry = { img, shader, x: bx, y: by, w: bw, h: bh };
+            entry = { img, shader, x: bx, y: by, w: bw, h: bh, bytes: pw * ph * 4 };
             this._meshRasterCache.set(key, entry);
-            while (this._meshRasterCache.size > 8) {
+            // Evict by total bytes (the WASM heap pays for every cached
+            // raster — unbounded growth ends in a CanvasKit Aborted()) and
+            // keep a generous entry cap as a backstop.
+            let total = 0;
+            for (const e of this._meshRasterCache.values()) total += e.bytes;
+            while (
+                this._meshRasterCache.size > 1 &&
+                (total > 48 * 1024 * 1024 || this._meshRasterCache.size > 12)
+            ) {
                 const oldest = this._meshRasterCache.keys().next().value as string;
                 const evicted = this._meshRasterCache.get(oldest);
-                evicted?.shader?.delete();
-                evicted?.img?.delete();
+                if (!evicted) break;
+                total -= evicted.bytes;
+                evicted.shader?.delete();
+                evicted.img?.delete();
                 this._meshRasterCache.delete(oldest);
             }
         }
@@ -2940,14 +3018,27 @@ export class Renderer {
     rasterizeMeshForExport(
         mesh: MeshGradient,
         pxPerUnit = 2,
+        pathBounds: { x: number; y: number; w: number; h: number } | null = null,
     ): { href: string; x: number; y: number; w: number; h: number } | null {
         const b = meshBounds(mesh);
         if (b.w <= 0 || b.h <= 0) return null;
-        const pad = 2 / pxPerUnit;
-        const bx = b.x - pad;
-        const by = b.y - pad;
-        const bw = b.w + 2 * pad;
-        const bh = b.h + 2 * pad;
+        // Cover the whole fill path, not just the mesh hull (see
+        // getMeshFillShader) — the flood below fills the difference.
+        let x0 = b.x;
+        let y0 = b.y;
+        let x1 = b.x + b.w;
+        let y1 = b.y + b.h;
+        if (pathBounds) {
+            x0 = Math.min(x0, pathBounds.x);
+            y0 = Math.min(y0, pathBounds.y);
+            x1 = Math.max(x1, pathBounds.x + pathBounds.w);
+            y1 = Math.max(y1, pathBounds.y + pathBounds.h);
+        }
+        const pad = 1 / pxPerUnit;
+        const bx = x0 - pad;
+        const by = y0 - pad;
+        const bw = x1 - x0 + 2 * pad;
+        const bh = y1 - y0 + 2 * pad;
         let scale = pxPerUnit;
         const maxDim = Math.max(bw, bh) * scale;
         if (maxDim > 4096) scale *= 4096 / maxDim;
@@ -2961,7 +3052,7 @@ export class Renderer {
             oc.scale(pw / bw, ph / bh);
             oc.translate(-bx, -by);
             const { u, v } = subdivisionCounts(mesh, scale);
-            const tess = tessellate(mesh, u, v, 1, 2 / scale);
+            const tess = tessellate(mesh, u, v, 1, Math.hypot(bw, bh));
             const verts = this.ck.MakeVertices(
                 this.ck.VertexMode.Triangles,
                 tess.positions,
@@ -3739,14 +3830,16 @@ export class Renderer {
             canvas.drawPath(hp, p);
             hp.delete();
         } else if (hover?.type === 'vertex' && me.hoverAlt) {
-            // Alt over an interior vertex: both its lines glow red (deletion).
-            const row = Math.floor(hover.vi / stride);
-            const col = hover.vi % stride;
-            if (row > 0 && row < mesh.rows && col > 0 && col < mesh.cols) {
+            // Alt over a vertex: exactly the lines a delete would remove glow
+            // red (the last-added lines for a freshly added point, both grid
+            // lines otherwise).
+            const lines = me.linesForVertexDeletion(mesh, hover.vi);
+            if (lines.length > 0) {
                 danger.setStrokeWidth(2 / z);
                 const hp = new ck.Path();
-                worldCubicPath(rowLine(row), hp);
-                worldCubicPath(colLine(col), hp);
+                for (const l of lines) {
+                    worldCubicPath(l.axis === 'row' ? rowLine(l.index) : colLine(l.index), hp);
+                }
                 canvas.drawPath(hp, danger);
                 hp.delete();
             }

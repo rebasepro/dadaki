@@ -33,6 +33,18 @@ body, html {
 
 /* ─── App Shell ─── */
 
+/* The standalone app's mount point. Without an explicit height the whole
+   percentage chain below (#app-container → #main-layout → canvas) resolves
+   against an AUTO box, so the layout is sized by a feedback loop through the
+   canvas's pixel buffer instead of the viewport — it can lock at a stale
+   height after window resizes (dead strip under the app) and oscillate with
+   the canvas ResizeObserver (flickering redraws). Embedded hosts use their
+   own mount and size it themselves. */
+#app {
+    width: 100%;
+    height: 100%;
+}
+
 #app-container {
     display: flex;
     flex-direction: column;
@@ -1747,6 +1759,34 @@ body.scrubbing * {
     color: var(--accent);
     border-color: var(--accent);
     background: var(--accent-dim);
+}
+
+/* Small labelled button for inspector rows (e.g. the mesh fill's "Edit").
+   Reads as an actionable control, unlike the muted .icon-toggle. */
+.panel-btn {
+    height: var(--color-swatch-h);
+    padding: 0 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg-input, var(--bg-panel));
+    color: var(--text-main);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+    flex-shrink: 0;
+}
+
+.panel-btn:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+}
+
+.panel-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
 }
 
 /* ─── Pathfinder ─── */

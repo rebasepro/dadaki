@@ -614,7 +614,7 @@ export class InputManager {
             return;
         }
 
-        // Double-click on any other leaf shape enters node-editing (direct
+        // Double-click on any leaf shape enters node-editing (direct
         // selection) mode. enterPathEditMode converts Rect/Ellipse to an
         // editable Path; corner radii carry over per-vertex, so this is
         // non-destructive.
@@ -933,9 +933,11 @@ export class InputManager {
             }
             if (this.isMouseDown && this.meshDragActive) {
                 this.meshDragActive = false;
+                this.renderer.meshDraftMode = false;
                 this.isMouseDown = false; // swallow the drag; onMouseUp early-returns
                 this.ui.meshEdit.cancelDrag();
                 this.ui.syncWithSelection();
+                this.renderer.requestRender();
                 return;
             }
             if (
@@ -959,6 +961,7 @@ export class InputManager {
             // falls through to the generic "back to Selection tool" below.
             if (this.ui.activeTool === 'mesh' && this.ui.meshEdit.selectedVertices.size > 0) {
                 this.ui.meshEdit.selectedVertices.clear();
+                this.ui.contextBar?.refresh();
                 this.renderer.requestRender();
                 return;
             }
@@ -1389,6 +1392,7 @@ export class InputManager {
         this.pencilPoints = null;
         this.marqueeRect = null;
         this.meshMarqueeStart = null;
+        this.renderer.meshDraftMode = false;
         this.dragMode = 'none';
         this.isMouseDown = false;
         this.didMove = false;
@@ -2150,12 +2154,15 @@ export class InputManager {
                     // Plain click selects; drag (if it follows) moves. Shift
                     // toggles membership without starting a move of others.
                     this.meshDragActive = true;
+                    this.renderer.meshDraftMode = true;
                     me.beginVertexDrag(hit.vi, pos, e.shiftKey);
                     this.ui.syncWithSelection({ interactive: true });
+                    this.ui.contextBar?.refresh();
                     return;
                 }
                 if (hit.type === 'handle') {
                     this.meshDragActive = true;
+                    this.renderer.meshDraftMode = true;
                     me.beginHandleDrag(hit.vi, hit.dir, pos);
                     return;
                 }
@@ -2175,8 +2182,17 @@ export class InputManager {
             const meshIdx = fills.findIndex((f) => isMeshGradient(f));
             if (meshIdx >= 0) {
                 me.activate(nodeId, meshIdx);
+                // Resolve the same press against the freshly activated mesh so
+                // the first click can already grab a vertex/handle — requiring
+                // a second click reads as "clicking does nothing".
+                const hit = me.hitTest(pos, this.renderer.zoom);
+                if (hit?.type === 'vertex' && !e.altKey) {
+                    this.meshDragActive = true;
+                    this.renderer.meshDraftMode = true;
+                    me.beginVertexDrag(hit.vi, pos, e.shiftKey);
+                }
                 this.ui.updateLayerList();
-                this.ui.syncWithSelection();
+                this.ui.syncWithSelection({ interactive: this.meshDragActive });
                 return;
             }
             if (fills.length === 0) {
@@ -4882,6 +4898,8 @@ export class InputManager {
                 this.editingNodeId!,
                 JSON.stringify(this.editingPoints),
             );
+            // Keep any mesh fill glued to the outline while it is dragged.
+            this.scene.snapMeshFillsToGeometry(this.editingNodeId!);
             this.scene.invalidateCache();
             this.ui.syncWithSelection({ interactive: true });
         }
@@ -4945,8 +4963,11 @@ export class InputManager {
         // pending Shift-toggle instead)
         if (this.meshDragActive) {
             this.meshDragActive = false;
+            // Back to full-resolution mesh rasters, and repaint at quality.
+            this.renderer.meshDraftMode = false;
             this.ui.meshEdit.endDrag(this.didMove);
             this.ui.syncWithSelection();
+            this.renderer.requestRender();
             return;
         }
         // Resolve a mesh-tool press on empty canvas: marquee-select vertices,
@@ -4971,6 +4992,7 @@ export class InputManager {
             }
             this.meshMarqueeStart = null;
             this.marqueeRect = null;
+            this.ui.contextBar?.refresh();
             this.renderer.requestRender();
             return;
         }

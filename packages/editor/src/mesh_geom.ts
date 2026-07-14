@@ -219,36 +219,62 @@ function packColor(c: Color, alphaScale: number): number {
     return ((cl(c.a * alphaScale) << 24) | (cl(c.r) << 16) | (cl(c.g) << 8) | cl(c.b)) >>> 0;
 }
 
+/** How far a cubic can stray from a polyline through evenly spaced samples,
+ *  scaled: the classic second-difference bound. `error ≈ d2 / (8·n²)`, so
+ *  `n = sqrt(d2 / (8·tolerance))` segments hit a given tolerance. */
+function cubicFlatnessMetric(c: Cubic): number {
+    const ax = c[0][0] - 2 * c[1][0] + c[2][0];
+    const ay = c[0][1] - 2 * c[1][1] + c[2][1];
+    const bx = c[1][0] - 2 * c[2][0] + c[3][0];
+    const by = c[1][1] - 2 * c[2][1] + c[3][1];
+    return 3 * Math.sqrt(Math.max(ax * ax + ay * ay, bx * bx + by * by));
+}
+
+/** Segments needed to keep a Coons patch's colour ramp smooth: Gouraud
+ *  triangles approximate the bilinear corner blend with an error that falls
+ *  as 1/n², so a small fixed count is plenty (measured: n=6 is pixel-identical
+ *  to n=48 on real meshes). */
+const COLOR_SUBDIV = 6;
+
 /**
  * Per-grid-column / per-grid-row subdivision counts at a given world scale
- * (device px per local unit). Chosen from the longest edge in that column/row
- * so both sides of every shared edge subdivide identically. The total vertex
- * budget is capped so indices always fit Uint16Array.
+ * (device px per local unit). Chosen from the WORST (curviest) edge in that
+ * column/row so both sides of every shared edge subdivide identically.
+ *
+ * Counts are curvature-driven, not length-driven: a long straight edge needs
+ * 2 segments, a tight curve needs many. (The old length/8 rule tessellated a
+ * plain 6×5 mesh into 46k triangles — ~17ms per rebuild — for output
+ * indistinguishable from 2.7k.) The total is still capped so indices fit
+ * Uint16Array.
  */
 export function subdivisionCounts(
     mesh: MeshGradient,
     worldScale: number,
 ): { u: number[]; v: number[] } {
-    const clampN = (px: number, cap: number) => Math.max(2, Math.min(cap, Math.ceil(px / 8)));
-    // Cap per-edge subdivision so Σ patches (nu+1)(nv+1) plus the boundary
-    // outset strip stays under the Uint16Array index ceiling (65536).
+    // Sub-pixel geometry tolerance; the raster is resampled by the shader, so
+    // a little slack here is invisible.
+    const TOL = 0.25;
     const patches = Math.max(1, mesh.rows * mesh.cols);
-    const cap = Math.max(2, Math.min(48, Math.floor(Math.sqrt(52000 / patches)) - 1));
+    const cap = Math.max(2, Math.min(24, Math.floor(Math.sqrt(44000 / patches)) - 1));
+    const countFor = (worstMetric: number) => {
+        const n = Math.ceil(Math.sqrt((worstMetric * worldScale) / (8 * TOL)));
+        return Math.max(2, Math.min(cap, Math.max(n, Math.min(COLOR_SUBDIV, cap))));
+    };
     const u: number[] = [];
     for (let pc = 0; pc < mesh.cols; pc++) {
-        let maxLen = 0;
+        let worst = 0;
         for (let row = 0; row <= mesh.rows; row++) {
-            maxLen = Math.max(maxLen, cubicLength(hEdgeCubic(mesh, row, pc)));
+            worst = Math.max(worst, cubicFlatnessMetric(hEdgeCubic(mesh, row, pc)));
         }
-        u.push(clampN(maxLen * worldScale, cap));
+        u.push(countFor(worst));
     }
     const v: number[] = [];
     for (let pr = 0; pr < mesh.rows; pr++) {
-        let maxLen = 0;
+        let worst = 0;
         for (let col = 0; col <= mesh.cols; col++) {
-            maxLen = Math.max(maxLen, cubicLength(vEdgeCubic(mesh, pr, col)));
+            worst = Math.max(worst, cubicFlatnessMetric(vEdgeCubic(mesh, pr, col)));
         }
-        v.push(clampN(maxLen * worldScale, cap));
+        v.push(countFor(worst));
     }
     return { u, v };
 }
@@ -269,9 +295,11 @@ export interface MeshTessellation {
  *
  * `outset` (node-local units) extrudes a strip along the outer boundary,
  * extending each boundary sample's color outward along its normal. The fill
- * is painted as `node path ∩ this raster`, so when a shape-fitted boundary
- * undershoots the true path edge by a hair, the strip covers the sliver with
- * the boundary color instead of transparency.
+ * is painted as `node path ∩ this raster`, so wherever the shape-fitted
+ * boundary undershoots the true path (a hairline sliver, or whole lobes on a
+ * many-point blob a 4-sided fit can't follow) the flood shows the nearest
+ * boundary color instead of a transparent hole. The strip is emitted FIRST so
+ * the real patches paint over any fold-overs at concave notches.
  */
 export function tessellate(
     mesh: MeshGradient,
@@ -283,6 +311,9 @@ export function tessellate(
     const positions: number[] = [];
     const colors: number[] = [];
     const indices: number[] = [];
+    if (outset > 0) {
+        appendBoundaryStrip(mesh, alphaScale, outset, positions, colors, indices);
+    }
     for (let pr = 0; pr < mesh.rows; pr++) {
         for (let pc = 0; pc < mesh.cols; pc++) {
             const b = patchBoundaryCubics(mesh, pr, pc);
@@ -311,9 +342,6 @@ export function tessellate(
             }
         }
     }
-    if (outset > 0) {
-        appendBoundaryStrip(mesh, subdivU, subdivV, alphaScale, outset, positions, colors, indices);
-    }
     return {
         positions: new Float32Array(positions),
         colors: new Uint32Array(colors),
@@ -325,8 +353,6 @@ export function tessellate(
  *  colors, and append the strip triangles to the tessellation arrays. */
 function appendBoundaryStrip(
     mesh: MeshGradient,
-    subdivU: number[],
-    subdivV: number[],
     alphaScale: number,
     outset: number,
     positions: number[],
@@ -335,12 +361,16 @@ function appendBoundaryStrip(
 ) {
     // Walk the boundary as one closed polyline of samples with colors:
     // top row (+u), right column (+v), bottom row (-u), left column (-v).
+    // The strip uses its own modest sample density: its inner edge chords the
+    // boundary, and any sliver between chord and curve is covered either by
+    // the patches (concave side) or by the outset band itself (convex side).
+    const STRIP_SAMPLES_PER_EDGE = 8;
     const pts: Vec2[] = [];
     const cols: number[] = [];
-    const emitEdge = (cubic: Cubic, n: number, c0: Color, c1: Color, reverse: boolean) => {
+    const emitEdge = (cubic: Cubic, c0: Color, c1: Color, reverse: boolean) => {
         // Skip the final sample of each edge — the next edge starts with it.
-        for (let i = 0; i < n; i++) {
-            const t = reverse ? 1 - i / n : i / n;
+        for (let i = 0; i < STRIP_SAMPLES_PER_EDGE; i++) {
+            const t = reverse ? 1 - i / STRIP_SAMPLES_PER_EDGE : i / STRIP_SAMPLES_PER_EDGE;
             pts.push(evalCubic(cubic, t));
             const f = reverse ? 1 - t : t;
             cols.push(
@@ -359,22 +389,22 @@ function appendBoundaryStrip(
     for (let pc = 0; pc < mesh.cols; pc++) {
         const a = vertexAt(mesh, 0, pc).color;
         const b = vertexAt(mesh, 0, pc + 1).color;
-        emitEdge(hEdgeCubic(mesh, 0, pc), subdivU[pc], a, b, false);
+        emitEdge(hEdgeCubic(mesh, 0, pc), a, b, false);
     }
     for (let pr = 0; pr < mesh.rows; pr++) {
         const a = vertexAt(mesh, pr, mesh.cols).color;
         const b = vertexAt(mesh, pr + 1, mesh.cols).color;
-        emitEdge(vEdgeCubic(mesh, pr, mesh.cols), subdivV[pr], a, b, false);
+        emitEdge(vEdgeCubic(mesh, pr, mesh.cols), a, b, false);
     }
     for (let pc = mesh.cols - 1; pc >= 0; pc--) {
         const a = vertexAt(mesh, mesh.rows, pc).color;
         const b = vertexAt(mesh, mesh.rows, pc + 1).color;
-        emitEdge(hEdgeCubic(mesh, mesh.rows, pc), subdivU[pc], a, b, true);
+        emitEdge(hEdgeCubic(mesh, mesh.rows, pc), a, b, true);
     }
     for (let pr = mesh.rows - 1; pr >= 0; pr--) {
         const a = vertexAt(mesh, pr, 0).color;
         const b = vertexAt(mesh, pr + 1, 0).color;
-        emitEdge(vEdgeCubic(mesh, pr, 0), subdivV[pr], a, b, true);
+        emitEdge(vEdgeCubic(mesh, pr, 0), a, b, true);
     }
     const n = pts.length;
     if (n < 3) return;
@@ -386,25 +416,60 @@ function appendBoundaryStrip(
         area += p[0] * q[1] - q[0] * p[1];
     }
     const sign = area >= 0 ? 1 : -1;
-    const base = positions.length / 2;
+
+    // Stroke-style offsetting: one rectangle per SEGMENT (segment normals
+    // never fold into bowties the way averaged per-sample normals do on
+    // curvy boundaries — folds leave uncovered wedges) plus a round join
+    // fan at every sample to close the convex gaps between rectangles.
+    const segNormal = (i: number): Vec2 => {
+        const p = pts[i];
+        const q = pts[(i + 1) % n];
+        const nx = sign * (q[1] - p[1]);
+        const ny = sign * -(q[0] - p[0]);
+        const l = Math.hypot(nx, ny) || 1;
+        return [nx / l, ny / l];
+    };
+    const push = (x: number, y: number, color: number): number => {
+        positions.push(x, y);
+        colors.push(color);
+        return positions.length / 2 - 1;
+    };
     for (let i = 0; i < n; i++) {
-        const prev = pts[(i + n - 1) % n];
-        const next = pts[(i + 1) % n];
-        // Averaged segment normal at this sample.
-        let nx = sign * (next[1] - prev[1]);
-        let ny = sign * -(next[0] - prev[0]);
-        const len = Math.hypot(nx, ny) || 1;
-        nx /= len;
-        ny /= len;
-        positions.push(pts[i][0], pts[i][1]);
-        colors.push(cols[i]);
-        positions.push(pts[i][0] + nx * outset, pts[i][1] + ny * outset);
-        colors.push(cols[i]);
-    }
-    for (let i = 0; i < n; i++) {
-        const a = base + i * 2;
-        const b = base + ((i + 1) % n) * 2;
-        indices.push(a, a + 1, b, a + 1, b + 1, b);
+        const j = (i + 1) % n;
+        const [nx, ny] = segNormal(i);
+        // Segment rectangle.
+        const a = push(pts[i][0], pts[i][1], cols[i]);
+        const a2 = push(pts[i][0] + nx * outset, pts[i][1] + ny * outset, cols[i]);
+        const b = push(pts[j][0], pts[j][1], cols[j]);
+        const b2 = push(pts[j][0] + nx * outset, pts[j][1] + ny * outset, cols[j]);
+        indices.push(a, a2, b, a2, b2, b);
+        // Round join fan at sample j between this segment's normal and the
+        // next one's, sweeping the shorter way (concave joins just overlap).
+        const [mx, my] = segNormal(j);
+        const a0 = Math.atan2(ny, nx);
+        const a1 = Math.atan2(my, mx);
+        let sweep = a1 - a0;
+        while (sweep > Math.PI) sweep -= 2 * Math.PI;
+        while (sweep < -Math.PI) sweep += 2 * Math.PI;
+        const steps = Math.min(10, Math.ceil(Math.abs(sweep) / 0.45));
+        if (steps > 0) {
+            const center = push(pts[j][0], pts[j][1], cols[j]);
+            let prevRim = push(
+                pts[j][0] + Math.cos(a0) * outset,
+                pts[j][1] + Math.sin(a0) * outset,
+                cols[j],
+            );
+            for (let s = 1; s <= steps; s++) {
+                const ang = a0 + (sweep * s) / steps;
+                const rim = push(
+                    pts[j][0] + Math.cos(ang) * outset,
+                    pts[j][1] + Math.sin(ang) * outset,
+                    cols[j],
+                );
+                indices.push(center, prevRim, rim);
+                prevRim = rim;
+            }
+        }
     }
 }
 

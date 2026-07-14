@@ -24,8 +24,8 @@ import {
     iconUnlock,
 } from './icons';
 import { MeshEditController } from './mesh_edit';
-import { createMeshForNode } from './mesh_fit';
-import { bilinearColor, cloneMesh, meanColor, meshContentHash } from './mesh_geom';
+import { createMeshForNode, geometryBBox } from './mesh_fit';
+import { cloneMesh, meanColor, meshContentHash } from './mesh_geom';
 import type { CssDecl } from './svg_css';
 import { matchedCssStyles, parseSvgStylesheet } from './svg_css';
 import type { FilledFace, LivePaintRenderData, SVGExportInput } from './svg_export';
@@ -2401,26 +2401,22 @@ export class UIEngine {
                 }
                 row.appendChild(preview);
             } else if (isMeshGradient(fill)) {
-                // ── Mesh: clickable preview (bilinear corner-color blend);
-                //    clicking jumps into the Mesh tool on this fill ──
-                const isActiveMesh =
-                    this.meshEdit.isActive() &&
-                    this.meshEdit.nodeId === primaryId &&
-                    this.meshEdit.fillIndex === index &&
-                    this.activeTool === 'mesh';
-                const preview = document.createElement('div');
-                preview.className = 'gradient-preview';
-                preview.classList.toggle('active', isActiveMesh);
-                preview.title = primaryId !== undefined ? 'Edit mesh (U)' : 'Mesh gradient';
-                preview.style.backgroundImage = `url(${this.meshPreviewUri(fill)}), ${UIEngine.CHECKER_CSS}`;
-                preview.style.backgroundSize = '100% 100%, 8px 8px';
-                preview.addEventListener('click', () => {
+                // ── Mesh: a plain Edit button (the canvas is the preview) ──
+                const editBtn = document.createElement('button');
+                editBtn.className = 'panel-btn';
+                editBtn.textContent = 'Edit';
+                editBtn.title = 'Edit the mesh points on canvas (U)';
+                editBtn.disabled = primaryId === undefined;
+                editBtn.onclick = () => {
                     if (primaryId === undefined) return;
                     this.meshEdit.activate(primaryId, index);
                     this.setActiveTool('mesh');
-                    this.syncWithSelection({ interactive: true });
-                });
-                row.appendChild(preview);
+                    this.syncWithSelection();
+                };
+                row.appendChild(editBtn);
+                const meshSpacer = document.createElement('div');
+                meshSpacer.style.flex = '1';
+                row.appendChild(meshSpacer);
             } else if (!isGradient(fill)) {
                 // ── Solid: color swatch (the hex value is edited inside the
                 //    picker popover, not shown inline) ──
@@ -2501,36 +2497,6 @@ export class UIEngine {
         }
     }
 
-    /** Tiny bilinear blend of the mesh's four corner colors — an honest,
-     *  cheap approximation for the fill-row preview swatch. */
-    private meshPreviewUri(mesh: MeshGradientData): string {
-        const W = 24;
-        const H = 16;
-        const cv = document.createElement('canvas');
-        cv.width = W;
-        cv.height = H;
-        const ctx = cv.getContext('2d');
-        if (!ctx) return '';
-        const stride = mesh.cols + 1;
-        const c00 = mesh.vertices[0].color;
-        const c10 = mesh.vertices[mesh.cols].color;
-        const c01 = mesh.vertices[mesh.rows * stride].color;
-        const c11 = mesh.vertices[mesh.rows * stride + mesh.cols].color;
-        const img = ctx.createImageData(W, H);
-        for (let y = 0; y < H; y++) {
-            for (let x = 0; x < W; x++) {
-                const c = bilinearColor(c00, c10, c01, c11, x / (W - 1), y / (H - 1));
-                const o = (y * W + x) * 4;
-                img.data[o] = Math.round(c.r * 255);
-                img.data[o + 1] = Math.round(c.g * 255);
-                img.data[o + 2] = Math.round(c.b * 255);
-                img.data[o + 3] = Math.round(c.a * 255);
-            }
-        }
-        ctx.putImageData(img, 0, 0);
-        return cv.toDataURL();
-    }
-
     /**
      * Mesh editor section: grid size, the selected mesh points' color swatch
      * (live picker drags = one undo step via applyPaintEdit's gesture path),
@@ -2597,11 +2563,9 @@ export class UIEngine {
         row.appendChild(spacer);
 
         const reset = document.createElement('button');
-        reset.className = 'icon-toggle';
+        reset.className = 'panel-btn';
         reset.textContent = 'Reset handles';
         reset.title = 'Smooth the selected mesh points (clear custom handles)';
-        reset.style.width = 'auto';
-        reset.style.padding = '0 8px';
         reset.disabled = selected.length === 0;
         reset.onclick = () => {
             if (me.resetHandles()) this.syncWithSelection();
@@ -4377,7 +4341,7 @@ export class UIEngine {
                 if (!p || !isMeshGradient(p)) continue;
                 const hash = meshContentHash(p);
                 if (out?.[hash]) continue;
-                const raster = renderer.rasterizeMeshForExport(p);
+                const raster = renderer.rasterizeMeshForExport(p, 2, geometryBBox(node.geometry));
                 if (raster) {
                     if (!out) out = {};
                     out[hash] = raster;

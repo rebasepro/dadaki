@@ -10,9 +10,11 @@ import {
     transformSubpaths,
 } from './boolean_ops';
 import type { Document } from './document';
+import { snapMeshBoundaryToOutline } from './mesh_fit';
 import type { AutosaveManager } from './persistence';
 import type { Renderer } from './renderer';
 import type { Artboard, SceneData, Subpath, Transform2D } from './types';
+import { isMeshGradient } from './types';
 
 /** Shared empty typed array for the common "no sprite roots" render path. */
 const EMPTY_U32 = new Uint32Array(0);
@@ -535,8 +537,33 @@ export class WasmScene {
     updatePathPoints(id: number, pointsJson: string) {
         this.saveHistory();
         this.engine!.update_path_points(id, pointsJson);
+        // The engine stretched any mesh fills through the geometry's bbox
+        // affine; re-snap their outer ring exactly onto the edited outline.
+        // Runs inside the same history step (saveHistory already fired).
+        this.snapMeshFillsToGeometry(id);
         this.invalidateCache();
         this.autosave?.trigger();
+    }
+
+    /** Re-snap the boundary of a node's mesh fills to its current outline
+     *  (no history push — callers own the history step). */
+    snapMeshFillsToGeometry(id: number) {
+        const node = this.getNode(id);
+        if (!node) return;
+        const fills = node.style.fills ?? [];
+        let changed = false;
+        const next = fills.map((f) => {
+            if (!f || !isMeshGradient(f)) return f;
+            const snapped = snapMeshBoundaryToOutline(f, node.geometry);
+            if (snapped) {
+                changed = true;
+                return snapped;
+            }
+            return f;
+        });
+        if (changed) {
+            this.engine!.set_node_style(id, JSON.stringify({ ...node.style, fills: next }));
+        }
     }
 
     setNodeStyle(id: number, styleJson: string) {

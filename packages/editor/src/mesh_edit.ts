@@ -66,6 +66,20 @@ export class MeshEditController {
     /** True while Alt is held over the canvas (hover shows delete affordance). */
     hoverAlt = false;
 
+    /** The line(s) the most recent add created, keyed to the vertex at their
+     *  intersection: deleting THAT point removes exactly those lines, so
+     *  "add a point, delete it" is a perfect inverse even when the add was a
+     *  single perpendicular line on an existing grid line. Validated against
+     *  the current grid shape; anything structural invalidates it. */
+    private lastAdd: {
+        nodeId: number;
+        fillIndex: number;
+        rows: number;
+        cols: number;
+        vi: number;
+        lines: { axis: 'row' | 'col'; index: number }[];
+    } | null = null;
+
     /** Active canvas drag. */
     private drag: {
         kind: 'vertex' | 'handle';
@@ -507,14 +521,21 @@ export class MeshEditController {
         if (!mesh) return false;
         let next: MeshGradient | null = null;
         let selectLocal: { x: number; y: number } | null = null;
+        const addedLines: { axis: 'row' | 'col'; index: number }[] = [];
         if (hit.type === 'mesh') {
             const { row, col, u, v } = hit.uv;
             const canCol = mesh.cols < MAX_MESH_LINES + 1;
             const canRow = mesh.rows < MAX_MESH_LINES + 1;
             if (!canCol && !canRow) return false;
             next = mesh;
-            if (canCol) next = splitCol(next, col, u);
-            if (canRow) next = splitRow(next, row, v);
+            if (canCol) {
+                next = splitCol(next, col, u);
+                addedLines.push({ axis: 'col', index: col + 1 });
+            }
+            if (canRow) {
+                next = splitRow(next, row, v);
+                addedLines.push({ axis: 'row', index: row + 1 });
+            }
             // The new intersection vertex: row/col line indices after split.
             const nvRow = canRow ? row + 1 : 0;
             const nvCol = canCol ? col + 1 : 0;
@@ -524,11 +545,13 @@ export class MeshEditController {
             if (hit.axis === 'row') {
                 if (mesh.cols >= MAX_MESH_LINES + 1) return false;
                 next = splitCol(mesh, hit.segIndex, hit.t);
+                addedLines.push({ axis: 'col', index: hit.segIndex + 1 });
                 const nv = next.vertices[vertexIndex(next, hit.lineIndex, hit.segIndex + 1)];
                 selectLocal = { x: nv.x, y: nv.y };
             } else {
                 if (mesh.rows >= MAX_MESH_LINES + 1) return false;
                 next = splitRow(mesh, hit.segIndex, hit.t);
+                addedLines.push({ axis: 'row', index: hit.segIndex + 1 });
                 const nv = next.vertices[vertexIndex(next, hit.segIndex + 1, hit.lineIndex)];
                 selectLocal = { x: nv.x, y: nv.y };
             }
@@ -539,8 +562,8 @@ export class MeshEditController {
             this.writeLive(() => committed);
         });
         // Select the vertex nearest where the user clicked/inserted.
+        let nearest = -1;
         if (selectLocal) {
-            let nearest = -1;
             let bestD = Infinity;
             for (let vi = 0; vi < committed.vertices.length; vi++) {
                 const v = committed.vertices[vi];
@@ -553,11 +576,72 @@ export class MeshEditController {
             this.selectedVertices.clear();
             if (nearest >= 0) this.selectedVertices.add(nearest);
         }
+        // Remember what this add created so deleting its point undoes it 1:1.
+        this.lastAdd =
+            nearest >= 0 && this.nodeId !== null
+                ? {
+                      nodeId: this.nodeId,
+                      fillIndex: this.fillIndex,
+                      rows: committed.rows,
+                      cols: committed.cols,
+                      vi: nearest,
+                      lines: addedLines,
+                  }
+                : null;
         return true;
     }
 
-    /** Alt-click: delete the clicked line, or both lines through a vertex.
-     *  Boundary lines are immune. One undo step. */
+    /** The grid line(s) a delete at vertex `vi` removes. Deleting a point
+     *  never nukes both of its crossing lines: it removes exactly what the
+     *  most recent add created when `vi` is that add's point (add → delete =
+     *  perfect inverse), otherwise the ONE line that looks most like it was
+     *  inserted later — the one whose along-line handles are stored on more
+     *  of its points (line splits store handles on every crossing; original
+     *  fitted lines keep automatic ones). The Alt-hover highlight previews
+     *  the exact line before you commit. */
+    linesForVertexDeletion(
+        mesh: MeshGradient,
+        vi: number,
+    ): { axis: 'row' | 'col'; index: number }[] {
+        const la = this.lastAdd;
+        if (
+            la &&
+            la.nodeId === this.nodeId &&
+            la.fillIndex === this.fillIndex &&
+            la.rows === mesh.rows &&
+            la.cols === mesh.cols &&
+            la.vi === vi
+        ) {
+            return la.lines;
+        }
+        const stride = mesh.cols + 1;
+        const row = Math.floor(vi / stride);
+        const col = vi % stride;
+        const rowDeletable = row > 0 && row < mesh.rows;
+        const colDeletable = col > 0 && col < mesh.cols;
+        if (!rowDeletable && !colDeletable) return [];
+        if (!colDeletable) return [{ axis: 'row', index: row }];
+        if (!rowDeletable) return [{ axis: 'col', index: col }];
+        // Fraction of the line's points carrying stored ALONG-LINE handles
+        // (e/w run along row lines, s/n along column lines).
+        let rowStored = 0;
+        for (let c = 0; c <= mesh.cols; c++) {
+            const h = mesh.vertices[row * stride + c].handles;
+            if (h?.e || h?.w) rowStored++;
+        }
+        let colStored = 0;
+        for (let r = 0; r <= mesh.rows; r++) {
+            const h = mesh.vertices[r * stride + col].handles;
+            if (h?.s || h?.n) colStored++;
+        }
+        const rowScore = rowStored / (mesh.cols + 1);
+        const colScore = colStored / (mesh.rows + 1);
+        // Tie → the column, so the choice is at least deterministic.
+        return rowScore > colScore ? [{ axis: 'row', index: row }] : [{ axis: 'col', index: col }];
+    }
+
+    /** Alt-click: delete the clicked line, or a vertex's deletion lines
+     *  (see linesForVertexDeletion). Boundary lines are immune. One undo step. */
     deleteAtHit(hit: MeshHit): boolean {
         const mesh = this.mesh();
         if (!mesh) return false;
@@ -568,11 +652,7 @@ export class MeshEditController {
                     ? deleteRow(mesh, hit.lineIndex)
                     : deleteCol(mesh, hit.lineIndex);
         } else if (hit.type === 'vertex') {
-            const stride = mesh.cols + 1;
-            const row = Math.floor(hit.vi / stride);
-            const col = hit.vi % stride;
-            next = deleteRow(next, row);
-            next = deleteCol(next, col);
+            next = this.deleteLines(mesh, this.linesForVertexDeletion(mesh, hit.vi));
         }
         if (next === mesh) return false;
         const committed = next;
@@ -580,35 +660,57 @@ export class MeshEditController {
             this.writeLive(() => committed);
         });
         this.selectedVertices.clear();
+        this.lastAdd = null;
         return true;
     }
 
-    /** Delete key: remove the row+column lines through every selected
-     *  interior vertex (deduplicated). Boundary vertices are skipped.
-     *  One undo step. Returns true if anything was deleted. */
+    /** Delete key: remove each selected interior vertex's deletion lines
+     *  (deduplicated; see linesForVertexDeletion). Boundary vertices are
+     *  skipped. One undo step. Returns true if anything was deleted. */
     deleteLinesThroughSelection(): boolean {
         const mesh = this.mesh();
         if (!mesh) return false;
-        const rowLines = new Set<number>();
-        const colLines = new Set<number>();
-        const stride = mesh.cols + 1;
+        const lines: { axis: 'row' | 'col'; index: number }[] = [];
+        const seen = new Set<string>();
         for (const vi of this.selectedVertices) {
             if (vi >= mesh.vertices.length) continue;
-            const row = Math.floor(vi / stride);
-            const col = vi % stride;
-            if (row > 0 && row < mesh.rows) rowLines.add(row);
-            if (col > 0 && col < mesh.cols) colLines.add(col);
+            for (const l of this.linesForVertexDeletion(mesh, vi)) {
+                const key = `${l.axis}:${l.index}`;
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    lines.push(l);
+                }
+            }
         }
-        if (rowLines.size === 0 && colLines.size === 0) return false;
-        let next = mesh;
-        for (const r of [...rowLines].sort((a, b) => b - a)) next = deleteRow(next, r);
-        for (const c of [...colLines].sort((a, b) => b - a)) next = deleteCol(next, c);
+        const next = this.deleteLines(mesh, lines);
+        if (next === mesh) return false;
         const committed = next;
         this.scene.transaction(() => {
             this.writeLive(() => committed);
         });
         this.selectedVertices.clear();
+        this.lastAdd = null;
         return true;
+    }
+
+    /** Apply a set of line deletions (descending per axis so indices stay
+     *  valid). Returns the input mesh unchanged when nothing was deletable. */
+    private deleteLines(
+        mesh: MeshGradient,
+        lines: { axis: 'row' | 'col'; index: number }[],
+    ): MeshGradient {
+        const rows = lines
+            .filter((l) => l.axis === 'row')
+            .map((l) => l.index)
+            .sort((a, b) => b - a);
+        const cols = lines
+            .filter((l) => l.axis === 'col')
+            .map((l) => l.index)
+            .sort((a, b) => b - a);
+        let next = mesh;
+        for (const r of rows) next = deleteRow(next, r);
+        for (const c of cols) next = deleteCol(next, c);
+        return next;
     }
 
     /** Set the color of all selected vertices without history (panel picker

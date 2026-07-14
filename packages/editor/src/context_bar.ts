@@ -45,6 +45,7 @@ import {
     iconFlipV,
     iconGroup,
     iconLink,
+    iconMeshGrid,
     iconMinusCircle,
     iconPencil,
     iconPlusCircle,
@@ -57,6 +58,7 @@ import { computeOffsetSubpaths } from './offset_path';
 import type { Renderer } from './renderer';
 import { computeSimplifiedSubpaths } from './simplify_path';
 import type { Subpath } from './types';
+import { isMeshGradient } from './types';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
 import type { WidthProfile } from './width_profile';
@@ -157,6 +159,7 @@ const ACTION_TOOLTIPS: Record<string, string> = {
     'Add Point': 'Click a segment to insert an anchor point where you click.',
     'Delete Point': 'Click an anchor point to remove it.',
     'Cut at Point': 'Split the path at the selected anchor point.',
+    'Edit Mesh': 'Edit this shape’s mesh fill — its points, colors and handles.',
     Done: 'Finish editing this path.',
     Finish: 'Finish and keep the path.',
     Cancel: 'Discard the path.',
@@ -267,7 +270,16 @@ export class ContextBar {
         const guideSig = g
             ? `|guide${g.axis}${g.index}${this.input.selectedGuideLocked() ? 'L' : ''}`
             : '';
-        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}${geoSig}${guideSig}`;
+        // Mesh bar shows grid dims + selected point count; both change without
+        // any node-selection change, so they're part of the signature.
+        const me = this.ui.meshEdit;
+        const meshSig =
+            info.context === 'mesh'
+                ? me.isActive()
+                    ? `|mesh${me.mesh()?.rows}x${me.mesh()?.cols}:${me.selectedVertices.size}`
+                    : '|mesh-idle'
+                : '';
+        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}${geoSig}${guideSig}${meshSig}`;
     }
 
     /** Rebuild the bar DOM based on context info. */
@@ -294,6 +306,9 @@ export class ContextBar {
                 break;
             case 'live-paint':
                 this.renderLivePaint(info);
+                break;
+            case 'mesh':
+                this.renderMesh();
                 break;
             case 'live-paint-object':
                 this.renderLivePaintObject(info);
@@ -415,6 +430,96 @@ export class ContextBar {
 
         this.appendTransformActions(info, { flatten: false });
         this.appendLifecycleActions();
+    }
+
+    /** Mesh tool bar: grid info, point actions, and a Done exit. Actions only
+     *  (verbs) — the point COLOR lives in the Fill panel with the other
+     *  appearance properties. */
+    private renderMesh() {
+        const me = this.ui.meshEdit;
+        const mesh = me.isActive() ? me.mesh() : null;
+        if (!mesh) {
+            this.el.appendChild(
+                this.createHint(
+                    'Click a filled shape to turn its fill into a mesh — then click inside it to add lines.',
+                ),
+            );
+            return;
+        }
+
+        const sel = me.selectedVertices.size;
+        this.el.appendChild(this.createBadge(`${mesh.rows} × ${mesh.cols} mesh`));
+        this.el.appendChild(this.createBadge(sel === 1 ? '1 point' : `${sel} points`));
+        this.el.appendChild(this.createSeparator());
+
+        const refreshAfter = () => {
+            this.ui.syncWithSelection();
+            this.refresh();
+        };
+
+        // Select every mesh point (handy before recoloring or nudging).
+        this.el.appendChild(
+            this.createButton(
+                'Select all',
+                iconGroup(14),
+                () => {
+                    const m = me.mesh();
+                    if (!m) return;
+                    me.selectedVertices.clear();
+                    for (let vi = 0; vi < m.vertices.length; vi++) me.selectedVertices.add(vi);
+                    this.input.renderer.requestRender();
+                    refreshAfter();
+                },
+                false,
+                undefined,
+                'Select every mesh point.',
+            ),
+        );
+
+        // Smooth: clear custom handles on the selected points.
+        const smooth = this.createButton(
+            'Smooth points',
+            iconCornerDownRight(14),
+            () => {
+                if (me.resetHandles()) refreshAfter();
+            },
+            false,
+            undefined,
+            'Reset the selected points’ handles so their mesh lines curve smoothly.',
+        );
+        if (sel === 0) smooth.setAttribute('disabled', '');
+        this.el.appendChild(smooth);
+
+        // Delete the grid lines through the selected points (Delete key).
+        const del = this.createButton(
+            'Delete lines',
+            iconTrash(14),
+            () => {
+                if (me.deleteLinesThroughSelection()) refreshAfter();
+            },
+            true,
+            '⌫',
+            'Remove the grid lines through the selected points.',
+        );
+        if (sel === 0) del.setAttribute('disabled', '');
+        this.el.appendChild(del);
+
+        this.el.appendChild(this.createSeparator());
+
+        // Done: leave mesh editing (Escape does the same, in two steps).
+        this.el.appendChild(
+            this.createButton(
+                'Done',
+                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+                () => {
+                    this.ui.setActiveTool('selection');
+                    this.ui.syncWithSelection();
+                },
+                false,
+                'Esc',
+                'Finish mesh editing and return to the Selection tool.',
+            ),
+        );
     }
 
     /** Gap-closing preset selector for the Live Paint tool. */
@@ -1224,6 +1329,33 @@ export class ContextBar {
                     ],
                 ),
             );
+        }
+
+        // Edit Mesh: jump from editing the OUTLINE to editing the mesh fill's
+        // points/colors. Only when the edited node actually carries a mesh.
+        const editingId = info.editingNodeId;
+        if (editingId !== null) {
+            const meshIdx = (this.scene.getNodeStyle(editingId)?.fills ?? []).findIndex((f) =>
+                isMeshGradient(f),
+            );
+            if (meshIdx >= 0) {
+                this.el.appendChild(this.createSeparator());
+                this.el.appendChild(
+                    this.createButton(
+                        'Edit Mesh',
+                        iconMeshGrid(14),
+                        () => {
+                            this.input.exitEditMode();
+                            this.scene.selectNode(editingId, false);
+                            this.ui.setActiveTool('mesh');
+                            this.ui.meshEdit.activate(editingId, meshIdx);
+                            this.ui.syncWithSelection();
+                        },
+                        false,
+                        'U',
+                    ),
+                );
+            }
         }
 
         this.el.appendChild(this.createSeparator());

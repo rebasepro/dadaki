@@ -193,6 +193,23 @@ impl MeshGradient {
         Color { r: acc[0] / n, g: acc[1] / n, b: acc[2] / n, a: acc[3] / n }
     }
 
+    /// Map every anchor and stored handle through the bbox→bbox affine
+    /// `p' = new_min + (p − old_min) · scale`. Used to keep a mesh glued to
+    /// its shape when the GEOMETRY (not the transform) is resized/edited.
+    pub fn map_bbox_affine(&mut self, ox: f32, oy: f32, sx: f32, sy: f32, nx: f32, ny: f32) {
+        let map = |p: [f32; 2]| [nx + (p[0] - ox) * sx, ny + (p[1] - oy) * sy];
+        for v in &mut self.vertices {
+            let m = map([v.x, v.y]);
+            v.x = m[0];
+            v.y = m[1];
+            for h in [&mut v.handles.e, &mut v.handles.w, &mut v.handles.s, &mut v.handles.n] {
+                if let Some(p) = h {
+                    *p = map(*p);
+                }
+            }
+        }
+    }
+
     /// Handle position for vertex `idx` toward `dir` (0=e, 1=w, 2=s, 3=n),
     /// materializing the auto default (1/3 toward the neighbor). For outward
     /// boundary directions there is no neighbor: returns the anchor itself.
@@ -2066,10 +2083,16 @@ impl Engine {
     pub fn update_path_points(&mut self, id: u32, subpaths_json: &str) {
         let subpaths: Vec<Subpath> = serde_json::from_str(subpaths_json).unwrap_or_default();
         if let Some(node) = self.scene.nodes.get_mut(&id) {
+            let old_bb = geometry_control_bbox(&node.geometry);
             node.geometry = Geometry::Path {
                 network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
                 subpaths,
             };
+            // Mesh fills live in node-local coordinates: when the geometry
+            // itself changes (path edit, not a transform), stretch them along
+            // so the color field follows the shape. JS refines committed path
+            // edits with an exact boundary re-snap on top of this affine.
+            adapt_mesh_fills_to_bbox(node, old_bb);
             self.update_spatial_index(id);
             self.mark_dirty(id);
         }
@@ -3262,6 +3285,7 @@ impl Engine {
             return;
         }
         if let Some(node) = self.scene.nodes.get_mut(&id) {
+            let old_bb = geometry_control_bbox(&node.geometry);
             match &mut node.geometry {
                 Geometry::Rect { width, height } => {
                     *width = new_w.max(1.0);
@@ -3326,6 +3350,9 @@ impl Engine {
                 }
                 Geometry::Text { .. } => {}
             }
+            // Mesh fills are node-local: stretch them with the geometry so
+            // resizing a mesh-filled shape keeps the color field in place.
+            adapt_mesh_fills_to_bbox(node, old_bb);
             self.update_spatial_index(id);
             self.update_ancestor_group_bounds(id);
             self.mark_dirty(id);
@@ -5167,6 +5194,58 @@ impl Engine {
 
     pub fn set_guide_locks_json(&mut self, json: String) {
         self.scene.guide_locks_json = json;
+    }
+}
+
+/// Control-point bounding box of a geometry in node-local space (anchors and
+/// bezier handles for paths). Used to derive the bbox→bbox affine that keeps
+/// mesh fills glued to a geometry edit; both sides of the mapping use the
+/// same measure, so any linear geometry scaling maps meshes exactly.
+fn geometry_control_bbox(geo: &Geometry) -> Option<[f32; 4]> {
+    match geo {
+        Geometry::Rect { width, height } | Geometry::Image { width, height, .. } => {
+            Some([0.0, 0.0, *width, *height])
+        }
+        Geometry::Ellipse { radius_x, radius_y } => {
+            Some([-radius_x, -radius_y, *radius_x, *radius_y])
+        }
+        Geometry::Path { subpaths, .. } => {
+            let mut bb = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+            let mut any = false;
+            for sp in subpaths {
+                for p in &sp.points {
+                    for [x, y] in [[p.x, p.y], [p.cp1.x, p.cp1.y], [p.cp2.x, p.cp2.y]] {
+                        any = true;
+                        bb[0] = bb[0].min(x);
+                        bb[1] = bb[1].min(y);
+                        bb[2] = bb[2].max(x);
+                        bb[3] = bb[3].max(y);
+                    }
+                }
+            }
+            if any { Some(bb) } else { None }
+        }
+        _ => None,
+    }
+}
+
+/// Stretch a node's mesh fills through the affine that maps the old geometry
+/// bbox onto the current one. No-op when either bbox is missing/degenerate
+/// or nothing actually moved.
+fn adapt_mesh_fills_to_bbox(node: &mut Node, old_bb: Option<[f32; 4]>) {
+    let Some(old) = old_bb else { return };
+    let Some(new) = geometry_control_bbox(&node.geometry) else { return };
+    let ow = old[2] - old[0];
+    let oh = old[3] - old[1];
+    if ow < 1e-6 || oh < 1e-6 || old == new {
+        return;
+    }
+    let sx = (new[2] - new[0]) / ow;
+    let sy = (new[3] - new[1]) / oh;
+    for fill in &mut node.style.fills {
+        if let Paint::Mesh(m) = fill {
+            m.map_bbox_affine(old[0], old[1], sx, sy, new[0], new[1]);
+        }
     }
 }
 
