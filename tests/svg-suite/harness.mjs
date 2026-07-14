@@ -264,6 +264,28 @@ for (const svgPath of tests) {
     await loadApp(); // recover the page after a hang/crash
   }
 
+  // A CanvasKit `Aborted()` (WASM OOM) is caught *inside* runInPage and returned
+  // as status:'error' — it never throws out to the catch above, so without this
+  // the aborted page survives and every later test fails ('exportPNG returned
+  // null'), silently zeroing hundreds of scores. On any error, probe whether the
+  // WASM context is still alive; reload only if it's dead. Cheap: runs solely on
+  // the error path, which is rare once exports don't leak.
+  if (res.status === 'error') {
+    const alive = await page
+      .evaluate(() => {
+        try {
+          const s = window.app.ck.MakeSurface(1, 1);
+          if (!s) return false;
+          s.delete();
+          return true;
+        } catch {
+          return false;
+        }
+      })
+      .catch(() => false);
+    if (!alive) await loadApp();
+  }
+
   const { diffB64, ...rec } = res;
   results[rel] = rec;
   // Only dump diffs for tests that actually fail — combine with --filter to
