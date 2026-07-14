@@ -12,6 +12,7 @@
     "dependencies": {
         "@dadaki/editor": "workspace:*",
         "canvaskit-wasm": "0.39.1",
-        "firebase": "^12.15.0"
+        "firebase": "^12.15.0",
+        "lucide": "0.460.0"
     }
 }
