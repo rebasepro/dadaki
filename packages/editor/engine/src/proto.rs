@@ -17,7 +17,8 @@ use crate::{
 /// v4: Live Paint face fills.
 /// v5: Multiple strokes and non-destructive transforms.
 /// v6: Live Paint face-fill signatures (source_nodes) + gap-bridge distance.
-pub const FORMAT_VERSION: u32 = 6;
+/// v7: mesh gradient paint (ProtoPaint.mesh) — additive, no migration needed.
+pub const FORMAT_VERSION: u32 = 7;
 
 // ─── Proto Message Types ────────────────────────────────────────────────────────
 
@@ -41,6 +42,41 @@ pub struct ProtoPaint {
     pub gradient: Option<ProtoGradient>,
     #[prost(message, optional, tag = "3")]
     pub pattern: Option<ProtoPattern>,
+    /// v7: Coons-patch mesh gradient.
+    #[prost(message, optional, tag = "4")]
+    pub mesh: Option<ProtoMeshGradient>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoMeshVertex {
+    #[prost(float, tag = "1")]
+    pub x: f32,
+    #[prost(float, tag = "2")]
+    pub y: f32,
+    #[prost(message, optional, tag = "3")]
+    pub color: Option<ProtoColor>,
+    /// Direction handles in absolute node-local coords: empty = auto (1/3
+    /// toward the neighbor), else exactly [x, y].
+    #[prost(float, repeated, tag = "4")]
+    pub handle_e: Vec<f32>,
+    #[prost(float, repeated, tag = "5")]
+    pub handle_w: Vec<f32>,
+    #[prost(float, repeated, tag = "6")]
+    pub handle_s: Vec<f32>,
+    #[prost(float, repeated, tag = "7")]
+    pub handle_n: Vec<f32>,
+}
+
+/// Coons-patch mesh fill: rows×cols patches, (rows+1)*(cols+1) vertices
+/// stored row-major.
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoMeshGradient {
+    #[prost(uint32, tag = "1")]
+    pub rows: u32,
+    #[prost(uint32, tag = "2")]
+    pub cols: u32,
+    #[prost(message, repeated, tag = "3")]
+    pub vertices: Vec<ProtoMeshVertex>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -669,25 +705,80 @@ impl From<&ProtoTransform> for crate::Transform2D {
 
 impl From<&Paint> for ProtoPaint {
     fn from(p: &Paint) -> Self {
+        let empty = ProtoPaint { solid: None, gradient: None, pattern: None, mesh: None };
         match p {
-            Paint::Solid(c) => ProtoPaint { solid: Some(c.into()), gradient: None, pattern: None },
-            Paint::Gradient(g) => ProtoPaint { solid: None, gradient: Some(g.into()), pattern: None },
+            Paint::Solid(c) => ProtoPaint { solid: Some(c.into()), ..empty },
+            Paint::Gradient(g) => ProtoPaint { gradient: Some(g.into()), ..empty },
             Paint::Pattern(pat) => ProtoPaint {
-                solid: None, gradient: None,
                 pattern: Some(ProtoPattern {
                     image_id: pat.image_id,
                     width: pat.width,
                     height: pat.height,
                     transform: pat.transform.to_vec(),
                 }),
+                ..empty
+            },
+            Paint::Mesh(m) => ProtoPaint {
+                mesh: Some(ProtoMeshGradient {
+                    rows: m.rows,
+                    cols: m.cols,
+                    vertices: m
+                        .vertices
+                        .iter()
+                        .map(|v| ProtoMeshVertex {
+                            x: v.x,
+                            y: v.y,
+                            color: Some((&v.color).into()),
+                            handle_e: v.handles.e.map_or_else(Vec::new, |h| h.to_vec()),
+                            handle_w: v.handles.w.map_or_else(Vec::new, |h| h.to_vec()),
+                            handle_s: v.handles.s.map_or_else(Vec::new, |h| h.to_vec()),
+                            handle_n: v.handles.n.map_or_else(Vec::new, |h| h.to_vec()),
+                        })
+                        .collect(),
+                }),
+                ..empty
             },
         }
     }
 }
 
+fn proto_handle(h: &[f32]) -> Option<[f32; 2]> {
+    if h.len() == 2 { Some([h[0], h[1]]) } else { None }
+}
+
 impl From<&ProtoPaint> for Paint {
     fn from(p: &ProtoPaint) -> Self {
-        if let Some(pat) = &p.pattern {
+        if let Some(m) = &p.mesh {
+            let mesh = crate::MeshGradient {
+                rows: m.rows,
+                cols: m.cols,
+                vertices: m
+                    .vertices
+                    .iter()
+                    .map(|v| crate::MeshVertex {
+                        x: v.x,
+                        y: v.y,
+                        color: v
+                            .color
+                            .as_ref()
+                            .map(Color::from)
+                            .unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                        handles: crate::MeshHandles {
+                            e: proto_handle(&v.handle_e),
+                            w: proto_handle(&v.handle_w),
+                            s: proto_handle(&v.handle_s),
+                            n: proto_handle(&v.handle_n),
+                        },
+                    })
+                    .collect(),
+            };
+            // Corrupt grid → solid black, same degradation as unknown paints.
+            if mesh.is_valid() {
+                Paint::Mesh(mesh)
+            } else {
+                Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+            }
+        } else if let Some(pat) = &p.pattern {
             let t = &pat.transform;
             let transform = if t.len() == 6 {
                 [t[0], t[1], t[2], t[3], t[4], t[5]]
@@ -1302,6 +1393,7 @@ mod tests {
                 solid: Some(ProtoColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
                 gradient: None,
                 pattern: None,
+                mesh: None,
             }],
             strokes: Vec::new(),
             opacity: Some(1.0),
@@ -1681,5 +1773,85 @@ mod tests {
         let (scene2, next_id) = deserialize_snapshot(&snap1).unwrap();
         let snap2 = serialize_snapshot(&scene2, next_id);
         assert_eq!(snap1, snap2);
+    }
+
+    // ─── Mesh gradients (v7) ────────────────────────────────────────────────
+
+    fn sample_mesh() -> crate::MeshGradient {
+        // 1×2 patch grid → 2×3 vertices, mixed auto/stored handles.
+        let c = |r: f32| Color { r, g: 0.25, b: 0.5, a: 1.0 };
+        let v = |x: f32, y: f32, r: f32| crate::MeshVertex {
+            x, y, color: c(r), handles: crate::MeshHandles::default(),
+        };
+        let mut mesh = crate::MeshGradient {
+            rows: 1,
+            cols: 2,
+            vertices: vec![
+                v(0.0, 0.0, 0.0), v(50.0, -3.0, 0.2), v(100.0, 0.0, 0.4),
+                v(0.0, 60.0, 0.6), v(50.0, 63.0, 0.8), v(100.0, 60.0, 1.0),
+            ],
+        };
+        mesh.vertices[1].handles.e = Some([70.0, -8.0]);
+        mesh.vertices[4].handles.n = Some([48.0, 40.0]);
+        mesh
+    }
+
+    #[test]
+    fn test_mesh_paint_proto_round_trip() {
+        let paint = Paint::Mesh(sample_mesh());
+        let proto: ProtoPaint = (&paint).into();
+        let back: Paint = (&proto).into();
+        match back {
+            Paint::Mesh(m) => {
+                assert_eq!(m.rows, 1);
+                assert_eq!(m.cols, 2);
+                assert_eq!(m.vertices.len(), 6);
+                assert_eq!(m.vertices[1].handles.e, Some([70.0, -8.0]));
+                assert_eq!(m.vertices[1].handles.w, None);
+                assert_eq!(m.vertices[4].handles.n, Some([48.0, 40.0]));
+                assert_eq!(m.vertices[5].color.r, 1.0);
+            }
+            other => panic!("expected mesh paint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_mesh_paint_corrupt_grid_degrades_to_solid() {
+        let mut proto: ProtoPaint = (&Paint::Mesh(sample_mesh())).into();
+        proto.mesh.as_mut().unwrap().vertices.pop(); // count mismatch
+        match Paint::from(&proto) {
+            Paint::Solid(_) => {}
+            other => panic!("expected solid degradation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_mesh_paint_json_round_trip() {
+        // The JS boundary (set_node_style) speaks serde JSON: the `vertices`
+        // marker must select the Mesh variant and handles must survive.
+        let json = serde_json::to_string(&Paint::Mesh(sample_mesh())).unwrap();
+        let back: Paint = serde_json::from_str(&json).unwrap();
+        match back {
+            Paint::Mesh(m) => {
+                assert_eq!(m.vertices.len(), 6);
+                assert_eq!(m.vertices[1].handles.e, Some([70.0, -8.0]));
+            }
+            other => panic!("expected mesh paint, got {:?}", other),
+        }
+        // Invalid vertex count must be rejected, not silently accepted.
+        let bad = r#"{"rows":2,"cols":2,"vertices":[{"x":0,"y":0,"color":{"r":0,"g":0,"b":0,"a":1}}]}"#;
+        assert!(serde_json::from_str::<Paint>(bad).is_err());
+    }
+
+    #[test]
+    fn test_mesh_effective_handle_defaults() {
+        let mesh = sample_mesh();
+        // Auto handle: vertex 0 (row 0, col 0) toward e = 1/3 to vertex 1.
+        let h = mesh.effective_handle(0, 0);
+        assert!((h[0] - (0.0 + 50.0 / 3.0)).abs() < 1e-5);
+        // Outward boundary direction (w on col 0) → anchor itself.
+        assert_eq!(mesh.effective_handle(0, 1), [0.0, 0.0]);
+        // Stored handle wins.
+        assert_eq!(mesh.effective_handle(1, 0), [70.0, -8.0]);
     }
 }

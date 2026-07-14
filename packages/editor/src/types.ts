@@ -44,14 +44,42 @@ export interface Pattern {
     transform?: number[];
 }
 
+/** Direction handles of a mesh vertex, ABSOLUTE node-local coords.
+ *  Missing = auto (1/3 of the way toward the neighboring vertex).
+ *  e = +u (next column), w = -u, s = +v (next row), n = -v. */
+export interface MeshVertexHandles {
+    e?: [number, number];
+    w?: [number, number];
+    s?: [number, number];
+    n?: [number, number];
+}
+
+/** One mesh grid vertex: position, color, and bezier handles along the grid lines. */
+export interface MeshVertex {
+    x: number;
+    y: number;
+    color: Color;
+    handles?: MeshVertexHandles;
+}
+
+/** Coons-patch mesh fill: rows×cols patches, (rows+1)*(cols+1) vertices
+ *  stored row-major in node-local coords (matches the engine's MeshGradient). */
+export interface MeshGradient {
+    rows: number;
+    cols: number;
+    vertices: MeshVertex[];
+}
+
 /**
- * A paint can be a solid color, a gradient, or a tiled-image pattern.
+ * A paint can be a solid color, a gradient, a tiled-image pattern, or a
+ * Coons-patch mesh gradient.
  * Matches the Rust engine's Paint enum (distinguished by a marker field):
  * - Solid:    `{ r, g, b, a }`
  * - Gradient: `{ gradient_type, stops, start_x, start_y, end_x, end_y }`
  * - Pattern:  `{ image_id, width, height, transform }`
+ * - Mesh:     `{ rows, cols, vertices }`
  */
-export type Paint = Color | Gradient | Pattern;
+export type Paint = Color | Gradient | Pattern | MeshGradient;
 
 /** Type guard: check if a Paint is a Gradient. */
 export function isGradient(paint: Paint): paint is Gradient {
@@ -61,6 +89,16 @@ export function isGradient(paint: Paint): paint is Gradient {
 /** Type guard: check if a Paint is a Pattern. */
 export function isPattern(paint: Paint): paint is Pattern {
     return 'image_id' in paint;
+}
+
+/** Type guard: check if a Paint is a mesh gradient. */
+export function isMeshGradient(paint: Paint): paint is MeshGradient {
+    return 'vertices' in paint && 'rows' in paint;
+}
+
+/** Type guard: check if a Paint is a plain solid color. */
+export function isSolid(paint: Paint): paint is Color {
+    return !isGradient(paint) && !isPattern(paint) && !isMeshGradient(paint);
 }
 
 /** Stroke Alignment */

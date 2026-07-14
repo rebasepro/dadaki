@@ -23,6 +23,9 @@ import {
     iconType,
     iconUnlock,
 } from './icons';
+import { MeshEditController } from './mesh_edit';
+import { createMeshForNode } from './mesh_fit';
+import { bilinearColor, cloneMesh, meanColor, meshContentHash } from './mesh_geom';
 import type { CssDecl } from './svg_css';
 import { matchedCssStyles, parseSvgStylesheet } from './svg_css';
 import type { FilledFace, LivePaintRenderData, SVGExportInput } from './svg_export';
@@ -52,12 +55,13 @@ import type {
     Gradient,
     GradientStop,
     MarkerKind,
+    MeshGradient as MeshGradientData,
     NodeStyle,
     Paint,
     SceneNode,
     Stroke,
 } from './types';
-import { isGradient, isPattern, StrokeAlignment } from './types';
+import { isGradient, isMeshGradient, isPattern, StrokeAlignment } from './types';
 import type { WasmScene } from './wasm_scene';
 
 /** Element tags a <clipPath> may legally contain (basic shapes, text, use).
@@ -84,6 +88,8 @@ export class UIEngine {
     toolLocked: boolean = false;
     /** Shared gradient-editing state (panel ramp + on-canvas handles). */
     gradientEdit: GradientEditController;
+    /** Shared mesh-gradient editing state (Mesh tool + panel section). */
+    meshEdit: MeshEditController;
     contextBar: ContextBar | null = null;
     toolbar: Toolbar | null = null;
 
@@ -201,6 +207,7 @@ export class UIEngine {
         this.ck = ck;
         this.scene = scene;
         this.gradientEdit = new GradientEditController(scene);
+        this.meshEdit = new MeshEditController(scene);
 
         // Initialize DOM refs — basic
         this.layerList = document.getElementById('layer-list') as HTMLElement;
@@ -1198,6 +1205,12 @@ export class UIEngine {
             im.enterPaintBucketMode();
         }
 
+        // Entering the Mesh tool with a mesh-filled single selection starts
+        // editing that mesh immediately (its overlay appears without a click).
+        if (toolId === 'mesh') {
+            this.meshEdit.syncSelection();
+        }
+
         this.contextBar?.refresh();
     }
 
@@ -1215,6 +1228,7 @@ export class UIEngine {
         text: 'text',
         'paint-bucket': 'crosshair',
         scissors: 'crosshair',
+        mesh: 'crosshair',
     };
 
     /** Set the canvas cursor to match the active tool. Callable after a drag
@@ -1253,7 +1267,13 @@ export class UIEngine {
             if (node) {
                 const newFills = node.style.fills ? [...node.style.fills] : [];
                 if (newFills.length === 0) newFills.push(c);
-                else if (!isGradient(newFills[0])) newFills[0] = c;
+                else if (isMeshGradient(newFills[0])) {
+                    // Recolor the mesh uniformly — never silently destroy the
+                    // grid the user built by swapping it for a solid.
+                    const m = cloneMesh(newFills[0]);
+                    for (const v of m.vertices) v.color = { ...c };
+                    newFills[0] = m;
+                } else if (!isGradient(newFills[0])) newFills[0] = c;
                 else if ((newFills[0] as Gradient).stops.length > 0)
                     (newFills[0] as Gradient).stops[0].color = c;
                 this.updateNodeStyle(node, { fills: newFills });
@@ -1687,8 +1707,9 @@ export class UIEngine {
     syncWithSelection(opts: { interactive?: boolean } = {}) {
         const interactive = opts.interactive === true;
         this.scene.renderer?.requestRender();
-        // Keep gradient-editing state consistent with the selection
+        // Keep gradient/mesh-editing state consistent with the selection
         this.gradientEdit.syncSelection();
+        this.meshEdit.syncSelection();
         const selection = this.scene.engine!.get_selection();
         // Node selection and artboard selection are mutually exclusive: selecting
         // a node clears any selected artboard. Then reconcile which property
@@ -1953,6 +1974,7 @@ export class UIEngine {
         const paint = kind === 'strokes' ? (value?.paint ?? { r: 0, g: 0, b: 0, a: 1 }) : value;
         if (paint && isGradient(paint))
             return paint.stops?.[0]?.color ?? { r: 0.5, g: 0.5, b: 0.5, a: 1 };
+        if (paint && isMeshGradient(paint)) return meanColor(paint);
         if (paint && !isPattern(paint)) return paint as Color;
         return { r: 0.5, g: 0.5, b: 0.5, a: 1 };
     }
@@ -2273,27 +2295,53 @@ export class UIEngine {
             const row = document.createElement('div');
             row.className = 'fill-stroke-row';
 
-            // Fill-type selector: Solid / Linear / Radial (+ Pattern for imported
-            // pattern fills — patterns can only be created via SVG import).
+            // Fill-type selector: Solid / Linear / Radial / Mesh (+ Pattern for
+            // imported pattern fills — patterns can only be created via import).
+            // Mesh is offered only for geometry that can carry one (not Text).
+            const meshCapable = targets.every((id) => {
+                const t = this.scene.getNode(id)?.node_type;
+                return t === 'Rect' || t === 'Ellipse' || t === 'Path';
+            });
             const typeSel = document.createElement('select');
             typeSel.className = 'prop-select fill-type-select';
             typeSel.innerHTML =
                 `<option value="solid">Solid</option><option value="linear">Linear</option><option value="radial">Radial</option>` +
+                (meshCapable ? `<option value="mesh">Mesh</option>` : '') +
                 (isPattern(fill) ? `<option value="pattern">Pattern</option>` : '');
             typeSel.value = isPattern(fill)
                 ? 'pattern'
-                : isGradient(fill)
-                  ? fill.gradient_type === 'Radial'
-                      ? 'radial'
-                      : 'linear'
-                  : 'solid';
+                : isMeshGradient(fill)
+                  ? 'mesh'
+                  : isGradient(fill)
+                    ? fill.gradient_type === 'Radial'
+                        ? 'radial'
+                        : 'linear'
+                    : 'solid';
             typeSel.addEventListener('change', () => {
                 if (typeSel.value === 'pattern') return; // can't switch TO pattern from the UI
                 const seed: Color = isGradient(fill)
                     ? (fill.stops[0]?.color ?? { r: 0.5, g: 0.5, b: 0.5, a: 1 })
-                    : isPattern(fill)
-                      ? { r: 0.5, g: 0.5, b: 0.5, a: 1 }
-                      : (fill as Color);
+                    : isMeshGradient(fill)
+                      ? meanColor(fill)
+                      : isPattern(fill)
+                        ? { r: 0.5, g: 0.5, b: 0.5, a: 1 }
+                        : (fill as Color);
+                if (typeSel.value === 'mesh') {
+                    // Convert to a shape-fitted mesh (centered interior lines)
+                    // and jump into the Mesh tool so the handles appear
+                    // immediately — a mesh with nothing to grab reads as
+                    // "nothing happened".
+                    commit((f, n) => {
+                        const m = createMeshForNode(n.geometry, f[index]);
+                        if (m) f[index] = m;
+                    });
+                    if (primaryId !== undefined) {
+                        this.meshEdit.activate(primaryId, index);
+                        this.setActiveTool('mesh');
+                        this.syncWithSelection();
+                    }
+                    return;
+                }
                 // Switching to a gradient type puts this fill into gradient-edit
                 // mode (canvas handles + panel ramp). syncSelection validates
                 // this after the commit lands.
@@ -2351,6 +2399,27 @@ export class UIEngine {
                 } else {
                     preview.style.background = '#888';
                 }
+                row.appendChild(preview);
+            } else if (isMeshGradient(fill)) {
+                // ── Mesh: clickable preview (bilinear corner-color blend);
+                //    clicking jumps into the Mesh tool on this fill ──
+                const isActiveMesh =
+                    this.meshEdit.isActive() &&
+                    this.meshEdit.nodeId === primaryId &&
+                    this.meshEdit.fillIndex === index &&
+                    this.activeTool === 'mesh';
+                const preview = document.createElement('div');
+                preview.className = 'gradient-preview';
+                preview.classList.toggle('active', isActiveMesh);
+                preview.title = primaryId !== undefined ? 'Edit mesh (U)' : 'Mesh gradient';
+                preview.style.backgroundImage = `url(${this.meshPreviewUri(fill)}), ${UIEngine.CHECKER_CSS}`;
+                preview.style.backgroundSize = '100% 100%, 8px 8px';
+                preview.addEventListener('click', () => {
+                    if (primaryId === undefined) return;
+                    this.meshEdit.activate(primaryId, index);
+                    this.setActiveTool('mesh');
+                    this.syncWithSelection({ interactive: true });
+                });
                 row.appendChild(preview);
             } else if (!isGradient(fill)) {
                 // ── Solid: color swatch (the hex value is edited inside the
@@ -2417,8 +2486,130 @@ export class UIEngine {
                 item.appendChild(this.buildGradientEditor(fill, index, commit));
             }
 
+            // ── Mesh editor (grid info + selected-point color + actions) —
+            //    only for the mesh currently edited by the Mesh tool ──
+            if (
+                isMeshGradient(fill) &&
+                this.meshEdit.isActive() &&
+                this.meshEdit.nodeId === primaryId &&
+                this.meshEdit.fillIndex === index
+            ) {
+                item.appendChild(this.buildMeshEditor(fill, index, commit));
+            }
+
             this.fillsList.appendChild(item);
         }
+    }
+
+    /** Tiny bilinear blend of the mesh's four corner colors — an honest,
+     *  cheap approximation for the fill-row preview swatch. */
+    private meshPreviewUri(mesh: MeshGradientData): string {
+        const W = 24;
+        const H = 16;
+        const cv = document.createElement('canvas');
+        cv.width = W;
+        cv.height = H;
+        const ctx = cv.getContext('2d');
+        if (!ctx) return '';
+        const stride = mesh.cols + 1;
+        const c00 = mesh.vertices[0].color;
+        const c10 = mesh.vertices[mesh.cols].color;
+        const c01 = mesh.vertices[mesh.rows * stride].color;
+        const c11 = mesh.vertices[mesh.rows * stride + mesh.cols].color;
+        const img = ctx.createImageData(W, H);
+        for (let y = 0; y < H; y++) {
+            for (let x = 0; x < W; x++) {
+                const c = bilinearColor(c00, c10, c01, c11, x / (W - 1), y / (H - 1));
+                const o = (y * W + x) * 4;
+                img.data[o] = Math.round(c.r * 255);
+                img.data[o + 1] = Math.round(c.g * 255);
+                img.data[o + 2] = Math.round(c.b * 255);
+                img.data[o + 3] = Math.round(c.a * 255);
+            }
+        }
+        ctx.putImageData(img, 0, 0);
+        return cv.toDataURL();
+    }
+
+    /**
+     * Mesh editor section: grid size, the selected mesh points' color swatch
+     * (live picker drags = one undo step via applyPaintEdit's gesture path),
+     * and a "Reset handles" action. Vertex selection happens on canvas with
+     * the Mesh tool; with nothing selected the swatch is disabled.
+     */
+    private buildMeshEditor(
+        fill: MeshGradientData,
+        index: number,
+        commit: (mutate: (f: Paint[], n: SceneNode) => void, live?: boolean) => void,
+    ): HTMLElement {
+        const me = this.meshEdit;
+        const editor = document.createElement('div');
+        editor.className = 'gradient-editor';
+
+        const row = document.createElement('div');
+        row.className = 'gradient-stop-row';
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '8px';
+        row.style.flexWrap = 'wrap'; // "Reset handles" wraps instead of clipping
+
+        const info = document.createElement('span');
+        info.className = 'prop-label';
+        info.textContent = `${fill.rows} × ${fill.cols} mesh`;
+        row.appendChild(info);
+
+        const selected = [...me.selectedVertices].filter((vi) => vi < fill.vertices.length);
+        if (selected.length > 0) {
+            const first = fill.vertices[selected[0]].color;
+            const setColors = (f: Paint[], c: Color) => {
+                const m = f[index];
+                if (!m || !isMeshGradient(m)) return;
+                const next = cloneMesh(m);
+                for (const vi of selected) {
+                    if (vi < next.vertices.length) next.vertices[vi].color = { ...c };
+                }
+                f[index] = next;
+            };
+            const swatch = createColorSwatch({
+                color: first,
+                title:
+                    selected.length === 1
+                        ? 'Mesh point color'
+                        : `Color of ${selected.length} mesh points`,
+                onInput: (c) => commit((f) => setColors(f, c), true),
+                onChange: (c) => commit((f) => setColors(f, c)),
+            });
+            row.appendChild(swatch.el);
+            const count = document.createElement('span');
+            count.className = 'prop-label';
+            count.textContent = selected.length === 1 ? 'point color' : `${selected.length} points`;
+            row.appendChild(count);
+        } else {
+            const hint = document.createElement('span');
+            hint.className = 'prop-label';
+            hint.style.opacity = '0.6';
+            hint.textContent = 'Select mesh points on canvas';
+            row.appendChild(hint);
+        }
+
+        const spacer = document.createElement('div');
+        spacer.style.flex = '1';
+        row.appendChild(spacer);
+
+        const reset = document.createElement('button');
+        reset.className = 'icon-toggle';
+        reset.textContent = 'Reset handles';
+        reset.title = 'Smooth the selected mesh points (clear custom handles)';
+        reset.style.width = 'auto';
+        reset.style.padding = '0 8px';
+        reset.disabled = selected.length === 0;
+        reset.onclick = () => {
+            if (me.resetHandles()) this.syncWithSelection();
+        };
+        row.appendChild(reset);
+
+        editor.appendChild(row);
+        return editor;
     }
 
     /** Checkerboard layer used behind transparent gradient previews. */
@@ -4169,9 +4360,31 @@ export class UIEngine {
             viewBox: bounds,
             background,
             textPaths: this.textPathsForExport(nodes),
+            meshRasters: this.meshRastersForExport(nodes),
         });
 
         return svg;
+    }
+
+    /** Rasterize every mesh-gradient fill among `nodes` for SVG export,
+     *  keyed by content hash (shared across identical meshes). */
+    private meshRastersForExport(nodes: SVGExportInput['nodes']): SVGExportInput['meshRasters'] {
+        let out: SVGExportInput['meshRasters'];
+        const renderer = this.scene.renderer;
+        if (!renderer) return undefined;
+        for (const node of Object.values(nodes)) {
+            for (const p of node.style?.fills ?? []) {
+                if (!p || !isMeshGradient(p)) continue;
+                const hash = meshContentHash(p);
+                if (out?.[hash]) continue;
+                const raster = renderer.rasterizeMeshForExport(p);
+                if (raster) {
+                    if (!out) out = {};
+                    out[hash] = raster;
+                }
+            }
+        }
+        return out;
     }
 
     /** Handle Figma-style exporting of selections, artboards, or canvas. */
@@ -4437,6 +4650,7 @@ export class UIEngine {
             viewBox: bounds,
             background,
             textPaths: this.textPathsForExport(nodes),
+            meshRasters: this.meshRastersForExport(nodes),
         });
 
         // Embed the binary .dataki payload for round-tripping

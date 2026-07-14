@@ -43,6 +43,7 @@ const TOOL_META: Record<string, ToolMeta> = {
     star: { label: 'Star', icon: 'star' },
     text: { label: 'Text', shortcut: 'T', icon: 'type' },
     'paint-bucket': { label: 'Live Paint', shortcut: 'B', icon: 'paint-bucket' },
+    mesh: { label: 'Mesh', shortcut: 'U', icon: 'grid-3x3' },
     eyedropper: { label: 'Eyedropper', shortcut: 'I', icon: 'pipette' },
 };
 
@@ -59,6 +60,7 @@ const LAYOUT: LayoutEntry[] = [
     ['text'],
     'sep',
     ['paint-bucket'],
+    ['mesh'],
     ['eyedropper'],
 ];
 

@@ -4,9 +4,10 @@
  * This separation enables testing without WASM and reuse in other contexts.
  */
 
+import { meanColor, meshContentHash } from './mesh_geom';
 import { escapeXml, matrixToSVGTransform, rgbToHex } from './svg_utils';
 import type { NodeStyle, Paint, SceneNode } from './types';
-import { isGradient, isPattern } from './types';
+import { isGradient, isMeshGradient, isPattern, isSolid } from './types';
 
 // ─── Lookup Tables ──────────────────────────────────────────────────────────
 
@@ -109,6 +110,14 @@ export interface SVGExportInput {
     viewBox?: { x: number; y: number; w: number; h: number };
     /** Optional solid background rect drawn behind all content. */
     background?: { r: number; g: number; b: number; a: number };
+    /**
+     * Rasterized mesh-gradient fills keyed by mesh content hash
+     * (mesh_geom.meshContentHash): PNG data URI + node-local placement.
+     * SVG 1.1 has no mesh gradients, so each becomes a non-repeating
+     * userSpaceOnUse <pattern> that the shape's own outline clips. Native
+     * saves stay lossless via the embedded binary payload.
+     */
+    meshRasters?: Record<number, { href: string; x: number; y: number; w: number; h: number }>;
 }
 
 // ─── SVG Generation ─────────────────────────────────────────────────────────
@@ -130,6 +139,7 @@ export function buildSVGFromData(input: SVGExportInput): string {
         viewBox,
         background,
         textPaths,
+        meshRasters,
     } = input;
 
     // ─── Live Paint compositing (mirrors the render writer) ──────────────────
@@ -296,6 +306,13 @@ export function buildSVGFromData(input: SVGExportInput): string {
             );
             return `url(#${id})`;
         }
+        if (isMeshGradient(paint)) {
+            // Mesh FILLS are emitted structurally (a clipped <image> of the
+            // rasterized mesh — see renderNodeToSVG); anything that still
+            // reaches this generic paint path (a stroke paint, or a mesh
+            // without a raster) degrades to the mean vertex color.
+            return escapeXml(rgbToHex(meanColor(paint)));
+        }
         if (!isGradient(paint)) {
             return escapeXml(rgbToHex(paint));
         }
@@ -414,13 +431,14 @@ export function buildSVGFromData(input: SVGExportInput): string {
         }
 
         // Fill opacity — extract from fill paint alpha (solid fills only;
-        // gradient stops carry their own stop-opacity, patterns have none).
-        if (fillPaint && !isGradient(fillPaint) && !isPattern(fillPaint) && fillPaint.a < 1) {
+        // gradient stops carry their own stop-opacity, patterns have none,
+        // mesh vertex colors carry their own alpha).
+        if (fillPaint && isSolid(fillPaint) && fillPaint.a < 1) {
             attrs += ` fill-opacity="${fillPaint.a}"`;
         }
 
         // Stroke opacity — extract from stroke paint alpha
-        if (sk?.paint && !isGradient(sk.paint) && !isPattern(sk.paint) && sk.paint.a < 1) {
+        if (sk?.paint && isSolid(sk.paint) && sk.paint.a < 1) {
             attrs += ` stroke-opacity="${sk.paint.a}"`;
         }
 
@@ -542,30 +560,57 @@ export function buildSVGFromData(input: SVGExportInput): string {
             // Leaf shape: carry any effect filter on the shape element itself.
             const attrs = buildStyleAttrs(node.style, suppressFill) + filterAttr;
             const geo = node.geometry;
-            if (geo.Rect) {
-                const cr = node.style.corner_radius;
-                const rxAttr = cr ? ` rx="${cr}" ry="${cr}"` : '';
-                nodeSvg += `<rect x="0" y="0" width="${geo.Rect.width}" height="${geo.Rect.height}"${rxAttr} ${attrs} />`;
+
+            /** The node's outline element with the given attributes — reused
+             *  for both the painted shape and a mesh raster's clip path. */
+            const shapeEl = (shapeAttrs: string): string => {
+                if (geo.Rect) {
+                    const cr = node.style.corner_radius;
+                    const rxAttr = cr ? ` rx="${cr}" ry="${cr}"` : '';
+                    return `<rect x="0" y="0" width="${geo.Rect.width}" height="${geo.Rect.height}"${rxAttr} ${shapeAttrs} />`;
+                }
+                if (geo.Ellipse) {
+                    return `<ellipse cx="0" cy="0" rx="${geo.Ellipse.radius_x}" ry="${geo.Ellipse.radius_y}" ${shapeAttrs} />`;
+                }
+                if (geo.Path) {
+                    let d = '';
+                    for (const sp of geo.Path.subpaths) {
+                        if (sp.points.length < 2) continue;
+                        d += `M ${sp.points[0].x} ${sp.points[0].y} `;
+                        for (let i = 1; i < sp.points.length; i++) {
+                            const prev = sp.points[i - 1];
+                            const p = sp.points[i];
+                            d += `C ${prev.cp2[0]} ${prev.cp2[1]} ${p.cp1[0]} ${p.cp1[1]} ${p.x} ${p.y} `;
+                        }
+                        if (sp.closed) d += 'Z ';
+                    }
+                    return `<path d="${d.trim()}" ${shapeAttrs} />`;
+                }
+                return '';
+            };
+
+            // Mesh-gradient fill: SVG 1.1 can't express it, so emit the
+            // pre-rasterized mesh as an <image> clipped by the shape's own
+            // outline, with the shape itself on top carrying the stroke.
+            const firstFill = (node.style.fills ?? [])[0];
+            const meshRaster =
+                !suppressFill && firstFill && isMeshGradient(firstFill)
+                    ? meshRasters?.[meshContentHash(firstFill)]
+                    : undefined;
+            if (meshRaster && (geo.Rect || geo.Ellipse || geo.Path)) {
+                const clipId = `meshclip${id}`;
+                const op = node.style.opacity ?? 1.0;
+                const opAttr = op < 1 ? ` opacity="${op}"` : '';
+                nodeSvg += `<clipPath id="${clipId}">${shapeEl('')}</clipPath>`;
+                nodeSvg += `<image href="${meshRaster.href}" x="${meshRaster.x}" y="${meshRaster.y}" width="${meshRaster.w}" height="${meshRaster.h}" preserveAspectRatio="none" clip-path="url(#${clipId})"${opAttr} />`;
+                nodeSvg += shapeEl(buildStyleAttrs(node.style, true) + filterAttr);
+            } else if (geo.Rect || geo.Ellipse || geo.Path) {
+                nodeSvg += shapeEl(attrs);
             } else if (geo.Image) {
                 const href = imageDataUris?.[geo.Image.image_id] ?? '';
                 const op = node.style.opacity ?? 1.0;
                 const opAttr = op < 1 ? ` opacity="${op}"` : '';
                 nodeSvg += `<image x="0" y="0" width="${geo.Image.width}" height="${geo.Image.height}" href="${href}"${opAttr}${filterAttr} preserveAspectRatio="none" />`;
-            } else if (geo.Ellipse) {
-                nodeSvg += `<ellipse cx="0" cy="0" rx="${geo.Ellipse.radius_x}" ry="${geo.Ellipse.radius_y}" ${attrs} />`;
-            } else if (geo.Path) {
-                let d = '';
-                for (const sp of geo.Path.subpaths) {
-                    if (sp.points.length < 2) continue;
-                    d += `M ${sp.points[0].x} ${sp.points[0].y} `;
-                    for (let i = 1; i < sp.points.length; i++) {
-                        const prev = sp.points[i - 1];
-                        const p = sp.points[i];
-                        d += `C ${prev.cp2[0]} ${prev.cp2[1]} ${p.cp1[0]} ${p.cp1[1]} ${p.x} ${p.y} `;
-                    }
-                    if (sp.closed) d += 'Z ';
-                }
-                nodeSvg += `<path d="${d.trim()}" ${attrs} />`;
             } else if (geo.Text) {
                 const textAnchorMap = ['start', 'middle', 'end'];
                 const fontFamily = geo.Text.font_family

@@ -1,4 +1,4 @@
-import type { Canvas, CanvasKit, Paint, Path, Surface } from 'canvaskit-wasm';
+import type { Canvas, CanvasKit, Paint, Path, Shader, Surface } from 'canvaskit-wasm';
 
 /** A Live Paint outline point: anchor + incoming/outgoing bézier handles. */
 type OutlinePt = { x: number; y: number; cp1: number[]; cp2: number[] };
@@ -13,6 +13,18 @@ import {
     loadGoogleFontData,
     onFontLoaded,
 } from './fonts';
+import type { Cubic } from './mesh_geom';
+import {
+    effectiveHandle,
+    hEdgeCubic,
+    meanColor,
+    meshBounds,
+    meshContentHash,
+    subdivisionCounts,
+    tessellate,
+    vEdgeCubic,
+} from './mesh_geom';
+import type { MeshGradient, MeshVertex } from './types';
 
 /** Helper for efficient zero-copy parsing of the WASM binary render buffer. */
 class BinaryReader {
@@ -84,7 +96,7 @@ export type ArtboardHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 11; // v11: anisotropic blur + elliptical-radial gradient transform
+const EXPECTED_RENDER_PROTOCOL_VERSION = 12; // v12: paint type 5 = mesh gradient
 
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {
@@ -1822,6 +1834,9 @@ export class Renderer {
                                 reader.f32(),
                             ],
                         });
+                    } else if (fillType === 5) {
+                        // Mesh gradient (v12)
+                        fills.push({ type: 5, mesh: this.readMeshPaint(reader) });
                     } else {
                         fills.push({ type: 0 });
                     }
@@ -1890,6 +1905,13 @@ export class Renderer {
                                 reader.f32(),
                             ],
                         };
+                    } else if (strokeType === 5) {
+                        // Mesh gradient — must consume the full record even
+                        // though mesh strokes aren't supported: degrade to the
+                        // mean vertex color (the UI never creates these).
+                        const mesh = this.readMeshPaint(reader);
+                        const mean = meanColor(mesh);
+                        paint = { type: 1, r: mean.r, g: mean.g, b: mean.b, a: mean.a };
                     }
                     strokes.push({
                         paint,
@@ -2185,6 +2207,24 @@ export class Renderer {
                                     fill.transform,
                                 ),
                             );
+                        } else if (fill.type === 5) {
+                            // Mesh gradient: a cached raster of the tessellated
+                            // mesh, applied as an image shader through the
+                            // ordinary fill draw (same flow as patterns).
+                            const meshShader = this.getMeshFillShader(canvas, fill.mesh, nodeAlpha);
+                            if (meshShader) {
+                                // Alpha lives in the raster; force the paint
+                                // opaque like the gradient branch above.
+                                p.setAlphaf(1);
+                                p.setShader(meshShader);
+                            } else {
+                                // Degenerate mesh: mean vertex color.
+                                const mean = meanColor(fill.mesh);
+                                p.setColor(
+                                    this.ck.Color4f(mean.r, mean.g, mean.b, mean.a * nodeAlpha),
+                                );
+                                p.setShader(null);
+                            }
                         }
                         p.setStyle(this.ck.PaintStyle.Fill);
                         this.drawBinaryGeometry(
@@ -2408,6 +2448,8 @@ export class Renderer {
             this.drawMeasurements(canvas, dpr);
             // Draw gradient editing handles (axis + stops on the shape)
             this.drawGradientOverlay(canvas, dpr);
+            // Draw mesh-gradient editing overlay (grid + vertices + handles)
+            this.drawMeshOverlay(canvas, dpr);
             // Draw direct selection edit handles
             this.drawDirectEditHandles(canvas, dpr);
             // Draw scissors / add-point hover dot
@@ -2418,6 +2460,49 @@ export class Renderer {
 
         // Keep the ruler strips in step with the current pan/zoom.
         if (!exporting && snapshotPass === null) this.guidesController?.syncRulers();
+    }
+
+    /**
+     * Allocate an offscreen CPU raster surface whose pixel buffer we own.
+     *
+     * CanvasKit 0.39.1's `MakeSurface(w, h)` mallocs a pixel buffer that
+     * `Surface.delete()` does NOT free — every call leaks the full w*h*4 bytes.
+     * Repeated exports (a batch export, or just a long editing session) march
+     * the WASM heap to its ceiling and CanvasKit hard-aborts (`Aborted()`),
+     * taking the whole app down. Backing the surface with our own `Malloc`
+     * buffer lets us `Free` it deterministically, so exporting is leak-free.
+     *
+     * Returns the surface plus a `release()` that frees BOTH the surface and its
+     * buffer; always call it (in a `finally`). Returns null if allocation fails.
+     */
+    private makeRasterSurface(
+        w: number,
+        h: number,
+    ): { surface: Surface; release: () => void } | null {
+        const bytesPerRow = w * 4;
+        const buffer = this.ck.Malloc(Uint8Array, h * bytesPerRow);
+        const surface = this.ck.MakeRasterDirectSurface(
+            {
+                width: w,
+                height: h,
+                colorType: this.ck.ColorType.RGBA_8888,
+                alphaType: this.ck.AlphaType.Premul,
+                colorSpace: this.ck.ColorSpace.SRGB,
+            },
+            buffer,
+            bytesPerRow,
+        );
+        if (!surface) {
+            this.ck.Free(buffer);
+            return null;
+        }
+        return {
+            surface,
+            release: () => {
+                surface.delete();
+                this.ck.Free(buffer);
+            },
+        };
     }
 
     /**
@@ -2481,15 +2566,16 @@ export class Renderer {
 
         const bigW = renderW * ss;
         const bigH = renderH * ss;
-        const bigSurface = this.ck.MakeSurface(bigW, bigH);
-        if (!bigSurface) return null;
+        const bigRaster = this.makeRasterSurface(bigW, bigH);
+        if (!bigRaster) return null;
+        const bigSurface = bigRaster.surface;
 
         // Swap in export state and reuse render(), then restore. The pan offsets
         // the export origin so an off-origin artboard is cropped correctly.
         const savedSurface = this.surface;
         const savedZoom = this.zoom;
         const savedPan = { x: this.pan.x, y: this.pan.y };
-        this.surface = bigSurface as unknown as Surface;
+        this.surface = bigSurface;
         this.zoom = renderScale * ss;
         this.pan = { x: -b.x * renderScale * ss, y: -b.y * renderScale * ss };
         this._exporting = true;
@@ -2507,11 +2593,12 @@ export class Renderer {
             const bigImg = bigSurface.makeImageSnapshot();
             let bytes: Uint8Array | null;
             if (bigW !== W || bigH !== H) {
-                const dstSurface = this.ck.MakeSurface(W, H);
-                if (!dstSurface) {
+                const dstRaster = this.makeRasterSurface(W, H);
+                if (!dstRaster) {
                     bigImg.delete();
                     return null;
                 }
+                const dstSurface = dstRaster.surface;
                 const dcanvas = dstSurface.getCanvas();
                 dcanvas.clear(this.ck.TRANSPARENT);
                 const dpaint = new this.ck.Paint();
@@ -2527,7 +2614,7 @@ export class Renderer {
                 bytes = outImg.encodeToBytes(); // defaults to PNG
                 outImg.delete();
                 dpaint.delete();
-                dstSurface.delete();
+                dstRaster.release();
             } else {
                 bytes = bigImg.encodeToBytes();
             }
@@ -2543,7 +2630,7 @@ export class Renderer {
             this.surface = savedSurface;
             this.zoom = savedZoom;
             this.pan = savedPan;
-            bigSurface.delete();
+            bigRaster.release();
             this.requestRender(); // repaint the on-screen surface
         }
         return blob;
@@ -2672,6 +2759,233 @@ export class Renderer {
             return null;
         } finally {
             reader.offset = start;
+        }
+    }
+
+    /** Decode a wire mesh-gradient paint (type tag 5, protocol v12). The
+     *  engine materializes all handles, so every vertex arrives with concrete
+     *  e/w/s/n control points. */
+    private readMeshPaint(reader: BinaryReader): MeshGradient {
+        const rows = reader.u32();
+        const cols = reader.u32();
+        const count = (rows + 1) * (cols + 1);
+        const vertices: MeshVertex[] = [];
+        for (let i = 0; i < count; i++) {
+            const x = reader.f32();
+            const y = reader.f32();
+            const color = { r: reader.f32(), g: reader.f32(), b: reader.f32(), a: reader.f32() };
+            const handles = {
+                e: [reader.f32(), reader.f32()] as [number, number],
+                w: [reader.f32(), reader.f32()] as [number, number],
+                s: [reader.f32(), reader.f32()] as [number, number],
+                n: [reader.f32(), reader.f32()] as [number, number],
+            };
+            vertices.push({ x, y, color, handles });
+        }
+        return { rows, cols, vertices };
+    }
+
+    /** Paint used for drawVertices mesh rasterization: AA off (interior edges
+     *  must be watertight; the path clip supplies outline AA), no shader. */
+    private _meshPaint: Paint | null = null;
+
+    /** LRU cache of rasterized mesh fills, keyed by mesh content hash +
+     *  raster size + alpha. Entries own their ck Image and its shader
+     *  (both deleted on evict). */
+    private _meshRasterCache = new Map<
+        string,
+        {
+            img: ReturnType<CanvasKit['MakeImage']>;
+            shader: Shader | null;
+            x: number;
+            y: number;
+            w: number;
+            h: number;
+        }
+    >();
+
+    /**
+     * Shader that paints a mesh-gradient fill in node-local coordinates —
+     * plugged into the ordinary fill pass exactly like pattern shaders.
+     *
+     * The mesh is tessellated (zoom-adaptive Coons subdivision) and rendered
+     * with drawVertices on an offscreen CPU raster at device resolution; the
+     * raster becomes a Decal-tiled image shader whose local matrix maps it
+     * onto the mesh's node-local bounds. The indirection is deliberate: on
+     * the onscreen WebGL surface this CanvasKit build silently discards both
+     * drawVertices and image blits issued under a non-rectangular clipPath
+     * (verified empirically), so the mesh must reach the screen through
+     * drawPath + shader — the one fill path proven to work everywhere. The
+     * raster + shader are cached by content, so static frames cost nothing.
+     */
+    private getMeshFillShader(
+        canvas: Canvas,
+        mesh: MeshGradient,
+        alphaScale: number,
+    ): Shader | null {
+        // Device px per node-local unit, from the live canvas matrix (covers
+        // zoom, dpr, node transform, and export supersampling in one go).
+        const m = canvas.getTotalMatrix();
+        let scale = Math.sqrt(Math.abs(m[0] * m[4] - m[1] * m[3])) || 1;
+        const b = meshBounds(mesh);
+        if (b.w <= 0 || b.h <= 0) return null;
+        // Padding for the 2px boundary-outset strip plus 1 device px so
+        // linear sampling never reads the raster edge.
+        const pad = 3 / scale;
+        const bx = b.x - pad;
+        const by = b.y - pad;
+        const bw = b.w + 2 * pad;
+        const bh = b.h + 2 * pad;
+        // Cap the raster to a sane device budget; beyond it the mesh renders
+        // slightly soft (upscaled), which at 2048px is imperceptible.
+        const maxDim = Math.max(bw, bh) * scale;
+        if (maxDim > 2048) scale *= 2048 / maxDim;
+        const pw = Math.max(1, Math.ceil(bw * scale));
+        const ph = Math.max(1, Math.ceil(bh * scale));
+        const key = `${meshContentHash(mesh)}:${pw}x${ph}:${alphaScale.toFixed(3)}`;
+
+        let entry = this._meshRasterCache.get(key);
+        if (entry) {
+            // Refresh LRU recency.
+            this._meshRasterCache.delete(key);
+            this._meshRasterCache.set(key, entry);
+        } else {
+            const rs = this.makeRasterSurface(pw, ph);
+            if (!rs) return null;
+            let img: ReturnType<CanvasKit['MakeImage']> = null;
+            try {
+                const oc = rs.surface.getCanvas();
+                oc.clear(this.ck.TRANSPARENT);
+                oc.scale(pw / bw, ph / bh);
+                oc.translate(-bx, -by);
+                const { u, v } = subdivisionCounts(mesh, scale);
+                // Extrude boundary colors ~2 device px outward so a
+                // shape-fitted boundary that undershoots the path edge shows
+                // the edge color there, never a transparent sliver.
+                const tess = tessellate(mesh, u, v, alphaScale, 2 / scale);
+                const verts = this.ck.MakeVertices(
+                    this.ck.VertexMode.Triangles,
+                    tess.positions,
+                    null,
+                    tess.colors,
+                    Array.from(tess.indices),
+                    false,
+                );
+                if (!this._meshPaint) {
+                    this._meshPaint = new this.ck.Paint();
+                    // Opaque white + Modulate ≡ "use the vertex colors
+                    // verbatim" on every backend (kDst is GPU-discarded).
+                    this._meshPaint.setColor(this.ck.Color4f(1, 1, 1, 1));
+                }
+                oc.drawVertices(verts, this.ck.BlendMode.Modulate, this._meshPaint);
+                verts.delete();
+                rs.surface.flush();
+                // Deep-copy the pixels into a self-owned image: the snapshot
+                // of a raster-direct surface references the surface's buffer,
+                // which release() frees — the cached image must outlive it.
+                const snap = rs.surface.makeImageSnapshot();
+                if (snap) {
+                    const px = snap.readPixels(0, 0, {
+                        width: pw,
+                        height: ph,
+                        colorType: this.ck.ColorType.RGBA_8888,
+                        alphaType: this.ck.AlphaType.Premul,
+                        colorSpace: this.ck.ColorSpace.SRGB,
+                    }) as Uint8Array | null;
+                    snap.delete();
+                    if (px) {
+                        img = this.ck.MakeImage(
+                            {
+                                width: pw,
+                                height: ph,
+                                colorType: this.ck.ColorType.RGBA_8888,
+                                alphaType: this.ck.AlphaType.Premul,
+                                colorSpace: this.ck.ColorSpace.SRGB,
+                            },
+                            px,
+                            pw * 4,
+                        );
+                    }
+                }
+            } finally {
+                rs.release();
+            }
+            if (!img) return null;
+            // Image px (0..pw, 0..ph) → node-local (bx..bx+bw, by..by+bh).
+            const shader = img.makeShaderOptions(
+                this.ck.TileMode.Decal,
+                this.ck.TileMode.Decal,
+                this.ck.FilterMode.Linear,
+                this.ck.MipmapMode.None,
+                [bw / pw, 0, bx, 0, bh / ph, by, 0, 0, 1],
+            );
+            entry = { img, shader, x: bx, y: by, w: bw, h: bh };
+            this._meshRasterCache.set(key, entry);
+            while (this._meshRasterCache.size > 8) {
+                const oldest = this._meshRasterCache.keys().next().value as string;
+                const evicted = this._meshRasterCache.get(oldest);
+                evicted?.shader?.delete();
+                evicted?.img?.delete();
+                this._meshRasterCache.delete(oldest);
+            }
+        }
+        return entry.shader;
+    }
+
+    /**
+     * Rasterize a mesh fill for SVG export: PNG data URI + its node-local
+     * placement. SVG 1.1 has no mesh gradients, so the exporter embeds this
+     * as a non-repeating <pattern> the shape's own outline clips.
+     */
+    rasterizeMeshForExport(
+        mesh: MeshGradient,
+        pxPerUnit = 2,
+    ): { href: string; x: number; y: number; w: number; h: number } | null {
+        const b = meshBounds(mesh);
+        if (b.w <= 0 || b.h <= 0) return null;
+        const pad = 2 / pxPerUnit;
+        const bx = b.x - pad;
+        const by = b.y - pad;
+        const bw = b.w + 2 * pad;
+        const bh = b.h + 2 * pad;
+        let scale = pxPerUnit;
+        const maxDim = Math.max(bw, bh) * scale;
+        if (maxDim > 4096) scale *= 4096 / maxDim;
+        const pw = Math.max(1, Math.ceil(bw * scale));
+        const ph = Math.max(1, Math.ceil(bh * scale));
+        const rs = this.makeRasterSurface(pw, ph);
+        if (!rs) return null;
+        try {
+            const oc = rs.surface.getCanvas();
+            oc.clear(this.ck.TRANSPARENT);
+            oc.scale(pw / bw, ph / bh);
+            oc.translate(-bx, -by);
+            const { u, v } = subdivisionCounts(mesh, scale);
+            const tess = tessellate(mesh, u, v, 1, 2 / scale);
+            const verts = this.ck.MakeVertices(
+                this.ck.VertexMode.Triangles,
+                tess.positions,
+                null,
+                tess.colors,
+                Array.from(tess.indices),
+                false,
+            );
+            const p = new this.ck.Paint();
+            p.setColor(this.ck.Color4f(1, 1, 1, 1));
+            oc.drawVertices(verts, this.ck.BlendMode.Modulate, p);
+            verts.delete();
+            p.delete();
+            rs.surface.flush();
+            const snap = rs.surface.makeImageSnapshot();
+            if (!snap) return null;
+            const bytes = snap.encodeToBytes();
+            snap.delete();
+            if (!bytes) return null;
+            let bin = '';
+            for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+            return { href: `data:image/png;base64,${btoa(bin)}`, x: bx, y: by, w: bw, h: bh };
+        } finally {
+            rs.release();
         }
     }
 
@@ -3317,6 +3631,202 @@ export class Renderer {
         fill.delete();
         accent.delete();
 
+        canvas.restore();
+    }
+
+    /**
+     * Mesh-gradient editing overlay: the grid's actual bezier lines, color-
+     * filled diamond vertices (accent ring when selected), bezier handles for
+     * the selected vertices, hover highlights, and dashed ghost previews of
+     * the exact lines a click would insert. Visible only while the Mesh tool
+     * is active on the edited node — the Selection tool shows the plain bbox.
+     *
+     * Everything is transformed to WORLD space point-by-point (affine maps
+     * cubics to cubics exactly), so handle/vertex sizes stay screen-constant
+     * even under rotation and non-uniform scale.
+     */
+    private drawMeshOverlay(canvas: Canvas, dpr: number) {
+        const im = this.inputManager;
+        if (im?.ui.activeTool !== 'mesh') return;
+        const me = im.ui.meshEdit;
+        if (!me?.isActive()) return;
+        const selection = this.scene.getSelection();
+        if (selection.length !== 1 || selection[0] !== me.nodeId) return;
+        const mesh = me.mesh();
+        if (!mesh) return;
+
+        const z = this.zoom;
+        const ck = this.ck;
+        const w = (p: [number, number]) => me.localToWorld(p[0], p[1]);
+
+        canvas.save();
+        canvas.scale(dpr, dpr);
+        canvas.translate(this.pan.x, this.pan.y);
+        canvas.scale(z, z);
+
+        const halo = new ck.Paint();
+        halo.setColor(ck.Color(0, 0, 0, 0.35));
+        halo.setStyle(ck.PaintStyle.Stroke);
+        halo.setAntiAlias(true);
+
+        const white = new ck.Paint();
+        white.setColor(ck.Color(255, 255, 255, 0.9));
+        white.setStyle(ck.PaintStyle.Stroke);
+        white.setAntiAlias(true);
+
+        const fill = new ck.Paint();
+        fill.setStyle(ck.PaintStyle.Fill);
+        fill.setAntiAlias(true);
+
+        const accent = new ck.Paint();
+        accent.setColor(ck.Color(0, 162, 255, 1));
+        accent.setStyle(ck.PaintStyle.Stroke);
+        accent.setAntiAlias(true);
+
+        const danger = new ck.Paint();
+        danger.setColor(ck.Color(235, 64, 52, 1));
+        danger.setStyle(ck.PaintStyle.Stroke);
+        danger.setAntiAlias(true);
+
+        const worldCubicPath = (cubics: Cubic[], path: Path) => {
+            for (const c of cubics) {
+                const p0 = w(c[0]);
+                const p1 = w(c[1]);
+                const p2 = w(c[2]);
+                const p3 = w(c[3]);
+                path.moveTo(p0.x, p0.y);
+                path.cubicTo(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+            }
+        };
+
+        // ── Grid lines ──
+        const grid = new ck.Path();
+        const rowLine = (r: number): Cubic[] => {
+            const out: Cubic[] = [];
+            for (let pc = 0; pc < mesh.cols; pc++) out.push(hEdgeCubic(mesh, r, pc));
+            return out;
+        };
+        const colLine = (c: number): Cubic[] => {
+            const out: Cubic[] = [];
+            for (let pr = 0; pr < mesh.rows; pr++) out.push(vEdgeCubic(mesh, pr, c));
+            return out;
+        };
+        for (let r = 0; r <= mesh.rows; r++) worldCubicPath(rowLine(r), grid);
+        for (let c = 0; c <= mesh.cols; c++) worldCubicPath(colLine(c), grid);
+        halo.setStrokeWidth(2.5 / z);
+        white.setStrokeWidth(1.1 / z);
+        canvas.drawPath(grid, halo);
+        canvas.drawPath(grid, white);
+        grid.delete();
+
+        // ── Hover highlights ──
+        const hover = me.hover;
+        const stride = mesh.cols + 1;
+        if (hover?.type === 'line') {
+            // Highlight the whole hovered grid line: accent = "insert the
+            // perpendicular here"; red (Alt) = "delete this line" (only when
+            // it is deletable, i.e. interior).
+            const cubics =
+                hover.axis === 'row' ? rowLine(hover.lineIndex) : colLine(hover.lineIndex);
+            const interior =
+                hover.axis === 'row'
+                    ? hover.lineIndex > 0 && hover.lineIndex < mesh.rows
+                    : hover.lineIndex > 0 && hover.lineIndex < mesh.cols;
+            const p = me.hoverAlt ? (interior ? danger : halo) : accent;
+            p.setStrokeWidth(2 / z);
+            const hp = new ck.Path();
+            worldCubicPath(cubics, hp);
+            canvas.drawPath(hp, p);
+            hp.delete();
+        } else if (hover?.type === 'vertex' && me.hoverAlt) {
+            // Alt over an interior vertex: both its lines glow red (deletion).
+            const row = Math.floor(hover.vi / stride);
+            const col = hover.vi % stride;
+            if (row > 0 && row < mesh.rows && col > 0 && col < mesh.cols) {
+                danger.setStrokeWidth(2 / z);
+                const hp = new ck.Path();
+                worldCubicPath(rowLine(row), hp);
+                worldCubicPath(colLine(col), hp);
+                canvas.drawPath(hp, danger);
+                hp.delete();
+            }
+        }
+
+        // ── Ghost previews of insertable lines (dashed accent) ──
+        const ghosts = me.ghostLines();
+        if (ghosts.length > 0) {
+            const dash = ck.PathEffect.MakeDash([5 / z, 4 / z], 0);
+            accent.setPathEffect(dash);
+            accent.setStrokeWidth(1.4 / z);
+            const gp = new ck.Path();
+            for (const chain of ghosts) worldCubicPath(chain, gp);
+            canvas.drawPath(gp, accent);
+            gp.delete();
+            accent.setPathEffect(null);
+            dash.delete();
+        }
+
+        // ── Handles of selected vertices (before diamonds so lines sit under) ──
+        halo.setStrokeWidth(2 / z);
+        white.setStrokeWidth(1 / z);
+        for (const vi of me.selectedVertices) {
+            if (vi >= mesh.vertices.length) continue;
+            const v = mesh.vertices[vi];
+            const row = Math.floor(vi / stride);
+            const col = vi % stride;
+            const vp = me.localToWorld(v.x, v.y);
+            for (const dir of ['e', 'w', 's', 'n'] as const) {
+                const exists =
+                    (dir === 'e' && col < mesh.cols) ||
+                    (dir === 'w' && col > 0) ||
+                    (dir === 's' && row < mesh.rows) ||
+                    (dir === 'n' && row > 0);
+                if (!exists) continue;
+                const h = effectiveHandle(mesh, vi, dir);
+                const hp = w(h);
+                canvas.drawLine(vp.x, vp.y, hp.x, hp.y, halo);
+                canvas.drawLine(vp.x, vp.y, hp.x, hp.y, white);
+                const hovered = hover?.type === 'handle' && hover.vi === vi && hover.dir === dir;
+                const r = (hovered ? 4.5 : 3.5) / z;
+                fill.setColor(ck.Color4f(1, 1, 1, 1));
+                canvas.drawCircle(hp.x, hp.y, r, fill);
+                accent.setStrokeWidth(1.2 / z);
+                canvas.drawCircle(hp.x, hp.y, r, accent);
+            }
+        }
+
+        // ── Vertices: color-filled diamonds ──
+        halo.setStrokeWidth(1 / z);
+        for (let vi = 0; vi < mesh.vertices.length; vi++) {
+            const v = mesh.vertices[vi];
+            const p = me.localToWorld(v.x, v.y);
+            const selected = me.selectedVertices.has(vi);
+            const hovered = hover?.type === 'vertex' && hover.vi === vi;
+            const s = ((selected ? 5.5 : 4.5) + (hovered ? 1 : 0)) / z;
+            canvas.save();
+            canvas.rotate(45, p.x, p.y);
+            const rect = ck.LTRBRect(p.x - s, p.y - s, p.x + s, p.y + s);
+            fill.setColor(ck.Color4f(1, 1, 1, 1));
+            canvas.drawRect(rect, fill);
+            fill.setColor(ck.Color4f(v.color.r, v.color.g, v.color.b, v.color.a));
+            canvas.drawRect(rect, fill);
+            canvas.drawRect(rect, halo);
+            if (selected || hovered) {
+                accent.setStrokeWidth(1.5 / z);
+                const ring = 1.5 / z;
+                canvas.drawRect(
+                    ck.LTRBRect(p.x - s - ring, p.y - s - ring, p.x + s + ring, p.y + s + ring),
+                    accent,
+                );
+            }
+            canvas.restore();
+        }
+
+        halo.delete();
+        white.delete();
+        fill.delete();
+        accent.delete();
+        danger.delete();
         canvas.restore();
     }
 

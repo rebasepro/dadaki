@@ -5,6 +5,7 @@ import { computeEqualSpacing } from './equal_spacing';
 import type { FileService } from './file_service';
 import { DEFAULT_TEXT_FONT, ensureFontCSS, loadGoogleFontData } from './fonts';
 import type { GuideHit, GuidesController } from './guides';
+import type { MeshEditController } from './mesh_edit';
 import { offsetPath } from './offset_path';
 import { outlineStroke } from './outline_stroke';
 import {
@@ -22,6 +23,7 @@ import { pathPointCount, simplifyPath } from './simplify_path';
 import { SnapEngine, type SnapGuide } from './snapping';
 import { textNodeToSubpaths } from './text_outlines';
 import type { Artboard, PathPoint, PenPathPoint, Subpath } from './types';
+import { isMeshGradient } from './types';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
 import { applyWidthProfile, type WidthProfile } from './width_profile';
@@ -139,6 +141,7 @@ export class InputManager {
         c: 'scissors',
         t: 'text',
         i: 'eyedropper',
+        u: 'mesh',
     };
     private static readonly TOOL_LOCK_WINDOW_MS = 400;
     /** Last tool-shortcut press, for double-tap-to-lock detection. */
@@ -306,6 +309,11 @@ export class InputManager {
     // --- Gradient handle state ---
     /** True while dragging an on-canvas gradient handle (ui.gradientEdit owns the details). */
     gradientDragActive: boolean = false;
+    /** True while a mesh vertex/handle drag is in flight (Mesh tool). */
+    meshDragActive: boolean = false;
+    /** Mesh-tool vertex marquee: press origin (world) + Shift-additive flag. */
+    private meshMarqueeStart: { x: number; y: number } | null = null;
+    private meshMarqueeAdditive = false;
 
     // --- Rotate handle state ---
     /** Which corner the rotation drag grabbed ('nw'|'ne'|'se'|'sw'), or null when not rotating. */
@@ -795,6 +803,17 @@ export class InputManager {
                 if (this.ui.gradientEdit.deleteStop(this.ui.gradientEdit.stopIndex)) {
                     this.ui.syncWithSelection();
                 }
+            } else if (
+                this.ui.activeTool === 'mesh' &&
+                this.ui.meshEdit.isActive() &&
+                this.ui.meshEdit.selectedVertices.size > 0
+            ) {
+                // Delete the grid lines through the selected interior
+                // vertices. Boundary-only selections no-op — never fall
+                // through to node deletion while mesh points are selected.
+                if (this.ui.meshEdit.deleteLinesThroughSelection()) {
+                    this.ui.syncWithSelection();
+                }
             } else if (this.renderer.selectedArtboardId !== null) {
                 // An artwork is selected → delete it.
                 this.deleteSelectedArtboard();
@@ -912,6 +931,13 @@ export class InputManager {
                 this.ui.syncWithSelection();
                 return;
             }
+            if (this.isMouseDown && this.meshDragActive) {
+                this.meshDragActive = false;
+                this.isMouseDown = false; // swallow the drag; onMouseUp early-returns
+                this.ui.meshEdit.cancelDrag();
+                this.ui.syncWithSelection();
+                return;
+            }
             if (
                 this.isMouseDown &&
                 (this.moveSnapshot ||
@@ -927,6 +953,13 @@ export class InputManager {
             }
             if (this.ui.gradientEdit.stopFocused) {
                 this.ui.gradientEdit.stopFocused = false;
+                return;
+            }
+            // Mesh tool: first Escape clears the vertex selection; the next
+            // falls through to the generic "back to Selection tool" below.
+            if (this.ui.activeTool === 'mesh' && this.ui.meshEdit.selectedVertices.size > 0) {
+                this.ui.meshEdit.selectedVertices.clear();
+                this.renderer.requestRender();
                 return;
             }
             if (this.editingNodeId !== null) {
@@ -1023,6 +1056,16 @@ export class InputManager {
         // Arrow key nudging — consecutive presses within 500ms are grouped
         // into a single undo step so Ctrl+Z reverts the whole sequence at once.
         if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+            // Mesh tool with selected vertices: nudge the mesh points
+            // (node-local units, one undo step per press), not the node.
+            if (this.ui.activeTool === 'mesh' && this.ui.meshEdit.selectedVertices.size > 0) {
+                e.preventDefault();
+                const step = e.shiftKey ? 10 : 1;
+                const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+                const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+                if (this.ui.meshEdit.nudge(dx, dy)) this.ui.syncWithSelection();
+                return;
+            }
             const selection = this.scene.engine!.get_selection();
             if (selection.length > 0) {
                 e.preventDefault();
@@ -1345,6 +1388,7 @@ export class InputManager {
         this.previewLine = null;
         this.pencilPoints = null;
         this.marqueeRect = null;
+        this.meshMarqueeStart = null;
         this.dragMode = 'none';
         this.isMouseDown = false;
         this.didMove = false;
@@ -1389,6 +1433,7 @@ export class InputManager {
             this.rotateSnapshot ||
             this.moveSnapshot ||
             this.gradientDragActive ||
+            this.meshDragActive ||
             this.draggingHandleType;
         if (!dragActive) return;
         const src = this.lastMouseEvent;
@@ -2081,7 +2126,130 @@ export class InputManager {
             this.handleScissorsDown(this.startPos);
         } else if (this.ui.activeTool === 'eyedropper') {
             this.handleEyedropper(this.startPos);
+        } else if (this.ui.activeTool === 'mesh') {
+            this.handleMeshDown(this.startPos, e);
         }
+    }
+
+    /** Mesh tool mousedown. Priority: active-mesh handles/vertices/lines →
+     *  convert/activate the clicked node → vertex marquee / deselect. */
+    private handleMeshDown(pos: { x: number; y: number }, e: MouseEvent) {
+        const me = this.ui.meshEdit;
+        if (me.isActive()) {
+            const hit = me.hitTest(pos, this.renderer.zoom);
+            if (hit) {
+                if (e.altKey) {
+                    // Alt-click: delete the clicked line, or both lines
+                    // through an interior vertex. Boundary targets no-op.
+                    if ((hit.type === 'line' || hit.type === 'vertex') && me.deleteAtHit(hit)) {
+                        this.ui.syncWithSelection();
+                    }
+                    return;
+                }
+                if (hit.type === 'vertex') {
+                    // Plain click selects; drag (if it follows) moves. Shift
+                    // toggles membership without starting a move of others.
+                    this.meshDragActive = true;
+                    me.beginVertexDrag(hit.vi, pos, e.shiftKey);
+                    this.ui.syncWithSelection({ interactive: true });
+                    return;
+                }
+                if (hit.type === 'handle') {
+                    this.meshDragActive = true;
+                    me.beginHandleDrag(hit.vi, hit.dir, pos);
+                    return;
+                }
+                // Grid line → add the perpendicular line; interior → add both.
+                if (me.addLinesAt(hit)) this.ui.syncWithSelection();
+                return;
+            }
+        }
+        // Not on the active mesh: a node click converts (or activates) it.
+        const nodeId = this.scene.hitTest(pos.x, pos.y);
+        if (nodeId !== undefined) {
+            const node = this.scene.getNode(nodeId);
+            const kind = node?.node_type;
+            if (kind === 'Text' || kind === 'Image' || kind === 'Group') return; // unsupported
+            const fills = node?.style.fills ?? [];
+            this.scene.selectNode(nodeId, false);
+            const meshIdx = fills.findIndex((f) => isMeshGradient(f));
+            if (meshIdx >= 0) {
+                me.activate(nodeId, meshIdx);
+                this.ui.updateLayerList();
+                this.ui.syncWithSelection();
+                return;
+            }
+            if (fills.length === 0) {
+                // Stroke-only shape: select it but don't invent a fill (T7).
+                this.ui.updateLayerList();
+                this.ui.syncWithSelection();
+                return;
+            }
+            const local = me.worldToLocalForNode(nodeId, pos.x, pos.y);
+            me.convertFillToMesh(nodeId, 0, local);
+            this.ui.updateLayerList();
+            this.ui.syncWithSelection();
+            return;
+        }
+        // Empty canvas: a drag becomes a vertex marquee (when a mesh is
+        // active); a plain click is resolved on mouseup (clear vertex
+        // selection first, then deselect the node).
+        if (me.isActive()) {
+            this.meshMarqueeStart = { ...pos };
+            this.meshMarqueeAdditive = e.shiftKey;
+            return;
+        }
+        this.scene.engine!.clear_selection();
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+    }
+
+    /** Mesh tool hover: update controller hover state (drives the overlay's
+     *  highlights and ghost insertion lines) and the cursor per target:
+     *  vertex = move, line/interior = copy (insert), Alt = delete affordance,
+     *  convertible shape = crosshair, unsupported = not-allowed. */
+    private updateMeshHover(e: MouseEvent) {
+        const me = this.ui.meshEdit;
+        const pos = this.currentPos;
+        let cursor = 'crosshair';
+        let hit: ReturnType<MeshEditController['hitTest']> = null;
+        let hoverNode: number | null = null;
+        if (me.isActive()) hit = me.hitTest(pos, this.renderer.zoom);
+        if (hit) {
+            if (hit.type === 'vertex') {
+                const mesh = me.mesh();
+                cursor =
+                    e.altKey && mesh && !me.isBoundaryVertex(mesh, hit.vi)
+                        ? 'default' // delete affordance (line highlight turns red)
+                        : 'move';
+            } else if (hit.type === 'handle') {
+                cursor = 'move';
+            } else {
+                cursor = e.altKey ? (hit.type === 'line' ? 'default' : 'crosshair') : 'copy';
+            }
+        } else {
+            const nodeId = this.scene.hitTest(pos.x, pos.y);
+            if (nodeId !== undefined) {
+                const node = this.scene.getNode(nodeId);
+                const kind = node?.node_type;
+                const fills = node?.style.fills ?? [];
+                if (kind === 'Text' || kind === 'Image' || kind === 'Group' || fills.length === 0) {
+                    cursor = 'not-allowed';
+                } else {
+                    hoverNode = nodeId; // outline highlight: "click converts me"
+                    cursor = 'crosshair';
+                }
+            }
+        }
+        const changed =
+            JSON.stringify(hit) !== JSON.stringify(me.hover) ||
+            me.hoverAlt !== e.altKey ||
+            this.hoverNodeId !== hoverNode;
+        me.hover = hit;
+        me.hoverAlt = e.altKey;
+        this.hoverNodeId = hoverNode;
+        this.canvas.style.cursor = cursor;
+        if (changed) this.renderer.requestRender();
     }
 
     /** Eyedropper: sample the appearance (fills, strokes, opacity, blend mode,
@@ -3826,6 +3994,12 @@ export class InputManager {
             this.canvas.style.cursor = 'crosshair';
         }
 
+        // Mesh tool hover: feed the overlay's hover state (highlights + ghost
+        // insertion lines) and pick the cursor for what a click would do.
+        if (!this.isMouseDown && this.ui.activeTool === 'mesh') {
+            this.updateMeshHover(e);
+        }
+
         // Paint bucket hover preview. Filling is primary, so we highlight the
         // region under the cursor; only when Alt is held (edge mode) do we
         // highlight the nearest edge — matching what a click will do.
@@ -3912,6 +4086,30 @@ export class InputManager {
         // On-canvas gradient handle drag (endpoints / stops / freshly inserted stop)
         if (this.gradientDragActive) {
             this.ui.gradientEdit.moveDrag(this.currentPos, e.shiftKey);
+            return;
+        }
+
+        // Mesh vertex/handle drag (Mesh tool)
+        if (this.meshDragActive) {
+            const screenDist =
+                Math.hypot(
+                    this.currentPos.x - this.startPos.x,
+                    this.currentPos.y - this.startPos.y,
+                ) * this.renderer.zoom;
+            if (screenDist > DRAG_START_THRESHOLD_PX) this.didMove = true;
+            if (this.didMove) this.ui.meshEdit.moveDrag(this.currentPos, e.shiftKey, e.altKey);
+            return;
+        }
+        // Mesh vertex marquee (drag from empty canvas with a mesh active)
+        if (this.meshMarqueeStart && this.ui.activeTool === 'mesh') {
+            this.didMove = true;
+            this.marqueeRect = {
+                x: Math.min(this.meshMarqueeStart.x, this.currentPos.x),
+                y: Math.min(this.meshMarqueeStart.y, this.currentPos.y),
+                w: Math.abs(this.currentPos.x - this.meshMarqueeStart.x),
+                h: Math.abs(this.currentPos.y - this.meshMarqueeStart.y),
+            };
+            this.renderer.requestRender();
             return;
         }
 
@@ -4740,6 +4938,40 @@ export class InputManager {
             this.gradientDragActive = false;
             this.ui.gradientEdit.endDrag();
             this.ui.syncWithSelection();
+            return;
+        }
+
+        // Commit mesh vertex/handle drag (a travel-less press resolves a
+        // pending Shift-toggle instead)
+        if (this.meshDragActive) {
+            this.meshDragActive = false;
+            this.ui.meshEdit.endDrag(this.didMove);
+            this.ui.syncWithSelection();
+            return;
+        }
+        // Resolve a mesh-tool press on empty canvas: marquee-select vertices,
+        // or (plain click) clear the vertex selection first, then deselect.
+        if (this.meshMarqueeStart && this.ui.activeTool === 'mesh') {
+            const me = this.ui.meshEdit;
+            if (this.didMove && this.marqueeRect) {
+                me.selectVerticesInWorldRect(
+                    { x: this.marqueeRect.x, y: this.marqueeRect.y },
+                    {
+                        x: this.marqueeRect.x + this.marqueeRect.w,
+                        y: this.marqueeRect.y + this.marqueeRect.h,
+                    },
+                    this.meshMarqueeAdditive,
+                );
+            } else if (me.selectedVertices.size > 0) {
+                me.selectedVertices.clear();
+            } else {
+                this.scene.engine!.clear_selection();
+                this.ui.updateLayerList();
+                this.ui.syncWithSelection();
+            }
+            this.meshMarqueeStart = null;
+            this.marqueeRect = null;
+            this.renderer.requestRender();
             return;
         }
 

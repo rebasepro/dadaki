@@ -127,16 +127,117 @@ pub struct Pattern {
 
 fn default_pattern_transform() -> [f32; 6] { [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] }
 
-/// A paint can be a solid color, a gradient, or a tiled-image pattern.
+/// Direction handles of a mesh vertex, in ABSOLUTE node-local coordinates.
+/// `None` = auto: 1/3 of the way toward the neighboring vertex (straight edge).
+/// Directions follow grid axes: e = +u (next column), w = -u, s = +v (next
+/// row), n = -v. Outward-facing handles on boundary vertices are meaningless
+/// and stay `None`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct MeshHandles {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e: Option<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub w: Option<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s: Option<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n: Option<[f32; 2]>,
+}
+
+impl MeshHandles {
+    fn is_empty(&self) -> bool {
+        self.e.is_none() && self.w.is_none() && self.s.is_none() && self.n.is_none()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MeshVertex {
+    pub x: f32,
+    pub y: f32,
+    pub color: Color,
+    #[serde(default, skip_serializing_if = "MeshHandles::is_empty")]
+    pub handles: MeshHandles,
+}
+
+/// Coons-patch mesh fill: a `rows`×`cols` grid of patches over node-local
+/// space with `(rows+1)*(cols+1)` vertices stored row-major. Grid lines are
+/// cubic béziers shaped by the vertex handles; each patch interpolates its
+/// four corner colors. Rendered by the JS renderer (tessellation +
+/// drawVertices) clipped to the node's fill path.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MeshGradient {
+    pub rows: u32,
+    pub cols: u32,
+    pub vertices: Vec<MeshVertex>,
+}
+
+impl MeshGradient {
+    /// Structural sanity: non-zero grid and a matching vertex count.
+    pub fn is_valid(&self) -> bool {
+        self.rows >= 1
+            && self.cols >= 1
+            && self.vertices.len() == ((self.rows + 1) * (self.cols + 1)) as usize
+    }
+
+    /// Area-mean of the vertex colors (used wherever a single representative
+    /// color is needed: Live Paint sampling, old-format degradation, UI).
+    pub fn mean_color(&self) -> Color {
+        let n = self.vertices.len().max(1) as f32;
+        let mut acc = [0.0f32; 4];
+        for v in &self.vertices {
+            acc[0] += v.color.r;
+            acc[1] += v.color.g;
+            acc[2] += v.color.b;
+            acc[3] += v.color.a;
+        }
+        Color { r: acc[0] / n, g: acc[1] / n, b: acc[2] / n, a: acc[3] / n }
+    }
+
+    /// Handle position for vertex `idx` toward `dir` (0=e, 1=w, 2=s, 3=n),
+    /// materializing the auto default (1/3 toward the neighbor). For outward
+    /// boundary directions there is no neighbor: returns the anchor itself.
+    pub fn effective_handle(&self, idx: usize, dir: u8) -> [f32; 2] {
+        let v = &self.vertices[idx];
+        let stored = match dir {
+            0 => v.handles.e,
+            1 => v.handles.w,
+            2 => v.handles.s,
+            _ => v.handles.n,
+        };
+        if let Some(h) = stored {
+            return h;
+        }
+        let stride = (self.cols + 1) as usize;
+        let (row, col) = (idx / stride, idx % stride);
+        let neighbor = match dir {
+            0 if col < self.cols as usize => Some(idx + 1),
+            1 if col > 0 => Some(idx - 1),
+            2 if row < self.rows as usize => Some(idx + stride),
+            3 if row > 0 => Some(idx - stride),
+            _ => None,
+        };
+        match neighbor {
+            Some(ni) => {
+                let nv = &self.vertices[ni];
+                [v.x + (nv.x - v.x) / 3.0, v.y + (nv.y - v.y) / 3.0]
+            }
+            None => [v.x, v.y],
+        }
+    }
+}
+
+/// A paint can be a solid color, a gradient, a tiled-image pattern, or a
+/// Coons-patch mesh gradient.
 /// Custom Serialize/Deserialize for JSON interchange with JS (`set_node_style`
-/// sends a Style whose fills are bare color/gradient/pattern objects). Snapshots
-/// and files go through protobuf (proto.rs), not serde, so there is no
-/// positional codec to keep in lockstep here.
+/// sends a Style whose fills are bare color/gradient/pattern/mesh objects).
+/// Snapshots and files go through protobuf (proto.rs), not serde, so there is
+/// no positional codec to keep in lockstep here.
 #[derive(Clone, Debug)]
 pub enum Paint {
     Gradient(Gradient),
     Solid(Color),
     Pattern(Pattern),
+    Mesh(MeshGradient),
 }
 
 impl serde::Serialize for Paint {
@@ -146,6 +247,7 @@ impl serde::Serialize for Paint {
             Paint::Solid(c) => c.serialize(serializer),
             Paint::Gradient(g) => g.serialize(serializer),
             Paint::Pattern(p) => p.serialize(serializer),
+            Paint::Mesh(m) => m.serialize(serializer),
         }
     }
 }
@@ -153,7 +255,8 @@ impl serde::Serialize for Paint {
 impl<'de> serde::Deserialize<'de> for Paint {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // JSON: distinguish by a discriminating field — Gradient has
-        // `gradient_type`, Pattern has `image_id`, otherwise it's a bare Color.
+        // `gradient_type`, Pattern has `image_id`, Mesh has `vertices`,
+        // otherwise it's a bare Color.
         let value = serde_json::Value::deserialize(deserializer)?;
         if value.get("gradient_type").is_some() {
             let g: Gradient = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
@@ -161,6 +264,13 @@ impl<'de> serde::Deserialize<'de> for Paint {
         } else if value.get("image_id").is_some() {
             let p: Pattern = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
             Ok(Paint::Pattern(p))
+        } else if value.get("vertices").is_some() {
+            let m: MeshGradient =
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            if !m.is_valid() {
+                return Err(serde::de::Error::custom("mesh vertex count mismatch"));
+            }
+            Ok(Paint::Mesh(m))
         } else {
             let c: Color = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
             Ok(Paint::Solid(c))
@@ -178,6 +288,7 @@ impl Paint {
                 .map(|s| s.color.clone())
                 .unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
             Paint::Pattern(_) => Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 },
+            Paint::Mesh(m) => m.mean_color(),
         }
     }
 
@@ -187,6 +298,7 @@ impl Paint {
             Paint::Solid(c) => c.a > 0.0,
             Paint::Gradient(g) => g.stops.iter().any(|s| s.color.a > 0.0),
             Paint::Pattern(_) => true,
+            Paint::Mesh(m) => m.vertices.iter().any(|v| v.color.a > 0.0),
         }
     }
 }
@@ -792,7 +904,10 @@ pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// v11: Blur effect gains a second f32 (y-axis sigma, anisotropic); gradients
 ///      gain a trailing [has_transform u32][a,b,c,d,e,f f32] block for rotated /
 ///      elliptical radials (local matrix + raw gradient-space coords).
-pub const RENDER_PROTOCOL_VERSION: u32 = 11;
+/// v12: paint type 5 = mesh gradient: [rows u32][cols u32] then per vertex
+///      (row-major, (rows+1)*(cols+1)) [x,y f32][r,g,b,a f32][e,w,s,n handles
+///      as 8 f32, effective/materialized — the reader never sees "auto"].
+pub const RENDER_PROTOCOL_VERSION: u32 = 12;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -849,6 +964,36 @@ fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>, opacity: f32) {
             buf.extend_from_slice(&c.g.to_le_bytes());
             buf.extend_from_slice(&c.b.to_le_bytes());
             buf.extend_from_slice(&(c.a * opacity).to_le_bytes());
+        }
+        Some(Paint::Mesh(m)) if !m.is_valid() => {
+            // Corrupt grid (shouldn't happen — deserialize paths validate):
+            // degrade to a solid so the writer can't index out of bounds.
+            let c = m.mean_color();
+            buf.extend_from_slice(&1u32.to_le_bytes());
+            buf.extend_from_slice(&c.r.to_le_bytes());
+            buf.extend_from_slice(&c.g.to_le_bytes());
+            buf.extend_from_slice(&c.b.to_le_bytes());
+            buf.extend_from_slice(&(c.a * opacity).to_le_bytes());
+        }
+        Some(Paint::Mesh(m)) => {
+            // v12: mesh gradient. Handles are materialized via effective_handle
+            // so the reader gets concrete control points, never "auto".
+            buf.extend_from_slice(&5u32.to_le_bytes()); // type: mesh
+            buf.extend_from_slice(&m.rows.to_le_bytes());
+            buf.extend_from_slice(&m.cols.to_le_bytes());
+            for (i, v) in m.vertices.iter().enumerate() {
+                buf.extend_from_slice(&v.x.to_le_bytes());
+                buf.extend_from_slice(&v.y.to_le_bytes());
+                buf.extend_from_slice(&v.color.r.to_le_bytes());
+                buf.extend_from_slice(&v.color.g.to_le_bytes());
+                buf.extend_from_slice(&v.color.b.to_le_bytes());
+                buf.extend_from_slice(&(v.color.a * opacity).to_le_bytes());
+                for dir in 0..4u8 {
+                    let h = m.effective_handle(i, dir);
+                    buf.extend_from_slice(&h[0].to_le_bytes());
+                    buf.extend_from_slice(&h[1].to_le_bytes());
+                }
+            }
         }
         Some(Paint::Gradient(g)) => {
             let type_tag = match g.gradient_type {
@@ -5026,12 +5171,14 @@ impl Engine {
 }
 
 /// A representative solid color for a paint: solids as-is, gradients → first
-/// stop (documented approximation for Live Paint), patterns → none.
+/// stop, meshes → mean vertex color (documented approximations for Live
+/// Paint), patterns → none.
 fn paint_color(p: &Paint) -> Option<Color> {
     match p {
         Paint::Solid(c) => Some(*c),
         Paint::Gradient(g) => g.stops.first().map(|s| s.color),
         Paint::Pattern(_) => None,
+        Paint::Mesh(m) => Some(m.mean_color()),
     }
 }
 
