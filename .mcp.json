@@ -6,7 +6,9 @@
                 "--experimental-strip-types",
                 "./packages/mcp/src/index.ts",
                 "--mode",
-                "bridge"
+                "relay",
+                "--url",
+                "https://dadaki.apps.rebase.pro"
             ],
             "env": {}
         }

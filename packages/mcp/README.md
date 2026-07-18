@@ -45,10 +45,17 @@ editor chrome, at whatever scale is asked for.
 
 | Mode | What it does | Use it for |
 | --- | --- | --- |
-| `bridge` | Drives the editor tab **you** have open | Working alongside the agent — the default in `.mcp.json` |
+| `relay` | Drives your tab in the **hosted app** | The deployed SaaS — the default in `.mcp.json` |
+| `bridge` | Drives your tab on **localhost** | Local dev against `pnpm dev` |
 | `headless` | Throwaway browser serving the local build | Scripts, CI, unattended work |
 | `headful` | The same, with a visible window | Watching an agent work; debugging |
-| `--url <addr>` | Any of the above, pointed elsewhere | Dev server, staging, the deployed app |
+| `--url <addr>` | Any of the above, pointed elsewhere | Dev server, staging, the deployment |
+
+**Why two "your tab" modes.** `bridge` has the page dial `ws://127.0.0.1`
+directly, which only works when the page itself is served from localhost. From
+a public origin Chrome refuses the connection outright — Local Network Access
+checks, `ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS` — so the hosted app needs
+`relay`, where both sides connect outward and the backend pairs them.
 
 **`headless` is the code default; `bridge` is what the checked-in `.mcp.json`
 selects.** That split is deliberate: headless is right for a script, and wrong
@@ -80,6 +87,21 @@ Register it with an MCP client:
 
 Add `"--mode", "bridge"` to `args` (or `"env": {"DADAKI_MCP_MODE": "bridge"}`) to
 switch modes. `DADAKI_MCP_HEADFUL=1` still works.
+
+### Relay mode (the hosted app)
+
+```bash
+node --experimental-strip-types packages/mcp/src/index.ts \
+  --mode relay --url https://your-app/
+```
+
+It prints a URL; open the hosted editor with it once and the tab attaches. From
+there it behaves exactly like bridge mode — same tools, same badge, same
+one-call-one-undo — except the calls travel through the app's backend
+(`/api/agent-bridge`) instead of a loopback socket.
+
+Sessions live in the backend process's memory, so a horizontally scaled
+deployment would need sticky routing or a shared store.
 
 ### Bridge mode
 
