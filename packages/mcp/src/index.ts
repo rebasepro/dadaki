@@ -11,19 +11,30 @@
  * mutating tool returns the affected node so the agent can immediately verify
  * placement without a round-trip.
  *
+ * Every tool works in every mode. The mode decides only how a call reaches an
+ * editor (see transport.ts): a browser this server owns, or one the user has
+ * open. Nothing in the tool layer below knows which is in use.
+ *
+ *   headless  (default)  a throwaway browser serving the local build
+ *   headful              the same, with a window so a human can watch
+ *   bridge               drive the editor tab the user already has open
+ *   --url <addr>         point any of the above at a dev server or deployment
+ *
  * Usage (stdio):
  *   pnpm build            # produce packages/app/dist, which the server serves
- *   node --experimental-strip-types packages/mcp/src/index.ts
+ *   node --experimental-strip-types packages/mcp/src/index.ts [--mode bridge]
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { EditorSession } from './session.ts';
+import { createTransport, readConfig } from './config.ts';
 
-const session = new EditorSession({
-    headful: process.env.DADAKI_MCP_HEADFUL === '1',
-});
+const config = readConfig();
+const { transport: session, notice } = await createTransport(config);
+// Diagnostics go to stderr: stdout is the MCP wire protocol.
+console.error(notice);
 
 const server = new McpServer({ name: 'dadaki', version: '1.0.0' });
 
@@ -59,16 +70,17 @@ function tool<S extends z.ZodRawShape>(
     schema: S,
     run: (args: z.objectOutputType<S, z.ZodTypeAny>) => Promise<unknown>,
 ) {
-    server.registerTool(name, { description, inputSchema: schema }, async (args) => {
+    const handler = async (args: Record<string, unknown>): Promise<CallToolResult> => {
         try {
             return asText(await run(args as z.objectOutputType<S, z.ZodTypeAny>));
         } catch (err) {
-            return {
-                isError: true,
-                content: [{ type: 'text' as const, text: (err as Error).message }],
-            };
+            return { isError: true, content: [{ type: 'text', text: (err as Error).message }] };
         }
-    });
+    };
+    // registerTool infers its callback's argument from the *concrete* schema,
+    // which can't be reconciled with this wrapper's generic one. The handler's
+    // return type is checked above; only the argument type is being asserted.
+    server.registerTool(name, { description, inputSchema: schema }, handler as never);
 }
 
 /** Create a node, then report it back so the agent can verify placement. */
@@ -88,12 +100,9 @@ tool(
 
 tool(
     'render_png',
-    'Render the canvas to a PNG image so you can SEE the artwork. Use this to check composition, spacing and colour after making changes — bounds alone will not tell you whether a drawing looks right.',
-    {},
-    async () => {
-        const data = await session.screenshot();
-        return { image: data };
-    },
+    'Render the canvas to a base64 PNG so you can SEE the artwork. Use this to check composition, spacing and colour after making changes — bounds alone will not tell you whether a drawing looks right.',
+    { scale: z.number().positive().max(8).optional().describe('Pixels per world unit, default 2') },
+    async (a) => ({ image: await session.call<string>('toPNG', [a.scale ?? 2]) }),
 );
 
 server.registerTool(
@@ -105,7 +114,11 @@ server.registerTool(
     },
     async () => ({
         content: [
-            { type: 'image' as const, data: await session.screenshot(), mimeType: 'image/png' },
+            {
+                type: 'image' as const,
+                data: await session.call<string>('toPNG', [2]),
+                mimeType: 'image/png',
+            },
         ],
     }),
 );

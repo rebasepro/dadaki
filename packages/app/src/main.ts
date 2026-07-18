@@ -5,7 +5,7 @@
 // page via the library's `createEditor`, and owns app-only concerns: the
 // Firebase analytics sink, the unsaved-changes guard, and dev/test globals.
 
-import { createEditor } from '@dadaki/editor';
+import { connectAgentBridge, createEditor, readBridgeCredentials } from '@dadaki/editor';
 import '@dadaki/editor/style.css';
 import { createIcons, icons } from 'lucide';
 import { createFirebaseAnalyticsSink } from './firebase_analytics';
@@ -44,6 +44,18 @@ async function bootstrap() {
         newDocument: editor.newDocument,
         ck,
     };
+
+    // Attach to an agent bridge if this tab was given one (via
+    // ?agentBridge=PORT&token=… , or a previous session). Opt-in only: with no
+    // credentials this does nothing at all.
+    const bridge = readBridgeCredentials();
+    if (bridge) {
+        connectAgentBridge(editor.agent, bridge, {
+            onStatus: (connected) => {
+                document.body.classList.toggle('agent-attached', connected);
+            },
+        });
+    }
 
     // Warn before leaving if any open document has unsaved changes. Skipped in
     // dev — HMR reloads constantly and the prompt is just noise there.

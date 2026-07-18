@@ -98,6 +98,13 @@ export interface AgentApi {
     describeNode(id: number): AgentNode | null;
     /** The active document serialized to SVG (for rendering / inspection). */
     toSVG(): string;
+    /**
+     * The artboard rasterized to a base64 PNG, at `scale` pixels per world
+     * unit. Rendered by CanvasKit through the editor's own export path, so it
+     * carries no editor chrome and is identical whichever transport an agent
+     * reached the editor through.
+     */
+    toPNG(scale?: number): Promise<string>;
 
     // ─── Creating ──────────────────────────────────────────────────────
     createRect(x: number, y: number, w: number, h: number, style?: AgentStyle): number;
@@ -229,6 +236,12 @@ export interface AgentDeps {
     setSelection(ids: number[]): void;
     /** Serialize the active document to SVG. */
     exportSVG(): string;
+    /**
+     * Rasterize the artboard to a base64 PNG at `scale` px per world unit.
+     * Lives on the host because it needs the renderer's offscreen export
+     * surface, which this module deliberately doesn't depend on.
+     */
+    renderPNG(scale: number): Promise<string>;
     /**
      * Import an SVG document, resolving to the new root ids. Lives on the UI
      * engine (it needs DOM parsing plus raster fallbacks), which this module
@@ -527,6 +540,8 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
         describeNode,
 
         toSVG: () => deps.exportSVG(),
+
+        toPNG: (scale = 2) => deps.renderPNG(scale),
 
         createRect(x, y, w, h, style) {
             return scene.transaction(() => {

@@ -37,11 +37,20 @@ import { WasmScene } from './wasm_scene';
 
 export type {
     AgentApi,
+    AgentCanvas,
     AgentDescription,
+    AgentGradient,
     AgentNode,
     AgentPathPoint,
     AgentStyle,
+    AgentTextOptions,
 } from './agent';
+export type { BridgeCredentials, BridgeHandle, BridgeOptions } from './agent_bridge';
+export {
+    clearBridgeCredentials,
+    connectAgentBridge,
+    readBridgeCredentials,
+} from './agent_bridge';
 export type { AnalyticsSink } from './analytics';
 export { logAppEvent, registerAnalyticsSink } from './analytics';
 export type { Document } from './document';
@@ -362,6 +371,29 @@ export async function createEditor(
             renderer.requestRender();
         },
         exportSVG,
+        renderPNG: async (scale: number) => {
+            // Frame the artboard, matching exportSVG, so an agent's PNG and its
+            // SVG deliverable always show the same thing. The artboard's own
+            // background is used, falling back to the white the editor shows.
+            const arts = wasmScene.getArtboards();
+            const ab = arts[0];
+            const bounds = ab
+                ? { x: ab.x, y: ab.y, w: ab.w, h: ab.h }
+                : renderer.getArtboardsBounds();
+            const bg =
+                ab?.background && ab.background.a > 0 ? ab.background : { r: 1, g: 1, b: 1, a: 1 };
+            const blob = renderer.exportPNG(scale, bounds, bg);
+            if (!blob) throw new Error('[agent] PNG export failed (no render surface)');
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            // Chunked: String.fromCharCode(...bytes) overflows the call stack
+            // on anything but a tiny image.
+            let binary = '';
+            const CHUNK = 0x8000;
+            for (let i = 0; i < bytes.length; i += CHUNK) {
+                binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+            }
+            return btoa(binary);
+        },
         importSVG: (svg: string) =>
             new Promise<number[]>((resolve, reject) => {
                 ui.parseSVG(svg, (newRoots) => resolve(newRoots)).catch(reject);

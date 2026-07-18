@@ -19,22 +19,38 @@ without a round-trip.
 
 ## Architecture
 
-```
-agent ──stdio──▶ MCP server (node) ──CDP──▶ headless Chrome
-                                              └─ the real editor build
-                                                 (CanvasKit + Rust/WASM engine)
-```
-
 The editor is a browser application: CanvasKit, the WASM engine and the whole
 tool layer assume a DOM and a GPU canvas. Rather than maintain a second,
-inevitably-divergent Node implementation, the server runs the **real** editor
-build in headless Chrome and calls into it. Agent edits therefore go through the
-same engine, history and export paths as a human's.
+inevitably-divergent Node implementation, the server drives the **real** editor.
+Agent edits therefore go through the same engine, history and export paths as a
+human's.
 
-The page is served from `packages/app/dist` by a static server on an ephemeral
-loopback port. No dev server, no network access.
+The agent API (`EditorHandle.agent`) is identical in every editor instance. What
+differs between modes is only how a call gets into the page, which is isolated
+behind one `EditorTransport` interface — so **every tool works in every mode**,
+and nothing in the tool layer knows which is in use.
 
-## Setup
+```
+                          ┌── CDP ──▶ a browser this server launches
+agent ──stdio──▶ MCP server
+                          └── ws  ──▶ the editor tab YOU already have open
+```
+
+Rendering is not special-cased per mode. `render_png` is an ordinary call to
+`agent.toPNG()`, which CanvasKit services inside the page through the editor's
+own export path — so a render produces the same pixels in every mode, with no
+editor chrome, at whatever scale is asked for.
+
+## Modes
+
+| Mode | What it does | Use it for |
+| --- | --- | --- |
+| `headless` (default) | Throwaway browser serving the local build | Scripts, CI, unattended work |
+| `headful` | The same, with a visible window | Watching an agent work; debugging |
+| `bridge` | Drives the editor tab **you** have open | Working alongside the agent |
+| `--url <addr>` | Any of the above, pointed elsewhere | Dev server, staging, the deployed app |
+
+### Setup
 
 ```bash
 pnpm install
@@ -54,8 +70,45 @@ Register it with an MCP client:
 }
 ```
 
-Set `DADAKI_MCP_HEADFUL=1` to watch the browser work — useful when debugging
-what an agent is actually doing.
+Add `"--mode", "bridge"` to `args` (or `"env": {"DADAKI_MCP_MODE": "bridge"}`) to
+switch modes. `DADAKI_MCP_HEADFUL=1` still works.
+
+### Bridge mode
+
+The server launches no browser. It listens on loopback and prints a URL:
+
+```
+[dadaki-mcp] bridge mode — listening on 127.0.0.1:54666
+[dadaki-mcp] open your editor with this URL to attach it:
+
+    http://localhost:5199/?agentBridge=54666&token=…
+```
+
+Open that once and the tab attaches. The credentials are stripped from the
+address bar (so the token doesn't linger in history or get pasted into a shared
+link) and remembered, so reloads stay attached — call
+`clearBridgeCredentials()` to stop.
+
+You keep working in the same window while the agent does. Its edits are ordinary
+edits: same undo history, same granularity, so you can undo its work, correct
+it, or take over mid-drawing.
+
+The channel is a remote control into your document, so it is deliberately
+narrow: loopback only, one editor at a time (a second is refused, so a call is
+never ambiguous about which document it hit), token-gated with a timing-safe
+comparison, and able to invoke only functions that exist on the agent API — it
+cannot evaluate arbitrary code in your page.
+
+### The deployed app
+
+Bridge mode works against the cloud app: `ws://127.0.0.1` is **not** blocked as
+mixed content from an `https://` page, because loopback counts as a potentially
+trustworthy origin. That is verified in `smoke_modes.ts` against a real HTTPS
+origin rather than assumed. Open the deployed editor with the same
+`?agentBridge=…&token=…` query and it attaches.
+
+`--url https://your-app/` also works, but headless can't get past a login — use
+`--mode headful --url …`, sign in the visible window, then let the agent work.
 
 ## Tools
 
@@ -122,10 +175,22 @@ survive the feature being broken.
 ## Testing
 
 ```bash
-pnpm test                                              # agent API unit tests
-node --experimental-strip-types packages/mcp/smoke.ts  # full MCP round-trip
+pnpm test                                     # agent API unit tests
+pnpm --filter @dadaki/mcp smoke               # full MCP round-trip (headless)
+pnpm --filter @dadaki/mcp smoke:bridge        # bridge mode, incl. its security rules
+pnpm --filter @dadaki/mcp smoke:modes <dir>   # every mode; <dir> holds cert.pem/key.pem
 ```
 
-The unit tests cover the agent API against the real WASM engine. The smoke test
-covers what only exists assembled: the MCP handshake, the CDP bridge, CanvasKit
-booting headless, and rendering.
+The unit tests cover the agent API against the real WASM engine. The smoke tests
+cover what only exists assembled: the MCP handshake, each transport, CanvasKit
+booting, and rendering.
+
+`smoke:bridge` is the one worth reading. Bridge mode's correctness claim is that
+a call lands in *somebody else's* page, so the test opens an editor itself,
+attaches it, drives it over MCP, and then reads that page back **directly** —
+not through MCP — to prove the edit really landed there. It also checks the
+security rules hold: a second editor is refused, and a bad token gets nothing.
+
+`smoke:modes` needs a self-signed cert to test the HTTPS case; generate one with
+`openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 2 -nodes
+-subj /CN=localhost`. Without it that one check is skipped, not failed.

@@ -50,6 +50,9 @@ function makeAgent(): { agent: AgentApi; scene: WasmScene; selection: number[] }
         // neither of which exists headless; the importSVG tests assert the
         // validation that happens before this is ever reached.
         importSVG: async () => [],
+        // Rasterizing needs the renderer's offscreen surface, which doesn't
+        // exist headless; the transports are covered by the MCP smoke test.
+        renderPNG: async () => '',
     });
     return { agent, scene, selection: state.selection };
 }
