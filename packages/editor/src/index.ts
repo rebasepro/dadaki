@@ -71,6 +71,16 @@ export interface EditorOptions {
      */
     onDocumentActivated?: (doc: Document) => void;
     /**
+     * Fired on every scene mutation, carrying the document that changed. This
+     * is the signal a host with its own persistence should drive autosave from:
+     * it covers every path that can dirty a document (gestures, menu actions,
+     * SVG import, paste, programmatic edits), unlike listening for DOM events
+     * on the canvas.
+     */
+    onDocumentMutated?: (doc: Document) => void;
+    /** Fired when a tab is closed, so a host can drop its per-document state. */
+    onDocumentClosed?: (doc: Document) => void;
+    /**
      * Toggle/inject into the built-in chrome for embedding.
      * - `header: false` hides the whole top header (rarely needed).
      * - `saveButton: false` hides just the built-in Save button — use this when
@@ -103,11 +113,12 @@ export interface EditorHandle {
     /** Currently active document, or undefined. */
     activeDocument(): Document | undefined;
     /**
-     * Serialize the active document to durable bytes (the `.dataki` protobuf
-     * snapshot). Returns null if there is no active document/engine. Use this
-     * to persist a scene to your own backend.
+     * Serialize a document to durable bytes (the `.dataki` protobuf snapshot).
+     * Defaults to the active document; pass a `Document.id` to serialize a
+     * background tab, which a host needs to flush that tab's pending save
+     * without switching to it. Returns null if the document has no live engine.
      */
-    exportBytes(): Uint8Array | null;
+    exportBytes(docId?: string): Uint8Array | null;
     /** Serialize the active document to an SVG string (good for previews). */
     exportSVG(): string;
     /**
@@ -213,6 +224,8 @@ export async function createEditor(
     documentManager.hostEvents = {
         opened: options.onDocumentOpened,
         activated: options.onDocumentActivated,
+        mutated: options.onDocumentMutated,
+        closed: options.onDocumentClosed,
     };
 
     // Export dialog + button.
@@ -309,8 +322,8 @@ export async function createEditor(
             headerTrailing: el<HTMLElement>('header-slot-trailing'),
         },
         activeDocument: () => documentManager.active() ?? undefined,
-        exportBytes: () => {
-            const doc = documentManager.active();
+        exportBytes: (docId?: string) => {
+            const doc = docId ? documentManager.byId(docId) : documentManager.active();
             const engine = doc?.engine;
             if (!engine) return null;
             return new Uint8Array(engine.serialize_proto());

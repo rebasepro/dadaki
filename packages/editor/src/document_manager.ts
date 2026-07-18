@@ -26,11 +26,15 @@ export class DocumentManager {
      * Optional host callbacks (embedding API — see EditorOptions). `opened`
      * fires when the USER brings a document with content into the editor (file
      * picker, backup restore) — i.e. documents the host doesn't yet know about;
-     * `activated` fires on every active-tab change, including the first one.
+     * `activated` fires on every active-tab change, including the first one;
+     * `mutated` fires on every scene mutation, carrying the document it
+     * belongs to; `closed` fires when a tab is closed.
      */
     hostEvents: {
         opened?: (doc: Document) => void;
         activated?: (doc: Document) => void;
+        mutated?: (doc: Document) => void;
+        closed?: (doc: Document) => void;
     } = {};
 
     constructor(
@@ -103,6 +107,11 @@ export class DocumentManager {
         // Capture a final version snapshot before dropping the working copy, so
         // the closed document stays recoverable from the backups list.
         doc.autosave?.snapshotNow();
+
+        // Tell the host while the document is still fully addressable, so it
+        // can flush a pending save (which needs to look the doc up and
+        // serialize it) before dropping its per-document state.
+        this.hostEvents.closed?.(doc);
 
         const idx = this.docs.findIndex((d) => d.id === id);
         this.docs.splice(idx, 1);
@@ -288,6 +297,10 @@ export class DocumentManager {
 
     private handleMutation(doc: Document): void {
         doc.markMutated();
+        // Every scene mutation funnels through here regardless of how it was
+        // triggered (gesture, menu, SVG import, paste, programmatic), so this
+        // is the one place a host can reliably learn "this document changed".
+        this.hostEvents.mutated?.(doc);
         // Autosave itself is triggered by the WasmScene mutation wrappers via
         // this.scene.autosave (= doc.autosave). Here we only reflect the dirty
         // state in the chrome.
