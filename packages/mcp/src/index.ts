@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --experimental-strip-types
 /**
  * Dadaki MCP server — lets an agent author vector artwork the way a designer
  * would: place shapes, style them, align and combine them, then LOOK at the
