@@ -14,8 +14,9 @@ import { dirname, join } from 'node:path';
 import type { EditorTransport } from './transport.ts';
 import { BridgeTransport } from './transport_bridge.ts';
 import { PuppeteerTransport } from './transport_puppeteer.ts';
+import { RelayTransport } from './transport_relay.ts';
 
-export type Mode = 'headless' | 'headful' | 'bridge';
+export type Mode = 'headless' | 'headful' | 'bridge' | 'relay';
 
 /**
  * Default bridge port. Fixed, not ephemeral, so the connect URL is the SAME
@@ -82,7 +83,12 @@ export function readConfig(argv: string[] = process.argv.slice(2)): Config {
 
     const rawMode = args.get('mode') ?? process.env.DADAKI_MCP_MODE;
     let mode: Mode;
-    if (rawMode === 'bridge' || rawMode === 'headful' || rawMode === 'headless') {
+    if (
+        rawMode === 'bridge' ||
+        rawMode === 'headful' ||
+        rawMode === 'headless' ||
+        rawMode === 'relay'
+    ) {
         mode = rawMode;
     } else if (envFlag('DADAKI_MCP_HEADFUL')) {
         // Retained: this was the original way to watch the agent work.
@@ -102,23 +108,73 @@ export function readConfig(argv: string[] = process.argv.slice(2)): Config {
     return { mode, url, port, token };
 }
 
+/**
+ * Is something serving `base`? Used only to make the startup notice honest,
+ * so a short timeout and a swallowed error are the right behaviour — a slow or
+ * unreachable editor must never delay or fail the server itself.
+ */
+async function editorReachable(base: string): Promise<boolean> {
+    try {
+        const res = await fetch(base, {
+            method: 'GET',
+            signal: AbortSignal.timeout(1500),
+        });
+        return res.ok;
+    } catch {
+        return false;
+    }
+}
+
 /** Build the transport for a config, and describe how to reach it. */
 export async function createTransport(
     cfg: Config,
 ): Promise<{ transport: EditorTransport; notice: string }> {
+    if (cfg.mode === 'relay') {
+        // The hosted app: both sides connect outward and its backend pairs
+        // them. A browser on a public origin cannot reach loopback at all, so
+        // this is the only arrangement that works against a deployment.
+        const origin = cfg.url ?? 'https://dadaki.apps.rebase.pro';
+        const transport = new RelayTransport({ origin, token: cfg.token });
+        const base = origin.replace(/\/+$/, '');
+        const connectUrl = `${base}/edit/new/blank?agentBridge=cloud&token=${cfg.token}`;
+        const live = await transport.attached();
+        return {
+            transport,
+            notice:
+                `[dadaki-mcp] relay mode — ${base}\n` +
+                (live
+                    ? '[dadaki-mcp] an editor is already attached to this session.\n'
+                    : '[dadaki-mcp] open the hosted editor with this URL to attach it:\n' +
+                      `\n    ${connectUrl}\n\n`) +
+                '[dadaki-mcp] the tab stays attached across reloads until you clear it.',
+        };
+    }
+
     if (cfg.mode === 'bridge') {
         const transport = new BridgeTransport({ port: cfg.port, token: cfg.token });
         const port = await transport.listen();
         const base = cfg.url ?? 'http://localhost:5199/';
         const sep = base.includes('?') ? '&' : '?';
         const connectUrl = `${base}${sep}agentBridge=${port}&token=${cfg.token}`;
+
+        // The bridge listening says nothing about whether there is an editor to
+        // attach. Printing a URL to a dev server that isn't running produces a
+        // dead link and no clue why — so check, and say which half is missing.
+        const reachable = await editorReachable(base);
+        const warning = reachable
+            ? ''
+            : `\n[dadaki-mcp] NOTE: nothing is serving ${base} yet, so that URL will not load.\n` +
+              '[dadaki-mcp] Start the editor first (`pnpm dev` for the local app), or pass\n' +
+              '[dadaki-mcp] --url <address> if your editor runs somewhere else.';
+
         return {
             transport,
             notice:
                 `[dadaki-mcp] bridge mode — listening on 127.0.0.1:${port}\n` +
                 '[dadaki-mcp] open your editor with this URL to attach it:\n' +
                 `\n    ${connectUrl}\n\n` +
-                '[dadaki-mcp] the tab stays attached across reloads until you clear it.',
+                '[dadaki-mcp] the tab stays attached across reloads until you clear it.' +
+                warning,
         };
     }
 

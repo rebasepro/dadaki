@@ -1,7 +1,7 @@
 {
     "name": "@dadaki/mcp",
     "version": "1.0.0",
-    "description": "MCP server that lets an agent author vector artwork in Dadaki — intent-level drawing verbs plus render-back so the agent can see its own work.",
+    "description": "MCP server that lets an agent author vector artwork in Dadaki \u2014 intent-level drawing verbs plus render-back so the agent can see its own work.",
     "license": "MIT",
     "private": true,
     "type": "module",
@@ -13,7 +13,8 @@
         "start:bridge": "node --experimental-strip-types src/index.ts --mode bridge",
         "smoke": "node --experimental-strip-types smoke.ts",
         "smoke:bridge": "node --experimental-strip-types smoke_bridge.ts",
-        "smoke:modes": "node --experimental-strip-types smoke_modes.ts"
+        "smoke:modes": "node --experimental-strip-types smoke_modes.ts",
+        "smoke:relay": "node smoke_relay.mjs"
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.22.0",

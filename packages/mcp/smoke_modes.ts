@@ -145,6 +145,36 @@ const httpServed = await serveStatic(APP_DIST);
             setTimeout(() => done(urlOf(buf)), 15_000);
         });
 
+    /** Start the server and return everything it printed before dying. */
+    const startAndCapture = (extra: string[] = []) =>
+        new Promise<string>((resolve) => {
+            const child = spawn(process.execPath, [
+                '--experimental-strip-types',
+                SERVER,
+                '--mode',
+                'bridge',
+                ...extra,
+            ]);
+            let buf = '';
+            child.stderr.on('data', (d) => {
+                buf += String(d);
+            });
+            setTimeout(() => {
+                child.kill('SIGKILL');
+                resolve(buf);
+            }, 6_000);
+        });
+
+    // The bridge listening says nothing about whether there is an editor to
+    // attach to. Printing a URL to a dev server that isn't running is a dead
+    // link with no clue why — which is exactly how this bit someone.
+    const deadBase = await startAndCapture(['--port', '0', '--url', 'http://localhost:9/']);
+    check(
+        'a base URL with nothing serving it is called out',
+        /nothing is serving/.test(deadBase),
+        deadBase.slice(-200),
+    );
+
     const first = await startAndRead();
     const second = await startAndRead();
     check('bridge prints a connect URL', /agentBridge=\d+&token=[0-9a-f]{48}/.test(first), first);
