@@ -31,9 +31,9 @@ behind one `EditorTransport` interface — so **every tool works in every mode**
 and nothing in the tool layer knows which is in use.
 
 ```
-                          ┌── CDP ──▶ a browser this server launches
-agent ──stdio──▶ MCP server
-                          └── ws  ──▶ the editor tab YOU already have open
+                          ┌── CDP ───▶ a browser this server launches
+agent ──stdio──▶ MCP server├── ws ────▶ your editor tab, on localhost
+                          └── HTTPS ─▶ app backend ──SSE──▶ your tab, hosted
 ```
 
 Rendering is not special-cased per mode. `render_png` is an ordinary call to
@@ -57,7 +57,7 @@ a public origin Chrome refuses the connection outright — Local Network Access
 checks, `ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS` — so the hosted app needs
 `relay`, where both sides connect outward and the backend pairs them.
 
-**`headless` is the code default; `bridge` is what the checked-in `.mcp.json`
+**`headless` is the code default; `relay` is what the checked-in `.mcp.json`
 selects.** That split is deliberate: headless is right for a script, and wrong
 for a person. In headless mode the document lives in an invisible browser owned
 by the server process — you can't see it, can't take it over, and it is **lost
@@ -85,8 +85,9 @@ Register it with an MCP client:
 }
 ```
 
-Add `"--mode", "bridge"` to `args` (or `"env": {"DADAKI_MCP_MODE": "bridge"}`) to
-switch modes. `DADAKI_MCP_HEADFUL=1` still works.
+Add `"--mode", "relay"` (or `bridge`, `headful`) to `args` — or
+`"env": {"DADAKI_MCP_MODE": "relay"}` — to switch modes. `DADAKI_MCP_HEADFUL=1`
+still works.
 
 ### Relay mode (the hosted app)
 
@@ -136,16 +137,18 @@ never ambiguous about which document it hit), token-gated with a timing-safe
 comparison, and able to invoke only functions that exist on the agent API — it
 cannot evaluate arbitrary code in your page.
 
-### The deployed app
+### A correction worth keeping
 
-Bridge mode works against the cloud app: `ws://127.0.0.1` is **not** blocked as
-mixed content from an `https://` page, because loopback counts as a potentially
-trustworthy origin. That is verified in `smoke_modes.ts` against a real HTTPS
-origin rather than assumed. Open the deployed editor with the same
-`?agentBridge=…&token=…` query and it attaches.
+An earlier version of this file claimed bridge mode worked against the deployed
+app, "verified against a real HTTPS origin." It did not, and the verification
+was invalid: the test served its HTTPS page from `https://127.0.0.1`, so it was
+a *loopback* origin talking to loopback — which is permitted. A public origin
+talking to loopback is not, and fails with
+`ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS`.
 
-`--url https://your-app/` also works, but headless can't get past a login — use
-`--mode headful --url …`, sign in the visible window, then let the agent work.
+That is why `relay` exists. `smoke_relay.mjs` runs against the real deployment
+(`RELAY_FRONTEND` / `RELAY_BACKEND`), and asserts the absence of those errors
+specifically — a test that would have caught the original mistake.
 
 ## Tools
 
