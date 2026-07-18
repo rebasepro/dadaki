@@ -36,6 +36,7 @@ import { WasmScene } from './wasm_scene';
 
 export type { AnalyticsSink } from './analytics';
 export { logAppEvent, registerAnalyticsSink } from './analytics';
+export type { Document } from './document';
 
 export interface EditorOptions {
     /** A CanvasKit instance (host loads canvaskit.js and passes it here). */
@@ -55,6 +56,20 @@ export interface EditorOptions {
      * existing document, or omit to start with a blank one.
      */
     initialDocument?: { bytes?: Uint8Array; name?: string };
+    /**
+     * Fired when the user brings a document with content into the editor via
+     * built-in chrome the host doesn't mediate — the File → Open picker or a
+     * backup restore — always in a new tab, which is active when this fires.
+     * Hosts that own persistence (e.g. a cloud app) should persist the new
+     * document here; without this hook they'd never learn it exists.
+     */
+    onDocumentOpened?: (doc: Document) => void;
+    /**
+     * Fired whenever the active tab changes (including the initial document,
+     * which fires before `createEditor` resolves). Lets a host that keys its
+     * persistence per-document follow tab switches (URL, save target, badges).
+     */
+    onDocumentActivated?: (doc: Document) => void;
     /**
      * Toggle/inject into the built-in chrome for embedding.
      * - `header: false` hides the whole top header (rarely needed).
@@ -193,6 +208,12 @@ export async function createEditor(
     );
     input.fileService = fileService;
     input.documentManager = documentManager;
+    // Wire host lifecycle callbacks before the initial document is created so
+    // the first activation is observable too.
+    documentManager.hostEvents = {
+        opened: options.onDocumentOpened,
+        activated: options.onDocumentActivated,
+    };
 
     // Export dialog + button.
     const exportDialog = new ExportDialog(

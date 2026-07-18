@@ -22,6 +22,17 @@ export class DocumentManager {
     private docs: Document[] = [];
     private activeId: string | null = null;
 
+    /**
+     * Optional host callbacks (embedding API — see EditorOptions). `opened`
+     * fires when the USER brings a document with content into the editor (file
+     * picker, backup restore) — i.e. documents the host doesn't yet know about;
+     * `activated` fires on every active-tab change, including the first one.
+     */
+    hostEvents: {
+        opened?: (doc: Document) => void;
+        activated?: (doc: Document) => void;
+    } = {};
+
     constructor(
         private scene: WasmScene,
         private ui: UIEngine,
@@ -77,6 +88,7 @@ export class DocumentManager {
         doc.pendingBytes = entry.bytes; // lazily deserialized on activate
         this.adopt(doc);
         logAppEvent('document_opened', { source: 'backup' });
+        this.hostEvents.opened?.(doc);
     }
 
     /** Close a document (with a dirty-confirm). Never leaves zero tabs open. */
@@ -159,6 +171,7 @@ export class DocumentManager {
 
         const ext = picked.file.name.split('.').pop() || 'unknown';
         logAppEvent('document_opened', { source: 'picker', format: ext });
+        this.hostEvents.opened?.(doc);
     }
 
     private async findOpenByHandle(handle: FileSystemFileHandle): Promise<Document | null> {
@@ -227,6 +240,7 @@ export class DocumentManager {
         this.ui.syncWithSelection();
         this.refreshChrome();
         this.renderTabs();
+        this.hostEvents.activated?.(doc);
     }
 
     // ─── Session restore ──────────────────────────────────────────────────
@@ -315,5 +329,5 @@ export class DocumentManager {
 }
 
 function stripExt(name: string): string {
-    return name.replace(/\.(vec|svg)$/i, '');
+    return name.replace(/\.(dataki|vec|svg)$/i, '');
 }
