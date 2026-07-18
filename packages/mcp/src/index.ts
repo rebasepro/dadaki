@@ -81,7 +81,7 @@ async function created(method: string, args: unknown[]) {
 
 tool(
     'describe_scene',
-    'List every object on the canvas with its id, type, world-space bounds [x,y,w,h], fill, stroke and opacity. Call this before editing so you know what ids to target, and after editing to confirm the result.',
+    'Describe the document: the canvas (artboard) rect, plus every object with its id, type, world-space bounds [x,y,w,h], fill, stroke, rotation and opacity. Call this before editing to learn what ids to target and how big the canvas is, and after editing to confirm the result.',
     {},
     () => session.call('describe'),
 );
@@ -189,10 +189,33 @@ tool(
 );
 
 tool(
+    'create_path_data',
+    'Draw a path from an SVG "d" attribute, e.g. "M 0 0 L 100 0 A 50 50 0 1 1 0 100 Z". Prefer this over create_path for anything with curves or arcs — it is the notation you already know, and avoids hand-computing control points.',
+    { d: z.string().min(1), style },
+    (a) => created('createPathData', [a.d, a.style]),
+);
+
+tool(
+    'import_svg',
+    'Import a whole SVG document onto the canvas, returning the ids it created. This is usually the FASTEST route to complex artwork: compose the drawing as SVG markup, import it, then refine it with the other tools. Gradients, groups and transforms are preserved.',
+    { svg: z.string().min(1).describe('A complete <svg>…</svg> document') },
+    async (a) => {
+        const ids = await session.call<number[]>('importSVG', [a.svg]);
+        return { ids, scene: await session.call('describe') };
+    },
+);
+
+tool(
     'create_text',
-    'Place a text object with its baseline starting at x,y.',
-    { x: z.number(), y: z.number(), text: z.string(), fontSize: z.number().positive().optional() },
-    (a) => created('createText', [a.x, a.y, a.text, a.fontSize ?? 16]),
+    'Place a text object with its baseline starting at x,y. Defaults to black; pass style.fill for another colour.',
+    {
+        x: z.number(),
+        y: z.number(),
+        text: z.string(),
+        fontSize: z.number().positive().optional(),
+        style,
+    },
+    (a) => created('createText', [a.x, a.y, a.text, a.fontSize ?? 16, a.style]),
 );
 
 // ─── Styling ────────────────────────────────────────────────────────────
@@ -204,6 +227,48 @@ tool(
     async (a) => {
         await session.call('setFill', [a.ids, a.color]);
         return { ok: true };
+    },
+);
+
+tool(
+    'set_gradient',
+    'Fill objects with a linear or radial gradient. Stops run 0→1. For linear, angle is in degrees: 0 = left→right, 90 = top→bottom.',
+    {
+        ids,
+        type: z.enum(['linear', 'radial']),
+        stops: z
+            .array(z.object({ offset: z.number().min(0).max(1), color: hex }))
+            .min(2)
+            .describe('At least two colour stops'),
+        angle: z.number().optional().describe('Linear only; degrees, default 90 (top→bottom)'),
+    },
+    async (a) => {
+        await session.call('setGradient', [
+            a.ids,
+            { type: a.type, stops: a.stops, angle: a.angle },
+        ]);
+        return { ok: true };
+    },
+);
+
+tool(
+    'set_text',
+    'Change a text object’s content and/or typography. Only the properties you supply change.',
+    {
+        id: z.number(),
+        text: z.string().optional(),
+        fontSize: z.number().positive().optional(),
+        fontFamily: z.string().optional(),
+        align: z.enum(['left', 'center', 'right']).optional(),
+        weight: z.number().min(100).max(900).optional().describe('400 normal, 700 bold'),
+        italic: z.boolean().optional(),
+        letterSpacing: z.number().optional(),
+        lineHeight: z.number().positive().optional(),
+    },
+    async (a) => {
+        const { id, ...opts } = a;
+        await session.call('setText', [id, opts]);
+        return { node: await session.call('describeNode', [id]) };
     },
 );
 
@@ -302,6 +367,54 @@ tool(
     },
 );
 
+tool(
+    'bring_to_front',
+    'Move an object to the top of the paint order (in front of everything else).',
+    { id: z.number() },
+    async (a) => {
+        await session.call('bringToFront', [a.id]);
+        return { ok: true };
+    },
+);
+
+tool(
+    'send_to_back',
+    'Move an object to the bottom of the paint order (behind everything else).',
+    { id: z.number() },
+    async (a) => {
+        await session.call('sendToBack', [a.id]);
+        return { ok: true };
+    },
+);
+
+// ─── Canvas ─────────────────────────────────────────────────────────────
+
+tool(
+    'set_canvas',
+    'Resize or recolour the artboard — the frame the artwork is composed within and exported to. Pass background null for transparent.',
+    {
+        width: z.number().positive().optional(),
+        height: z.number().positive().optional(),
+        background: hex.nullable().optional(),
+    },
+    async (a) => {
+        await session.call('setCanvas', [
+            { width: a.width, height: a.height, background: a.background },
+        ]);
+        return { canvas: (await session.call<{ canvas: unknown }>('describe')).canvas };
+    },
+);
+
+tool(
+    'fit_canvas_to_artwork',
+    'Shrink the artboard to hug the artwork, with an optional margin. Use this before exporting an icon or logo so it has no stray whitespace.',
+    { margin: z.number().min(0).optional() },
+    async (a) => {
+        await session.call('fitCanvasToArtwork', [a.margin ?? 0]);
+        return { canvas: (await session.call<{ canvas: unknown }>('describe')).canvas };
+    },
+);
+
 // ─── Structuring ────────────────────────────────────────────────────────
 
 tool(
@@ -324,6 +437,16 @@ tool('delete', 'Remove one or more objects.', { ids }, async (a) => {
     await session.call('remove', [a.ids]);
     return { ok: true };
 });
+
+tool(
+    'clear',
+    'Delete everything and start from a blank canvas. Use this when a drawing has gone wrong and is easier to redo than to repair — it is a single undo step, so it is recoverable.',
+    {},
+    async () => {
+        await session.call('clear');
+        return { ok: true };
+    },
+);
 
 tool(
     'rename',

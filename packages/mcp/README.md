@@ -62,33 +62,62 @@ what an agent is actually doing.
 | Group | Tools |
 | --- | --- |
 | Seeing | `describe_scene`, `render_png`, `render_png_image`, `export_svg` |
-| Creating | `create_rect`, `create_ellipse`, `create_polygon`, `create_star`, `create_path`, `create_text` |
-| Styling | `set_fill`, `set_stroke`, `set_opacity`, `set_corner_radius` |
-| Arranging | `move`, `set_position`, `resize`, `rotate`, `align`, `distribute` |
-| Structuring | `group`, `ungroup`, `duplicate`, `delete`, `rename`, `boolean` |
+| Creating | `create_rect`, `create_ellipse`, `create_polygon`, `create_star`, `create_path`, `create_path_data`, `create_text`, `import_svg` |
+| Styling | `set_fill`, `set_gradient`, `set_stroke`, `set_opacity`, `set_corner_radius`, `set_text` |
+| Arranging | `move`, `set_position`, `resize`, `rotate`, `align`, `distribute`, `bring_to_front`, `send_to_back` |
+| Canvas | `set_canvas`, `fit_canvas_to_artwork` |
+| Structuring | `group`, `ungroup`, `duplicate`, `delete`, `clear`, `rename`, `boolean` |
 | Session | `undo`, `redo` |
 
 Coordinates are world units with y growing downward. Colours are CSS hex.
 
-`align` and `distribute` are exposed deliberately: computing even spacing by
-hand is exactly what agents get subtly wrong, and these are exact.
+Three are worth calling out:
+
+- **`import_svg`** is usually the fastest route to complex artwork — compose the
+  drawing as SVG markup, import it, then refine with the other verbs. Gradients,
+  groups and transforms survive.
+- **`create_path_data`** takes an SVG `d` attribute. Agents are far more fluent
+  in path data than in point arrays, and arcs can't be expressed any other way.
+- **`align` / `distribute`** are exact. Computing even spacing by hand is
+  precisely what agents get subtly wrong.
 
 ## Design notes
 
-Two behaviours differ from the editor's internal defaults, both because an agent
-can't notice what a human would:
+Several behaviours differ from the editor's internal defaults. The rule behind
+all of them: **an agent cannot notice what a human would.** A human sees a stray
+outline and deletes it; an agent ships it.
 
 - **Strokes are opt-in at creation.** The engine's default node style carries a
-  black 2px stroke. A human sees it and removes it; an agent asking for "a
-  yellow circle" would ship one with an unintended black outline it never
-  registered in a render.
-- **Renders clear the selection first.** Selection handles are editor chrome,
-  and in a screenshot an agent can't distinguish them from a rectangle it drew.
+  black 2px stroke, so "a yellow circle" would arrive with an unintended black
+  outline.
+- **Text defaults to black, not white.** The engine defaults text to a white
+  fill, which is invisible on the default white artboard — the node describes
+  perfectly and draws nothing, which is undiagnosable from the agent's side.
+- **Renders frame the artboard, not the editor.** Rulers, grid and the artboard
+  label cost resolution and are indistinguishable from artwork in a screenshot.
+  The view is fitted first so the drawing fills the image.
+- **Renders clear the selection first.** Selection handles read as a stray
+  outlined rectangle.
+- **Gradients are given as an angle**, resolved against each node's own local
+  box. That box is not uniform — a Rect spans `0..w` from a top-left origin, an
+  Ellipse spans `-r..r` about its centre — and getting it wrong yields a shape
+  that reports as a gradient fill but renders as flat colour.
 
 One agent call is exactly one undo step (everything routes through
 `WasmScene.transaction()`), so a human can step back through an agent's work at
 the same granularity as their own. That invariant is pinned in
 `packages/editor/src/agent.test.ts`.
+
+## A note on testing this
+
+Every one of the defaults above exists because of a bug found by **rendering the
+output and looking at it**, not by a failing assertion. The gradient bug is the
+sharpest example: the test asserted `fillType === 'gradient'` and passed, while
+the shape rendered as flat blue.
+
+If you extend this, assert on the thing that makes the artwork correct —
+gradient endpoints, path bounds, resolved colours — not on metadata that would
+survive the feature being broken.
 
 ## Testing
 

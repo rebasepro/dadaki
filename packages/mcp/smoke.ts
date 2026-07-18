@@ -116,6 +116,63 @@ try {
         tri.node.bounds,
     );
 
+    // The canvas rect must be reachable — without it an agent cannot centre
+    // artwork or reason about margins, and resorts to reading ruler pixels.
+    check('describe_scene reports the canvas', scene.canvas?.width > 0, scene.canvas);
+
+    // SVG path data: the notation agents are fluent in. Arcs in particular
+    // cannot be expressed through the point form at all.
+    const arc = await call('create_path_data', {
+        d: 'M 700 700 A 60 60 0 1 1 820 700 Z',
+        style: { fill: '#8b5cf6' },
+    });
+    check('create_path_data renders an arc', arc.node.bounds[2] > 50, arc.node.bounds);
+
+    const grad = await call('create_rect', { x: 120, y: 120, width: 160, height: 160 });
+    await call('set_gradient', {
+        ids: grad.id,
+        type: 'linear',
+        angle: 45,
+        stops: [
+            { offset: 0, color: '#ec4899' },
+            { offset: 1, color: '#3b82f6' },
+        ],
+    });
+    const gradNode = await call('describe_scene');
+    const gradDesc = gradNode.nodes.find((n: { id: number }) => n.id === grad.id);
+    check('gradient fill is reported as a gradient', gradDesc?.fillType === 'gradient', gradDesc);
+
+    // Whole-document import — the fastest route to complex artwork.
+    const imported = await call('import_svg', {
+        svg: '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><circle cx="100" cy="100" r="80" fill="#22c55e"/><rect x="60" y="60" width="80" height="80" fill="#fbbf24"/></svg>',
+    });
+    check(
+        'import_svg creates nodes',
+        Array.isArray(imported.ids) && imported.ids.length > 0,
+        imported.ids,
+    );
+
+    // Typography: a content edit must not silently reset weight/size, or an
+    // agent styling text then correcting a typo loses the styling.
+    const label = await call('create_text', { x: 140, y: 900, text: 'draft', fontSize: 72 });
+    // The engine defaults text to WHITE, which is invisible on the default
+    // white artboard — a node that reports fine and draws nothing.
+    check(
+        'new text is visible, not white-on-white',
+        label.node.fill === '#000000',
+        label.node.fill,
+    );
+
+    await call('set_text', { id: label.id, weight: 700, italic: true });
+    await call('set_text', { id: label.id, text: 'DADAKI' });
+
+    // Paint order has to be controllable, or an agent can only ever stack
+    // things in creation order.
+    await call('send_to_back', { id: label.id });
+    const ordered = await call('describe_scene');
+    check('send_to_back reorders the scene', ordered.nodes[0].id === label.id, ordered.nodes[0]);
+    await call('bring_to_front', { id: label.id });
+
     const svg = await call('export_svg');
     check('export_svg returns markup', svg.svg.startsWith('<svg'), svg.svg.slice(0, 40));
     writeFileSync(join(OUT, 'logo.svg'), svg.svg);
@@ -133,6 +190,24 @@ try {
         'unknown id yields an actionable error',
         bad.isError === true && /no object with id 999/.test(msg),
         msg,
+    );
+
+    // Fitting the canvas is the last step of any icon/logo job, so it has to
+    // produce a frame that actually hugs the artwork.
+    const fitted = await call('fit_canvas_to_artwork', { margin: 24 });
+    check('fit_canvas_to_artwork tightens the frame', fitted.canvas.width < 1000, fitted.canvas);
+
+    // `clear` is the escape hatch from a botched drawing, and it must be one
+    // undo step or the way back is worse than the mess.
+    await call('clear');
+    const cleared = await call('describe_scene');
+    check('clear empties the canvas', cleared.nodes.length === 0, cleared.nodes);
+    await call('undo');
+    const restored = await call('describe_scene');
+    check(
+        'one undo restores everything clear removed',
+        restored.nodes.length > 0,
+        restored.nodes.length,
     );
 
     console.log(`\nartifacts written to ${OUT}`);

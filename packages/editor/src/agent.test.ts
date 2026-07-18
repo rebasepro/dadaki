@@ -46,6 +46,10 @@ function makeAgent(): { agent: AgentApi; scene: WasmScene; selection: number[] }
             state.selection = ids;
         },
         exportSVG: () => '<svg/>',
+        // SVG import needs the UI engine's DOM parsing and raster fallbacks,
+        // neither of which exists headless; the importSVG tests assert the
+        // validation that happens before this is ever reached.
+        importSVG: async () => [],
     });
     return { agent, scene, selection: state.selection };
 }
@@ -276,6 +280,21 @@ describe('agent API — creation defaults', () => {
         expect(agent.describeNode(id)?.stroke, 'a fill-only request means no outline').toBeNull();
     });
 
+    // The engine defaults text to a WHITE fill, which is invisible on the
+    // default white artboard. The node describes fine and draws nothing, so an
+    // agent has no way to diagnose it — it just sees a blank canvas.
+    it('does not create text that is invisible on a white canvas', () => {
+        const { agent } = makeAgent();
+        const id = agent.createText(10, 10, 'hello', 24);
+        expect(agent.describeNode(id)?.fill).toBe('#000000');
+    });
+
+    it('still honours an explicit text colour', () => {
+        const { agent } = makeAgent();
+        const id = agent.createText(10, 10, 'hello', 24, { fill: '#ff0000' });
+        expect(agent.describeNode(id)?.fill).toBe('#ff0000');
+    });
+
     it('leaves a bare shape unstroked too', () => {
         const { agent } = makeAgent();
         expect(agent.describeNode(agent.createRect(0, 0, 10, 10))?.stroke).toBeNull();
@@ -287,6 +306,272 @@ describe('agent API — creation defaults', () => {
         const node = agent.describeNode(id);
         expect(node?.stroke).toBe('#5c4033');
         expect(node?.strokeWidth).toBe(4);
+    });
+});
+
+describe('agent API — canvas', () => {
+    // Without this an agent cannot centre anything or reason about margins.
+    // I hit exactly this drawing an icon: the only way to learn the canvas
+    // size was reading ruler markings out of a PNG.
+    it('reports the artboard so the agent can centre artwork', () => {
+        const { agent } = makeAgent();
+        const canvas = agent.describe().canvas;
+        expect(canvas).not.toBeNull();
+        expect(canvas!.width).toBeGreaterThan(0);
+        expect(canvas!.height).toBeGreaterThan(0);
+    });
+
+    it('resizes the canvas', () => {
+        const { agent } = makeAgent();
+        agent.setCanvas({ width: 512, height: 512 });
+        const canvas = agent.describe().canvas;
+        expect([canvas!.width, canvas!.height]).toEqual([512, 512]);
+    });
+
+    it('fits the canvas around the artwork with a margin', () => {
+        const { agent } = makeAgent();
+        agent.createRect(100, 200, 50, 80);
+        agent.fitCanvasToArtwork(20);
+        const canvas = agent.describe().canvas!;
+        expect(canvas.x).toBeCloseTo(80, 0);
+        expect(canvas.y).toBeCloseTo(180, 0);
+        expect(canvas.width).toBeCloseTo(90, 0);
+        expect(canvas.height).toBeCloseTo(120, 0);
+    });
+
+    it('refuses to fit an empty canvas rather than producing a degenerate one', () => {
+        const { agent } = makeAgent();
+        expect(() => agent.fitCanvasToArtwork()).toThrow(/canvas is empty/);
+    });
+});
+
+describe('agent API — SVG path data', () => {
+    it('accepts an SVG d attribute', () => {
+        const { agent } = makeAgent();
+        const id = agent.createPathData('M 0 0 L 100 0 L 100 100 L 0 100 Z', { fill: '#ff0000' });
+        const [, , w, h] = agent.describeNode(id)!.bounds;
+        expect(w).toBeCloseTo(100, 0);
+        expect(h).toBeCloseTo(100, 0);
+    });
+
+    it('handles curves and arcs the point form cannot express', () => {
+        const { agent } = makeAgent();
+        const id = agent.createPathData('M 0 50 A 50 50 0 1 1 100 50 Z');
+        const [, , w, h] = agent.describeNode(id)!.bounds;
+        expect(w).toBeGreaterThan(50);
+        expect(h).toBeGreaterThan(20);
+    });
+
+    // The engine turns unparseable data into an empty path with no error, so
+    // this has to be caught at the boundary or artwork silently loses shapes.
+    it('rejects data that yields no geometry instead of a silent empty path', () => {
+        const { agent } = makeAgent();
+        expect(() => agent.createPathData('not path data')).toThrow(/no drawable geometry/);
+    });
+});
+
+describe('agent API — gradients', () => {
+    it('applies a linear gradient and reports it as a gradient fill', () => {
+        const { agent } = makeAgent();
+        const id = agent.createRect(0, 0, 100, 100);
+        agent.setGradient(id, {
+            type: 'linear',
+            angle: 90,
+            stops: [
+                { offset: 0, color: '#ff0000' },
+                { offset: 1, color: '#0000ff' },
+            ],
+        });
+        const node = agent.describeNode(id)!;
+        // `fill` can only carry solids, so the kind must be reported separately
+        // or a gradient is indistinguishable from no fill at all.
+        expect(node.fill).toBeNull();
+        expect(node.fillType).toBe('gradient');
+    });
+
+    it('applies a radial gradient', () => {
+        const { agent } = makeAgent();
+        const id = agent.createEllipse(50, 50, 40, 40);
+        agent.setGradient(id, {
+            type: 'radial',
+            stops: [
+                { offset: 0, color: '#ffffff' },
+                { offset: 1, color: '#000000' },
+            ],
+        });
+        expect(agent.describeNode(id)!.fillType).toBe('gradient');
+    });
+
+    /**
+     * Asserting only `fillType === 'gradient'` is not enough — it passed while
+     * gradients rendered as flat colour. Local space differs per node type: a
+     * Rect spans 0..w from a top-left origin, an Ellipse spans -r..r about the
+     * centre. Endpoints computed as if everything were centred land outside a
+     * Rect, so the shape pads to the last stop and looks solid. So check the
+     * endpoints actually straddle each shape's own box.
+     */
+    const gradientOf = (scene: WasmScene, id: number) => {
+        const paint = scene.getNodeStyle(id).fills?.[0] as {
+            start_x: number;
+            start_y: number;
+            end_x: number;
+            end_y: number;
+        };
+        return paint;
+    };
+
+    it('spans a RECT across its own local box (origin at top-left)', () => {
+        const { agent, scene } = makeAgent();
+        const id = agent.createRect(0, 0, 160, 160);
+        agent.setGradient(id, {
+            type: 'linear',
+            angle: 90,
+            stops: [
+                { offset: 0, color: '#ec4899' },
+                { offset: 1, color: '#3b82f6' },
+            ],
+        });
+        const g = gradientOf(scene, id);
+        // A rect's local box is 0..160, so the gradient must run 0 → 160 in y,
+        // NOT -80 → 80 (which would leave most of the shape past the last stop).
+        expect(g.start_y).toBeCloseTo(0, 0);
+        expect(g.end_y).toBeCloseTo(160, 0);
+    });
+
+    it('spans an ELLIPSE across its own local box (centred on origin)', () => {
+        const { agent, scene } = makeAgent();
+        const id = agent.createEllipse(200, 200, 50, 50);
+        agent.setGradient(id, {
+            type: 'linear',
+            angle: 0,
+            stops: [
+                { offset: 0, color: '#000000' },
+                { offset: 1, color: '#ffffff' },
+            ],
+        });
+        const g = gradientOf(scene, id);
+        expect(g.start_x).toBeCloseTo(-50, 0);
+        expect(g.end_x).toBeCloseTo(50, 0);
+    });
+
+    it('centres a radial gradient on the shape, not on the origin', () => {
+        const { agent, scene } = makeAgent();
+        const id = agent.createRect(0, 0, 100, 100);
+        agent.setGradient(id, {
+            type: 'radial',
+            stops: [
+                { offset: 0, color: '#ffffff' },
+                { offset: 1, color: '#000000' },
+            ],
+        });
+        const g = gradientOf(scene, id);
+        expect(g.start_x).toBeCloseTo(50, 0);
+        expect(g.start_y).toBeCloseTo(50, 0);
+    });
+
+    it('rejects a gradient with too few stops', () => {
+        const { agent } = makeAgent();
+        const id = agent.createRect(0, 0, 10, 10);
+        expect(() =>
+            agent.setGradient(id, { type: 'linear', stops: [{ offset: 0, color: '#fff' }] }),
+        ).toThrow(/at least 2 stops/);
+    });
+
+    it('is one undo step across a batch', () => {
+        const { agent, scene } = makeAgent();
+        const a1 = agent.createRect(0, 0, 10, 10);
+        const a2 = agent.createRect(20, 0, 10, 10);
+        const before = snapshot(scene);
+        agent.setGradient([a1, a2], {
+            type: 'linear',
+            stops: [
+                { offset: 0, color: '#000000' },
+                { offset: 1, color: '#ffffff' },
+            ],
+        });
+        scene.undo();
+        expect(snapshot(scene)).toEqual(before);
+    });
+});
+
+describe('agent API — z-order', () => {
+    it('brings a node to the front and sends it to the back', () => {
+        const { agent, scene } = makeAgent();
+        const bottom = agent.createRect(0, 0, 10, 10);
+        agent.createRect(5, 5, 10, 10);
+        const roots = () => Array.from(scene.getRootNodes());
+
+        expect(roots()[0]).toBe(bottom);
+        agent.bringToFront(bottom);
+        expect(roots()[roots().length - 1]).toBe(bottom);
+        agent.sendToBack(bottom);
+        expect(roots()[0]).toBe(bottom);
+    });
+});
+
+describe('agent API — text', () => {
+    const textGeom = (scene: WasmScene, id: number) => scene.getNode(id)!.geometry.Text!;
+
+    it('edits content without discarding typography', () => {
+        const { agent, scene } = makeAgent();
+        const id = agent.createText(10, 10, 'hello', 24);
+        agent.setText(id, { weight: 700, italic: true });
+        agent.setText(id, { text: 'goodbye' });
+
+        const t = textGeom(scene, id);
+        expect(t.content).toBe('goodbye');
+        expect(t.font_size, 'size must survive a content-only edit').toBe(24);
+        expect(t.font_weight, 'weight must survive a content-only edit').toBe(700);
+        expect(t.italic).toBe(true);
+    });
+
+    it('sets alignment by name rather than a magic number', () => {
+        const { agent, scene } = makeAgent();
+        const id = agent.createText(0, 0, 'x', 16);
+        agent.setText(id, { align: 'center' });
+        expect(textGeom(scene, id).text_align).toBe(1);
+    });
+
+    it('is one undo step even when it touches all three engine setters', () => {
+        const { agent, scene } = makeAgent();
+        const id = agent.createText(0, 0, 'x', 16);
+        const before = snapshot(scene);
+        agent.setText(id, { text: 'y', fontSize: 32, align: 'right', weight: 700 });
+        scene.undo();
+        expect(snapshot(scene)).toEqual(before);
+    });
+
+    it('refuses to apply text edits to a non-text node', () => {
+        const { agent } = makeAgent();
+        const rect = agent.createRect(0, 0, 10, 10);
+        expect(() => agent.setText(rect, { text: 'nope' })).toThrow(/not Text/);
+    });
+});
+
+describe('agent API — clear', () => {
+    it('empties the canvas in a single undo step', () => {
+        const { agent, scene } = makeAgent();
+        agent.createRect(0, 0, 10, 10);
+        agent.createEllipse(50, 50, 10, 10);
+        const before = snapshot(scene);
+
+        agent.clear();
+        expect(agent.describe().nodes).toHaveLength(0);
+
+        scene.undo();
+        expect(snapshot(scene), 'clear must be recoverable with one undo').toEqual(before);
+    });
+
+    it('is a no-op on an already-empty canvas', () => {
+        const { agent } = makeAgent();
+        expect(() => agent.clear()).not.toThrow();
+    });
+});
+
+describe('agent API — importSVG', () => {
+    it('rejects input that is not an SVG document', () => {
+        const { agent } = makeAgent();
+        return expect(agent.importSVG('just some text')).rejects.toThrow(/expects an <svg>/);
     });
 });
 

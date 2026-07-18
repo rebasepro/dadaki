@@ -362,6 +362,10 @@ export async function createEditor(
             renderer.requestRender();
         },
         exportSVG,
+        importSVG: (svg: string) =>
+            new Promise<number[]>((resolve, reject) => {
+                ui.parseSVG(svg, (newRoots) => resolve(newRoots)).catch(reject);
+            }),
     });
 
     return {

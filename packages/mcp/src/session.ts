@@ -138,13 +138,15 @@ export class EditorSession {
     async call<T = unknown>(method: string, args: unknown[] = []): Promise<T> {
         const page = await this.ready();
         const { ok, value, error } = await page.evaluate(
-            (m: string, a: unknown[]) => {
+            // Async so a verb returning a Promise (importSVG) is awaited here
+            // rather than serialized across CDP as an empty object.
+            async (m: string, a: unknown[]) => {
                 const agent = (window as any).app?.agent;
                 if (!agent) return { ok: false, error: 'editor agent API is not available' };
                 if (typeof agent[m] !== 'function')
                     return { ok: false, error: `unknown method ${m}` };
                 try {
-                    return { ok: true, value: agent[m](...a) ?? null };
+                    return { ok: true, value: (await agent[m](...a)) ?? null };
                 } catch (err) {
                     return { ok: false, error: (err as Error).message };
                 }
@@ -156,7 +158,16 @@ export class EditorSession {
         return value as T;
     }
 
-    /** PNG of the current canvas — how the agent sees what it has drawn. */
+    /**
+     * PNG of the artwork — how the agent sees what it has drawn.
+     *
+     * This frames the ARTBOARD rather than grabbing the whole editor canvas.
+     * Rulers, the grid and the artboard label are editor chrome: they cost
+     * resolution, and an agent reading the image has to work out which marks
+     * are its own. The view is fitted first so the artwork fills the frame,
+     * which matters because this render is the agent's only way to judge its
+     * own composition.
+     */
     async screenshot(): Promise<string> {
         const page = await this.ready();
         // Drop the selection first: its handles and bounding box are editor
@@ -165,7 +176,45 @@ export class EditorSession {
         // Selection is view state, not document state, so clearing costs
         // nothing — every verb targets explicit ids, never "the selection".
         await this.call('select', [[]]).catch(() => {});
-        // Let any pending render land before capturing.
+
+        // Fit the view to the artboard, then work out where that artboard
+        // landed on screen. Screen space is `world * zoom + pan`, offset by the
+        // canvas element's own position in the page.
+        const clip = await page.evaluate(async () => {
+            const app = (window as any).app;
+            const canvas = document.getElementById('editor-canvas');
+            if (!app?.renderer || !canvas) return null;
+            app.renderer.fitToArtboard?.();
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+            const ab = app.scene?.getArtboards?.()[0];
+            if (!ab) return null;
+            const { zoom, pan } = app.renderer;
+            const rect = canvas.getBoundingClientRect();
+            const x = rect.left + ab.x * zoom + pan.x;
+            const y = rect.top + ab.y * zoom + pan.y;
+            const width = ab.w * zoom;
+            const height = ab.h * zoom;
+            // Stay inside the canvas element; a clip that runs past the
+            // viewport makes the screenshot call fail outright.
+            const left = Math.max(x, rect.left);
+            const top = Math.max(y, rect.top);
+            return {
+                x: left,
+                y: top,
+                width: Math.max(Math.min(x + width, rect.right) - left, 1),
+                height: Math.max(Math.min(y + height, rect.bottom) - top, 1),
+            };
+        });
+
+        if (clip) {
+            return (await page.screenshot({
+                encoding: 'base64',
+                type: 'png',
+                clip,
+            })) as string;
+        }
+        // No artboard to frame — fall back to the whole canvas.
         await page.evaluate(
             () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
         );

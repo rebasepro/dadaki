@@ -27,8 +27,9 @@ import type { CanvasKit } from 'canvaskit-wasm';
 import { type AlignMode, alignSelection, distributeSelection } from './align';
 import { applyBooleanOp, type BoolOp } from './boolean_ops';
 import { colorToHex, parseHex } from './color_picker';
-import type { Color, NodeStyle, Paint, Stroke, Subpath } from './types';
-import { isSolid, StrokeAlignment } from './types';
+import { parseSVGPathD } from './svg_utils';
+import type { Color, Gradient, NodeGeometry, NodeStyle, Paint, Stroke, Subpath } from './types';
+import { isGradient, isMeshGradient, isSolid, StrokeAlignment } from './types';
 import type { WasmScene } from './wasm_scene';
 
 /** A node as reported to the agent: flat, small, and free of engine internals. */
@@ -43,16 +44,50 @@ export interface AgentNode {
     /** First solid stroke as hex, or null when unstroked / non-solid. */
     stroke: string | null;
     strokeWidth: number | null;
+    /** Non-solid fills report their kind here, since `fill` can't carry them. */
+    fillType?: 'gradient' | 'pattern' | 'mesh';
     opacity: number;
+    /** Rotation in degrees, so an agent can see a transform it applied. */
+    rotation: number;
     visible: boolean;
     locked: boolean;
     children?: AgentNode[];
 }
 
+/**
+ * The artboard — the frame the artwork is composed within and exported to.
+ * Without this an agent has no way to know how big the canvas is, and can't
+ * centre anything or reason about margins; it ends up guessing from whatever
+ * the first render happened to look like.
+ */
+export interface AgentCanvas {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    /** Background as hex, or null when transparent. */
+    background: string | null;
+}
+
 export interface AgentDescription {
+    canvas: AgentCanvas | null;
     nodes: AgentNode[];
     /** Ids currently selected in the editor. */
     selection: number[];
+}
+
+/**
+ * A gradient in the terms an agent thinks in: colour stops plus a direction.
+ * The engine stores gradient endpoints in the node's own centred local space,
+ * which an agent has no way to reason about — so `angle` is resolved against
+ * the node's bounding box at apply time instead.
+ */
+export interface AgentGradient {
+    type: 'linear' | 'radial';
+    /** Colour stops; `offset` runs 0 (start) → 1 (end). */
+    stops: { offset: number; color: string }[];
+    /** Linear only. Degrees: 0 = left→right, 90 = top→bottom. Default 90. */
+    angle?: number;
 }
 
 export interface AgentApi {
@@ -84,13 +119,36 @@ export interface AgentApi {
     ): number;
     /** A path from explicit points; `points` matches the engine's pen format. */
     createPath(points: AgentPathPoint[], closed?: boolean, style?: AgentStyle): number;
-    createText(x: number, y: number, content: string, fontSize?: number): number;
+    /**
+     * A path from an SVG `d` attribute — the notation agents are most fluent
+     * in, and the only practical way to express arcs and smooth curves without
+     * hand-computing control points.
+     */
+    createPathData(d: string, style?: AgentStyle): number;
+    createText(
+        x: number,
+        y: number,
+        content: string,
+        fontSize?: number,
+        style?: AgentStyle,
+    ): number;
+    /**
+     * Import an SVG document, returning the ids of the roots it created.
+     * This is the fastest route to complex artwork: compose it as SVG, bring
+     * it in, then refine with the verbs above. Goes through the editor's real
+     * importer, so gradients, groups and transforms all survive.
+     */
+    importSVG(svg: string): Promise<number[]>;
 
     // ─── Styling ───────────────────────────────────────────────────────
     setFill(ids: number | number[], hex: string | null): void;
+    /** Fill with a gradient. Replaces any solid fill. */
+    setGradient(ids: number | number[], gradient: AgentGradient): void;
     setStroke(ids: number | number[], hex: string | null, width?: number): void;
     setOpacity(ids: number | number[], opacity: number): void;
     setCornerRadius(ids: number | number[], radius: number): void;
+    /** Edit a text node's content and/or typography. Only supplied keys change. */
+    setText(id: number, opts: AgentTextOptions): void;
 
     // ─── Arranging ─────────────────────────────────────────────────────
     move(ids: number | number[], dx: number, dy: number): void;
@@ -99,6 +157,16 @@ export interface AgentApi {
     rotate(id: number, degrees: number): void;
     align(ids: number[], mode: AlignMode): void;
     distribute(ids: number[], axis: 'h' | 'v'): void;
+    /** Paint order: front = on top of everything, back = behind everything. */
+    bringToFront(id: number): void;
+    sendToBack(id: number): void;
+    /**
+     * Resize / recolour the artboard. An icon usually wants a square canvas
+     * sized to the artwork, which is otherwise impossible to arrange.
+     */
+    setCanvas(opts: { width?: number; height?: number; background?: string | null }): void;
+    /** Fit the artboard snugly around all artwork, with an optional margin. */
+    fitCanvasToArtwork(margin?: number): void;
 
     // ─── Structuring ───────────────────────────────────────────────────
     group(ids: number[]): number;
@@ -107,6 +175,11 @@ export interface AgentApi {
     remove(ids: number | number[]): void;
     rename(id: number, name: string): void;
     boolean(ids: number[], op: BoolOp): number | null;
+    /**
+     * Delete everything, in one undo step. An agent that has painted itself
+     * into a corner needs a way back to a blank canvas that isn't N deletes.
+     */
+    clear(): void;
 
     // ─── Session ───────────────────────────────────────────────────────
     select(ids: number | number[]): void;
@@ -121,6 +194,19 @@ export interface AgentStyle {
     strokeWidth?: number;
     opacity?: number;
     cornerRadius?: number;
+}
+
+/** Typography edits. Every key is optional; unsupplied ones keep their value. */
+export interface AgentTextOptions {
+    text?: string;
+    fontSize?: number;
+    fontFamily?: string;
+    align?: 'left' | 'center' | 'right';
+    /** CSS-style numeric weight, 100–900 (400 normal, 700 bold). */
+    weight?: number;
+    italic?: boolean;
+    letterSpacing?: number;
+    lineHeight?: number;
 }
 
 /** A path point; control points default to the anchor (i.e. a straight corner). */
@@ -143,6 +229,12 @@ export interface AgentDeps {
     setSelection(ids: number[]): void;
     /** Serialize the active document to SVG. */
     exportSVG(): string;
+    /**
+     * Import an SVG document, resolving to the new root ids. Lives on the UI
+     * engine (it needs DOM parsing plus raster fallbacks), which this module
+     * deliberately doesn't depend on directly.
+     */
+    importSVG(svg: string): Promise<number[]>;
 }
 
 function toIds(ids: number | number[]): number[] {
@@ -160,6 +252,107 @@ function firstSolidHex(paints: Paint[] | undefined): string | null {
     const p = paints?.[0];
     if (!p || !isSolid(p)) return null;
     return colorToHex(p);
+}
+
+/** Report what a non-solid fill actually is, so `fill: null` isn't ambiguous. */
+function paintKind(paints: Paint[] | undefined): AgentNode['fillType'] {
+    const p = paints?.[0];
+    if (!p || isSolid(p)) return undefined;
+    if (isGradient(p)) return 'gradient';
+    if (isMeshGradient(p)) return 'mesh';
+    return 'pattern';
+}
+
+/**
+ * A node's bounding box in its OWN local space, as [minX, minY, maxX, maxY].
+ *
+ * Local space is not uniform across node types, which is the trap here: a Rect
+ * has its origin at the top-left and spans 0..w, while an Ellipse and a Path
+ * are centred on the origin and span -w/2..w/2. Assuming "centred" everywhere
+ * puts a gradient's endpoints outside a Rect entirely, so most of the shape
+ * falls beyond the last stop and pads to a flat colour — it still reports as a
+ * gradient fill, it just doesn't look like one.
+ */
+function localBox(node: {
+    node_type: string;
+    geometry: NodeGeometry;
+}): [number, number, number, number] {
+    const { geometry: geo } = node;
+    if (geo.Rect) return [0, 0, geo.Rect.width, geo.Rect.height];
+    if (geo.Image) return [0, 0, geo.Image.width, geo.Image.height];
+    if (geo.Ellipse) {
+        const { radius_x: rx, radius_y: ry } = geo.Ellipse;
+        return [-rx, -ry, rx, ry];
+    }
+    if (geo.Path) {
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const sp of geo.Path.subpaths) {
+            for (const pt of sp.points) {
+                // Control points can extend a curve beyond its anchors.
+                for (const [x, y] of [[pt.x, pt.y], pt.cp1, pt.cp2] as [number, number][]) {
+                    minX = Math.min(minX, x);
+                    minY = Math.min(minY, y);
+                    maxX = Math.max(maxX, x);
+                    maxY = Math.max(maxY, y);
+                }
+            }
+        }
+        if (Number.isFinite(minX)) return [minX, minY, maxX, maxY];
+    }
+    if (geo.Text) {
+        // Text has no stored box; approximate from the font size so a gradient
+        // still spans something sensible rather than collapsing to a point.
+        const size = geo.Text.font_size;
+        return [0, -size, size * Math.max(geo.Text.content.length, 1) * 0.6, 0];
+    }
+    return [0, 0, 0, 0];
+}
+
+/**
+ * Resolve an agent-facing gradient onto a node's local box.
+ *
+ * The engine stores endpoints in the node's own local space, which an agent has
+ * no way to reason about — so it supplies an angle, and this projects that
+ * angle across the box supplied by `localBox`.
+ */
+function buildGradient(g: AgentGradient, box: [number, number, number, number]): Gradient {
+    const stops = g.stops
+        .map((s) => ({ offset: s.offset, color: requireColor(s.color) }))
+        .sort((a, b) => a.offset - b.offset);
+    if (stops.length < 2) throw new Error('[agent] a gradient needs at least 2 stops');
+
+    const [minX, minY, maxX, maxY] = box;
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const hw = Math.max((maxX - minX) / 2, 0.5);
+    const hh = Math.max((maxY - minY) / 2, 0.5);
+
+    if (g.type === 'radial') {
+        // Concentric on the box centre, sized to cover its longer half-axis.
+        return {
+            gradient_type: 'Radial',
+            stops,
+            start_x: cx,
+            start_y: cy,
+            end_x: cx + Math.max(hw, hh),
+            end_y: cy,
+        };
+    }
+    // Linear: a line through the box centre at `angle`, reaching its edges.
+    const rad = ((g.angle ?? 90) * Math.PI) / 180;
+    const dx = Math.cos(rad);
+    const dy = Math.sin(rad);
+    return {
+        gradient_type: 'Linear',
+        stops,
+        start_x: cx - dx * hw,
+        start_y: cy - dy * hh,
+        end_x: cx + dx * hw,
+        end_y: cy + dy * hh,
+    };
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -257,6 +450,37 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
         });
     };
 
+    /** The primary artboard, which is the frame `exportSVG` renders. */
+    const describeCanvas = (): AgentCanvas | null => {
+        const ab = scene.getArtboards()[0];
+        if (!ab) return null;
+        return {
+            x: ab.x,
+            y: ab.y,
+            width: ab.w,
+            height: ab.h,
+            background: ab.background && ab.background.a > 0 ? colorToHex(ab.background) : null,
+        };
+    };
+
+    /** Union of every root node's world bounds, or null on an empty canvas. */
+    const artworkBounds = (): [number, number, number, number] | null => {
+        const roots = Array.from(scene.getRootNodes());
+        if (!roots.length) return null;
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const id of roots) {
+            const b = scene.getNodeBounds(id);
+            minX = Math.min(minX, b[0]);
+            minY = Math.min(minY, b[1]);
+            maxX = Math.max(maxX, b[2]);
+            maxY = Math.max(maxY, b[3]);
+        }
+        return Number.isFinite(minX) ? [minX, minY, maxX, maxY] : null;
+    };
+
     const describeNode = (id: number): AgentNode | null => {
         const node = scene.getNode(id);
         if (!node) return null;
@@ -268,9 +492,11 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
             type: node.node_type,
             bounds: [round2(b[0]), round2(b[1]), round2(b[2] - b[0]), round2(b[3] - b[1])],
             fill: firstSolidHex(node.style.fills),
+            fillType: paintKind(node.style.fills),
             stroke: stroke?.paint && isSolid(stroke.paint) ? colorToHex(stroke.paint) : null,
             strokeWidth: stroke ? stroke.width : null,
             opacity: node.style.opacity,
+            rotation: round2(scene.getNodeTransformComponents(id).rotation_deg),
             visible: node.visible,
             locked: node.locked,
         };
@@ -287,6 +513,7 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
         describe(): AgentDescription {
             const data = scene.getSceneData();
             return {
+                canvas: describeCanvas(),
                 nodes: data.root_nodes
                     .map((id) => describeNode(id))
                     .filter((n): n is AgentNode => n !== null),
@@ -354,8 +581,40 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
             });
         },
 
-        createText(x, y, content, fontSize = 16) {
-            return scene.transaction(() => scene.addText(x, y, content, fontSize));
+        createPathData(d, style) {
+            // parseSVGPathD already emits the engine's [x,y] control-point
+            // tuples, so this needs no conversion — and it handles arcs and
+            // smooth-curve shorthand, which the point form can't express.
+            const subpaths = parseSVGPathD(d, 0, 0);
+            if (!subpaths.length || !subpaths.some((sp) => sp.points.length >= 2)) {
+                throw new Error(
+                    `[agent] path data produced no drawable geometry: ${d.slice(0, 60)}`,
+                );
+            }
+            return scene.transaction(() => {
+                const id = scene.addPath(JSON.stringify(subpaths));
+                applyStyle(id, creationStyle(style));
+                return id;
+            });
+        },
+
+        createText(x, y, content, fontSize = 16, style) {
+            return scene.transaction(() => {
+                const id = scene.addText(x, y, content, fontSize);
+                // The engine defaults text to a WHITE fill, which is invisible
+                // on the default white artboard — the agent gets a node that
+                // reports fine and draws nothing, with no way to diagnose it.
+                // Default to black; an explicit fill still wins.
+                applyStyle(id, { fill: '#000000', ...creationStyle(style) });
+                return id;
+            });
+        },
+
+        async importSVG(svg) {
+            if (!/<svg[\s>]/i.test(svg)) {
+                throw new Error('[agent] importSVG expects an <svg> document');
+            }
+            return deps.importSVG(svg);
         },
 
         setFill(ids, hex) {
@@ -370,8 +629,67 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
             });
         },
 
+        setGradient(ids, gradient) {
+            // Endpoints are per-node (they're resolved against each node's own
+            // box), so this can't share one paint across the batch.
+            const list = requireNodes(ids);
+            scene.transaction(() => {
+                for (const id of list) {
+                    const node = scene.getNode(id);
+                    if (!node) continue;
+                    const paint = buildGradient(gradient, localBox(node));
+                    scene.setNodeStyleNoHistory(
+                        id,
+                        JSON.stringify({ ...node.style, fills: [paint] }),
+                    );
+                }
+            });
+        },
+
         setOpacity(ids, opacity) {
             editStyle(ids, (s) => ({ ...s, opacity }));
+        },
+
+        setText(id, opts) {
+            requireNodes(id);
+            const node = scene.getNode(id);
+            if (node?.node_type !== 'Text') {
+                throw new Error(
+                    `[agent] node ${id} is a ${node?.node_type ?? 'unknown'}, not Text`,
+                );
+            }
+            const t = node.geometry.Text;
+            if (!t) throw new Error(`[agent] node ${id} has no text geometry`);
+            const ALIGN = { left: 0, center: 1, right: 2 } as const;
+            scene.transaction(() => {
+                if (opts.text !== undefined || opts.fontSize !== undefined) {
+                    scene.setTextContent(id, opts.text ?? t.content, opts.fontSize ?? t.font_size);
+                }
+                if (
+                    opts.fontFamily !== undefined ||
+                    opts.align !== undefined ||
+                    opts.lineHeight !== undefined
+                ) {
+                    scene.setTextProperties(
+                        id,
+                        opts.fontFamily ?? t.font_family,
+                        opts.align !== undefined ? ALIGN[opts.align] : t.text_align,
+                        opts.lineHeight ?? t.line_height,
+                    );
+                }
+                if (
+                    opts.weight !== undefined ||
+                    opts.italic !== undefined ||
+                    opts.letterSpacing !== undefined
+                ) {
+                    scene.setTextStyle(
+                        id,
+                        opts.weight ?? t.font_weight ?? 400,
+                        opts.italic ?? t.italic ?? false,
+                        opts.letterSpacing ?? t.letter_spacing ?? 0,
+                    );
+                }
+            });
         },
 
         setCornerRadius(ids, radius) {
@@ -413,6 +731,56 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
             scene.transaction(() => distributeSelection(scene, ids, axis));
         },
 
+        bringToFront(id) {
+            requireNodes(id);
+            scene.transaction(() => scene.bringToFront(id));
+        },
+
+        sendToBack(id) {
+            requireNodes(id);
+            scene.transaction(() => scene.sendToBack(id));
+        },
+
+        setCanvas(opts) {
+            const ab = scene.getArtboards()[0];
+            if (!ab) throw new Error('[agent] this document has no artboard');
+            scene.transaction(() => {
+                if (opts.width !== undefined || opts.height !== undefined) {
+                    scene.setArtboardBounds(
+                        ab.id,
+                        ab.x,
+                        ab.y,
+                        opts.width ?? ab.w,
+                        opts.height ?? ab.h,
+                    );
+                }
+                if (opts.background !== undefined) {
+                    const c =
+                        opts.background === null
+                            ? { r: 0, g: 0, b: 0, a: 0 }
+                            : requireColor(opts.background);
+                    scene.setArtboardBackground(ab.id, c.r, c.g, c.b, c.a);
+                }
+            });
+        },
+
+        fitCanvasToArtwork(margin = 0) {
+            const ab = scene.getArtboards()[0];
+            if (!ab) throw new Error('[agent] this document has no artboard');
+            const bounds = artworkBounds();
+            if (!bounds) throw new Error('[agent] nothing to fit — the canvas is empty');
+            const [minX, minY, maxX, maxY] = bounds;
+            scene.transaction(() =>
+                scene.setArtboardBounds(
+                    ab.id,
+                    minX - margin,
+                    minY - margin,
+                    maxX - minX + margin * 2,
+                    maxY - minY + margin * 2,
+                ),
+            );
+        },
+
         group(ids) {
             requireNodes(ids);
             return scene.transaction(() => scene.groupNodes(ids));
@@ -436,6 +804,12 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
         rename(id, name) {
             requireNodes(id);
             scene.transaction(() => scene.setNodeName(id, name));
+        },
+
+        clear() {
+            const roots = Array.from(scene.getRootNodes());
+            if (!roots.length) return;
+            scene.transaction(() => scene.removeNodes(roots));
         },
 
         boolean(ids, op) {
