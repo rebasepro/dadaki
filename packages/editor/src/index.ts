@@ -26,6 +26,7 @@ import { Document } from './document';
 import { DocumentManager } from './document_manager';
 import { ExportDialog, type ExportOptions } from './export_dialog';
 import { FileService } from './file_service';
+import { ensureFontCSS, fontsSettled, loadGoogleFontData } from './fonts';
 import { GuidesController } from './guides';
 import { InputManager } from './input';
 import { PersistenceManager } from './persistence';
@@ -371,7 +372,15 @@ export async function createEditor(
             renderer.requestRender();
         },
         exportSVG,
+        ensureFont: (family: string) => {
+            ensureFontCSS(family);
+            void loadGoogleFontData(family);
+        },
         renderPNG: async (scale: number) => {
+            // Text added moments ago may still be fetching its faces; without
+            // this the image shows a fallback face and an agent reading it
+            // draws the wrong conclusion about its own work.
+            await fontsSettled();
             // Frame the artboard, matching exportSVG, so an agent's PNG and its
             // SVG deliverable always show the same thing. The artboard's own
             // background is used, falling back to the white the editor shows.

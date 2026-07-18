@@ -175,6 +175,17 @@ try {
 
     const svg = await call('export_svg');
     check('export_svg returns markup', svg.svg.startsWith('<svg'), svg.svg.slice(0, 40));
+
+    // The engine creates text with an EMPTY family, which falls back to a face
+    // carrying no bold or italic — so weight and slant silently do nothing and
+    // the render contradicts what was asked for.
+    const textTag = svg.svg.match(/<text[^>]*>/)?.[0] ?? '';
+    check('text carries a real font family', /font-family="Inter"/.test(textTag), textTag);
+    check(
+        'weight and slant survive to the deliverable',
+        /font-weight="700"/.test(textTag) && /font-style="italic"/.test(textTag),
+        textTag,
+    );
     writeFileSync(join(OUT, 'logo.svg'), svg.svg);
 
     const img = await client.callTool({ name: 'render_png_image', arguments: {} });

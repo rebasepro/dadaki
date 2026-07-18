@@ -53,6 +53,9 @@ function makeAgent(): { agent: AgentApi; scene: WasmScene; selection: number[] }
         // Rasterizing needs the renderer's offscreen surface, which doesn't
         // exist headless; the transports are covered by the MCP smoke test.
         renderPNG: async () => '',
+        // Font fetching needs the network and a DOM; the contract these tests
+        // pin is that createText assigns a real family, not that it downloads.
+        ensureFont: () => {},
     });
     return { agent, scene, selection: state.selection };
 }
@@ -543,6 +546,25 @@ describe('agent API — text', () => {
         expect(t.content).toBe('goodbye');
         expect(t.font_size, 'size must survive a content-only edit').toBe(24);
         expect(t.font_weight, 'weight must survive a content-only edit').toBe(700);
+        expect(t.italic).toBe(true);
+    });
+
+    // The engine creates text with an EMPTY family, which falls back to
+    // CanvasKit's RefDefault: not a sans-serif, and carrying no bold or italic
+    // face — so weight and slant silently do nothing and the agent sees a
+    // render that contradicts what it asked for.
+    it('assigns a real font family so weight and slant have faces to select', () => {
+        const { agent, scene } = makeAgent();
+        const id = agent.createText(10, 10, 'hello', 24);
+        expect(textGeom(scene, id).font_family).toBe('Inter');
+    });
+
+    it('records weight and italic on the node', () => {
+        const { agent, scene } = makeAgent();
+        const id = agent.createText(10, 10, 'hello', 24);
+        agent.setText(id, { weight: 700, italic: true });
+        const t = textGeom(scene, id);
+        expect(t.font_weight).toBe(700);
         expect(t.italic).toBe(true);
     });
 

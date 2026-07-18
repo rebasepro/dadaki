@@ -27,6 +27,7 @@ import type { CanvasKit } from 'canvaskit-wasm';
 import { type AlignMode, alignSelection, distributeSelection } from './align';
 import { applyBooleanOp, type BoolOp } from './boolean_ops';
 import { colorToHex, parseHex } from './color_picker';
+import { DEFAULT_TEXT_FONT } from './fonts';
 import { parseSVGPathD } from './svg_utils';
 import type { Color, Gradient, NodeGeometry, NodeStyle, Paint, Stroke, Subpath } from './types';
 import { isGradient, isMeshGradient, isSolid, StrokeAlignment } from './types';
@@ -242,6 +243,12 @@ export interface AgentDeps {
      * surface, which this module deliberately doesn't depend on.
      */
     renderPNG(scale: number): Promise<string>;
+    /**
+     * Start loading a font family's faces, so a subsequent render has them.
+     * Fire-and-forget: creation stays synchronous, and `renderPNG` is what
+     * waits.
+     */
+    ensureFont(family: string): void;
     /**
      * Import an SVG document, resolving to the new root ids. Lives on the UI
      * engine (it needs DOM parsing plus raster fallbacks), which this module
@@ -617,8 +624,15 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
         },
 
         createText(x, y, content, fontSize = 16, style) {
+            // The engine creates text with an EMPTY family, which falls back to
+            // CanvasKit's RefDefault — not a sans-serif, and with no bold or
+            // italic face to select, so weight and slant silently do nothing.
+            // The text tool assigns a real family for exactly this reason; do
+            // the same, and start the fetch so a render can wait on it.
+            deps.ensureFont(DEFAULT_TEXT_FONT);
             return scene.transaction(() => {
                 const id = scene.addText(x, y, content, fontSize);
+                scene.setTextPropertiesNoHistory(id, DEFAULT_TEXT_FONT, 0, 1.2);
                 // The engine defaults text to a WHITE fill, which is invisible
                 // on the default white artboard — the agent gets a node that
                 // reports fine and draws nothing, with no way to diagnose it.
@@ -679,6 +693,9 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
             const t = node.geometry.Text;
             if (!t) throw new Error(`[agent] node ${id} has no text geometry`);
             const ALIGN = { left: 0, center: 1, right: 2 } as const;
+            // Switching family, or asking for a weight/slant this family hasn't
+            // fetched yet, needs the faces on hand before the next render.
+            if (opts.fontFamily) deps.ensureFont(opts.fontFamily);
             scene.transaction(() => {
                 if (opts.text !== undefined || opts.fontSize !== undefined) {
                     scene.setTextContent(id, opts.text ?? t.content, opts.fontSize ?? t.font_size);
