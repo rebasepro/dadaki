@@ -358,6 +358,39 @@ describe('agent API — canvas', () => {
         expect(canvas.height).toBeCloseTo(120, 0);
     });
 
+    /**
+     * fitCanvasToArtwork read the engine's raw bounds while describeNode used
+     * the measured ones, so a fitted canvas framed text by the estimate and
+     * clipped it. Caught by fitting a real logo and looking at the render:
+     * a 46pt wordmark was cropped mid-word because 7 bytes * 46 * 0.6 = 193
+     * against a true 255. The two must agree, so they now share one path.
+     */
+    it('fits around MEASURED text, not the engine estimate', () => {
+        const scene = new WasmScene({} as never);
+        scene.engine = new Engine();
+        scene.history = new History(50);
+        scene.wasm = wasm;
+        const agent = createAgentApi({
+            scene,
+            ck: {} as never,
+            getSelection: () => [],
+            setSelection: () => {},
+            exportSVG: () => '<svg/>',
+            importSVG: async () => [],
+            renderPNG: async () => '',
+            ensureFont: () => {},
+            // Deliberately much wider than the engine's estimate would be.
+            measureText: () => ({ width: 400, height: 50 }),
+            fontsReady: async () => {},
+        });
+
+        agent.createText(0, 100, 'SOLARIS', 46);
+        agent.fitCanvasToArtwork(0);
+        return agent.describe().then((d) => {
+            expect(d.canvas!.width, 'canvas must span the measured width').toBeCloseTo(400, 0);
+        });
+    });
+
     it('refuses to fit an empty canvas rather than producing a degenerate one', () => {
         const { agent } = makeAgent();
         expect(() => agent.fitCanvasToArtwork()).toThrow(/canvas is empty/);

@@ -512,51 +512,79 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
         };
     };
 
+    /**
+     * A node's world bounds as [minX, minY, maxX, maxY], with text measured
+     * rather than estimated.
+     *
+     * The engine's own bounds approximate text as `bytes * font_size * 0.6`, so
+     * anything reading them frames text wrongly — a fitted canvas clips a
+     * wordmark, a reported width misplaces an alignment. Groups are walked
+     * rather than trusted, because a group's engine bounds are the union of
+     * those same estimates.
+     */
+    const worldBounds = (id: number): [number, number, number, number] | null => {
+        const node = scene.getNode(id);
+        if (!node) return null;
+
+        const kids = node.children ?? [];
+        if (kids.length) {
+            let box: [number, number, number, number] | null = null;
+            for (const childId of kids) {
+                const cb = worldBounds(childId);
+                if (!cb) continue;
+                box = box
+                    ? [
+                          Math.min(box[0], cb[0]),
+                          Math.min(box[1], cb[1]),
+                          Math.max(box[2], cb[2]),
+                          Math.max(box[3], cb[3]),
+                      ]
+                    : cb;
+            }
+            if (box) return box;
+        }
+
+        const b = scene.getNodeBounds(id);
+        const text = node.geometry.Text;
+        if (!text) return [b[0], b[1], b[2], b[3]];
+        const measured = deps.measureText(text);
+        if (!measured) return [b[0], b[1], b[2], b[3]];
+        // measureText returns the typeset size in the node's OWN local units,
+        // while x/y are world. Scale it by the world transform, or text under a
+        // scaled group claims a size it doesn't occupy.
+        const t = scene.getTransform(id);
+        const sx = Math.hypot(t[0], t[3]);
+        const sy = Math.hypot(t[1], t[4]);
+        return [b[0], b[1], b[0] + measured.width * sx, b[1] + measured.height * sy];
+    };
+
     /** Union of every root node's world bounds, or null on an empty canvas. */
     const artworkBounds = (): [number, number, number, number] | null => {
-        const roots = Array.from(scene.getRootNodes());
-        if (!roots.length) return null;
-        let minX = Infinity;
-        let minY = Infinity;
-        let maxX = -Infinity;
-        let maxY = -Infinity;
-        for (const id of roots) {
-            const b = scene.getNodeBounds(id);
-            minX = Math.min(minX, b[0]);
-            minY = Math.min(minY, b[1]);
-            maxX = Math.max(maxX, b[2]);
-            maxY = Math.max(maxY, b[3]);
+        let box: [number, number, number, number] | null = null;
+        for (const id of Array.from(scene.getRootNodes())) {
+            const b = worldBounds(id);
+            if (!b) continue;
+            box = box
+                ? [
+                      Math.min(box[0], b[0]),
+                      Math.min(box[1], b[1]),
+                      Math.max(box[2], b[2]),
+                      Math.max(box[3], b[3]),
+                  ]
+                : b;
         }
-        return Number.isFinite(minX) ? [minX, minY, maxX, maxY] : null;
+        return box;
     };
 
     const describeNodeSync = (id: number): AgentNode | null => {
         const node = scene.getNode(id);
         if (!node) return null;
-        const b = scene.getNodeBounds(id);
+        // Same measured bounds everything else uses, so a width read here and a
+        // canvas fitted there can never disagree about where a shape ends.
+        const b = worldBounds(id) ?? scene.getNodeBounds(id);
         const stroke = node.style.strokes?.[0];
-        // Text is the one type whose engine bounds are an estimate rather than
-        // real geometry, and it is also the type most likely to be positioned
-        // BY its reported width. Substitute a real measurement when one is
-        // available; keep the estimate when it isn't, rather than inventing a
-        // number that would be confidently wrong.
-        let width = round2(b[2] - b[0]);
-        let height = round2(b[3] - b[1]);
-        if (node.geometry.Text) {
-            const measured = deps.measureText(node.geometry.Text);
-            if (measured) {
-                // measureText returns the typeset size in the node's OWN local
-                // units, while x/y above are world. Scale it by the world
-                // transform or a text node under a scaled group reports a width
-                // it doesn't occupy — and right-aligning by it lands short by
-                // exactly that factor.
-                const t = scene.getTransform(id);
-                const sx = Math.hypot(t[0], t[3]);
-                const sy = Math.hypot(t[1], t[4]);
-                width = round2(measured.width * sx);
-                height = round2(measured.height * sy);
-            }
-        }
+        const width = round2(b[2] - b[0]);
+        const height = round2(b[3] - b[1]);
         const out: AgentNode = {
             id,
             name: node.name,

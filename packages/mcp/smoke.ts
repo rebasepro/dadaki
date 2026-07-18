@@ -226,8 +226,22 @@ try {
 
     // Fitting the canvas is the last step of any icon/logo job, so it has to
     // produce a frame that actually hugs the artwork.
+    const beforeFit = await call('describe_scene');
     const fitted = await call('fit_canvas_to_artwork', { margin: 24 });
     check('fit_canvas_to_artwork tightens the frame', fitted.canvas.width < 1000, fitted.canvas);
+
+    // The frame must be built from the SAME measured bounds describe_scene
+    // reports. It used to read the engine's raw estimate instead, so a fitted
+    // canvas clipped a wordmark mid-word while every reported number looked
+    // right. Any node extending past the fitted frame means they disagree.
+    const right = Math.max(
+        ...beforeFit.nodes.map((n: { bounds: number[] }) => n.bounds[0] + n.bounds[2]),
+    );
+    check(
+        'the fitted frame agrees with reported bounds',
+        fitted.canvas.x + fitted.canvas.width >= right,
+        { frameRight: fitted.canvas.x + fitted.canvas.width, artworkRight: right },
+    );
 
     // `clear` is the escape hatch from a botched drawing, and it must be one
     // undo step or the way back is worse than the mess.
