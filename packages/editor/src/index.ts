@@ -16,6 +16,7 @@
 
 import type { CanvasKit } from 'canvaskit-wasm';
 import { AboutDialog } from './about_dialog';
+import { type AgentApi, createAgentApi } from './agent';
 import { type AnalyticsSink, logAppEvent, registerAnalyticsSink } from './analytics';
 import { AppMenu } from './app_menu';
 import { BackupDialog } from './backup_dialog';
@@ -34,6 +35,13 @@ import { Toolbar } from './toolbar';
 import { UIEngine } from './ui';
 import { WasmScene } from './wasm_scene';
 
+export type {
+    AgentApi,
+    AgentDescription,
+    AgentNode,
+    AgentPathPoint,
+    AgentStyle,
+} from './agent';
 export type { AnalyticsSink } from './analytics';
 export { logAppEvent, registerAnalyticsSink } from './analytics';
 export type { Document } from './document';
@@ -121,6 +129,13 @@ export interface EditorHandle {
     exportBytes(docId?: string): Uint8Array | null;
     /** Serialize the active document to an SVG string (good for previews). */
     exportSVG(): string;
+    /**
+     * Authoring API for autonomous agents: intent-level verbs (create, style,
+     * align, group, boolean) plus `describe()` so an agent can see the scene it
+     * is editing. Each call is one undo step; agent edits are ordinary edits as
+     * far as history, autosave and the host hooks are concerned.
+     */
+    readonly agent: AgentApi;
     /**
      * Open a document from durable bytes (as produced by `exportBytes`) in a
      * new tab and activate it.
@@ -308,6 +323,47 @@ export async function createEditor(
 
     logAppEvent('app_loaded');
 
+    // Render the artwork as it looks on the canvas — framed to the artboard
+    // bounds and on a solid canvas — rather than loose shapes on transparency
+    // (which reads as an empty/checkerboard preview). This is what hosts use
+    // for thumbnails, and what the agent API renders through. Artboards default
+    // to a transparent background, so fall back to white (the canvas colour
+    // shown in the editor) when there's no opaque fill.
+    const exportSVG = (): string => {
+        const white = { r: 1, g: 1, b: 1, a: 1 };
+        const canvasBg = (bg?: { r: number; g: number; b: number; a: number }) =>
+            bg && bg.a > 0 ? bg : white;
+        const arts = wasmScene.getArtboards();
+        if (arts.length === 1) {
+            const ab = arts[0];
+            return ui.buildSVGString(
+                { x: ab.x, y: ab.y, w: ab.w, h: ab.h },
+                canvasBg(ab.background),
+            );
+        }
+        if (arts.length > 1) {
+            return ui.buildSVGString(renderer.getArtboardsBounds(), canvasBg(arts[0].background));
+        }
+        return ui.buildSVGString(undefined, white);
+    };
+
+    // Agent authoring surface. Selection goes through the engine (whose
+    // `select_node` is add-only, hence the clear) and then refreshes the same
+    // panels a human click would, so the editor's chrome reflects agent work.
+    const agent = createAgentApi({
+        scene: wasmScene,
+        ck,
+        getSelection: () => Array.from(wasmScene.getSelection()),
+        setSelection: (ids: number[]) => {
+            wasmScene.engine?.clear_selection();
+            for (const id of ids) wasmScene.selectNode(id, true);
+            ui.updateLayerList();
+            ui.syncWithSelection();
+            renderer.requestRender();
+        },
+        exportSVG,
+    });
+
     return {
         scene: wasmScene,
         ui,
@@ -328,26 +384,8 @@ export async function createEditor(
             if (!engine) return null;
             return new Uint8Array(engine.serialize_proto());
         },
-        exportSVG: () => {
-            // Render the artwork as it looks on the canvas — framed to the
-            // artboard bounds and on a solid canvas — rather than loose shapes
-            // on transparency (which reads as an empty/checkerboard preview).
-            // This is what hosts use for thumbnails. Artboards default to a
-            // transparent background, so fall back to white (the canvas colour
-            // shown in the editor) when there's no opaque fill.
-            const white = { r: 1, g: 1, b: 1, a: 1 };
-            const canvasBg = (bg?: { r: number; g: number; b: number; a: number }) =>
-                bg && bg.a > 0 ? bg : white;
-            const arts = wasmScene.getArtboards();
-            if (arts.length === 1) {
-                const ab = arts[0];
-                return ui.buildSVGString({ x: ab.x, y: ab.y, w: ab.w, h: ab.h }, canvasBg(ab.background));
-            }
-            if (arts.length > 1) {
-                return ui.buildSVGString(renderer.getArtboardsBounds(), canvasBg(arts[0].background));
-            }
-            return ui.buildSVGString(undefined, white);
-        },
+        exportSVG,
+        agent,
         loadBytes: (bytes: Uint8Array, name = 'Untitled') => {
             const doc = new Document(name);
             doc.pendingBytes = bytes;

@@ -32,12 +32,16 @@ async function bootstrap() {
         analyticsSink: createFirebaseAnalyticsSink(),
     });
 
-    // Global handle used by the SVG conformance harness and manual debugging.
+    // Global handle used by the SVG conformance harness, the agent MCP server
+    // (packages/mcp drives `app.agent` over CDP) and manual debugging.
     (window as unknown as Record<string, unknown>).app = {
         scene: editor.scene,
         ui: editor.ui,
         input: editor.input,
         renderer: editor.renderer,
+        agent: editor.agent,
+        exportSVG: editor.exportSVG,
+        newDocument: editor.newDocument,
         ck,
     };
 

@@ -1,0 +1,20 @@
+{
+    "name": "@dadaki/mcp",
+    "version": "1.0.0",
+    "description": "MCP server that lets an agent author vector artwork in Dadaki — intent-level drawing verbs plus render-back so the agent can see its own work.",
+    "license": "MIT",
+    "private": true,
+    "type": "module",
+    "bin": {
+        "dadaki-mcp": "./src/index.ts"
+    },
+    "scripts": {
+        "start": "node --experimental-strip-types src/index.ts",
+        "smoke": "node --experimental-strip-types smoke.ts"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.22.0",
+        "puppeteer": "^25.3.0",
+        "zod": "^3.25.0"
+    }
+}
