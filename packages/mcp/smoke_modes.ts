@@ -18,6 +18,7 @@
  *   node --experimental-strip-types packages/mcp/smoke_modes.ts [certDir]
  */
 
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createServer as createHttpsServer } from 'node:https';
 import { createServer as createNetServer } from 'node:net';
@@ -113,6 +114,44 @@ const httpServed = await serveStatic(APP_DIST);
     } finally {
         await client.close().catch(() => {});
     }
+}
+
+// ─── bridge: the connect URL must survive a restart ─────────────────────
+// Bridge mode is only usable if you attach ONCE. A token minted per run would
+// reject the previously attached tab on every server restart — and MCP clients
+// restart their servers constantly — leaving the user to re-paste a URL each
+// time. So both the port and the token have to be stable.
+{
+    const urlOf = (stderr: string) => stderr.match(/agentBridge=\d+&token=[0-9a-f]+/)?.[0] ?? '';
+    /** Start the server, read its printed connect URL, then kill it. */
+    const startAndRead = () =>
+        new Promise<string>((resolve) => {
+            const child = spawn(process.execPath, [
+                '--experimental-strip-types',
+                SERVER,
+                '--mode',
+                'bridge',
+            ]);
+            let buf = '';
+            const done = (v: string) => {
+                child.kill('SIGKILL');
+                resolve(v);
+            };
+            child.stderr.on('data', (d) => {
+                buf += String(d);
+                const u = urlOf(buf);
+                if (u) done(u);
+            });
+            setTimeout(() => done(urlOf(buf)), 15_000);
+        });
+
+    const first = await startAndRead();
+    const second = await startAndRead();
+    check('bridge prints a connect URL', /agentBridge=\d+&token=[0-9a-f]{48}/.test(first), first);
+    check('the connect URL is identical after a restart', first !== '' && first === second, {
+        first,
+        second,
+    });
 }
 
 // ─── headful ────────────────────────────────────────────────────────────

@@ -85,13 +85,36 @@ export class BridgeTransport implements EditorTransport {
         return this.port;
     }
 
-    private async start(): Promise<void> {
-        const wss = new WebSocketServer({ host: '127.0.0.1', port: this.opts.port ?? 0 });
-        this.wss = wss;
-        await new Promise<void>((ok, fail) => {
-            wss.once('listening', ok);
-            wss.once('error', fail);
+    /** Bind `port`, resolving false if it is already taken. */
+    private async bind(port: number): Promise<boolean> {
+        const wss = new WebSocketServer({ host: '127.0.0.1', port });
+        const ok = await new Promise<boolean>((resolve, reject) => {
+            wss.once('listening', () => resolve(true));
+            wss.once('error', (err: NodeJS.ErrnoException) => {
+                if (err.code === 'EADDRINUSE') resolve(false);
+                else reject(err);
+            });
         });
+        if (ok) this.wss = wss;
+        return ok;
+    }
+
+    private async start(): Promise<void> {
+        const preferred = this.opts.port ?? 0;
+        if (!(await this.bind(preferred))) {
+            // The fixed default keeps the connect URL stable across restarts,
+            // but a second server (or a stale one) must not take the whole
+            // process down. Fall back to an ephemeral port; the caller builds
+            // the URL from the port we actually bound.
+            console.error(
+                `[dadaki-mcp] port ${preferred} is in use — another server may already be ` +
+                    'running. Falling back to a free port; the connect URL below is the one ' +
+                    'to use, and an already-attached tab will need re-attaching.',
+            );
+            if (!(await this.bind(0))) throw new Error('[dadaki-mcp] could not bind a port');
+        }
+        const wss = this.wss;
+        if (!wss) throw new Error('[dadaki-mcp] bridge failed to start');
 
         wss.on('connection', (ws, req) => {
             const url = new URL(req.url ?? '/', 'http://127.0.0.1');

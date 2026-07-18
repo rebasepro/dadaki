@@ -45,10 +45,18 @@ editor chrome, at whatever scale is asked for.
 
 | Mode | What it does | Use it for |
 | --- | --- | --- |
-| `headless` (default) | Throwaway browser serving the local build | Scripts, CI, unattended work |
+| `bridge` | Drives the editor tab **you** have open | Working alongside the agent — the default in `.mcp.json` |
+| `headless` | Throwaway browser serving the local build | Scripts, CI, unattended work |
 | `headful` | The same, with a visible window | Watching an agent work; debugging |
-| `bridge` | Drives the editor tab **you** have open | Working alongside the agent |
 | `--url <addr>` | Any of the above, pointed elsewhere | Dev server, staging, the deployed app |
+
+**`headless` is the code default; `bridge` is what the checked-in `.mcp.json`
+selects.** That split is deliberate: headless is right for a script, and wrong
+for a person. In headless mode the document lives in an invisible browser owned
+by the server process — you can't see it, can't take it over, and it is **lost
+when the server restarts**, which MCP clients do routinely. Reach for it when
+something else is consuming the exported SVG, not when you want to keep the
+artwork.
 
 ### Setup
 
@@ -88,6 +96,13 @@ Open that once and the tab attaches. The credentials are stripped from the
 address bar (so the token doesn't linger in history or get pasted into a shared
 link) and remembered, so reloads stay attached — call
 `clearBridgeCredentials()` to stop.
+
+**The URL is stable, so "once" really means once.** The port is fixed (7331) and
+the token is persisted to `~/.dadaki/agent-bridge.json` (mode 0600, outside any
+repo so it is never committed). A token minted per run would reject the attached
+tab on every server restart, which would mean re-pasting a URL constantly and
+make the mode unusable. If port 7331 is taken the server falls back to a free
+one and says so — that run's URL is the one to use.
 
 You keep working in the same window while the agent does. Its edits are ordinary
 edits: same undo history, same granularity, so you can undo its work, correct
