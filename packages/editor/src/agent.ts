@@ -29,7 +29,16 @@ import { applyBooleanOp, type BoolOp } from './boolean_ops';
 import { colorToHex, parseHex } from './color_picker';
 import { DEFAULT_TEXT_FONT } from './fonts';
 import { parseSVGPathD } from './svg_utils';
-import type { Color, Gradient, NodeGeometry, NodeStyle, Paint, Stroke, Subpath } from './types';
+import type {
+    Color,
+    Gradient,
+    NodeGeometry,
+    NodeStyle,
+    Paint,
+    Stroke,
+    Subpath,
+    TextGeometry,
+} from './types';
 import { isGradient, isMeshGradient, isSolid, StrokeAlignment } from './types';
 import type { WasmScene } from './wasm_scene';
 
@@ -93,10 +102,17 @@ export interface AgentGradient {
 
 export interface AgentApi {
     // ─── Seeing ────────────────────────────────────────────────────────
-    /** The whole scene as a compact tree. This is what lets the agent aim. */
-    describe(): AgentDescription;
+    /**
+     * The whole scene as a compact tree. This is what lets the agent aim.
+     *
+     * Async because text bounds are only real once the font is loaded, and an
+     * agent's loop is create-then-describe with no pause between — describing
+     * too early would report estimated widths and silently mislead any layout
+     * built on them.
+     */
+    describe(): Promise<AgentDescription>;
     /** One node, or null if the id is unknown. */
-    describeNode(id: number): AgentNode | null;
+    describeNode(id: number): Promise<AgentNode | null>;
     /** The active document serialized to SVG (for rendering / inspection). */
     toSVG(): string;
     /**
@@ -250,6 +266,14 @@ export interface AgentDeps {
      */
     ensureFont(family: string): void;
     /**
+     * True typeset size of a text node, or null if it can't be measured yet.
+     * The engine's own text bounds are a crude estimate, which is fine for
+     * hit-testing but wrong for anything that positions text by its width.
+     */
+    measureText(geo: TextGeometry): { width: number; height: number } | null;
+    /** Resolve once no font load is in flight, so text can be measured. */
+    fontsReady(): Promise<void>;
+    /**
      * Import an SVG document, resolving to the new root ids. Lives on the UI
      * engine (it needs DOM parsing plus raster fallbacks), which this module
      * deliberately doesn't depend on directly.
@@ -293,10 +317,10 @@ function paintKind(paints: Paint[] | undefined): AgentNode['fillType'] {
  * falls beyond the last stop and pads to a flat colour — it still reports as a
  * gradient fill, it just doesn't look like one.
  */
-function localBox(node: {
-    node_type: string;
-    geometry: NodeGeometry;
-}): [number, number, number, number] {
+function localBox(
+    node: { node_type: string; geometry: NodeGeometry },
+    measure?: (geo: TextGeometry) => { width: number; height: number } | null,
+): [number, number, number, number] {
     const { geometry: geo } = node;
     if (geo.Rect) return [0, 0, geo.Rect.width, geo.Rect.height];
     if (geo.Image) return [0, 0, geo.Image.width, geo.Image.height];
@@ -323,8 +347,10 @@ function localBox(node: {
         if (Number.isFinite(minX)) return [minX, minY, maxX, maxY];
     }
     if (geo.Text) {
-        // Text has no stored box; approximate from the font size so a gradient
-        // still spans something sensible rather than collapsing to a point.
+        // Text carries no stored box, so a gradient across it needs the typeset
+        // size. Fall back to a font-size estimate only if measuring fails.
+        const m = measure?.(geo.Text);
+        if (m) return [0, -m.height, m.width, 0];
         const size = geo.Text.font_size;
         return [0, -size, size * Math.max(geo.Text.content.length, 1) * 0.6, 0];
     }
@@ -504,16 +530,30 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
         return Number.isFinite(minX) ? [minX, minY, maxX, maxY] : null;
     };
 
-    const describeNode = (id: number): AgentNode | null => {
+    const describeNodeSync = (id: number): AgentNode | null => {
         const node = scene.getNode(id);
         if (!node) return null;
         const b = scene.getNodeBounds(id);
         const stroke = node.style.strokes?.[0];
+        // Text is the one type whose engine bounds are an estimate rather than
+        // real geometry, and it is also the type most likely to be positioned
+        // BY its reported width. Substitute a real measurement when one is
+        // available; keep the estimate when it isn't, rather than inventing a
+        // number that would be confidently wrong.
+        let width = round2(b[2] - b[0]);
+        let height = round2(b[3] - b[1]);
+        if (node.geometry.Text) {
+            const measured = deps.measureText(node.geometry.Text);
+            if (measured) {
+                width = round2(measured.width);
+                height = round2(measured.height);
+            }
+        }
         const out: AgentNode = {
             id,
             name: node.name,
             type: node.node_type,
-            bounds: [round2(b[0]), round2(b[1]), round2(b[2] - b[0]), round2(b[3] - b[1])],
+            bounds: [round2(b[0]), round2(b[1]), width, height],
             fill: firstSolidHex(node.style.fills),
             fillType: paintKind(node.style.fills),
             stroke: stroke?.paint && isSolid(stroke.paint) ? colorToHex(stroke.paint) : null,
@@ -526,25 +566,29 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
         const kids = node.children ?? [];
         if (kids.length) {
             out.children = kids
-                .map((childId) => describeNode(childId))
+                .map((childId) => describeNodeSync(childId))
                 .filter((n): n is AgentNode => n !== null);
         }
         return out;
     };
 
     return {
-        describe(): AgentDescription {
+        async describe(): Promise<AgentDescription> {
+            await deps.fontsReady();
             const data = scene.getSceneData();
             return {
                 canvas: describeCanvas(),
                 nodes: data.root_nodes
-                    .map((id) => describeNode(id))
+                    .map((id) => describeNodeSync(id))
                     .filter((n): n is AgentNode => n !== null),
                 selection: deps.getSelection(),
             };
         },
 
-        describeNode,
+        async describeNode(id: number) {
+            await deps.fontsReady();
+            return describeNodeSync(id);
+        },
 
         toSVG: () => deps.exportSVG(),
 
@@ -669,7 +713,7 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
                 for (const id of list) {
                     const node = scene.getNode(id);
                     if (!node) continue;
-                    const paint = buildGradient(gradient, localBox(node));
+                    const paint = buildGradient(gradient, localBox(node, deps.measureText));
                     scene.setNodeStyleNoHistory(
                         id,
                         JSON.stringify({ ...node.style, fills: [paint] }),

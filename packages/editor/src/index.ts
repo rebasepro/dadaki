@@ -372,6 +372,8 @@ export async function createEditor(
             renderer.requestRender();
         },
         exportSVG,
+        measureText: (geo) => renderer.measureText(geo),
+        fontsReady: () => fontsSettled(),
         ensureFont: (family: string) => {
             ensureFontCSS(family);
             void loadGoogleFontData(family);

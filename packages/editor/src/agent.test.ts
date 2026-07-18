@@ -56,6 +56,11 @@ function makeAgent(): { agent: AgentApi; scene: WasmScene; selection: number[] }
         // Font fetching needs the network and a DOM; the contract these tests
         // pin is that createText assigns a real family, not that it downloads.
         ensureFont: () => {},
+        // Real measurement needs CanvasKit's paragraph API and a font provider,
+        // neither of which exists headless. Returning null is the documented
+        // "can't measure" path, which falls back to the engine's estimate.
+        measureText: () => null,
+        fontsReady: async () => {},
     });
     return { agent, scene, selection: state.selection };
 }
@@ -157,11 +162,11 @@ describe('agent API — undo granularity', () => {
 });
 
 describe('agent API — describe()', () => {
-    it('reports geometry and style in the units the agent supplied', () => {
+    it('reports geometry and style in the units the agent supplied', async () => {
         const { agent } = makeAgent();
         agent.createRect(10, 20, 100, 50, { fill: '#ff0000' });
 
-        const desc = agent.describe();
+        const desc = await agent.describe();
         expect(desc.nodes).toHaveLength(1);
         const [node] = desc.nodes;
         expect(node.fill).toBe('#ff0000');
@@ -170,27 +175,27 @@ describe('agent API — describe()', () => {
         expect(node.bounds[3]).toBeCloseTo(50, 1);
     });
 
-    it('nests children under groups so the agent can see structure', () => {
+    it('nests children under groups so the agent can see structure', async () => {
         const { agent } = makeAgent();
         const a1 = agent.createRect(0, 0, 10, 10);
         const a2 = agent.createRect(20, 0, 10, 10);
         agent.group([a1, a2]);
 
-        const desc = agent.describe();
+        const desc = await agent.describe();
         expect(desc.nodes).toHaveLength(1);
         expect(desc.nodes[0].children?.map((c) => c.id).sort()).toEqual([a1, a2].sort());
     });
 
-    it('returns null fill for unfilled nodes rather than inventing a colour', () => {
+    it('returns null fill for unfilled nodes rather than inventing a colour', async () => {
         const { agent } = makeAgent();
         const id = agent.createRect(0, 0, 10, 10);
         agent.setFill(id, null);
-        expect(agent.describeNode(id)?.fill).toBeNull();
+        expect((await agent.describeNode(id))?.fill).toBeNull();
     });
 
-    it('describeNode returns null for an unknown id', () => {
+    it('describeNode returns null for an unknown id', async () => {
         const { agent } = makeAgent();
-        expect(agent.describeNode(99999)).toBeNull();
+        expect(await agent.describeNode(99999)).toBeNull();
     });
 });
 
@@ -201,13 +206,13 @@ describe('agent API — input validation', () => {
         expect(() => agent.setFill(id, 'not-a-colour')).toThrow(/invalid color/);
     });
 
-    it('accepts shorthand and alpha hex forms', () => {
+    it('accepts shorthand and alpha hex forms', async () => {
         const { agent } = makeAgent();
         const id = agent.createRect(0, 0, 10, 10);
         agent.setFill(id, '#f00');
-        expect(agent.describeNode(id)?.fill).toBe('#ff0000');
+        expect((await agent.describeNode(id))?.fill).toBe('#ff0000');
         agent.setFill(id, '#ff000080');
-        expect(agent.describeNode(id)?.fill).toMatch(/^#ff0000/);
+        expect((await agent.describeNode(id))?.fill).toMatch(/^#ff0000/);
     });
 
     it('rejects a path with too few points', () => {
@@ -243,7 +248,7 @@ describe('agent API — createPath geometry', () => {
     // control-point shape mismatch produces a silently EMPTY path — it renders
     // as nothing and reports zero bounds, with no error anywhere. Pin the real
     // geometry so a format drift fails loudly here instead of in artwork.
-    it('produces a path with real bounds, not a silently empty one', () => {
+    it('produces a path with real bounds, not a silently empty one', async () => {
         const { agent } = makeAgent();
         const id = agent.createPath(
             [
@@ -254,14 +259,14 @@ describe('agent API — createPath geometry', () => {
             true,
             { fill: '#a63d40' },
         );
-        const node = agent.describeNode(id);
+        const node = await agent.describeNode(id);
         expect(node, 'path node should exist').not.toBeNull();
         const [, , w, h] = node!.bounds;
         expect(w, 'path width should span the supplied points').toBeCloseTo(360, 0);
         expect(h, 'path height should span the supplied points').toBeCloseTo(130, 0);
     });
 
-    it('honours explicit control points', () => {
+    it('honours explicit control points', async () => {
         const { agent } = makeAgent();
         const id = agent.createPath(
             [
@@ -272,7 +277,7 @@ describe('agent API — createPath geometry', () => {
         );
         // The curve bulges above y=0, so the bbox must be taller than the
         // straight-line case (which would be zero-height).
-        expect(agent.describeNode(id)!.bounds[3]).toBeGreaterThan(0);
+        expect((await agent.describeNode(id))!.bounds[3]).toBeGreaterThan(0);
     });
 });
 
@@ -280,36 +285,39 @@ describe('agent API — creation defaults', () => {
     // The engine's default node style has a black 2px stroke. A human sees and
     // deletes it; an agent won't notice a thin dark outline in a render and
     // will ship artwork with unintended borders. Creation must be opt-in.
-    it('does not add a stroke the caller never asked for', () => {
+    it('does not add a stroke the caller never asked for', async () => {
         const { agent } = makeAgent();
         const id = agent.createEllipse(100, 100, 45, 45, { fill: '#f5c542' });
-        expect(agent.describeNode(id)?.stroke, 'a fill-only request means no outline').toBeNull();
+        expect(
+            (await agent.describeNode(id))?.stroke,
+            'a fill-only request means no outline',
+        ).toBeNull();
     });
 
     // The engine defaults text to a WHITE fill, which is invisible on the
     // default white artboard. The node describes fine and draws nothing, so an
     // agent has no way to diagnose it — it just sees a blank canvas.
-    it('does not create text that is invisible on a white canvas', () => {
+    it('does not create text that is invisible on a white canvas', async () => {
         const { agent } = makeAgent();
         const id = agent.createText(10, 10, 'hello', 24);
-        expect(agent.describeNode(id)?.fill).toBe('#000000');
+        expect((await agent.describeNode(id))?.fill).toBe('#000000');
     });
 
-    it('still honours an explicit text colour', () => {
+    it('still honours an explicit text colour', async () => {
         const { agent } = makeAgent();
         const id = agent.createText(10, 10, 'hello', 24, { fill: '#ff0000' });
-        expect(agent.describeNode(id)?.fill).toBe('#ff0000');
+        expect((await agent.describeNode(id))?.fill).toBe('#ff0000');
     });
 
-    it('leaves a bare shape unstroked too', () => {
+    it('leaves a bare shape unstroked too', async () => {
         const { agent } = makeAgent();
-        expect(agent.describeNode(agent.createRect(0, 0, 10, 10))?.stroke).toBeNull();
+        expect((await agent.describeNode(agent.createRect(0, 0, 10, 10)))?.stroke).toBeNull();
     });
 
-    it('still applies a stroke when one IS requested', () => {
+    it('still applies a stroke when one IS requested', async () => {
         const { agent } = makeAgent();
         const id = agent.createRect(0, 0, 10, 10, { stroke: '#5c4033', strokeWidth: 4 });
-        const node = agent.describeNode(id);
+        const node = await agent.describeNode(id);
         expect(node?.stroke).toBe('#5c4033');
         expect(node?.strokeWidth).toBe(4);
     });
@@ -319,26 +327,26 @@ describe('agent API — canvas', () => {
     // Without this an agent cannot centre anything or reason about margins.
     // I hit exactly this drawing an icon: the only way to learn the canvas
     // size was reading ruler markings out of a PNG.
-    it('reports the artboard so the agent can centre artwork', () => {
+    it('reports the artboard so the agent can centre artwork', async () => {
         const { agent } = makeAgent();
-        const canvas = agent.describe().canvas;
+        const canvas = (await agent.describe()).canvas;
         expect(canvas).not.toBeNull();
         expect(canvas!.width).toBeGreaterThan(0);
         expect(canvas!.height).toBeGreaterThan(0);
     });
 
-    it('resizes the canvas', () => {
+    it('resizes the canvas', async () => {
         const { agent } = makeAgent();
         agent.setCanvas({ width: 512, height: 512 });
-        const canvas = agent.describe().canvas;
+        const canvas = (await agent.describe()).canvas;
         expect([canvas!.width, canvas!.height]).toEqual([512, 512]);
     });
 
-    it('fits the canvas around the artwork with a margin', () => {
+    it('fits the canvas around the artwork with a margin', async () => {
         const { agent } = makeAgent();
         agent.createRect(100, 200, 50, 80);
         agent.fitCanvasToArtwork(20);
-        const canvas = agent.describe().canvas!;
+        const canvas = (await agent.describe()).canvas!;
         expect(canvas.x).toBeCloseTo(80, 0);
         expect(canvas.y).toBeCloseTo(180, 0);
         expect(canvas.width).toBeCloseTo(90, 0);
@@ -352,18 +360,18 @@ describe('agent API — canvas', () => {
 });
 
 describe('agent API — SVG path data', () => {
-    it('accepts an SVG d attribute', () => {
+    it('accepts an SVG d attribute', async () => {
         const { agent } = makeAgent();
         const id = agent.createPathData('M 0 0 L 100 0 L 100 100 L 0 100 Z', { fill: '#ff0000' });
-        const [, , w, h] = agent.describeNode(id)!.bounds;
+        const [, , w, h] = (await agent.describeNode(id))!.bounds;
         expect(w).toBeCloseTo(100, 0);
         expect(h).toBeCloseTo(100, 0);
     });
 
-    it('handles curves and arcs the point form cannot express', () => {
+    it('handles curves and arcs the point form cannot express', async () => {
         const { agent } = makeAgent();
         const id = agent.createPathData('M 0 50 A 50 50 0 1 1 100 50 Z');
-        const [, , w, h] = agent.describeNode(id)!.bounds;
+        const [, , w, h] = (await agent.describeNode(id))!.bounds;
         expect(w).toBeGreaterThan(50);
         expect(h).toBeGreaterThan(20);
     });
@@ -377,7 +385,7 @@ describe('agent API — SVG path data', () => {
 });
 
 describe('agent API — gradients', () => {
-    it('applies a linear gradient and reports it as a gradient fill', () => {
+    it('applies a linear gradient and reports it as a gradient fill', async () => {
         const { agent } = makeAgent();
         const id = agent.createRect(0, 0, 100, 100);
         agent.setGradient(id, {
@@ -388,14 +396,14 @@ describe('agent API — gradients', () => {
                 { offset: 1, color: '#0000ff' },
             ],
         });
-        const node = agent.describeNode(id)!;
+        const node = (await agent.describeNode(id))!;
         // `fill` can only carry solids, so the kind must be reported separately
         // or a gradient is indistinguishable from no fill at all.
         expect(node.fill).toBeNull();
         expect(node.fillType).toBe('gradient');
     });
 
-    it('applies a radial gradient', () => {
+    it('applies a radial gradient', async () => {
         const { agent } = makeAgent();
         const id = agent.createEllipse(50, 50, 40, 40);
         agent.setGradient(id, {
@@ -405,7 +413,7 @@ describe('agent API — gradients', () => {
                 { offset: 1, color: '#000000' },
             ],
         });
-        expect(agent.describeNode(id)!.fillType).toBe('gradient');
+        expect((await agent.describeNode(id))!.fillType).toBe('gradient');
     });
 
     /**
@@ -592,14 +600,14 @@ describe('agent API — text', () => {
 });
 
 describe('agent API — clear', () => {
-    it('empties the canvas in a single undo step', () => {
+    it('empties the canvas in a single undo step', async () => {
         const { agent, scene } = makeAgent();
         agent.createRect(0, 0, 10, 10);
         agent.createEllipse(50, 50, 10, 10);
         const before = snapshot(scene);
 
         agent.clear();
-        expect(agent.describe().nodes).toHaveLength(0);
+        expect((await agent.describe()).nodes).toHaveLength(0);
 
         scene.undo();
         expect(snapshot(scene), 'clear must be recoverable with one undo').toEqual(before);
@@ -619,20 +627,20 @@ describe('agent API — importSVG', () => {
 });
 
 describe('agent API — styling', () => {
-    it('setStroke preserves width when only the colour changes', () => {
+    it('setStroke preserves width when only the colour changes', async () => {
         const { agent } = makeAgent();
         const id = agent.createRect(0, 0, 10, 10);
         agent.setStroke(id, '#000000', 7);
         agent.setStroke(id, '#ffffff');
-        const node = agent.describeNode(id);
+        const node = await agent.describeNode(id);
         expect(node?.strokeWidth).toBe(7);
         expect(node?.stroke).toBe('#ffffff');
     });
 
-    it('a stroke width with no colour still paints something visible', () => {
+    it('a stroke width with no colour still paints something visible', async () => {
         const { agent } = makeAgent();
         const id = agent.createRect(0, 0, 10, 10, { strokeWidth: 3 });
-        const node = agent.describeNode(id);
+        const node = await agent.describeNode(id);
         expect(node?.strokeWidth).toBe(3);
         expect(node?.stroke, 'width-only stroke should default to black').toBe('#000000');
     });

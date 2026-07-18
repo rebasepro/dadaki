@@ -163,6 +163,17 @@ try {
         label.node.fill,
     );
 
+    // Text bounds must be MEASURED, not the engine's `bytes * size * 0.6`
+    // estimate. Anything positioning text by its reported width — right-
+    // aligning, centring, packing columns — lands wrong otherwise, and the
+    // estimate errs in both directions (bold caps are wider than 0.6em, body
+    // text much narrower), so it can't be corrected with a fudge factor.
+    const estimate = 'draft'.length * 72 * 0.6;
+    check('text width is measured, not estimated', Math.abs(label.node.bounds[2] - estimate) > 1, {
+        reported: label.node.bounds[2],
+        estimate,
+    });
+
     await call('set_text', { id: label.id, weight: 700, italic: true });
     await call('set_text', { id: label.id, text: 'DADAKI' });
 
