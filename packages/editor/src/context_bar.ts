@@ -159,6 +159,7 @@ const ACTION_TOOLTIPS: Record<string, string> = {
     'Add Point': 'Click a segment to insert an anchor point where you click.',
     'Delete Point': 'Click an anchor point to remove it.',
     'Cut at Point': 'Split the path at the selected anchor point.',
+    'Make Corner': 'Remove the selected point’s Bézier handles — its segments become straight.',
     'Edit Mesh': 'Edit this shape’s mesh fill — its points, colors and handles.',
     Done: 'Finish editing this path.',
     Finish: 'Finish and keep the path.',
@@ -270,6 +271,13 @@ export class ContextBar {
         const guideSig = g
             ? `|guide${g.axis}${g.index}${this.input.selectedGuideLocked() ? 'L' : ''}`
             : '';
+        // "Make Corner" is enabled only while a selected anchor still has
+        // handles; retracting them doesn't change any count, so hash the
+        // handle-presence bit to force the bar to re-disable the button.
+        const cornerSig =
+            info.context === 'path-editing'
+                ? `|corner${this.input.selectedPointsHaveHandles() ? 1 : 0}`
+                : '';
         // Mesh bar shows grid dims + selected point count; both change without
         // any node-selection change, so they're part of the signature.
         const me = this.ui.meshEdit;
@@ -279,7 +287,7 @@ export class ContextBar {
                     ? `|mesh${me.mesh()?.rows}x${me.mesh()?.cols}:${me.selectedVertices.size}`
                     : '|mesh-idle'
                 : '';
-        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}${geoSig}${guideSig}${meshSig}`;
+        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}${geoSig}${guideSig}${cornerSig}${meshSig}`;
     }
 
     /** Rebuild the bar DOM based on context info. */
@@ -1276,6 +1284,20 @@ export class ContextBar {
         );
         if (info.selectedPointCount === 0) delBtn.setAttribute('disabled', '');
         this.el.appendChild(delBtn);
+
+        // Make Corner: retract the selected anchors' Bézier handles so the point
+        // becomes a plain corner (its segments straighten). The multi-select,
+        // discoverable form of the ⌥-click-to-collapse gesture. Only enabled when
+        // at least one selected anchor still has handles to remove.
+        if (info.selectedPointCount >= 1) {
+            const cornerIcon =
+                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20 L12 5 L20 20"/><rect x="9.5" y="2.5" width="5" height="5" rx="0.5" fill="currentColor" stroke="none"/></svg>';
+            const cornerBtn = this.createButton('Make Corner', cornerIcon, () => {
+                this.input.makeSelectedPointsCorner();
+            });
+            if (!this.input.selectedPointsHaveHandles()) cornerBtn.setAttribute('disabled', '');
+            this.el.appendChild(cornerBtn);
+        }
 
         // Cut at the selected anchor (scissors with zero aiming — the point is
         // already selected). Only offered for exactly one anchor.

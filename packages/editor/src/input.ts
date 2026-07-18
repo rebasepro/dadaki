@@ -2414,7 +2414,7 @@ export class InputManager {
                 this.ui.contextBar?.refresh();
                 return;
             } else {
-                // Clicked empty space in edit mode — start marquee for points
+                // Clicked empty space in edit mode — start marquee for points.
                 if (!isShift) {
                     this.selectedPoints.clear();
                     this.selectedAnchorSubpath = -1;
@@ -2422,17 +2422,12 @@ export class InputManager {
                     this.ui.contextBar?.refresh();
                 }
 
-                // Hit test to see if we're clicking ANOTHER node
-                const hitId = this.scene.hitTest(pos.x, pos.y);
-                if (hitId !== undefined && hitId !== this.editingNodeId) {
-                    this.scene.selectNode(hitId, isShift);
-                    this.ui.syncWithSelection();
-                    this.ui.updateLayerList();
-                    this.enterPathEditMode(hitId);
-                    return;
-                }
-
-                // Otherwise, start point marquee
+                // Stay committed to the shape we're editing: a single click that
+                // happens to land on (or overlap) another object no longer jumps
+                // the selection to it — that stray-switch was the annoying part.
+                // To edit a different object, double-click it (onDoubleClick enters
+                // node-editing directly) or press Esc first. Here we only ever
+                // deselect points and start a point-marquee.
                 this.dragMode = 'marquee'; // Reuse marquee mode, will handle in onMouseMove
                 this.marqueeRect = { x: pos.x, y: pos.y, w: 0, h: 0 };
                 return;
@@ -2901,6 +2896,52 @@ export class InputManager {
             p.cp2[0] += dx;
             p.cp2[1] += dy;
         }
+        this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(next));
+        this.editingPoints = next;
+        this.ui.contextBar?.refresh();
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
+    /** True if any selected anchor still carries a Bézier handle (a control
+     *  point not coincident with its anchor). Drives whether "Make Corner" is
+     *  offered/enabled. */
+    selectedPointsHaveHandles(): boolean {
+        if (this.editingNodeId === null || !this.editingPoints) return false;
+        for (const key of this.selectedPoints) {
+            const [si, pi] = key.split(':').map(Number);
+            const p = this.editingPoints[si]?.points[pi];
+            if (!p) continue;
+            if (p.cp1[0] !== p.x || p.cp1[1] !== p.y || p.cp2[0] !== p.x || p.cp2[1] !== p.y) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Retract the Bézier handles of every selected anchor, turning each into a
+     *  plain corner point (its adjoining segments straighten). This is the
+     *  multi-select, discoverable version of the ⌥-click-to-collapse gesture. */
+    makeSelectedPointsCorner() {
+        if (this.editingNodeId === null || !this.editingPoints) return;
+        if (this.selectedPoints.size === 0) return;
+
+        const next: Subpath[] = JSON.parse(JSON.stringify(this.editingPoints));
+        let changed = false;
+        for (const key of this.selectedPoints) {
+            const [si, pi] = key.split(':').map(Number);
+            const p = next[si]?.points[pi];
+            if (!p) continue;
+            if (p.cp1[0] !== p.x || p.cp1[1] !== p.y || p.cp2[0] !== p.x || p.cp2[1] !== p.y) {
+                p.cp1[0] = p.x;
+                p.cp1[1] = p.y;
+                p.cp2[0] = p.x;
+                p.cp2[1] = p.y;
+                changed = true;
+            }
+        }
+        if (!changed) return; // already corners — no history churn
+
         this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(next));
         this.editingPoints = next;
         this.ui.contextBar?.refresh();
