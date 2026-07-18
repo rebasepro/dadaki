@@ -52,6 +52,16 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 try {
     await client.connect(transport);
 
+    // Tool descriptions say what each verb does; the server instructions say
+    // how to WORK. Without them an agent gets 30 verbs and no sense that it
+    // should be looking at renders, which is the whole point of the tool.
+    const instructions = client.getInstructions() ?? '';
+    check(
+        'server ships working instructions, not just tool descriptions',
+        instructions.length > 200 && /render_png_image/.test(instructions),
+        instructions.slice(0, 80),
+    );
+
     const { tools } = await client.listTools();
     check('server exposes its tool surface', tools.length > 20, `${tools.length} tools`);
     for (const required of ['describe_scene', 'create_rect', 'boolean', 'export_svg']) {

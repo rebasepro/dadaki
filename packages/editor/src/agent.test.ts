@@ -25,16 +25,21 @@ import init, { Engine, History } from '../engine/pkg/engine';
 import { type AgentApi, createAgentApi } from './agent';
 import { WasmScene } from './wasm_scene';
 
+/** The wasm exports, kept so scenes can be given real linear memory — some
+ *  reads (node transforms) go through it directly rather than JSON. */
+let wasm: { memory: WebAssembly.Memory };
+
 beforeAll(async () => {
-    await init({
+    wasm = (await init({
         module_or_path: readFileSync(resolve('packages/editor/engine/pkg/engine_bg.wasm')),
-    });
+    })) as unknown as { memory: WebAssembly.Memory };
 });
 
 function makeAgent(): { agent: AgentApi; scene: WasmScene; selection: number[] } {
     const scene = new WasmScene({} as never);
     scene.engine = new Engine();
     scene.history = new History(50);
+    scene.wasm = wasm;
     // Selection is owned by the UI engine in the real editor; here a plain
     // array stands in, which is all the agent API actually needs.
     const state = { selection: [] as number[] };
@@ -596,6 +601,46 @@ describe('agent API — text', () => {
         const { agent } = makeAgent();
         const rect = agent.createRect(0, 0, 10, 10);
         expect(() => agent.setText(rect, { text: 'nope' })).toThrow(/not Text/);
+    });
+});
+
+describe('agent API — text bounds under a transform', () => {
+    /**
+     * measureText reports the typeset size in the node's OWN local units, while
+     * a node's x/y come from the world-space AABB. Reporting the two together
+     * unscaled means a text node under a scaled group claims a width it does
+     * not occupy — and right-aligning by that number, the exact use case
+     * measurement exists for, lands short by the scale factor.
+     */
+    it('scales a measured width by the node’s world transform', () => {
+        const scene = new WasmScene({} as never);
+        scene.engine = new Engine();
+        scene.history = new History(50);
+        scene.wasm = wasm;
+        const agent = createAgentApi({
+            scene,
+            ck: {} as never,
+            getSelection: () => [],
+            setSelection: () => {},
+            exportSVG: () => '<svg/>',
+            importSVG: async () => [],
+            renderPNG: async () => '',
+            ensureFont: () => {},
+            // A fixed 100×20 stands in for a real typeset measurement.
+            measureText: () => ({ width: 100, height: 20 }),
+            fontsReady: async () => {},
+        });
+
+        const id = agent.createText(0, 0, 'hello', 16);
+        return agent.describeNode(id).then(async (before) => {
+            expect(before!.bounds[2]).toBeCloseTo(100, 1);
+
+            // Scale the node the way an enclosing group's transform would.
+            scene.setNodeScale(id, 2, 2);
+            const after = await agent.describeNode(id);
+            expect(after!.bounds[2], 'width must follow the transform').toBeCloseTo(200, 0);
+            expect(after!.bounds[3], 'height must follow the transform').toBeCloseTo(40, 0);
+        });
     });
 });
 

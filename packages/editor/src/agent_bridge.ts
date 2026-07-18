@@ -156,10 +156,17 @@ export function connectAgentBridge(
             socket = null;
             onStatus?.(false);
             if (stopped) return;
-            // A rejected token is permanent; retrying would just spin.
+            // A rejected token is permanent; retrying would just spin. Discard
+            // the stored credentials too: the common cause is a restarted MCP
+            // server issuing a fresh token, and creds kept after a rejection
+            // would make every future reload of this tab fail the same way,
+            // recoverable only by knowing to call clearBridgeCredentials().
             if (why === 'rejected') {
+                clearBridgeCredentials();
                 console.warn(
-                    '[dadaki] agent bridge rejected this tab — token invalid or another editor is attached',
+                    '[dadaki] agent bridge rejected this tab — token invalid, or another editor ' +
+                        'is already attached. Stored credentials cleared; re-open with the URL ' +
+                        'the server printed to attach again.',
                 );
                 return;
             }

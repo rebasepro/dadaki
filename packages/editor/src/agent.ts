@@ -545,8 +545,16 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
         if (node.geometry.Text) {
             const measured = deps.measureText(node.geometry.Text);
             if (measured) {
-                width = round2(measured.width);
-                height = round2(measured.height);
+                // measureText returns the typeset size in the node's OWN local
+                // units, while x/y above are world. Scale it by the world
+                // transform or a text node under a scaled group reports a width
+                // it doesn't occupy — and right-aligning by it lands short by
+                // exactly that factor.
+                const t = scene.getTransform(id);
+                const sx = Math.hypot(t[0], t[3]);
+                const sy = Math.hypot(t[1], t[4]);
+                width = round2(measured.width * sx);
+                height = round2(measured.height * sy);
             }
         }
         const out: AgentNode = {

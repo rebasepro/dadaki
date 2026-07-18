@@ -397,9 +397,12 @@ export async function createEditor(
             if (!blob) throw new Error('[agent] PNG export failed (no render surface)');
             const bytes = new Uint8Array(await blob.arrayBuffer());
             // Chunked: String.fromCharCode(...bytes) overflows the call stack
-            // on anything but a tiny image.
+            // on anything but a tiny image. 8k arguments stays well clear of
+            // the engine's spread limit, which a big render at high scale would
+            // otherwise approach — failing the render rather than the thing
+            // that is actually oversized.
             let binary = '';
-            const CHUNK = 0x8000;
+            const CHUNK = 0x2000;
             for (let i = 0; i < bytes.length; i += CHUNK) {
                 binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
             }

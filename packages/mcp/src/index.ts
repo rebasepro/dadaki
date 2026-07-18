@@ -36,7 +36,58 @@ const { transport: session, notice } = await createTransport(config);
 // Diagnostics go to stderr: stdout is the MCP wire protocol.
 console.error(notice);
 
-const server = new McpServer({ name: 'dadaki', version: '1.0.0' });
+/**
+ * Server-level guidance. Tool descriptions say what each verb does; this says
+ * how to WORK — which is the part that decides whether the output is any good.
+ * The failure mode without it is an agent that draws once, never looks, and
+ * reports success on a drawing with overlapping shapes and stray outlines.
+ */
+const INSTRUCTIONS = `Dadaki is a real vector editor. You are drawing actual
+vector geometry — paths, gradients, live text — not describing an image for
+something else to render. The output is an SVG a designer can open and edit.
+
+WORK IN A LOOP. This is the whole point of the tool:
+  1. describe_scene — learn the canvas size and what ids exist.
+  2. Draw or change something.
+  3. render_png_image — LOOK at it.
+  4. Fix what you see.
+Step 3 is not optional. Coordinates and bounds will not tell you that a shape
+sits 7px proud of another, that a silhouette has an unintended notch, or that
+two colours vibrate against each other. Every serious mistake in a drawing is
+one you can only see. Render after each meaningful stage, not just at the end.
+
+COORDINATES: world units, y grows DOWNWARD, origin top-left. create_rect takes
+a top-left corner; create_ellipse takes a centre; create_text takes a BASELINE
+(so the glyphs sit above y). describe_scene reports the artboard rect — read it
+rather than assuming a canvas size.
+
+REACH FOR THE RIGHT TOOL:
+  - import_svg is usually the fastest route to anything complex. Compose the
+    drawing as SVG markup, import it, then refine with the other verbs.
+  - create_path_data takes an SVG "d" string. Prefer it over create_path for
+    curves; arcs cannot be expressed in the point form at all.
+  - align and distribute are EXACT. Computing even spacing by hand is the thing
+    most likely to come out subtly wrong.
+  - boolean union/subtract/intersect produce real merged geometry, which is how
+    you get clean single-outline marks instead of stacks of shapes.
+  - fit_canvas_to_artwork before exporting an icon or logo, so it has no stray
+    whitespace.
+
+THINGS THAT WILL BITE:
+  - Shapes get no stroke unless you ask for one, and text defaults to black.
+    If something is invisible, check whether it is behind something else
+    (send_to_back / bring_to_front) or the same colour as its background.
+  - Text bounds are measured, so you can right-align or centre by arithmetic on
+    the reported width — but only after the text exists; create it, read its
+    bounds, then position it.
+  - Every call is one undo step. If a drawing goes wrong, undo, or clear and
+    start again — repairing a mess usually costs more than redoing it.
+
+WHEN SOMEONE IS WATCHING (bridge mode): you are editing a document open in a
+person's own window. Use select so they can see which object you are working
+on, and prefer several small labelled steps over one large opaque one.`;
+
+const server = new McpServer({ name: 'dadaki', version: '1.0.0' }, { instructions: INSTRUCTIONS });
 
 /** Colours are CSS hex — the format agents produce most reliably. */
 const hex = z
@@ -100,7 +151,7 @@ tool(
 
 tool(
     'render_png',
-    'Render the canvas to a base64 PNG so you can SEE the artwork. Use this to check composition, spacing and colour after making changes — bounds alone will not tell you whether a drawing looks right.',
+    'Base64 PNG of the canvas, as text. Prefer render_png_image — it returns the same render as an actual image, which you can look at; this one hands you a very large base64 string and is only useful if your client cannot display images.',
     { scale: z.number().positive().max(8).optional().describe('Pixels per world unit, default 2') },
     async (a) => ({ image: await session.call<string>('toPNG', [a.scale ?? 2]) }),
 );
@@ -109,7 +160,7 @@ server.registerTool(
     'render_png_image',
     {
         description:
-            'Render the canvas and return it as an inline image (preferred over render_png when your client can display images).',
+            'Render the canvas to an image so you can SEE the artwork. Use this after making changes to check composition, spacing and colour — bounds alone will not tell you whether a drawing looks right, and most mistakes worth catching are only visible this way.',
         inputSchema: {},
     },
     async () => ({
@@ -482,6 +533,16 @@ tool(
 );
 
 // ─── Session ────────────────────────────────────────────────────────────
+
+tool(
+    'select',
+    'Select objects in the editor. In bridge mode this is how the person watching sees which object you are working on — select before a series of edits so your work is followable. Pass an empty list to deselect.',
+    { ids: z.union([z.number(), z.array(z.number())]) },
+    async (a) => {
+        await session.call('select', [a.ids]);
+        return { ok: true };
+    },
+);
 
 tool('undo', 'Undo the last change.', {}, async () => {
     await session.call('undo');

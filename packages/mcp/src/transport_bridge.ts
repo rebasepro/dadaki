@@ -148,10 +148,16 @@ export class BridgeTransport implements EditorTransport {
         if (!this.socket || this.socket.readyState !== this.socket.OPEN) {
             const wait = this.opts.attachTimeoutMs ?? 120_000;
             const timedOut = Symbol('timeout');
+            // Hold the handle so the loser can be cancelled: without this, a
+            // burst of calls issued right after attaching each leaves a live
+            // two-minute timer (and its closure) pending on the event loop.
+            let timer: NodeJS.Timeout | undefined;
             const race = await Promise.race([
                 this.attached,
-                new Promise((r) => setTimeout(() => r(timedOut), wait)),
-            ]);
+                new Promise((r) => {
+                    timer = setTimeout(() => r(timedOut), wait);
+                }),
+            ]).finally(() => clearTimeout(timer));
             if (race === timedOut) {
                 throw new AgentCallError(
                     'no editor is attached. Open the editor with the bridge URL printed at ' +

@@ -172,6 +172,13 @@ try {
     check('an editor with a bad token receives nothing', intruderScene.nodes.length === 0, {
         nodes: intruderScene.nodes.length,
     });
+
+    // A rejection must also DISCARD the stored credentials. The usual cause is
+    // a restarted server issuing a fresh token; creds kept after a rejection
+    // would make every future reload of that tab fail identically, with no
+    // obvious way back.
+    const leftover = await intruder.evaluate(`localStorage.getItem('dadaki.agentBridge')`);
+    check('a rejected tab forgets its stale credentials', leftover === null, leftover);
 } catch (err) {
     failures++;
     console.error('FAIL  unexpected error:', (err as Error).message);
