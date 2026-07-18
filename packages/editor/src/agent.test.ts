@@ -469,6 +469,24 @@ describe('agent API — gradients', () => {
         expect(g.start_y).toBeCloseTo(50, 0);
     });
 
+    // cos(90°) is 6e-17, not 0, so an unsnapped endpoint ships into every
+    // exported SVG as "-1.7145055e-14".
+    it('emits clean endpoints rather than floating-point noise', () => {
+        const { agent, scene } = makeAgent();
+        const id = agent.createRect(0, 0, 200, 200);
+        agent.setGradient(id, {
+            type: 'linear',
+            angle: 90,
+            stops: [
+                { offset: 0, color: '#000000' },
+                { offset: 1, color: '#ffffff' },
+            ],
+        });
+        const g = gradientOf(scene, id);
+        expect(g.start_x).toBe(100);
+        expect(g.end_x).toBe(100);
+    });
+
     it('rejects a gradient with too few stops', () => {
         const { agent } = makeAgent();
         const id = agent.createRect(0, 0, 10, 10);

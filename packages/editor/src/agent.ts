@@ -342,16 +342,19 @@ function buildGradient(g: AgentGradient, box: [number, number, number, number]):
         };
     }
     // Linear: a line through the box centre at `angle`, reaching its edges.
+    // Snap to 4dp: cos(90°) is 6e-17 rather than 0, which would otherwise ship
+    // endpoints like "-1.7145055e-14" into every exported SVG.
     const rad = ((g.angle ?? 90) * Math.PI) / 180;
+    const snap = (n: number) => Math.round(n * 1e4) / 1e4;
     const dx = Math.cos(rad);
     const dy = Math.sin(rad);
     return {
         gradient_type: 'Linear',
         stops,
-        start_x: cx - dx * hw,
-        start_y: cy - dy * hh,
-        end_x: cx + dx * hw,
-        end_y: cy + dy * hh,
+        start_x: snap(cx - dx * hw),
+        start_y: snap(cy - dy * hh),
+        end_x: snap(cx + dx * hw),
+        end_y: snap(cy + dy * hh),
     };
 }
 
