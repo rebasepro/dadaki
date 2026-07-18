@@ -393,9 +393,13 @@ body, html {
     color: var(--text-main);
 }
 
+.doc-tab.renaming {
+    max-width: none;
+}
+
 .doc-tab-rename {
-    min-width: 48px;
-    max-width: 200px;
+    min-width: 90px;
+    max-width: 280px;
     background: var(--bg-input);
     border: 1px solid var(--accent);
     border-radius: 3px;
@@ -407,6 +411,9 @@ body, html {
     padding: 1px 4px;
     margin: -1px 0;
     outline: none;
+    /* Host apps may add a global :focus-visible ring (box-shadow); the accent
+       border is this field's focus treatment, so suppress any host ring. */
+    box-shadow: none;
 }
 
 /* ─── Modal dialog (export, etc.) ─── */

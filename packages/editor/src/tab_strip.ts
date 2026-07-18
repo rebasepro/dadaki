@@ -96,10 +96,30 @@ export class TabStrip {
         const input = document.createElement('input');
         input.className = 'doc-tab-rename';
         input.value = t.name;
-        // Size the input to the label so the tab width doesn't jump.
-        const w = Math.max(48, Math.ceil(label.getBoundingClientRect().width) + 6);
-        input.style.width = `${w}px`;
         label.replaceWith(input);
+        // Lift the tab's max-width while renaming so the input can grow; the
+        // re-render in finish() restores the normal tab.
+        input.parentElement?.classList.add('renaming');
+
+        // Size the input to its content so it grows while typing, between a
+        // comfortable floor and a cap. Measure with a hidden mirror span so
+        // the real layout engine resolves the font (input.scrollWidth is
+        // unreliable for <input> in Chrome).
+        const cs = getComputedStyle(input);
+        const mirror = document.createElement('span');
+        mirror.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;';
+        mirror.style.fontFamily = cs.fontFamily;
+        mirror.style.fontSize = cs.fontSize;
+        mirror.style.fontWeight = cs.fontWeight;
+        mirror.style.letterSpacing = cs.letterSpacing;
+        document.body.appendChild(mirror);
+        const fit = () => {
+            mirror.textContent = input.value;
+            const w = Math.ceil(mirror.getBoundingClientRect().width);
+            input.style.width = `${Math.min(280, Math.max(90, w + 18))}px`;
+        };
+        fit();
+        input.addEventListener('input', fit);
         input.focus();
         input.select();
 
@@ -107,6 +127,7 @@ export class TabStrip {
         const finish = (save: boolean) => {
             if (done) return;
             done = true;
+            mirror.remove();
             if (save) {
                 const v = input.value.trim();
                 if (v && v !== t.name) this.cb.onRename?.(t.id, v);
