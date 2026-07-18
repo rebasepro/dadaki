@@ -7,6 +7,27 @@
       "runtimeArgs": ["packages/app", "--port", "5199", "--strictPort"],
       "port": 5199,
       "autoPort": true
+    },
+    {
+      "name": "rebase-saas-frontend",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd /Users/francesco/rebase/saas/frontend && ./node_modules/.bin/vite --port 5174 --strictPort"],
+      "port": 5174,
+      "autoPort": false
+    },
+    {
+      "name": "dadaki-cloud-backend",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd cloud/backend && ./node_modules/.bin/tsx src/index.ts"],
+      "port": 3001,
+      "autoPort": false
+    },
+    {
+      "name": "dadaki-cloud-frontend",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd cloud/frontend && ./node_modules/.bin/vite --mode development --port 5200 --strictPort"],
+      "port": 5200,
+      "autoPort": true
     }
   ]
 }

@@ -8,7 +8,9 @@
       "Read(//Users/francesco/.cargo/**)",
       "Read(//Users/francesco/.rustup/toolchains/**)",
       "Read(//opt/homebrew/opt/**)",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(kubectl *)",
+      "Bash(rebase cloud *)"
     ]
   }
 }
