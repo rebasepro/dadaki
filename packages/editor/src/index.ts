@@ -56,6 +56,20 @@ export type { AnalyticsSink } from './analytics';
 export { logAppEvent, registerAnalyticsSink } from './analytics';
 export type { Document } from './document';
 
+/** Largest site id the engine's id encoding can represent. */
+export const MAX_SITE_ID = 1023;
+
+/**
+ * Keep a host-supplied site id inside the range the engine encodes. Out-of-range
+ * values are clamped rather than rejected: a bad site id degrades to "shares a
+ * range with someone else", which the version check still catches, whereas
+ * throwing here would stop the editor opening at all.
+ */
+function clampSiteId(site: number | undefined): number {
+    if (typeof site !== "number" || !Number.isFinite(site) || site < 0) return 0;
+    return Math.min(Math.floor(site), MAX_SITE_ID);
+}
+
 export interface EditorOptions {
     /** A CanvasKit instance (host loads canvaskit.js and passes it here). */
     canvasKit: CanvasKit;
@@ -74,6 +88,19 @@ export interface EditorOptions {
      * existing document, or omit to start with a blank one.
      */
     initialDocument?: { bytes?: Uint8Array; name?: string };
+    /**
+     * Identity of this editing session for object-id allocation, 0…1023.
+     *
+     * Node ids are `(siteId << 22) | counter`, so two sessions given different
+     * site ids can create objects concurrently without ever producing the same
+     * id — the prerequisite for merging their edits. Hosts that support
+     * multiple people (or tabs) in one document must give each a DIFFERENT
+     * site id; ids may be reused by sessions that don't overlap in time.
+     *
+     * Defaults to 0, which reproduces the original single-writer numbering
+     * exactly, so single-user hosts can ignore this.
+     */
+    siteId?: number;
     /**
      * Fired when the user brings a document with content into the editor via
      * built-in chrome the host doesn't mediate — the File → Open picker or a
@@ -137,6 +164,13 @@ export interface EditorHandle {
      * without switching to it. Returns null if the document has no live engine.
      */
     exportBytes(docId?: string): Uint8Array | null;
+    /**
+     * Set the site used to allocate new object ids (see `EditorOptions.siteId`),
+     * for hosts that only learn their site after the editor is up — e.g. once a
+     * presence handshake says which other sessions are already in the document.
+     * Applies to open documents and ones opened later.
+     */
+    setSiteId(site: number): void;
     /** Serialize the active document to an SVG string (good for previews). */
     exportSVG(): string;
     /**
@@ -241,6 +275,8 @@ export async function createEditor(
         fileService,
         tabStrip,
         () => fileService.refreshChrome(),
+        50,
+        clampSiteId(options.siteId),
     );
     input.fileService = fileService;
     input.documentManager = documentManager;
@@ -436,6 +472,7 @@ export async function createEditor(
         },
         exportSVG,
         agent,
+        setSiteId: (site: number) => documentManager.setSiteId(clampSiteId(site)),
         loadBytes: (bytes: Uint8Array, name = 'Untitled') => {
             const doc = new Document(name);
             doc.pendingBytes = bytes;

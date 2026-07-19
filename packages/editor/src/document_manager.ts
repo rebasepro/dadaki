@@ -47,7 +47,24 @@ export class DocumentManager {
         /** Refresh breadcrumb root + document.title for the active doc. */
         private refreshChrome: () => void,
         private maxHistory = 50,
+        /**
+         * Site identity for object-id allocation, applied to every engine this
+         * manager instantiates. See `EditorOptions.siteId`. 0 = the original
+         * single-writer numbering.
+         */
+        private siteId = 0,
     ) {}
+
+    /**
+     * Change the site used for NEW object ids. Applies to already-open
+     * documents as well as ones opened later, so a host that learns its site
+     * asynchronously (e.g. from a presence handshake) can set it once the
+     * answer arrives.
+     */
+    setSiteId(site: number): void {
+        this.siteId = site;
+        for (const doc of this.docs) doc.engine?.set_site_id(site);
+    }
 
     // ─── Queries ────────────────────────────────────────────────────────────
 
@@ -311,6 +328,9 @@ export class DocumentManager {
     private ensureInstantiated(doc: Document): void {
         if (doc.engine) return;
         doc.engine = new Engine();
+        // Set the site BEFORE loading: deserializing resumes this site's
+        // counter from what the document already holds, so the order matters.
+        doc.engine.set_site_id(this.siteId);
         if (doc.pendingBytes) {
             doc.engine.deserialize_proto(doc.pendingBytes);
             doc.pendingBytes = null;
