@@ -28,6 +28,13 @@
       "runtimeArgs": ["-c", "cd cloud/frontend && ./node_modules/.bin/vite --mode development --port 5200 --strictPort"],
       "port": 5200,
       "autoPort": true
+    },
+    {
+      "name": "dadaki-cloud-frontend-5203",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd cloud/frontend && ./node_modules/.bin/vite --mode development --port 5203 --strictPort"],
+      "port": 5203,
+      "autoPort": false
     }
   ]
 }
