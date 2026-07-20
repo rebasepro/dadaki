@@ -66,6 +66,46 @@ Returns an `EditorHandle` with `scene`, `ui`, `input`, `renderer`,
   reads environment variables, or reaches into host-page structure.
 - Documents persist locally (IndexedDB) by default — there is no backend
   dependency. Cloud sync is layered on top by a host app (see `@dadaki/cloud`).
+- **A host that puts more than one session in the same document must assign
+  each a distinct `siteId`** (see below). Single-user hosts can ignore it.
+
+## Object identity (`siteId`)
+
+Node ids are partitioned by *site*:
+
+```
+id = (siteId << 22) | counter        siteId 0…1023, counter 0…4_194_303
+```
+
+A "site" is one editing **session**, not one user and not one account — two
+tabs are two sites. Give concurrent sessions different site ids and they can
+create objects at the same time without ever producing the same id, which is
+the prerequisite for merging their edits at all.
+
+```ts
+const editor = await createEditor(el, { canvasKit, siteId: 3 });
+editor.setSiteId(7);   // if the host learns its site later (e.g. a presence handshake)
+```
+
+Three properties worth knowing, each covered by tests in
+`engine/src/lib.rs` (`mod identity_tests`):
+
+- **`siteId: 0` is the legacy numbering.** `make_id(0, n) === n`, so documents
+  written before sites existed are bit-identical and keep allocating where they
+  left off. This is why the default is 0 and why single-user hosts see no change.
+- **Site ids are reusable.** On load, an engine resumes its own site's counter
+  past the highest id that site already has in the document, so a later session
+  reusing site 3 cannot reissue ids the earlier one created. Uniqueness is only
+  required among sessions that overlap *in time* — which is what keeps 10 bits
+  enough.
+- **Undo never recycles an id.** Undo rewinds the serialized counter (so a
+  snapshot round-trip is byte-identical) but allocation is floored by a session
+  watermark. An id retired by undo is not handed to a different object — a peer
+  may already know that id, and reissuing it would give two distinct objects one
+  identity.
+
+Changing `siteId` mid-session is safe: existing objects keep their ids, and the
+counter for the new site resumes from what the document already contains.
 
 ## Limitations (v1)
 

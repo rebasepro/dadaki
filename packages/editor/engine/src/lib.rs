@@ -1058,10 +1058,60 @@ fn write_paint(buf: &mut Vec<u8>, paint: &Option<Paint>, opacity: f32) {
     }
 }
 
+// ─── Object identity ────────────────────────────────────────────────────
+//
+// Node ids are partitioned by *site* so that two people editing the same
+// document concurrently can create objects without ever colliding:
+//
+//     id = (site << COUNTER_BITS) | counter
+//
+// A "site" is one concurrent editing session, not one user and not one
+// account — two tabs are two sites. Ids only have to be unique among sites
+// that are live at the same time, because on load each engine resumes its own
+// site's counter past the highest one already present in the document (see
+// `recompute_next_id`). That makes site ids safely *reusable* across sessions,
+// which is what keeps 10 bits sufficient.
+//
+// Site 0 is the default, and `make_id(0, n) == n` — so a document written
+// before any of this, by an engine that just counted 1, 2, 3…, is bit-identical
+// under the new scheme and keeps allocating exactly where it left off.
+const COUNTER_BITS: u32 = 22;
+/// Largest site id: 1023 concurrent editors of one document.
+pub const MAX_SITE: u32 = (1 << (32 - COUNTER_BITS)) - 1;
+/// Largest per-site counter: ~4.19M objects created by one site in one document.
+pub const MAX_COUNTER: u32 = (1 << COUNTER_BITS) - 1;
+
+#[inline]
+pub fn make_id(site: u32, counter: u32) -> u32 {
+    (site << COUNTER_BITS) | (counter & MAX_COUNTER)
+}
+#[inline]
+pub fn site_of(id: u32) -> u32 {
+    id >> COUNTER_BITS
+}
+#[inline]
+pub fn counter_of(id: u32) -> u32 {
+    id & MAX_COUNTER
+}
+
 #[wasm_bindgen]
 pub struct Engine {
     scene: Scene,
+    /// Next *counter* (not a whole id) to hand out for `site_id`. Part of the
+    /// document: serialized, and restored by undo.
     next_id: u32,
+    /// Highest counter this SESSION has ever emitted, for `site_id`. Session
+    /// state, never serialized, and never decreases.
+    ///
+    /// It exists because `next_id` alone is ambiguous after an undo. Undo
+    /// rewinds `next_id` (which is what keeps a snapshot round-trip
+    /// byte-identical), but an id that undo retired must still never be handed
+    /// to a *different* object — a peer may already know that id, and reissuing
+    /// it would give two distinct objects one identity. Allocation therefore
+    /// takes `max(next_id, id_high_water)`.
+    id_high_water: u32,
+    /// This engine's site. Set by the host before editing a shared document.
+    site_id: u32,
     /// Global transforms stored in glam column-major format.
     /// Converted to Skia row-major only at the JS boundary.
     global_transforms: HashMap<u32, [f32; 9]>,
@@ -1190,6 +1240,8 @@ impl Engine {
                 guide_locks_json: String::new(),
             },
             next_id: 1,
+            id_high_water: 1,
+            site_id: 0,
             global_transforms: HashMap::new(),
             transform_out_buf: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             spatial_index: RTree::new(),
@@ -1803,13 +1855,80 @@ impl Engine {
         ids
     }
 
+    /// Hand out the next node id for this engine's site.
+    ///
+    /// Every node-creating path goes through here — allocating inline is how
+    /// two sites end up producing the same id.
+    fn alloc_id(&mut self) -> u32 {
+        // Never below the session watermark, so an id retired by undo is not
+        // reissued to a different object.
+        self.next_id = self.next_id.max(self.id_high_water);
+        if self.next_id > MAX_COUNTER {
+            // Nothing safe is left to hand out: wrapping would start reissuing
+            // ids that live nodes already hold, silently aliasing objects.
+            // Refuse loudly instead — 4.19M objects from one session is far
+            // past any real document, so this means a leak or a runaway loop.
+            log_error(&format!(
+                "id space exhausted for site {} ({} objects); refusing to reuse ids",
+                self.site_id, MAX_COUNTER
+            ));
+            panic!("node id space exhausted for site {}", self.site_id);
+        }
+        let id = make_id(self.site_id, self.next_id);
+        self.next_id += 1;
+        self.id_high_water = self.next_id;
+        id
+    }
+
+    /// Resume this site's counter past everything the document already holds
+    /// FOR THIS SITE. Other sites' ids are irrelevant — they live in disjoint
+    /// ranges — which is exactly what makes a site id safe to reuse in a later
+    /// session without colliding with the objects it created in an earlier one.
+    /// `monotonic` means "never hand out a counter this session already used".
+    /// That matters for undo: restoring a snapshot taken before a node existed
+    /// must NOT free that node's id for reuse. Reusing it would give a second,
+    /// different object the identity of one other peers may already have seen —
+    /// two objects that merge into one. Opening a *different* document is the
+    /// opposite case: start from what that document actually contains.
+    fn own_site_high_counter(&self) -> u32 {
+        let mine = self.site_id;
+        self.scene
+            .nodes
+            .keys()
+            .filter(|id| site_of(**id) == mine)
+            .map(|id| counter_of(*id))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Resume allocation for a document being *opened*: this document defines
+    /// the counter, and the session watermark restarts with it. (Undo does not
+    /// use this — see `deserialize_scene`.)
+    fn recompute_next_id(&mut self) {
+        self.next_id = self.own_site_high_counter() + 1;
+        self.id_high_water = self.next_id;
+    }
+
+    /// Set this engine's site before editing a shared document. Concurrent
+    /// editors must each be given a different one; sessions that never overlap
+    /// may reuse them freely.
+    pub fn set_site_id(&mut self, site: u32) {
+        self.site_id = site.min(MAX_SITE);
+        // The counter is per-site, so switching site means resuming a
+        // different sequence — not continuing the old site's.
+        self.recompute_next_id();
+    }
+
+    pub fn site_id(&self) -> u32 {
+        self.site_id
+    }
+
     /// Create a default-styled rectangle node and attach it at the root,
     /// updating its global transform and dirty flag but NOT the spatial index.
     /// Shared by `add_rect` (which indexes the one node) and `add_rects` (which
     /// bulk-rebuilds the index once for the whole batch).
     fn insert_rect_node(&mut self, x: f32, y: f32, w: f32, h: f32) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.alloc_id();
 
         let node = Node {
             id,
@@ -1846,8 +1965,7 @@ impl Engine {
     }
 
     pub fn add_ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.alloc_id();
 
         let node = Node {
             id,
@@ -1886,8 +2004,7 @@ impl Engine {
 
     pub fn add_path(&mut self, points_json: &str) -> u32 {
         let subpaths: Vec<Subpath> = serde_json::from_str(points_json).unwrap_or_default();
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.alloc_id();
 
         // Compute bbox center of all points for local-space normalization
         let mut min_x = f32::MAX;
@@ -1977,8 +2094,7 @@ impl Engine {
 
         let subpaths = vec![Subpath { points, closed: true }];
 
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.alloc_id();
 
         let node = Node {
             id,
@@ -2039,8 +2155,7 @@ impl Engine {
 
         let subpaths = vec![Subpath { points, closed: true }];
 
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.alloc_id();
 
         let node = Node {
             id,
@@ -2498,11 +2613,11 @@ impl Engine {
         match proto::deserialize_snapshot(data) {
             Some((scene, next_id)) => {
                 self.scene = scene;
-                // Trust the snapshot's next_id (preserves id-allocation across
-                // undo), falling back to max+1 only if it was never written.
-                self.next_id = next_id.max(
-                    self.scene.nodes.keys().max().map(|id| id + 1).unwrap_or(1)
-                );
+                // Undo restores the snapshot's counter verbatim, which keeps a
+                // snapshot round-trip byte-identical. Non-recycling is handled
+                // by `id_high_water` in `alloc_id`, which this deliberately
+                // does not touch.
+                self.next_id = counter_of(next_id).max(self.own_site_high_counter() + 1);
                 self.update_all_global_transforms();
                 self.update_all_spatial_indices();
                 self.rebuild_live_paint_cache();
@@ -3847,8 +3962,7 @@ impl Engine {
     /// flag is only true for the top-level node being duplicated, so the
     /// " copy" suffix lands on the copied root and not on every descendant.
     fn deep_clone_subtree_inner(&mut self, id: u32, apply_copy_suffix: bool) -> u32 {
-        let new_id = self.next_id;
-        self.next_id += 1;
+        let new_id = self.alloc_id();
 
         if let Some(node) = self.scene.nodes.get(&id).cloned() {
             let old_children = node.children.clone();
@@ -3896,8 +4010,7 @@ impl Engine {
         let ids = self.filter_ancestors_only(&raw_ids);
         if ids.is_empty() { return 0; }
 
-        let group_id = self.next_id;
-        self.next_id += 1;
+        let group_id = self.alloc_id();
 
         // Determine the common parent of all selected nodes
         let first_parent = self.scene.nodes.get(&ids[0]).and_then(|n| n.parent);
@@ -4120,8 +4233,7 @@ impl Engine {
 
     /// Add a text node.
     pub fn add_text(&mut self, x: f32, y: f32, content: &str, font_size: f32) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.alloc_id();
 
         let node = Node {
             id,
@@ -4182,15 +4294,25 @@ impl Engine {
                 return id;
             }
         }
-        let id = self.scene.images.keys().copied().max().unwrap_or(0) + 1;
+        // Images carry their own id space, and it collides across peers for the
+        // same reason node ids did — so partition it by site too.
+        let next = self
+            .scene
+            .images
+            .keys()
+            .filter(|k| site_of(**k) == self.site_id)
+            .map(|k| counter_of(*k))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let id = make_id(self.site_id, next);
         self.scene.images.insert(id, ImageData { bytes: bytes.to_vec(), mime: mime.to_string() });
         id
     }
 
     /// Add a raster image node referencing a previously-registered image id.
     pub fn add_image(&mut self, x: f32, y: f32, w: f32, h: f32, image_id: u32) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.alloc_id();
 
         let node = Node {
             id,
@@ -4957,9 +5079,12 @@ impl Engine {
     /// Returns true on success.
     pub fn deserialize_proto(&mut self, data: &[u8]) -> bool {
         match proto::deserialize_from_proto(data) {
-            Some((scene, next_id)) => {
+            Some((scene, _next_id)) => {
                 self.scene = scene;
-                self.next_id = next_id;
+                // Opening a document: resume this site's counter from what THIS
+                // document contains, rather than inheriting a counter from
+                // whatever was open before.
+                self.recompute_next_id();
                 self.update_all_global_transforms();
                 self.update_all_spatial_indices();
                 self.rebuild_live_paint_cache();
@@ -4979,9 +5104,10 @@ impl Engine {
     /// Returns true on success.
     pub fn deserialize_proto_base64(&mut self, b64: &str) -> bool {
         match proto::deserialize_from_base64(b64) {
-            Some((scene, next_id)) => {
+            Some((scene, _next_id)) => {
                 self.scene = scene;
-                self.next_id = next_id;
+                // As above: a document being opened defines its own counter.
+                self.recompute_next_id();
                 self.update_all_global_transforms();
                 self.update_all_spatial_indices();
                 self.rebuild_live_paint_cache();
@@ -5020,7 +5146,18 @@ impl Engine {
 
     /// Add a new artboard; returns its id. Auto-named "Artwork N".
     pub fn add_artboard(&mut self, x: f32, y: f32, w: f32, h: f32) -> u32 {
-        let id = self.scene.artboards.iter().map(|a| a.id).max().unwrap_or(0) + 1;
+        // Artboards likewise have their own id space — partition it by site so
+        // two people adding an artboard at once don't create the same one.
+        let next = self
+            .scene
+            .artboards
+            .iter()
+            .filter(|a| site_of(a.id) == self.site_id)
+            .map(|a| counter_of(a.id))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let id = make_id(self.site_id, next);
         let n = self.scene.artboards.len() + 1;
         self.scene.artboards.push(Artboard {
             id,
@@ -5293,6 +5430,158 @@ fn json_string(s: &str) -> String {
 
 #[cfg(test)]
 mod transform_invariants;
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn id_encoding_round_trips() {
+        for &(site, counter) in &[(0u32, 1u32), (1, 1), (7, 42), (MAX_SITE, MAX_COUNTER)] {
+            let id = make_id(site, counter);
+            assert_eq!(site_of(id), site, "site of ({site},{counter})");
+            assert_eq!(counter_of(id), counter, "counter of ({site},{counter})");
+        }
+    }
+
+    /// Site 0 must produce exactly the ids the old plain counter produced, so
+    /// documents written before sites existed are unchanged.
+    #[test]
+    fn site_zero_is_backward_compatible() {
+        for n in [1u32, 2, 3, 999, MAX_COUNTER] {
+            assert_eq!(make_id(0, n), n);
+        }
+        let mut e = Engine::new();
+        assert_eq!(e.site_id(), 0);
+        let a = e.add_rect(0.0, 0.0, 10.0, 10.0);
+        let b = e.add_rect(0.0, 0.0, 10.0, 10.0);
+        assert_eq!((a, b), (1, 2), "legacy id sequence must be preserved");
+    }
+
+    /// The property the whole scheme exists for: two peers editing at once
+    /// never produce the same id.
+    #[test]
+    fn concurrent_sites_never_collide() {
+        let mut alice = Engine::new();
+        let mut bob = Engine::new();
+        alice.set_site_id(1);
+        bob.set_site_id(2);
+
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..500 {
+            assert!(ids.insert(alice.add_rect(0.0, 0.0, 1.0, 1.0)), "alice reissued an id");
+            assert!(ids.insert(bob.add_rect(0.0, 0.0, 1.0, 1.0)), "bob reissued an id");
+        }
+        assert_eq!(ids.len(), 1000);
+    }
+
+    /// A site id may be reused by a later session: on load the counter resumes
+    /// past that site's own highest existing object, so the second session
+    /// cannot reissue ids the first one created.
+    #[test]
+    fn reused_site_resumes_past_its_own_objects() {
+        let mut first = Engine::new();
+        first.set_site_id(3);
+        let created: Vec<u32> = (0..5).map(|_| first.add_rect(0.0, 0.0, 1.0, 1.0)).collect();
+        let doc = first.serialize_proto();
+
+        let mut second = Engine::new();
+        second.set_site_id(3); // same site, later session
+        assert!(second.deserialize_proto(&doc));
+        let next = second.add_rect(0.0, 0.0, 1.0, 1.0);
+
+        assert!(!created.contains(&next), "reused an id from the earlier session");
+        assert_eq!(site_of(next), 3);
+        assert_eq!(counter_of(next), counter_of(*created.last().unwrap()) + 1);
+    }
+
+    /// Loading a document must not adopt ids belonging to other sites as our
+    /// own — our counter is ours alone.
+    #[test]
+    fn foreign_site_objects_do_not_advance_our_counter() {
+        let mut bob = Engine::new();
+        bob.set_site_id(9);
+        for _ in 0..20 {
+            bob.add_rect(0.0, 0.0, 1.0, 1.0);
+        }
+        let doc = bob.serialize_proto();
+
+        let mut alice = Engine::new();
+        alice.set_site_id(4);
+        assert!(alice.deserialize_proto(&doc));
+        let mine = alice.add_rect(0.0, 0.0, 1.0, 1.0);
+
+        assert_eq!(site_of(mine), 4);
+        assert_eq!(counter_of(mine), 1, "should start fresh in our own range");
+    }
+
+    /// Undo restores an older scene. The id of a node that undo removed must
+    /// NOT be handed out again — a peer may already know that id, and reusing
+    /// it would merge two different objects into one identity.
+    #[test]
+    fn undo_does_not_recycle_ids() {
+        let mut e = Engine::new();
+        e.set_site_id(5);
+        let before = e.serialize_scene();
+        let doomed = e.add_rect(0.0, 0.0, 1.0, 1.0);
+
+        assert!(e.deserialize_scene(&before), "snapshot should restore");
+        let after_undo = e.add_rect(0.0, 0.0, 1.0, 1.0);
+
+        assert_ne!(after_undo, doomed, "undo recycled a node id");
+    }
+
+    /// The two undo properties have to hold at the same time, and they pull in
+    /// opposite directions: a snapshot round-trip must be byte-identical (the
+    /// serialized counter rewinds), yet a retired id must never be reissued
+    /// (allocation does not rewind). That is what `id_high_water` buys.
+    #[test]
+    fn undo_round_trip_is_byte_identical_and_still_does_not_recycle() {
+        let mut e = Engine::new();
+        e.set_site_id(2);
+        e.add_rect(0.0, 0.0, 1.0, 1.0);
+        let before = e.serialize_scene();
+
+        let doomed = e.add_rect(0.0, 0.0, 1.0, 1.0);
+        assert!(e.deserialize_scene(&before));
+
+        assert_eq!(e.serialize_scene(), before, "undo must restore the exact bytes");
+        assert_ne!(e.add_rect(0.0, 0.0, 1.0, 1.0), doomed, "must not reissue a retired id");
+    }
+
+    /// A high site id makes ids very large (site 1000 starts above 4.1 billion).
+    /// Nothing may assume ids are small or densely packed — they key hash maps
+    /// and are varint-encoded, but this pins it against a future regression.
+    #[test]
+    fn large_ids_survive_a_document_round_trip() {
+        let mut e = Engine::new();
+        e.set_site_id(MAX_SITE);
+        let ids: Vec<u32> = (0..10).map(|_| e.add_rect(1.0, 2.0, 3.0, 4.0)).collect();
+        assert!(ids.iter().all(|id| *id > 4_000_000_000), "expected very large ids: {ids:?}");
+
+        let bytes = e.serialize_proto();
+        let mut reloaded = Engine::new();
+        reloaded.set_site_id(MAX_SITE);
+        assert!(reloaded.deserialize_proto(&bytes));
+
+        let roots = reloaded.get_root_nodes();
+        assert_eq!(roots.len(), ids.len(), "all nodes should survive the round trip");
+        for id in &ids {
+            assert!(roots.contains(id), "id {id} lost in round trip");
+        }
+    }
+
+    #[test]
+    fn set_site_id_is_clamped() {
+        let mut e = Engine::new();
+        e.set_site_id(u32::MAX);
+        assert_eq!(e.site_id(), MAX_SITE);
+        // Still allocates inside its own range rather than overflowing into
+        // another site's.
+        let id = e.add_rect(0.0, 0.0, 1.0, 1.0);
+        assert_eq!(site_of(id), MAX_SITE);
+    }
+}
 
 #[cfg(test)]
 mod tests {

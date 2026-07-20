@@ -1,0 +1,26 @@
+import { createServer as netServer } from 'node:net';
+import { spawn } from 'node:child_process';
+import puppeteer from 'puppeteer';
+const SITE='https://dadaki.apps.rebase.pro/edit/new/blank';
+const SERVER='/Users/francesco/vector-editor/packages/mcp/src/index.ts';
+const TOKEN='ws-check-token';
+const freePort=async()=>{const s=netServer();await new Promise(r=>s.listen(0,'127.0.0.1',r));const p=s.address().port;await new Promise(r=>s.close(()=>r()));return p;};
+const port=await freePort();
+const mcp=spawn(process.execPath,['--experimental-strip-types',SERVER,'--mode','bridge','--port',String(port),'--token',TOKEN]);
+mcp.stderr.on('data',()=>{});
+await new Promise(r=>setTimeout(r,2000));
+const b=await puppeteer.launch({headless:true,args:['--use-gl=swiftshader','--enable-unsafe-swiftshader','--no-sandbox']});
+const p=await b.newPage();
+const msgs=[];
+p.on('console',m=>msgs.push(`[${m.type()}] ${m.text()}`));
+p.on('pageerror',e=>msgs.push(`[pageerror] ${e.message}`));
+await p.goto(`${SITE}?agentBridge=${port}&token=${TOKEN}`,{waitUntil:'load'});
+await new Promise(r=>setTimeout(r,12000));
+// Try a raw WebSocket from the page to isolate it from app logic.
+const raw=await p.evaluate(`new Promise(res=>{try{const ws=new WebSocket('ws://127.0.0.1:${port}/?token=${TOKEN}');
+ ws.onopen=()=>res('OPEN');ws.onerror=()=>res('ERROR');ws.onclose=e=>res('CLOSE code='+e.code);
+ setTimeout(()=>res('TIMEOUT'),8000);}catch(e){res('THREW: '+e.message);}})`);
+console.log('raw WebSocket from the production page →', raw);
+console.log('\nrelevant console output:');
+for(const m of msgs.filter(x=>/bridge|websocket|mixed|insecure|private network|blocked/i.test(x)).slice(0,10)) console.log('  '+m);
+await b.close(); mcp.kill('SIGKILL'); process.exit(0);

@@ -26,6 +26,29 @@ import {
 } from './mesh_geom';
 import type { MeshGradient, MeshVertex } from './types';
 
+/**
+ * Map a numeric weight + italic flag to CanvasKit's font-style enums.
+ *
+ * Shared by drawing and measuring: if the two ever disagreed about which face
+ * a node uses, measured widths would describe a different rendering than the
+ * one on screen — the sort of drift that only shows up as layout that looks
+ * subtly wrong. CanvasKit falls back gracefully when the family lacks the
+ * requested variant.
+ */
+function ckFontStyle(ck: CanvasKit, fontWeight: number, italic: boolean) {
+    const weight =
+        fontWeight >= 700
+            ? ck.FontWeight.Bold
+            : fontWeight >= 600
+              ? ck.FontWeight.SemiBold
+              : fontWeight >= 500
+                ? ck.FontWeight.Medium
+                : fontWeight <= 300
+                  ? ck.FontWeight.Light
+                  : ck.FontWeight.Normal;
+    return { weight, slant: italic ? ck.FontSlant.Italic : ck.FontSlant.Upright };
+}
+
 /** Helper for efficient zero-copy parsing of the WASM binary render buffer. */
 class BinaryReader {
     view: DataView;
@@ -2539,6 +2562,64 @@ export class Renderer {
     }
 
     /**
+     * Measure a text node's laid-out size, using the same paragraph
+     * configuration the renderer draws it with.
+     *
+     * The engine's own text bounds are an approximation — `content.len() *
+     * font_size * 0.6` — which is a byte count in Rust, so accented text
+     * over-counts, and it ignores the actual glyph advances entirely. That is
+     * fine for hit-testing but not for layout: anything positioning text by its
+     * reported width (right-aligning, centring, packing columns) lands wrong.
+     *
+     * Returns null when no font provider exists yet, in which case the caller
+     * should keep the engine's estimate rather than invent a number.
+     */
+    measureText(geo: {
+        content: string;
+        font_size: number;
+        font_family?: string;
+        line_height?: number;
+        font_weight?: number;
+        italic?: boolean;
+        letter_spacing?: number;
+    }): { width: number; height: number } | null {
+        const fontProvider = buildFontProvider(this.ck);
+        if (!fontProvider) return null;
+        const { weight, slant } = ckFontStyle(this.ck, geo.font_weight ?? 400, geo.italic ?? false);
+        let para: ReturnType<
+            ReturnType<CanvasKit['ParagraphBuilder']['MakeFromFontProvider']>['build']
+        > | null = null;
+        let builder: ReturnType<CanvasKit['ParagraphBuilder']['MakeFromFontProvider']> | null =
+            null;
+        try {
+            const paraStyle = new this.ck.ParagraphStyle({
+                textStyle: {
+                    color: this.ck.BLACK,
+                    fontSize: geo.font_size,
+                    fontFamilies: geo.font_family
+                        ? [geo.font_family, 'sans-serif']
+                        : ['sans-serif'],
+                    heightMultiplier: geo.line_height ?? 1.2,
+                    fontStyle: { weight, slant },
+                    letterSpacing: geo.letter_spacing ?? 0,
+                },
+            });
+            builder = this.ck.ParagraphBuilder.MakeFromFontProvider(paraStyle, fontProvider);
+            builder.addText(geo.content);
+            para = builder.build();
+            // Lay out unconstrained so lines break only where the text says to;
+            // getLongestLine is then the true typeset width.
+            para.layout(1e5);
+            return { width: para.getLongestLine(), height: para.getHeight() };
+        } catch {
+            return null;
+        } finally {
+            para?.delete();
+            builder?.delete();
+        }
+    }
+
+    /**
      * Render the whole document to a PNG at `scale`× (1 world unit → `scale`
      * pixels). Renders into an offscreen raster surface with a transparent
      * background and no editor chrome, reusing the normal draw path via the
@@ -3298,17 +3379,7 @@ export class Renderer {
 
             // Map font weight/style to CanvasKit enums (falls back gracefully
             // when the loaded font lacks the requested variant).
-            const ckWeight =
-                fontWeight >= 700
-                    ? this.ck.FontWeight.Bold
-                    : fontWeight >= 600
-                      ? this.ck.FontWeight.SemiBold
-                      : fontWeight >= 500
-                        ? this.ck.FontWeight.Medium
-                        : fontWeight <= 300
-                          ? this.ck.FontWeight.Light
-                          : this.ck.FontWeight.Normal;
-            const ckSlant = italic ? this.ck.FontSlant.Italic : this.ck.FontSlant.Upright;
+            const { weight: ckWeight, slant: ckSlant } = ckFontStyle(this.ck, fontWeight, italic);
 
             // Extract current fill color from paint for the paragraph text style
             const paintColor = paint.getColor();

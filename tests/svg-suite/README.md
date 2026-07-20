@@ -78,3 +78,36 @@ and, with `--diff`, `report/diffs/**.diff.png`.
 trees. To refresh, re-download the upstream repo, copy those two directories
 over `fixtures/`, and re-run with `--update` to regenerate the baseline (review
 the diff — an upstream change can legitimately move scores).
+
+## Known: the committed baseline is stale (26 pre-existing regressions)
+
+As of 2026-07-19 a clean run reports **26 regressions against `baseline.json`**
+that are *not* caused by any pending change. Verified by building the engine
+from an unmodified tree and re-running: the scores come out byte-identical to a
+run with local changes applied, so they predate them.
+
+They cluster by feature, which is what you'd expect from a rendering/filter
+change that was never re-baselined:
+
+| Area | Tests | Scores |
+|---|---|---|
+| `filters/feTile` | 3 | 1.000 → 0.878–0.904 |
+| `filters/feComposite` | 3 | 1.000 → 0.956 |
+| `filters/feConvolveMatrix` | 4 | 1.000 → 0.934–0.959 |
+| `structure/image/preserveAspectRatio` | 6 | ~0.99 → ~0.95 |
+| `painting/image-rendering/optimizeSpeed` | 1 | 1.000 → 0.824 |
+| text / markers / misc filters | 9 | ~0.98 → ~0.96 |
+
+Note the suite also now reports **522 passing vs the ~495 the baseline
+encodes** — more tests pass than when it was written, further evidence the
+baseline simply hasn't been refreshed.
+
+**Deliberately not `--update`d here.** Refreshing the baseline would bury these
+26 alongside the genuine improvements, and `optimizeSpeed` at 0.824 and `feTile`
+at 0.878 look like real fidelity losses worth diagnosing rather than accepting.
+Decide per-area: fix the regression, or re-baseline once it's understood.
+
+Until then, the gate is noisy — when checking whether *your* change regressed
+anything, compare against a control run of the same subset
+(`node harness.mjs --filter <area>`) with your change reverted, rather than
+trusting the pass/fail exit code.

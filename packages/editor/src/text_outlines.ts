@@ -10,7 +10,7 @@
 import type { CanvasKit } from 'canvaskit-wasm';
 import * as opentype from 'opentype.js';
 import { pathToSubpaths } from './boolean_ops';
-import { getFontDataForWeight, isFontLoaded, loadGoogleFontData } from './fonts';
+import { fontsSettled, getFontDataForWeight, isFontLoaded, loadGoogleFontData } from './fonts';
 import type { Subpath, TextGeometry } from './types';
 
 /** Parsed opentype fonts, keyed by `${family}@${weight >= 600 ? 'bold' : 'regular'}`. */
@@ -32,16 +32,26 @@ function cacheKey(family: string, weight: number): string {
 export async function ensureOutlineFont(
     fontFamily: string | undefined,
     weight: number,
+    italic = false,
 ): Promise<opentype.Font | null> {
     const family = fontFamily?.trim() ? fontFamily : DEFAULT_OUTLINE_FAMILY;
-    const key = cacheKey(family, weight);
+    // Italic is part of the identity of the face being parsed: outlining
+    // italic text with the upright face would silently straighten it.
+    const key = `${cacheKey(family, weight)}${italic ? ':italic' : ''}`;
     if (parsedFontCache.has(key)) return parsedFontCache.get(key)!;
 
     // Make sure the TTF bytes are cached (loadGoogleFontData is a no-op if so).
     if (!isFontLoaded(family)) {
+        // loadGoogleFontData returns null IMMEDIATELY when a load for this
+        // family is already in flight — it doesn't join it. Without waiting for
+        // that load to settle we'd read no data and cache the failure below
+        // permanently, silently disabling outlines for this family for the rest
+        // of the session. Creating text starts a load, so the overlap is
+        // routine, not rare.
         await loadGoogleFontData(family);
+        await fontsSettled();
     }
-    const data = getFontDataForWeight(family, weight);
+    const data = getFontDataForWeight(family, weight, italic);
     if (!data) {
         parsedFontCache.set(key, null);
         return null;
@@ -146,7 +156,11 @@ export async function textNodeToSubpaths(
     geo: TextGeometry,
     ck: CanvasKit,
 ): Promise<Subpath[] | null> {
-    const font = await ensureOutlineFont(geo.font_family, geo.font_weight || 400);
+    const font = await ensureOutlineFont(
+        geo.font_family,
+        geo.font_weight || 400,
+        geo.italic ?? false,
+    );
     if (!font) return null;
     return textToSubpaths(font, geo, ck);
 }

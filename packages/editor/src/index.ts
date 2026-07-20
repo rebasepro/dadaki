@@ -16,6 +16,7 @@
 
 import type { CanvasKit } from 'canvaskit-wasm';
 import { AboutDialog } from './about_dialog';
+import { type AgentApi, createAgentApi } from './agent';
 import { type AnalyticsSink, logAppEvent, registerAnalyticsSink } from './analytics';
 import { AppMenu } from './app_menu';
 import { BackupDialog } from './backup_dialog';
@@ -25,6 +26,7 @@ import { Document } from './document';
 import { DocumentManager } from './document_manager';
 import { ExportDialog, type ExportOptions } from './export_dialog';
 import { FileService } from './file_service';
+import { ensureFontCSS, fontsSettled, loadGoogleFontData } from './fonts';
 import { GuidesController } from './guides';
 import { InputManager } from './input';
 import { PersistenceManager } from './persistence';
@@ -34,9 +36,39 @@ import { Toolbar } from './toolbar';
 import { UIEngine } from './ui';
 import { WasmScene } from './wasm_scene';
 
+export type {
+    AgentApi,
+    AgentCanvas,
+    AgentDescription,
+    AgentGradient,
+    AgentNode,
+    AgentPathPoint,
+    AgentStyle,
+    AgentTextOptions,
+} from './agent';
+export type { BridgeCredentials, BridgeHandle, BridgeOptions } from './agent_bridge';
+export {
+    clearBridgeCredentials,
+    connectAgentBridge,
+    readBridgeCredentials,
+} from './agent_bridge';
 export type { AnalyticsSink } from './analytics';
 export { logAppEvent, registerAnalyticsSink } from './analytics';
 export type { Document } from './document';
+
+/** Largest site id the engine's id encoding can represent. */
+export const MAX_SITE_ID = 1023;
+
+/**
+ * Keep a host-supplied site id inside the range the engine encodes. Out-of-range
+ * values are clamped rather than rejected: a bad site id degrades to "shares a
+ * range with someone else", which the version check still catches, whereas
+ * throwing here would stop the editor opening at all.
+ */
+function clampSiteId(site: number | undefined): number {
+    if (typeof site !== "number" || !Number.isFinite(site) || site < 0) return 0;
+    return Math.min(Math.floor(site), MAX_SITE_ID);
+}
 
 export interface EditorOptions {
     /** A CanvasKit instance (host loads canvaskit.js and passes it here). */
@@ -56,6 +88,19 @@ export interface EditorOptions {
      * existing document, or omit to start with a blank one.
      */
     initialDocument?: { bytes?: Uint8Array; name?: string };
+    /**
+     * Identity of this editing session for object-id allocation, 0…1023.
+     *
+     * Node ids are `(siteId << 22) | counter`, so two sessions given different
+     * site ids can create objects concurrently without ever producing the same
+     * id — the prerequisite for merging their edits. Hosts that support
+     * multiple people (or tabs) in one document must give each a DIFFERENT
+     * site id; ids may be reused by sessions that don't overlap in time.
+     *
+     * Defaults to 0, which reproduces the original single-writer numbering
+     * exactly, so single-user hosts can ignore this.
+     */
+    siteId?: number;
     /**
      * Fired when the user brings a document with content into the editor via
      * built-in chrome the host doesn't mediate — the File → Open picker or a
@@ -119,8 +164,22 @@ export interface EditorHandle {
      * without switching to it. Returns null if the document has no live engine.
      */
     exportBytes(docId?: string): Uint8Array | null;
+    /**
+     * Set the site used to allocate new object ids (see `EditorOptions.siteId`),
+     * for hosts that only learn their site after the editor is up — e.g. once a
+     * presence handshake says which other sessions are already in the document.
+     * Applies to open documents and ones opened later.
+     */
+    setSiteId(site: number): void;
     /** Serialize the active document to an SVG string (good for previews). */
     exportSVG(): string;
+    /**
+     * Authoring API for autonomous agents: intent-level verbs (create, style,
+     * align, group, boolean) plus `describe()` so an agent can see the scene it
+     * is editing. Each call is one undo step; agent edits are ordinary edits as
+     * far as history, autosave and the host hooks are concerned.
+     */
+    readonly agent: AgentApi;
     /**
      * Open a document from durable bytes (as produced by `exportBytes`) in a
      * new tab and activate it.
@@ -216,6 +275,8 @@ export async function createEditor(
         fileService,
         tabStrip,
         () => fileService.refreshChrome(),
+        50,
+        clampSiteId(options.siteId),
     );
     input.fileService = fileService;
     input.documentManager = documentManager;
@@ -308,6 +369,87 @@ export async function createEditor(
 
     logAppEvent('app_loaded');
 
+    // Render the artwork as it looks on the canvas — framed to the artboard
+    // bounds and on a solid canvas — rather than loose shapes on transparency
+    // (which reads as an empty/checkerboard preview). This is what hosts use
+    // for thumbnails, and what the agent API renders through. Artboards default
+    // to a transparent background, so fall back to white (the canvas colour
+    // shown in the editor) when there's no opaque fill.
+    const exportSVG = (): string => {
+        const white = { r: 1, g: 1, b: 1, a: 1 };
+        const canvasBg = (bg?: { r: number; g: number; b: number; a: number }) =>
+            bg && bg.a > 0 ? bg : white;
+        const arts = wasmScene.getArtboards();
+        if (arts.length === 1) {
+            const ab = arts[0];
+            return ui.buildSVGString(
+                { x: ab.x, y: ab.y, w: ab.w, h: ab.h },
+                canvasBg(ab.background),
+            );
+        }
+        if (arts.length > 1) {
+            return ui.buildSVGString(renderer.getArtboardsBounds(), canvasBg(arts[0].background));
+        }
+        return ui.buildSVGString(undefined, white);
+    };
+
+    // Agent authoring surface. Selection goes through the engine (whose
+    // `select_node` is add-only, hence the clear) and then refreshes the same
+    // panels a human click would, so the editor's chrome reflects agent work.
+    const agent = createAgentApi({
+        scene: wasmScene,
+        ck,
+        getSelection: () => Array.from(wasmScene.getSelection()),
+        setSelection: (ids: number[]) => {
+            wasmScene.engine?.clear_selection();
+            for (const id of ids) wasmScene.selectNode(id, true);
+            ui.updateLayerList();
+            ui.syncWithSelection();
+            renderer.requestRender();
+        },
+        exportSVG,
+        measureText: (geo) => renderer.measureText(geo),
+        fontsReady: () => fontsSettled(),
+        ensureFont: (family: string) => {
+            ensureFontCSS(family);
+            void loadGoogleFontData(family);
+        },
+        renderPNG: async (scale: number) => {
+            // Text added moments ago may still be fetching its faces; without
+            // this the image shows a fallback face and an agent reading it
+            // draws the wrong conclusion about its own work.
+            await fontsSettled();
+            // Frame the artboard, matching exportSVG, so an agent's PNG and its
+            // SVG deliverable always show the same thing. The artboard's own
+            // background is used, falling back to the white the editor shows.
+            const arts = wasmScene.getArtboards();
+            const ab = arts[0];
+            const bounds = ab
+                ? { x: ab.x, y: ab.y, w: ab.w, h: ab.h }
+                : renderer.getArtboardsBounds();
+            const bg =
+                ab?.background && ab.background.a > 0 ? ab.background : { r: 1, g: 1, b: 1, a: 1 };
+            const blob = renderer.exportPNG(scale, bounds, bg);
+            if (!blob) throw new Error('[agent] PNG export failed (no render surface)');
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            // Chunked: String.fromCharCode(...bytes) overflows the call stack
+            // on anything but a tiny image. 8k arguments stays well clear of
+            // the engine's spread limit, which a big render at high scale would
+            // otherwise approach — failing the render rather than the thing
+            // that is actually oversized.
+            let binary = '';
+            const CHUNK = 0x2000;
+            for (let i = 0; i < bytes.length; i += CHUNK) {
+                binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+            }
+            return btoa(binary);
+        },
+        importSVG: (svg: string) =>
+            new Promise<number[]>((resolve, reject) => {
+                ui.parseSVG(svg, (newRoots) => resolve(newRoots)).catch(reject);
+            }),
+    });
+
     return {
         scene: wasmScene,
         ui,
@@ -328,26 +470,9 @@ export async function createEditor(
             if (!engine) return null;
             return new Uint8Array(engine.serialize_proto());
         },
-        exportSVG: () => {
-            // Render the artwork as it looks on the canvas — framed to the
-            // artboard bounds and on a solid canvas — rather than loose shapes
-            // on transparency (which reads as an empty/checkerboard preview).
-            // This is what hosts use for thumbnails. Artboards default to a
-            // transparent background, so fall back to white (the canvas colour
-            // shown in the editor) when there's no opaque fill.
-            const white = { r: 1, g: 1, b: 1, a: 1 };
-            const canvasBg = (bg?: { r: number; g: number; b: number; a: number }) =>
-                bg && bg.a > 0 ? bg : white;
-            const arts = wasmScene.getArtboards();
-            if (arts.length === 1) {
-                const ab = arts[0];
-                return ui.buildSVGString({ x: ab.x, y: ab.y, w: ab.w, h: ab.h }, canvasBg(ab.background));
-            }
-            if (arts.length > 1) {
-                return ui.buildSVGString(renderer.getArtboardsBounds(), canvasBg(arts[0].background));
-            }
-            return ui.buildSVGString(undefined, white);
-        },
+        exportSVG,
+        agent,
+        setSiteId: (site: number) => documentManager.setSiteId(clampSiteId(site)),
         loadBytes: (bytes: Uint8Array, name = 'Untitled') => {
             const doc = new Document(name);
             doc.pendingBytes = bytes;
