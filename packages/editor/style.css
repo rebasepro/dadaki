@@ -397,6 +397,18 @@ body, html {
     max-width: none;
 }
 
+/* The active tab's title is click-to-rename: signal it like an editable
+   field (text cursor + underline on hover) so a click is never a surprise. */
+.doc-tab-label.renamable {
+    cursor: text;
+}
+
+.doc-tab-label.renamable:hover {
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 3px;
+}
+
 .doc-tab-rename {
     min-width: 90px;
     max-width: 280px;
@@ -2880,7 +2892,18 @@ body.scrubbing * {
     text-decoration: underline;
 }
 .about-contact {
+    margin-bottom: 14px;
+}
+.about-legal {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
     margin-bottom: 20px;
+    font-size: 11px;
+}
+.about-legal-sep {
+    color: var(--text-faint, #7a7a7a);
 }
 .about-email {
     font-size: 11px;
