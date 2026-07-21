@@ -9,7 +9,7 @@
 import { Engine, History } from '../engine/pkg/engine';
 import { logAppEvent } from './analytics';
 import { Document } from './document';
-import { FileIO } from './file_io';
+import { FileIO, isNativeDoc } from './file_io';
 import type { FileService } from './file_service';
 import type { InputManager } from './input';
 import { AutosaveManager, type BackupEntry, PersistenceManager } from './persistence';
@@ -175,8 +175,7 @@ export class DocumentManager {
 
         // Create + activate a blank tab so the scene points at its engine, then
         // load into it (SVG import parses into the active engine).
-        const isDatakiOrVec =
-            picked.file.name.endsWith('.dataki') || picked.file.name.endsWith('.vec');
+        const isNative = isNativeDoc(picked.file.name);
         const doc = this.create(stripExt(picked.file.name));
         const ok = await FileIO.loadFile(this.scene.engine!, picked.file, (svg) =>
             this.ui.parseSVG(svg),
@@ -185,7 +184,7 @@ export class DocumentManager {
             this.close(doc.id);
             return;
         }
-        doc.fileHandle = isDatakiOrVec ? picked.handle : null;
+        doc.fileHandle = isNative ? picked.handle : null;
         this.scene.invalidateCache();
         doc.markSaved();
         this.ui.updateLayerList();
@@ -362,5 +361,5 @@ export class DocumentManager {
 }
 
 function stripExt(name: string): string {
-    return name.replace(/\.(dataki|vec|svg)$/i, '');
+    return name.replace(/\.(dadaki|svg)$/i, '');
 }

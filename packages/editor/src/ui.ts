@@ -4518,7 +4518,7 @@ export class UIEngine {
         }
     }
 
-    /** Build the full SVG document string (with embedded .dataki payload). */
+    /** Build the full SVG document string (with embedded .dadaki payload). */
     buildSVGString(
         bounds?: { x: number; y: number; w: number; h: number },
         background?: Color,
@@ -4617,7 +4617,7 @@ export class UIEngine {
             meshRasters: this.meshRastersForExport(nodes),
         });
 
-        // Embed the binary .dataki payload for round-tripping
+        // Embed the binary .dadaki payload for round-tripping
         if (this.scene.engine) {
             svg = FileIO.embedPayloadInSVG(this.scene.engine, svg);
         }

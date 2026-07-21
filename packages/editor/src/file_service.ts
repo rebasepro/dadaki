@@ -35,25 +35,25 @@ export class FileService {
             handle = null;
         }
 
-        const res = await FileIO.saveDataki(engine, handle, this.suggestedName());
+        const res = await FileIO.saveDadaki(engine, handle, this.suggestedName());
         if (!res) return; // user aborted — keep dirty state
         this.adoptHandle(res.handle);
         this.activeDoc.markSaved();
         this.activeDoc.autosave?.snapshotNow(); // checkpoint the saved state
         this.refreshChrome();
-        logAppEvent('document_saved', { format: 'dataki', type: 'save' });
+        logAppEvent('document_saved', { format: 'dadaki', type: 'save' });
     }
 
     async saveActiveAs(): Promise<void> {
         const engine = this.scene.engine;
         if (!engine) return;
-        const res = await FileIO.saveDatakiAs(engine, this.suggestedName());
+        const res = await FileIO.saveDadakiAs(engine, this.suggestedName());
         if (!res) return;
         this.adoptHandle(res.handle);
         this.activeDoc.markSaved();
         this.activeDoc.autosave?.snapshotNow();
         this.refreshChrome();
-        logAppEvent('document_saved', { format: 'dataki', type: 'saveAs' });
+        logAppEvent('document_saved', { format: 'dadaki', type: 'saveAs' });
     }
 
     /** Open a file, replacing the active document's content (Phase A semantics). */
@@ -97,12 +97,12 @@ export class FileService {
 
     private suggestedName(): string {
         const n = this.activeDoc.name || 'untitled';
-        return n.endsWith('.dataki') ? n : `${n}.dataki`;
+        return n.endsWith('.dadaki') ? n : `${n}.dadaki`;
     }
 }
 
 function stripExt(name: string): string {
-    return name.replace(/\.(dataki|vec|svg)$/i, '');
+    return name.replace(/\.(dadaki|svg)$/i, '');
 }
 
 /** Ensure readwrite permission on a (possibly restored) handle. */

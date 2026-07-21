@@ -84,7 +84,7 @@ export interface EditorOptions {
     restoreSession?: boolean;
     /**
      * When `restoreSession` is false, the single document to open on start.
-     * Provide `bytes` (a `.dataki` snapshot from `exportBytes`) to open an
+     * Provide `bytes` (a `.dadaki` snapshot from `exportBytes`) to open an
      * existing document, or omit to start with a blank one.
      */
     initialDocument?: { bytes?: Uint8Array; name?: string };
@@ -158,7 +158,7 @@ export interface EditorHandle {
     /** Currently active document, or undefined. */
     activeDocument(): Document | undefined;
     /**
-     * Serialize a document to durable bytes (the `.dataki` protobuf snapshot).
+     * Serialize a document to durable bytes (the `.dadaki` protobuf snapshot).
      * Defaults to the active document; pass a `Document.id` to serialize a
      * background tab, which a host needs to flush that tab's pending save
      * without switching to it. Returns null if the document has no live engine.

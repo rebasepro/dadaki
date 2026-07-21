@@ -1,5 +1,5 @@
 /**
- * File I/O for .dataki (protobuf) and .svg formats.
+ * File I/O for .dadaki (protobuf) and .svg formats.
  * Uses the File System Access API for native save/open dialogs, with a
  * blob-download / <input type=file> fallback for browsers that lack it
  * (Firefox, Safari).
@@ -27,16 +27,24 @@ export function hasFileSystemAccess(): boolean {
     return 'showSaveFilePicker' in window && 'showOpenFilePicker' in window;
 }
 
+/**
+ * A native (protobuf) document — `.dadaki`. `.svg` is not native: it imports and
+ * must be re-saved via Save As.
+ */
+export function isNativeDoc(name: string): boolean {
+    return /\.dadaki$/i.test(name);
+}
+
 export class FileIO {
     /**
      * Save the current scene to `handle` if given (save-in-place); otherwise
      * show a Save As dialog. Returns the handle used, or `null` on user-abort
      * so the caller can leave dirty state untouched.
      */
-    static async saveDataki(
+    static async saveDadaki(
         engine: Engine,
         handle: FileSystemFileHandle | null,
-        suggestedName = 'untitled.dataki',
+        suggestedName = 'untitled.dadaki',
     ): Promise<SaveResult | null> {
         const bytes = engine.serialize_proto();
 
@@ -44,16 +52,16 @@ export class FileIO {
             await FileIO.writeToHandle(handle, bytes);
             return { handle };
         }
-        return FileIO.saveDatakiAs(engine, suggestedName);
+        return FileIO.saveDadakiAs(engine, suggestedName);
     }
 
     /**
      * Save As — always shows the picker (or downloads on fallback).
      * Returns null on user-abort.
      */
-    static async saveDatakiAs(
+    static async saveDadakiAs(
         engine: Engine,
-        suggestedName = 'untitled.dataki',
+        suggestedName = 'untitled.dadaki',
     ): Promise<SaveResult | null> {
         const bytes = engine.serialize_proto();
 
@@ -64,7 +72,7 @@ export class FileIO {
                     types: [
                         {
                             description: 'Dadaki Document',
-                            accept: { 'application/octet-stream': ['.dataki'] },
+                            accept: { 'application/octet-stream': ['.dadaki'] },
                         },
                     ],
                 });
@@ -81,7 +89,7 @@ export class FileIO {
     }
 
     /**
-     * Show an open dialog for .dataki / .vec / .svg. Loads the picked file into `engine`
+     * Show an open dialog for .dadaki / .svg. Loads the picked file into `engine`
      * and returns its handle + name, or null on abort / load failure.
      */
     static async openFile(
@@ -93,9 +101,9 @@ export class FileIO {
                 const [handle] = await (window as any).showOpenFilePicker({
                     types: [
                         {
-                            description: 'Dadaki, Vector or SVG files',
+                            description: 'Dadaki or SVG files',
                             accept: {
-                                'application/octet-stream': ['.dataki', '.vec'],
+                                'application/octet-stream': ['.dadaki'],
                                 'image/svg+xml': ['.svg'],
                             },
                         },
@@ -106,9 +114,9 @@ export class FileIO {
                 const file = await handle.getFile();
                 const loaded = await FileIO.loadFile(engine, file, fallbackParser);
                 if (!loaded) return null;
-                // Only .dataki and .vec files get a reusable save-in-place handle; an
-                // imported .svg should save to a new .dataki via Save As.
-                const isNative = file.name.endsWith('.dataki') || file.name.endsWith('.vec');
+                // Only native documents get a reusable save-in-place handle; an
+                // imported .svg should save to a new .dadaki via Save As.
+                const isNative = isNativeDoc(file.name);
                 return { handle: isNative ? handle : null, name: file.name };
             } catch (e: unknown) {
                 if (e instanceof DOMException && e.name === 'AbortError') return null;
@@ -129,9 +137,9 @@ export class FileIO {
                 const [handle] = await (window as any).showOpenFilePicker({
                     types: [
                         {
-                            description: 'Dadaki, Vector or SVG files',
+                            description: 'Dadaki or SVG files',
                             accept: {
-                                'application/octet-stream': ['.dataki', '.vec'],
+                                'application/octet-stream': ['.dadaki'],
                                 'image/svg+xml': ['.svg'],
                             },
                         },
@@ -148,7 +156,7 @@ export class FileIO {
         return new Promise((resolve) => {
             const input = document.createElement('input');
             input.type = 'file';
-            input.accept = '.dataki,.vec,.svg';
+            input.accept = '.dadaki,.svg';
             input.onchange = () => {
                 const file = input.files?.[0];
                 resolve(file ? { file, handle: null } : null);
@@ -158,14 +166,14 @@ export class FileIO {
     }
 
     /**
-     * Load a file (auto-detect .dataki vs .vec vs .svg).
+     * Load a file (auto-detect native .dadaki vs .svg).
      */
     static async loadFile(
         engine: Engine,
         file: File,
         fallbackParser?: (svgText: string) => void,
     ): Promise<boolean> {
-        if (file.name.endsWith('.dataki') || file.name.endsWith('.vec')) {
+        if (isNativeDoc(file.name)) {
             const bytes = new Uint8Array(await file.arrayBuffer());
             return engine.deserialize_proto(bytes);
         }
@@ -176,7 +184,7 @@ export class FileIO {
     }
 
     /**
-     * Parse SVG text and load it. Checks for embedded dataki:data or vec:data payload first.
+     * Parse SVG text and load it. Checks for an embedded dadaki:data payload first.
      * If no payload is found and a fallback parser callback is provided, it is called with the raw SVG text.
      */
     static loadSVGText(
@@ -184,10 +192,10 @@ export class FileIO {
         text: string,
         fallbackParser?: (svgText: string) => void,
     ): boolean {
-        // Check for embedded protobuf payload (supporting both modern dataki:data and legacy vec:data)
-        const match = text.match(/<(dataki|vec):data[^>]*>([\s\S]*?)<\/\1:data>/);
+        // Check for an embedded protobuf payload.
+        const match = text.match(/<dadaki:data[^>]*>([\s\S]*?)<\/dadaki:data>/);
         if (match) {
-            const b64 = match[2].trim();
+            const b64 = match[1].trim();
             if (engine.deserialize_proto_base64(b64)) {
                 return true;
             }
@@ -200,7 +208,7 @@ export class FileIO {
         }
 
         console.warn(
-            'No dataki:data or vec:data payload found in SVG. Standard SVG import not yet implemented.',
+            'No dadaki:data payload found in SVG. Standard SVG import not yet implemented.',
         );
         return false;
     }
@@ -215,7 +223,7 @@ export class FileIO {
         // Inject the namespace and metadata right after the opening <svg> tag
         const svgWithNs = svgContent.replace(
             '<svg xmlns="http://www.w3.org/2000/svg"',
-            '<svg xmlns="http://www.w3.org/2000/svg"\n     xmlns:dataki="https://dataki.dev/ns"',
+            '<svg xmlns="http://www.w3.org/2000/svg"\n     xmlns:dadaki="https://dadaki.dev/ns"',
         );
 
         // Insert metadata block right after the opening tag
@@ -227,7 +235,7 @@ export class FileIO {
 
         return (
             before +
-            `\n  <metadata>\n    <dataki:data version="${engine.get_format_version()}">\n${b64}\n    </dataki:data>\n  </metadata>` +
+            `\n  <metadata>\n    <dadaki:data version="${engine.get_format_version()}">\n${b64}\n    </dadaki:data>\n  </metadata>` +
             after
         );
     }
@@ -263,7 +271,7 @@ export class FileIO {
         return new Promise((resolve) => {
             const input = document.createElement('input');
             input.type = 'file';
-            input.accept = '.dataki,.vec,.svg';
+            input.accept = '.dadaki,.svg';
             input.onchange = async () => {
                 const file = input.files?.[0];
                 if (!file) {

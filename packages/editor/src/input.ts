@@ -401,7 +401,7 @@ export class InputManager {
             { passive: false, capture: true },
         );
 
-        // Import .svg / .dataki / .vec files by dropping them onto the canvas area
+        // Import .svg / .dadaki files by dropping them onto the canvas area
         const dropTarget = document.getElementById('canvas-container') ?? this.canvas;
         dropTarget.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -418,8 +418,8 @@ export class InputManager {
     }
 
     /** Import dropped files: .svg content is centered at the drop point and
-     *  selected; .dataki and .vec replace the document (undoable — a history snapshot is
-     *  taken first). */
+     *  selected; a native .dadaki doc replaces the document (undoable — a
+     *  history snapshot is taken first). */
     async onFileDrop(e: DragEvent) {
         e.preventDefault();
         const files = Array.from(e.dataTransfer?.files ?? []);
@@ -454,7 +454,7 @@ export class InputManager {
                     this.scene.engine!.clear_selection();
                     for (const id of newRoots) this.scene.selectNode(id, true);
                 });
-            } else if (name.endsWith('.dataki') || name.endsWith('.vec')) {
+            } else if (name.endsWith('.dadaki')) {
                 const bytes = new Uint8Array(await file.arrayBuffer());
                 this.scene.saveMoveHistory(); // snapshot current doc so the drop is undoable
                 this.scene.engine.deserialize_proto(bytes);
