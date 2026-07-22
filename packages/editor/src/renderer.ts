@@ -1,4 +1,13 @@
-import type { Canvas, CanvasKit, Paint, Path, Shader, Surface } from 'canvaskit-wasm';
+import type {
+    Canvas,
+    CanvasKit,
+    Paint,
+    Path,
+    PictureRecorder,
+    Shader,
+    SkPicture,
+    Surface,
+} from 'canvaskit-wasm';
 
 /** A Live Paint outline point: anchor + incoming/outgoing bézier handles. */
 type OutlinePt = { x: number; y: number; cp1: number[]; cp2: number[] };
@@ -394,6 +403,31 @@ export class Renderer {
         return this._ckBlendModes;
     }
 
+    // Memoized cap/join lookup tables (indexed by the protocol's enum values) —
+    // previously rebuilt for every node's stroke pass, every frame.
+    private _ckCaps: unknown[] | null = null;
+    private getCkCaps() {
+        if (!this._ckCaps) {
+            this._ckCaps = [
+                this.ck.StrokeCap.Butt,
+                this.ck.StrokeCap.Round,
+                this.ck.StrokeCap.Square,
+            ];
+        }
+        return this._ckCaps as Array<(typeof this.ck.StrokeCap)['Butt']>;
+    }
+    private _ckJoins: unknown[] | null = null;
+    private getCkJoins() {
+        if (!this._ckJoins) {
+            this._ckJoins = [
+                this.ck.StrokeJoin.Miter,
+                this.ck.StrokeJoin.Round,
+                this.ck.StrokeJoin.Bevel,
+            ];
+        }
+        return this._ckJoins as Array<(typeof this.ck.StrokeJoin)['Miter']>;
+    }
+
     // ─── Filled faces cache ───
 
     // ─── Cached overlay paints (created once, reused every frame) ───
@@ -406,6 +440,107 @@ export class Renderer {
         artboardFill: Paint;
         artboardStroke: Paint;
     } | null = null;
+
+    // ─── Retained scene picture ───
+    // The whole decoded content pass (engine command stream → Skia draws) of
+    // one frame, captured as an SkPicture in that frame's DEVICE space. Frames
+    // where the scene content is unchanged — pan, zoom, idle repaints for
+    // overlay/selection changes, i.e. the overwhelmingly common case — replay
+    // it with one native drawPicture instead of re-walking the engine tree,
+    // copying the render buffer out of WASM and re-issuing every draw from JS
+    // (all O(visible nodes), ~19 ms at 15k shapes; playback is ~1-2 ms).
+    //
+    // Recorded in device space (view transform baked in) so everything inside
+    // the decode loop that inspects the canvas CTM — the adaptive-tile
+    // re-bake heuristic reads getTotalMatrix() for its device scale — sees
+    // exactly what it sees today. Replay cancels the baked-in view transform
+    // with the recording frame's inverse and applies the current one.
+    private _scenePic: {
+        pic: SkPicture;
+        zoom: number;
+        panX: number;
+        panY: number;
+        dpr: number;
+        /** scene.changeCounter at record time — any mutation invalidates. */
+        changeCounter: number;
+        /** _scenePicGen at record time — async resource swaps invalidate. */
+        gen: number;
+        /** World-space cull rect the recording covered (viewport + margin). */
+        cullMinX: number;
+        cullMinY: number;
+        cullMaxX: number;
+        cullMaxY: number;
+        /** Max zoom-in factor before replay would visibly upscale baked
+         *  bitmaps (sprites/tiles/images); pure-vector content stays sharp
+         *  at any zoom so it gets a wider band. */
+        maxUp: number;
+    } | null = null;
+    /** Bumped whenever something OUTSIDE the engine buffer changes rendered
+     *  pixels: renderer cache wipes, adaptive-tile swaps, sprite bakes. */
+    private _scenePicGen = 0;
+    private _scenePicSettleTimer: number | null = null;
+    /** Extra viewport fraction recorded on each side so small pans replay
+     *  from the picture instead of re-recording at the first scroll. */
+    private static readonly SCENE_PIC_MARGIN = 0.5;
+    /** Zoom-out floor: below half the recorded zoom, re-record (keeps the
+     *  recorded cull region from dominating and AA geometry reasonable). */
+    private static readonly SCENE_PIC_MIN_DOWN = 0.5;
+
+    /** A valid, empty render stream (header only, zero commands). Fed to the
+     *  decode loop on picture-replay frames so the shared code path runs
+     *  untouched while drawing nothing. */
+    private static _emptyRenderBuf: DataView | null = null;
+    private static emptyRenderBuffer(): DataView {
+        if (!Renderer._emptyRenderBuf) {
+            const dv = new DataView(new ArrayBuffer(12));
+            dv.setUint32(0, RENDER_PROTOCOL_MAGIC, true);
+            dv.setUint32(4, EXPECTED_RENDER_PROTOCOL_VERSION, true);
+            dv.setUint32(8, 0, true); // commandCount
+            Renderer._emptyRenderBuf = dv;
+        }
+        return Renderer._emptyRenderBuf;
+    }
+
+    /** Drop the retained scene picture; the next frame re-records it. */
+    invalidateScenePicture() {
+        this._scenePicGen++;
+        if (this._scenePic) {
+            this._scenePic.pic.delete();
+            this._scenePic = null;
+        }
+    }
+
+    /** Draw the retained picture under the current view transform. Call with
+     *  the canvas in WORLD space (view transform applied): concatenating the
+     *  recording frame's inverse view matrix turns the CTM into
+     *  V_cur·V_rec⁻¹, which cancels the V_rec baked into the picture's ops. */
+    private drawScenePicture(canvas: Canvas, sp: NonNullable<Renderer['_scenePic']>) {
+        const s = 1 / (sp.dpr * sp.zoom);
+        canvas.save();
+        canvas.concat([s, 0, -sp.panX / sp.zoom, 0, s, -sp.panY / sp.zoom, 0, 0, 1]);
+        canvas.drawPicture(sp.pic);
+        canvas.restore();
+    }
+
+    /** While zoom changes ride the retained picture, the zoom-dependent work
+     *  inside the decode loop (tile re-bake wants, sprite usability, the
+     *  clip-vs-layer choice) never runs. Re-record once the zoom settles so
+     *  those heuristics catch up — same debounce idea as the tile bakes. */
+    private scheduleScenePicSettle() {
+        if (this._scenePicSettleTimer !== null) {
+            window.clearTimeout(this._scenePicSettleTimer);
+        }
+        const zoomAt = this.zoom;
+        this._scenePicSettleTimer = window.setTimeout(() => {
+            this._scenePicSettleTimer = null;
+            if (this.zoom !== zoomAt) {
+                this.scheduleScenePicSettle();
+                return;
+            }
+            this.invalidateScenePicture();
+            this._needsRender = true;
+        }, 180);
+    }
 
     constructor(ck: CanvasKit, canvas: HTMLCanvasElement, scene: WasmScene) {
         this.ck = ck;
@@ -421,9 +556,22 @@ export class Renderer {
 
         // Re-render when a Google Font finishes loading so text appears correctly
         onFontLoaded(() => {
+            // The cached provider doesn't know the new face — rebuild lazily.
+            this._fontProvider?.delete();
+            this._fontProvider = null;
             this.scene.invalidateCache();
             this._needsRender = true;
         });
+    }
+
+    /** Cached TypefaceFontProvider over every loaded face. Rebuilding it per
+     *  text node per frame re-registered every font each time (O(text nodes ×
+     *  faces) WASM churn); the set of loaded faces only changes via
+     *  onFontLoaded, which drops this cache. */
+    private _fontProvider: ReturnType<CanvasKit['TypefaceFontProvider']['Make']> | null = null;
+    private getFontProvider(): ReturnType<CanvasKit['TypefaceFontProvider']['Make']> | null {
+        if (!this._fontProvider) this._fontProvider = buildFontProvider(this.ck);
+        return this._fontProvider;
     }
 
     /** Signal that the scene or view changed and a new frame is needed. */
@@ -445,6 +593,7 @@ export class Renderer {
 
     /** Invalidate all cached rendering resources. Call when the scene mutates. */
     invalidateRenderCaches() {
+        this.invalidateScenePicture();
         // Clear path cache
         for (const entry of this._pathCache.values()) {
             entry.path.delete();
@@ -525,6 +674,7 @@ export class Renderer {
     /** Drop all decoded images. Call when a different document is loaded (image
      *  ids may be reused for different bytes). Not called on ordinary edits. */
     clearImageCache() {
+        this.invalidateScenePicture();
         for (const img of this._imageCache.values()) {
             if (img) img.delete();
         }
@@ -691,6 +841,8 @@ export class Renderer {
                 this.invalidateAllGroupSprites();
                 this._needsRender = true;
             }
+            // The retained scene picture references the old tile images.
+            if (anyChanged) this.invalidateScenePicture();
         }
     }
 
@@ -1142,6 +1294,10 @@ export class Renderer {
                 this.processSpriteBakes();
             }, 30);
         }
+        // Fresh sprites change nothing visually, but re-recording the retained
+        // picture now lets it (and every future re-record) draw one bitmap per
+        // cached group instead of the groups' full subtrees.
+        if (done > 0) this.invalidateScenePicture();
     }
 
     /** Ensure the reusable overlay Paint objects exist. */
@@ -1220,6 +1376,13 @@ export class Renderer {
             window.clearTimeout(this._tileBakeTimer);
             this._tileBakeTimer = null;
         }
+        if (this._scenePicSettleTimer !== null) {
+            window.clearTimeout(this._scenePicSettleTimer);
+            this._scenePicSettleTimer = null;
+        }
+        this.invalidateScenePicture();
+        this._fontProvider?.delete();
+        this._fontProvider = null;
         for (const t of this._adaptiveTiles.values()) t.img.delete();
         this._adaptiveTiles.clear();
         this._tileBakeQueue.clear();
@@ -1386,7 +1549,12 @@ export class Renderer {
 
     render() {
         if (!this.surface || !this.scene.engine) return;
-        const canvas = this.surface.getCanvas();
+        // `canvas` is the CONTENT target: on a picture-record frame it is
+        // swapped to a PictureRecorder canvas for the duration of the command
+        // stream decode, then back. Everything before/after (grid, artboards,
+        // overlays) always draws to the screen canvas.
+        let canvas = this.surface.getCanvas();
+        const screenCanvas = canvas;
         // In export mode we render into an offscreen surface at 1:1 (the export
         // scale is folded into this.zoom) with a transparent background and no
         // editor chrome (grid, artboard, selection, guides).
@@ -1456,14 +1624,54 @@ export class Renderer {
             viewportMaxY = (this.canvas.height / dpr - this.pan.y) / this.zoom;
         }
 
-        // Re-evaluate any Boolean Group whose operands changed since last frame,
-        // so the cached outline the stream draws is current. Cheap when idle.
-        this.scene.recomputeDirtyBooleanGroups(this.ck);
-
         // Compute the dim target once per frame. getEditingDimTarget self-heals a
         // stale id (edited node removed by undo/delete), so dimming can never stick.
         // No dimming in export output.
         const dimTarget = exporting ? null : (this.inputManager?.getEditingDimTarget() ?? null);
+
+        // ─── Retained scene picture: replay when the content is unchanged ───
+        // Eligible = an ordinary on-screen frame whose content stream depends
+        // only on the scene (no export/snapshot/bake/drag subset, no per-node
+        // visibility mode a picture can't express).
+        const picEligible =
+            !exporting &&
+            snapshotPass === null &&
+            !dragActive &&
+            this._bakeSubset == null &&
+            dimTarget === null &&
+            this.editingTextId === null &&
+            (this.inputManager?.penSourceNodeId ?? null) == null;
+        let scenePicReplayed = false;
+        if (picEligible && this._scenePic) {
+            const sp = this._scenePic;
+            if (
+                sp.changeCounter === this.scene.changeCounter &&
+                sp.gen === this._scenePicGen &&
+                sp.dpr === dpr &&
+                this.zoom <= sp.zoom * sp.maxUp &&
+                this.zoom >= sp.zoom * Renderer.SCENE_PIC_MIN_DOWN &&
+                viewportMinX >= sp.cullMinX &&
+                viewportMinY >= sp.cullMinY &&
+                viewportMaxX <= sp.cullMaxX &&
+                viewportMaxY <= sp.cullMaxY
+            ) {
+                this.drawScenePicture(canvas, sp);
+                scenePicReplayed = true;
+                // Zoom moved while riding the picture: re-record once it
+                // settles so the zoom-dependent heuristics inside the decode
+                // loop (tile re-bakes, sprite usability, clip strategy) run
+                // against the final zoom.
+                if (this.zoom !== sp.zoom) this.scheduleScenePicSettle();
+            } else {
+                this.invalidateScenePicture();
+            }
+        }
+
+        // Re-evaluate any Boolean Group whose operands changed since last frame,
+        // so the cached outline the stream draws is current. Replay frames skip
+        // it: groups only go dirty on mutations, and a mutation (changeCounter)
+        // never replays.
+        if (!scenePicReplayed) this.scene.recomputeDirtyBooleanGroups(this.ck);
 
         // Group sprites are bypassed in export output (full-res vectors) and
         // in per-node visibility modes a baked image can't express (edit
@@ -1507,7 +1715,18 @@ export class Renderer {
             this._bakeSubset != null ||
             ((dragActive || snapshotPass !== null) && this._dragSubtree != null);
         let view: DataView;
-        if (needsSubset) {
+        // World cull rect handed to the engine. A picture-record frame expands
+        // it by SCENE_PIC_MARGIN per side so nearby offscreen content lands in
+        // the recording and small pans replay instead of re-recording.
+        let cullMinX = viewportMinX;
+        let cullMinY = viewportMinY;
+        let cullMaxX = viewportMaxX;
+        let cullMaxY = viewportMaxY;
+        if (scenePicReplayed) {
+            // Content already came from the retained picture — feed the decode
+            // loop a valid empty stream so the shared path below stays intact.
+            view = Renderer.emptyRenderBuffer();
+        } else if (needsSubset) {
             let visibleIds = this.scene.getVisibleNodes(
                 viewportMinX,
                 viewportMinY,
@@ -1523,11 +1742,19 @@ export class Renderer {
             visibleIds = tmp.subarray(0, n);
             view = this.scene.getRenderData(visibleIds, spriteRootsArr);
         } else {
+            if (picEligible) {
+                const mx = (viewportMaxX - viewportMinX) * Renderer.SCENE_PIC_MARGIN;
+                const my = (viewportMaxY - viewportMinY) * Renderer.SCENE_PIC_MARGIN;
+                cullMinX -= mx;
+                cullMinY -= my;
+                cullMaxX += mx;
+                cullMaxY += my;
+            }
             view = this.scene.getRenderDataCulled(
-                viewportMinX,
-                viewportMinY,
-                viewportMaxX,
-                viewportMaxY,
+                cullMinX,
+                cullMinY,
+                cullMaxX,
+                cullMaxY,
                 spriteRootsArr,
             );
         }
@@ -1552,6 +1779,30 @@ export class Renderer {
         }
 
         const commandCount = reader.u32();
+
+        // ─── Record this frame's content stream into the retained picture ───
+        // The recorder canvas carries the same view transform as the screen
+        // canvas, so the decode loop — including everything that reads the
+        // canvas CTM, like the adaptive-tile re-bake heuristic — behaves
+        // identically while drawing into the recording.
+        let scenePicRecorder: PictureRecorder | null = null;
+        if (picEligible && !scenePicReplayed) {
+            scenePicRecorder = new this.ck.PictureRecorder();
+            const rc = scenePicRecorder.beginRecording(
+                this.ck.LTRBRect(
+                    (cullMinX * this.zoom + this.pan.x) * dpr,
+                    (cullMinY * this.zoom + this.pan.y) * dpr,
+                    (cullMaxX * this.zoom + this.pan.x) * dpr,
+                    (cullMaxY * this.zoom + this.pan.y) * dpr,
+                ),
+            );
+            rc.save();
+            rc.scale(dpr, dpr);
+            rc.translate(this.pan.x, this.pan.y);
+            rc.scale(this.zoom, this.zoom);
+            canvas = rc;
+        }
+
         // Mask spans never straddle frames; reset so a mid-frame desync can't
         // leak stale span state into the next frame.
         this._maskStack.length = 0;
@@ -2300,16 +2551,8 @@ export class Renderer {
                     }
 
                     // Stroke Pass(es)
-                    const ckCaps = [
-                        this.ck.StrokeCap.Butt,
-                        this.ck.StrokeCap.Round,
-                        this.ck.StrokeCap.Square,
-                    ];
-                    const ckJoins = [
-                        this.ck.StrokeJoin.Miter,
-                        this.ck.StrokeJoin.Round,
-                        this.ck.StrokeJoin.Bevel,
-                    ];
+                    const ckCaps = this.getCkCaps();
+                    const ckJoins = this.getCkJoins();
 
                     for (const st of strokes) {
                         if (st.paint.type === 0 || st.width <= 0) continue;
@@ -2455,6 +2698,43 @@ export class Renderer {
             }
         }
 
+        // ─── Finish the retained-picture recording and paint it ───
+        if (scenePicRecorder) {
+            canvas.restore(); // matches the recorder canvas's save() above
+            const pic = scenePicRecorder.finishRecordingAsPicture();
+            scenePicRecorder.delete();
+            canvas = screenCanvas;
+            // Baked bitmaps in the recording (group sprites, adaptive filter
+            // tiles, raster images) go visibly soft when the replay upscales
+            // them, so their presence tightens the zoom-in band. Pure vector
+            // content replays sharp at any zoom (ops re-rasterize under the
+            // playback CTM); its band is bounded only to keep the heuristics
+            // from drifting too far.
+            const hasBitmaps =
+                (spriteDrawRoots !== null && spriteDrawRoots.size > 0) ||
+                this._adaptiveTiles.size > 0 ||
+                adaptiveTileSources.size > 0 ||
+                this._imageCache.size > 0;
+            this._scenePic?.pic.delete();
+            this._scenePic = {
+                pic,
+                zoom: this.zoom,
+                panX: this.pan.x,
+                panY: this.pan.y,
+                dpr,
+                changeCounter: this.scene.changeCounter,
+                gen: this._scenePicGen,
+                cullMinX,
+                cullMinY,
+                cullMaxX,
+                cullMaxY,
+                maxUp: hasBitmaps ? 1.12 : 2.0,
+            };
+            // This frame's content itself comes from the recording (V_rec
+            // equals the current view, so the corrective concat is identity).
+            this.drawScenePicture(canvas, this._scenePic);
+        }
+
         // Live Paint faces/edges are no longer drawn here — they're emitted
         // in-stream at the group's z (CMD_LP_FACES/EDGES) so members' strokes
         // sit on top, like Illustrator.
@@ -2583,7 +2863,7 @@ export class Renderer {
         italic?: boolean;
         letter_spacing?: number;
     }): { width: number; height: number } | null {
-        const fontProvider = buildFontProvider(this.ck);
+        const fontProvider = this.getFontProvider();
         if (!fontProvider) return null;
         const { weight, slant } = ckFontStyle(this.ck, geo.font_weight ?? 400, geo.italic ?? false);
         let para: ReturnType<
@@ -3385,7 +3665,7 @@ export class Renderer {
             const paintColor = paint.getColor();
 
             // Try Paragraph API for rich text rendering
-            const fontProvider = buildFontProvider(this.ck);
+            const fontProvider = this.getFontProvider();
             const fontFamilies = fontFamily ? [fontFamily, 'sans-serif'] : ['sans-serif'];
 
             try {
@@ -3445,8 +3725,7 @@ export class Renderer {
             if (fontFamily && !isFontLoaded(fontFamily)) {
                 loadGoogleFontData(fontFamily); // fire-and-forget; repaint via callback
             }
-            // Clean up font provider
-            if (fontProvider) fontProvider.delete();
+            // fontProvider is the shared cached instance — do NOT delete it here.
         }
     }
 

@@ -415,6 +415,29 @@ export class InputManager {
         window.addEventListener('gesturestart', (e) => e.preventDefault(), { capture: true });
         window.addEventListener('gesturechange', (e) => e.preventDefault(), { capture: true });
         window.addEventListener('gestureend', (e) => e.preventDefault(), { capture: true });
+
+        // The canvas client rect is read on every mousemove/wheel (pointer →
+        // world mapping). getBoundingClientRect forces layout when anything
+        // dirtied it, so cache the rect and drop the cache whenever the box
+        // could have changed: any canvas resize (panels opening/closing — the
+        // same events the renderer's ResizeObserver reacts to), window resize,
+        // or scrolling anywhere in the page. Every mousedown also re-reads it,
+        // so a gesture can never start against a stale rect.
+        if (typeof ResizeObserver !== 'undefined') {
+            new ResizeObserver(() => {
+                this._canvasRect = null;
+            }).observe(this.canvas);
+        }
+        window.addEventListener('resize', () => {
+            this._canvasRect = null;
+        });
+        window.addEventListener(
+            'scroll',
+            () => {
+                this._canvasRect = null;
+            },
+            { capture: true, passive: true },
+        );
     }
 
     /** Import dropped files: .svg content is centered at the drop point and
@@ -1451,8 +1474,15 @@ export class InputManager {
         this.onMouseMove(synthetic);
     }
 
+    /** Cached canvas client rect (see the invalidation listeners in setup). */
+    private _canvasRect: DOMRect | null = null;
+    private canvasRect(): DOMRect {
+        if (!this._canvasRect) this._canvasRect = this.canvas.getBoundingClientRect();
+        return this._canvasRect;
+    }
+
     getPos(e: MouseEvent) {
-        const rect = this.canvas.getBoundingClientRect();
+        const rect = this.canvasRect();
         const screenX = e.clientX - rect.left;
         const screenY = e.clientY - rect.top;
 
@@ -1470,7 +1500,7 @@ export class InputManager {
         const want =
             HOVER_SNAP_TOOLS.has(this.ui.activeTool) && this.editingNodeId === null && !bypassed;
         if (want) {
-            this.snap.begin(this.scene, []);
+            this.snap.beginHover(this.scene);
             const s = this.snap.snapPoint(
                 this.currentPos.x,
                 this.currentPos.y,
@@ -1500,7 +1530,7 @@ export class InputManager {
         const bypass = this.metaKey || this.ctrlKey;
         let hp = this.currentPos;
         if (!bypass) {
-            this.snap.begin(this.scene, []);
+            this.snap.beginHover(this.scene);
             const s = this.snap.snapPoint(hp.x, hp.y, 8 / this.renderer.zoom);
             this.snap.end();
             hp = { x: s.x, y: s.y };
@@ -1528,17 +1558,22 @@ export class InputManager {
         this.canvas.style.cursor = 'crosshair';
     }
 
+    /** Cached #canvas-container element (looked up per wheel tick before). */
+    private _wheelContainer: HTMLElement | null = null;
     onWheel(e: WheelEvent) {
         // Only handle wheel events when the target is the canvas or its container
-        const container = document.getElementById('canvas-container');
+        if (!this._wheelContainer) {
+            this._wheelContainer = document.getElementById('canvas-container');
+        }
+        const container = this._wheelContainer;
         if (!container?.contains(e.target as Node)) return;
 
         e.preventDefault();
-        const rect = this.canvas.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
 
         if (e.ctrlKey || e.metaKey) {
+            const rect = this.canvasRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
             const factor = 0.99 ** e.deltaY;
             const oldZoom = this.renderer.zoom;
             const newZoom = Math.max(0.01, Math.min(100, oldZoom * factor));
@@ -1817,6 +1852,7 @@ export class InputManager {
         this.ui.hideContextMenu();
         this.isMouseDown = true;
         this.didMove = false;
+        this._canvasRect = null; // gestures never start against a stale rect
         this.startPos = this.getPos(e);
         this.currentPos = { ...this.startPos };
         this.hoverNodeId = null;
@@ -4232,7 +4268,7 @@ export class InputManager {
 
                     const style = { ...node.style, corner_radius: newRadius };
                     this.scene.setNodeStyleNoHistory(nodeId, JSON.stringify(style));
-                    this.ui.syncWithSelection({ interactive: true });
+                    this.ui.syncWithSelection({ gesture: true });
                     return;
                 }
             }
@@ -4399,7 +4435,7 @@ export class InputManager {
                 } else {
                     this.scene.invalidateCache();
                 }
-                this.ui.syncWithSelection({ interactive: true });
+                this.ui.syncWithSelection({ gesture: true });
                 return;
             }
 
@@ -4570,7 +4606,7 @@ export class InputManager {
                     this.scene.invalidateCache();
                 }
                 // Pass interactive to skip expensive context bar / breadcrumb / layer list rebuilds during drag
-                this.ui.syncWithSelection({ interactive: true });
+                this.ui.syncWithSelection({ gesture: true });
                 return;
             }
         }
@@ -4711,7 +4747,7 @@ export class InputManager {
                 // moved node sits INSIDE (moved cached roots keep theirs).
                 this.scene.invalidateCacheTransformOnly(moveTargets);
                 // Update property panel position values without rebuilding chrome DOM
-                this.ui.syncWithSelection({ interactive: true });
+                this.ui.syncWithSelection({ gesture: true });
             }
         }
 
@@ -4946,7 +4982,7 @@ export class InputManager {
             // Keep any mesh fill glued to the outline while it is dragged.
             this.scene.snapMeshFillsToGeometry(this.editingNodeId!);
             this.scene.invalidateCache();
-            this.ui.syncWithSelection({ interactive: true });
+            this.ui.syncWithSelection({ gesture: true });
         }
     }
 
@@ -5566,7 +5602,7 @@ export class InputManager {
         // path/shader caches and group sprites stay valid — a rotated cached
         // group follows the delta transform instead of being re-recorded.
         this.scene.invalidateCacheTransformOnly(this.rotateTargetIds);
-        this.ui.syncWithSelection({ interactive: true });
+        this.ui.syncWithSelection({ gesture: true });
     }
 
     /** Compose two affine matrices: result applies B first, then A. */

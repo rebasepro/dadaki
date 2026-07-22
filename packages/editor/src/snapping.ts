@@ -39,6 +39,42 @@ export class SnapEngine {
      * them. `excludeArtboardId` omits one artboard's edges (so a frame being
      * dragged/resized doesn't snap to itself).
      */
+    /** Cached target set for idle-hover previews (see beginHover). */
+    private hoverCache: { x: number[]; y: number[]; points: { x: number; y: number }[] } | null =
+        null;
+    private hoverCacheCounter = -1;
+    private hoverCacheEngine: unknown = null;
+
+    /**
+     * `begin()` for idle-hover snap previews (pen/shape tools, no drag).
+     *
+     * Hover previews exclude nothing, so the target set only changes when the
+     * scene does — but the naive path rebuilds it on EVERY mousemove, and the
+     * rebuild serializes every path's geometry out of WASM as JSON
+     * (getResolvedSubpaths per leaf). On a heavy document that alone blows the
+     * frame budget while merely moving the cursor. Reuse the collected targets
+     * until a mutation (changeCounter) or a document swap (engine identity)
+     * invalidates them. `end()` only reassigns the working arrays, so the
+     * cached ones survive.
+     */
+    beginHover(scene: WasmScene) {
+        if (
+            this.hoverCache &&
+            this.hoverCacheCounter === scene.changeCounter &&
+            this.hoverCacheEngine === scene.engine
+        ) {
+            this.xTargets = this.hoverCache.x;
+            this.yTargets = this.hoverCache.y;
+            this.points = this.hoverCache.points;
+            this.active = true;
+            return;
+        }
+        this.begin(scene, []);
+        this.hoverCache = { x: this.xTargets, y: this.yTargets, points: this.points };
+        this.hoverCacheCounter = scene.changeCounter;
+        this.hoverCacheEngine = scene.engine;
+    }
+
     begin(scene: WasmScene, excludeIds: Iterable<number>, excludeArtboardId?: number) {
         this.xTargets = [];
         this.yTargets = [];

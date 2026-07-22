@@ -1704,8 +1704,14 @@ export class UIEngine {
         this.updateLayerList();
     }
 
-    syncWithSelection(opts: { interactive?: boolean } = {}) {
-        const interactive = opts.interactive === true;
+    syncWithSelection(opts: { interactive?: boolean; gesture?: boolean } = {}) {
+        // `gesture` = a per-pointermove call from a live transform gesture
+        // (move/resize/rotate/point drag). Only the transform numbers can
+        // change frame-to-frame, so everything else — fills/strokes/effects
+        // list DOM rebuilds, typography, toggles — is skipped; the caller's
+        // mouse-up path issues the full sync. Implies `interactive`.
+        const gesture = opts.gesture === true;
+        const interactive = opts.interactive === true || gesture;
         this.scene.renderer?.requestRender();
         // Keep gradient/mesh-editing state consistent with the selection
         this.gradientEdit.syncSelection();
@@ -1742,20 +1748,26 @@ export class UIEngine {
         }
         const style = node.style;
 
-        this.opacityInput.value = ((style.opacity !== undefined ? style.opacity : 1) * 100).toFixed(
-            0,
-        );
-        if (this.blendMode) this.blendMode.value = (style.blend_mode || 0).toString();
+        if (!gesture) {
+            this.opacityInput.value = (
+                (style.opacity !== undefined ? style.opacity : 1) * 100
+            ).toFixed(0);
+            if (this.blendMode) this.blendMode.value = (style.blend_mode || 0).toString();
 
-        // Effects list (single-selection only)
-        this.renderEffectsList(selection.length === 1 ? selection[0] : null);
+            // Effects list (single-selection only)
+            this.renderEffectsList(selection.length === 1 ? selection[0] : null);
+        } else if (this.cornerRadius && node.geometry.Rect) {
+            // The one style value a gesture CAN change live: the corner-radius
+            // drag handle on a rect. Cheap — no DOM rebuild, no subpath walk.
+            this.cornerRadius.value = (style.corner_radius || 0).toString();
+        }
 
         // Corner radius: the field is always present (Figma-style); it is
         // disabled/dimmed when the selected geometry doesn't support it.
-        const cornerRadiusCell = document.getElementById('corner-radius-cell');
+        const cornerRadiusCell = gesture ? null : document.getElementById('corner-radius-cell');
         const im = this.scene.renderer?.inputManager;
         const radiusSupported = !!(node.geometry.Rect || node.geometry.Path);
-        if (this.cornerRadius) {
+        if (this.cornerRadius && !gesture) {
             this.cornerRadius.disabled = !radiusSupported;
             this.cornerRadius.placeholder = '';
             if (node.geometry.Rect) {
@@ -1782,9 +1794,12 @@ export class UIEngine {
         }
         cornerRadiusCell?.classList.toggle('disabled', !radiusSupported);
 
-        if (this.toggleVisible)
-            this.toggleVisible.classList.toggle('active', node.visible !== false);
-        if (this.toggleLocked) this.toggleLocked.classList.toggle('active', node.locked === true);
+        if (!gesture) {
+            if (this.toggleVisible)
+                this.toggleVisible.classList.toggle('active', node.visible !== false);
+            if (this.toggleLocked)
+                this.toggleLocked.classList.toggle('active', node.locked === true);
+        }
 
         // X/Y show the top-left of the world-space bounding box (Figma-style),
         // which matches the on-screen selection rectangle — not the transform
@@ -1820,6 +1835,8 @@ export class UIEngine {
             this.updateLayerSelection();
             this.contextBar?.refresh();
         }
+
+        if (gesture) return; // transform numbers are synced — skip the style DOM
 
         if (node.geometry.Text) {
             if (this.typographySection) this.typographySection.style.display = '';
