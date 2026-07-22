@@ -734,13 +734,9 @@ export class InputManager {
             return;
         }
 
-        // Cmd/Ctrl+R: toggle rulers (matches Illustrator). Prevent the browser
-        // reload that key would otherwise trigger.
-        if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === 'r' || e.key === 'R')) {
-            e.preventDefault();
-            this.guides?.toggleRulers();
-            return;
-        }
+        // NOTE: rulers are ⇧R, NOT Illustrator's ⌘R — in a browser that chord is
+        // Reload, and swallowing it makes the app feel broken. Figma binds ⇧R for
+        // the same reason. See the ⇧R handler below.
 
         // Tool shortcuts — plain letters only; ⇧letter is reserved for actions (flip etc.)
         if (!e.metaKey && !e.ctrlKey) {
@@ -762,6 +758,9 @@ export class InputManager {
             // Shift+H / Shift+V: flip selection in place
             if (e.shiftKey && (e.key === 'H' || e.key === 'h')) this.flipSelection('h');
             if (e.shiftKey && (e.key === 'V' || e.key === 'v')) this.flipSelection('v');
+
+            // Shift+R: toggle rulers. ⌘R stays the browser's reload.
+            if (e.shiftKey && (e.key === 'R' || e.key === 'r')) this.guides?.toggleRulers();
 
             // View shortcuts (Figma-style)
             if (e.key === '!' || (e.shiftKey && e.key === '1')) {
