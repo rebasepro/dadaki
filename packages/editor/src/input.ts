@@ -1587,6 +1587,10 @@ export class InputManager {
             this.renderer.pan.x -= e.deltaX;
             this.renderer.pan.y -= e.deltaY;
         }
+        // Wheel/trackpad zoom and pan arrive in bursts and only move the view,
+        // so the renderer may serve these frames from a cached raster and
+        // re-render sharp once they stop.
+        this.renderer.noteViewGesture();
         this.renderer.notifyViewChange();
     }
 
@@ -4015,6 +4019,7 @@ export class InputManager {
         if (this.panDrag && this.isMouseDown) {
             this.renderer.pan.x = this.panDrag.panX + (e.clientX - this.panDrag.screenX);
             this.renderer.pan.y = this.panDrag.panY + (e.clientY - this.panDrag.screenY);
+            this.renderer.noteViewGesture();
             this.renderer.notifyViewChange();
             return;
         }
