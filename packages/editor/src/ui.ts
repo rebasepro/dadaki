@@ -5141,11 +5141,29 @@ export class UIEngine {
         for (const pat of Array.from(doc.querySelectorAll('pattern'))) {
             const id = pat.getAttribute('id');
             if (!id) continue;
-            const w = parseSvgLength(pat.getAttribute('width'), 0);
-            const h = parseSvgLength(pat.getAttribute('height'), 0);
-            // Only userSpaceOnUse-style pixel tiles are supported in v1;
-            // objectBoundingBox fractions (<=2) can't be sized without the shape.
-            if (!(w > 2 && h > 2)) continue;
+            // A pattern may inherit any of its geometry, presentation attributes
+            // and even its children from another pattern via xlink:href/href.
+            // Resolve the chain so an attribute set anywhere along it is seen.
+            const attr = (name: string): string | null => this.patternInheritedAttr(pat, doc, name);
+
+            const w = parseSvgLength(attr('width'), 0);
+            const h = parseSvgLength(attr('height'), 0);
+            // Only userSpaceOnUse-style pixel tiles are supported: an
+            // objectBoundingBox fraction (the default) needs the filled shape's
+            // bounding box, which isn't known here. patternUnits defaults to
+            // objectBoundingBox, so require the explicit userSpaceOnUse.
+            const units = (attr('patternUnits') || 'objectBoundingBox').trim();
+            if (units !== 'userSpaceOnUse') continue;
+            if (!(w > 0 && h > 0)) continue;
+
+            const x = parseSvgLength(attr('x'), 0);
+            const y = parseSvgLength(attr('y'), 0);
+            const viewBox = attr('viewBox');
+            // Children come from the nearest ancestor in the href chain that has
+            // any (SVG 2 §"pattern element" template semantics).
+            const inner = this.patternInheritedChildren(pat, doc);
+            if (!inner.trim()) continue;
+
             // Tile resolution. A fixed 2× is too coarse the moment the artwork
             // is viewed or exported above that scale — and badly so for a small
             // tile, which is exactly what gets magnified (a 4-unit tile baked at
@@ -5157,9 +5175,16 @@ export class UIEngine {
                 4,
                 Math.min(MIN_TILE_PX / Math.max(1, Math.min(w, h)), MAX_TILE_PX / Math.max(w, h)),
             );
+            // With a viewBox the tile content is defined in viewBox units and
+            // fitted into the w×h tile; otherwise content is already in tile
+            // units. Either way the rasterized image is exactly one tile.
+            const par = attr('preserveAspectRatio');
+            const vbAttr = viewBox ? ` viewBox="${viewBox}"` : ` viewBox="0 0 ${w} ${h}"`;
+            const parAttr = viewBox && par ? ` preserveAspectRatio="${par}"` : '';
             const svg =
                 `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
-                `width="${w * scale}" height="${h * scale}" viewBox="0 0 ${w} ${h}"><defs>${defsHtml}</defs>${pat.innerHTML}</svg>`;
+                `width="${w * scale}" height="${h * scale}"${vbAttr}${parAttr}>` +
+                `<defs>${defsHtml}</defs>${inner}</svg>`;
             const bytes = await this.rasterizeSvgToPng(
                 svg,
                 Math.round(w * scale),
@@ -5173,15 +5198,53 @@ export class UIEngine {
                 continue;
             }
             // patternTransform (3×3 col-major) → SVG 2×3 [a,b,c,d,e,f].
-            const pt = pat.getAttribute('patternTransform');
+            const pt = attr('patternTransform');
             let transform = [1, 0, 0, 1, 0, 0];
             if (pt) {
                 const m = parseSVGTransform(pt);
                 transform = [m[0], m[1], m[3], m[4], m[6], m[7]];
             }
+            // The tile origin (x,y) shifts the tiling phase; fold it into the
+            // pattern→user transform's translation (applied inside
+            // patternTransform).
+            if (x !== 0 || y !== 0) {
+                const [a, b, c, d, e, f] = transform;
+                transform = [a, b, c, d, a * x + c * y + e, b * x + d * y + f];
+            }
             map.set(id, { image_id: imageId, width: w, height: h, transform });
         }
         return map;
+    }
+
+    /** An attribute of a <pattern>, inheriting from its href chain if unset on
+     *  the element itself (SVG 2 pattern template inheritance). Cycle-safe. */
+    private patternInheritedAttr(pat: Element, doc: Document, name: string): string | null {
+        const seen = new Set<Element>();
+        let cur: Element | null = pat;
+        while (cur && !seen.has(cur)) {
+            seen.add(cur);
+            const v = cur.getAttribute(name);
+            if (v !== null) return v;
+            const href: string = cur.getAttribute('href') ?? cur.getAttribute('xlink:href') ?? '';
+            cur = href.startsWith('#') ? doc.getElementById(href.slice(1)) : null;
+            if (cur && cur.tagName.toLowerCase() !== 'pattern') cur = null;
+        }
+        return null;
+    }
+
+    /** The children a <pattern> renders: its own, or the nearest referenced
+     *  pattern in the href chain that has any. */
+    private patternInheritedChildren(pat: Element, doc: Document): string {
+        const seen = new Set<Element>();
+        let cur: Element | null = pat;
+        while (cur && !seen.has(cur)) {
+            seen.add(cur);
+            if (cur.children.length > 0) return cur.innerHTML;
+            const href: string = cur.getAttribute('href') ?? cur.getAttribute('xlink:href') ?? '';
+            cur = href.startsWith('#') ? doc.getElementById(href.slice(1)) : null;
+            if (cur && cur.tagName.toLowerCase() !== 'pattern') cur = null;
+        }
+        return '';
     }
 
     /** Render an SVG string to PNG bytes at the given pixel size (async). */
