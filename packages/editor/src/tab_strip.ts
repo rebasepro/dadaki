@@ -25,6 +25,10 @@ export class TabStrip {
     private _signature = '';
     /** Last descriptor list, so a rename can re-render without the manager. */
     private _lastTabs: TabDescriptor[] = [];
+    /** When a click just activated a tab, ignore the immediate follow-up click
+     *  on the (re-rendered) active tab so a double-click-to-focus doesn't
+     *  accidentally open the rename editor. */
+    private _activatedAt = 0;
 
     constructor(
         private el: HTMLElement,
@@ -50,6 +54,10 @@ export class TabStrip {
             const label = document.createElement('span');
             label.className = 'doc-tab-label';
             label.textContent = t.name;
+            if (t.active && this.cb.onRename) {
+                label.classList.add('renamable');
+                label.title = 'Click to rename';
+            }
 
             const dot = document.createElement('span');
             dot.className = `doc-tab-dot${t.dirty ? ' dirty' : ''}`;
@@ -69,7 +77,24 @@ export class TabStrip {
                 tab.appendChild(close);
             }
 
-            tab.addEventListener('click', () => this.cb.onSelect(t.id));
+            tab.addEventListener('click', (e) => {
+                if (!t.active) {
+                    this._activatedAt = Date.now();
+                    this.cb.onSelect(t.id);
+                    return;
+                }
+                // Clicking the title of the already-active tab starts a rename
+                // — unless this click is the tail of the double-click that
+                // activated it, or a rename input is already open.
+                if (
+                    this.cb.onRename &&
+                    e.target === label &&
+                    !tab.classList.contains('renaming') &&
+                    Date.now() - this._activatedAt > 500
+                ) {
+                    this.beginRename(label, t);
+                }
+            });
             tab.addEventListener('mousedown', (e) => {
                 // Middle-click closes.
                 if (e.button === 1 && showClose) {
@@ -78,7 +103,9 @@ export class TabStrip {
                 }
             });
             if (this.cb.onRename) {
-                tab.addEventListener('dblclick', () => this.beginRename(label, t));
+                tab.addEventListener('dblclick', () => {
+                    if (!tab.classList.contains('renaming')) this.beginRename(label, t);
+                });
             }
 
             this.el.appendChild(tab);
@@ -140,13 +167,21 @@ export class TabStrip {
         input.addEventListener('blur', () => finish(true));
         input.addEventListener('keydown', (e) => {
             e.stopPropagation();
-            if (e.key === 'Enter') {
+            // Some environments deliver the key as legacy 'Return' or only a
+            // reliable keyCode — accept them all; this is the primary commit.
+            if (e.key === 'Enter' || e.key === 'Return' || e.keyCode === 13) {
                 e.preventDefault();
                 finish(true);
-            } else if (e.key === 'Escape') {
+            } else if (e.key === 'Escape' || e.keyCode === 27) {
                 e.preventDefault();
                 finish(false);
             }
+        });
+        // keydown can be swallowed by host-page capture listeners; keyup is a
+        // second chance to commit so Enter never appears to "do nothing".
+        input.addEventListener('keyup', (e) => {
+            e.stopPropagation();
+            if (e.key === 'Enter' || e.key === 'Return' || e.keyCode === 13) finish(true);
         });
     }
 }

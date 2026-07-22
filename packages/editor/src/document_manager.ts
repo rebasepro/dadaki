@@ -215,6 +215,9 @@ export class DocumentManager {
         this.refreshChrome();
         this.renderTabs();
         this.persistManifest();
+        // A rename is a document change the host must persist too — without
+        // this, an embedding app (cloud) never saves the new name.
+        this.hostEvents.mutated?.(doc);
     }
 
     /** Switch the editor to a different document. */
