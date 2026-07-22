@@ -4758,6 +4758,59 @@ export class UIEngine {
         return parts.join('');
     }
 
+    /**
+     * The filter region for `el` in user space — the rectangle a filter's
+     * output is clipped to, and therefore exactly the area worth rasterizing.
+     *
+     * `filterUnits="objectBoundingBox"` (the default) reads x/y/width/height as
+     * fractions of the element's bounding box, defaulting to -10%,-10%,
+     * 120%,120%; `userSpaceOnUse` reads them as user-space lengths. Returns
+     * null when the filter can't be resolved, so the caller can skip it.
+     */
+    private filterRegionFor(
+        el: Element,
+        doc: Document,
+        bbox: { x: number; y: number; w: number; h: number },
+    ): { x: number; y: number; w: number; h: number } | null {
+        const styleFilter = (el.getAttribute('style') || '').match(
+            /(?:^|;)\s*filter\s*:\s*([^;]+)/i,
+        );
+        const ref = ((styleFilter ? styleFilter[1] : el.getAttribute('filter')) || '').trim();
+        const m = ref.match(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/);
+        const filterEl = m ? doc.getElementById(m[1]) : null;
+        if (filterEl?.tagName.toLowerCase() !== 'filter') return null;
+
+        const userSpace = (filterEl.getAttribute('filterUnits') || '').trim() === 'userSpaceOnUse';
+        // In objectBoundingBox units a percentage and a plain number mean the
+        // same thing (50% === 0.5); in user space a percentage is relative to
+        // the viewport, which we approximate with the bbox extent.
+        const coord = (attr: string, fallback: number, base: number, origin: number): number => {
+            const raw = filterEl.getAttribute(attr);
+            if (raw === null)
+                return userSpace ? origin + fallback * base : origin + fallback * base;
+            const pct = raw.trim().endsWith('%');
+            const n = parseFloat(raw);
+            if (Number.isNaN(n)) return origin + fallback * base;
+            if (userSpace) return pct ? (n / 100) * base : n;
+            return origin + (pct ? n / 100 : n) * base;
+        };
+        const extent = (attr: string, fallback: number, base: number): number => {
+            const raw = filterEl.getAttribute(attr);
+            if (raw === null) return fallback * base;
+            const pct = raw.trim().endsWith('%');
+            const n = parseFloat(raw);
+            if (Number.isNaN(n)) return fallback * base;
+            if (userSpace) return pct ? (n / 100) * base : n;
+            return (pct ? n / 100 : n) * base;
+        };
+        return {
+            x: coord('x', -0.1, bbox.w, bbox.x),
+            y: coord('y', -0.1, bbox.h, bbox.y),
+            w: extent('width', 1.2, bbox.w),
+            h: extent('height', 1.2, bbox.h),
+        };
+    }
+
     /** For each element whose filter can't be mapped to native effects,
      *  rasterize element+filter to an image and tag it with `__rasterFilter`. */
     private async rasterizeFilteredElements(doc: Document): Promise<void> {
@@ -4778,6 +4831,15 @@ export class UIEngine {
         host.appendChild(liveSvg);
         document.body.appendChild(host);
         const defsHtml = this.collectDefsHtml(doc);
+        // The visible canvas in user units, used to bound filter regions.
+        const vb = (svg.getAttribute('viewBox') || '')
+            .trim()
+            .split(/[\s,]+/)
+            .map(Number);
+        const canvasRect =
+            vb.length === 4 && vb.every((n) => Number.isFinite(n)) && vb[2] > 0 && vb[3] > 0
+                ? { x: vb[0], y: vb[1], w: vb[2], h: vb[3] }
+                : null;
         try {
             for (const el of candidates) {
                 const id = el.getAttribute('id');
@@ -4799,12 +4861,47 @@ export class UIEngine {
                     /* getBBox may throw for empty geometry */
                 }
                 if (bw <= 0 || bh <= 0) continue;
-                // Expand for filter overflow (blur/offset spill past the geometry).
-                const mx = Math.max(bw, bh) * 0.4 + 10;
-                bx -= mx;
-                by -= mx;
-                bw += 2 * mx;
-                bh += 2 * mx;
+                // Capture exactly the FILTER REGION, which is what the filter's
+                // output is clipped to. Previously this was a guess (bbox + 40%
+                // + 10), which both cropped filters whose real region is larger
+                // and, for an explicit region, captured the wrong area
+                // entirely. Defaults are -10%,-10%,120%,120% of the bbox
+                // (SVG 1.1 §15.7.2).
+                const region = this.filterRegionFor(el, doc, { x: bx, y: by, w: bw, h: bh });
+                if (region && region.w > 0 && region.h > 0) {
+                    // Nothing outside the canvas can be seen, so clip the region
+                    // to it: that bounds the tile for a deliberately enormous
+                    // region (the suite has a 100000×100000 one whose only
+                    // requirement is that we don't hang), and detects a region
+                    // sitting entirely off-canvas, whose output is invisible.
+                    const clipped = canvasRect
+                        ? {
+                              x: Math.max(region.x, canvasRect.x),
+                              y: Math.max(region.y, canvasRect.y),
+                              r: Math.min(region.x + region.w, canvasRect.x + canvasRect.w),
+                              b: Math.min(region.y + region.h, canvasRect.y + canvasRect.h),
+                          }
+                        : null;
+                    if (clipped && (clipped.r <= clipped.x || clipped.b <= clipped.y)) {
+                        // The filter paints nothing visible; the element must
+                        // not fall back to an unfiltered draw.
+                        (el as unknown as { __filterEmpty?: boolean }).__filterEmpty = true;
+                        continue;
+                    }
+                    bx = clipped ? clipped.x : region.x;
+                    by = clipped ? clipped.y : region.y;
+                    bw = clipped ? clipped.r - clipped.x : region.w;
+                    bh = clipped ? clipped.b - clipped.y : region.h;
+                } else {
+                    // No <filter> element to read a region from — a CSS filter
+                    // function list (blur(), drop-shadow(), …), which has no
+                    // region concept. Keep the spill heuristic.
+                    const mx = Math.max(bw, bh) * 0.4 + 10;
+                    bx -= mx;
+                    by -= mx;
+                    bw += 2 * mx;
+                    bh += 2 * mx;
+                }
                 const scale = 2;
                 const tile =
                     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
@@ -6723,6 +6820,10 @@ export class UIEngine {
         // A url() combined with anything else (extra urls / functions) can't be
         // composed natively — let the caller rasterize it.
         if (ref.replace(m[0], '').trim() !== '') return 'rasterize';
+        // Flagged during rasterization: the filter region lies entirely off
+        // the canvas, so the filter's (clipped) output is invisible. Falling
+        // back to an unfiltered draw would show the element at full strength.
+        if ((el as unknown as { __filterEmpty?: boolean }).__filterEmpty) return 'hide';
         const filterEl = doc.getElementById(m[1]);
         // An invalid filter reference (missing target or not a <filter>) makes
         // the referencing element not render at all (SVG 1.1).
@@ -6735,6 +6836,35 @@ export class UIEngine {
         // A filter with no primitives (and no template it inherits them from)
         // produces empty output → the element is not rendered.
         if (primitives.length === 0) return hasHref ? 'rasterize' : 'hide';
+
+        // A length that is present but zero or negative. Units are irrelevant:
+        // no unit system makes a non-positive extent valid.
+        const nonPositive = (v: string | null): boolean => {
+            if (v === null) return false;
+            const n = parseFloat(v);
+            return !Number.isNaN(n) && n <= 0;
+        };
+        // "A negative or zero value disables rendering of the element which
+        // references the filter." (SVG 1.1 §15.7.2)
+        if (nonPositive(filterEl.getAttribute('width'))) return 'hide';
+        if (nonPositive(filterEl.getAttribute('height'))) return 'hide';
+        // The last primitive's result IS the filter's output, so a zero-sized
+        // subregion there leaves nothing to composite.
+        const lastPrim = primitives[primitives.length - 1];
+        if (nonPositive(lastPrim.getAttribute('width'))) return 'hide';
+        if (nonPositive(lastPrim.getAttribute('height'))) return 'hide';
+        // An feMerge with no feMergeNode yields transparent black, and each
+        // later primitive defaults its input to the previous result — so unless
+        // something downstream re-sources (`in=`), the whole chain is empty.
+        const emptyMergeAt = primitives.findIndex(
+            (p) => p.tagName.toLowerCase() === 'femerge' && p.children.length === 0,
+        );
+        if (
+            emptyMergeAt >= 0 &&
+            !primitives.slice(emptyMergeAt + 1).some((p) => p.hasAttribute('in'))
+        ) {
+            return 'hide';
+        }
         // The native effect path can only represent a plain effect stack over
         // the default region/inputs. Anything with a custom filter region,
         // primitive subregion, non-default units, explicit inputs, or href
@@ -6775,7 +6905,13 @@ export class UIEngine {
             } else if (t === 'fedropshadow') {
                 const flood = prim.getAttribute('flood-color') || '#000000';
                 const fo = firstNum(prim.getAttribute('flood-opacity'), 1);
-                const c = flood.startsWith('#') ? hexToRgb(flood) : { r: 0, g: 0, b: 0 };
+                // flood-color is a full CSS colour: named, rgb(), hsl() and
+                // every hex length. Testing for a leading '#' and defaulting
+                // everything else to black turned `flood-color="red"` into a
+                // black shadow, and fed a shorthand hex straight into the
+                // 6-digit-only reader.
+                const parsed = parseCssColor(flood);
+                const c = parsed ? hexToRgb(parsed.hex) : { r: 0, g: 0, b: 0 };
                 effects.push({
                     DropShadow: {
                         dx: firstNum(prim.getAttribute('dx')),

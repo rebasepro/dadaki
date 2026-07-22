@@ -4,12 +4,24 @@
  */
 import type { Color } from './types';
 
-/** Convert a hex color string to RGBA color object (0-1 range). */
+/**
+ * Convert a hex color string to an RGBA color object (0-1 range).
+ *
+ * Accepts the shorthand forms as well as the long ones (#rgb, #rgba, #rrggbb,
+ * #rrggbbaa). Fixed 6-digit slicing used to yield NaN for green and blue on a
+ * 3-digit value like `#333`, and a NaN channel doesn't survive the trip into
+ * the engine — the whole style it belonged to was silently dropped.
+ */
 export function hexToRgb(hex: string): Color {
-    const r = parseInt(hex.slice(1, 3), 16) / 255;
-    const g = parseInt(hex.slice(3, 5), 16) / 255;
-    const b = parseInt(hex.slice(5, 7), 16) / 255;
-    return { r, g, b, a: 1.0 };
+    const h = hex.trim().replace(/^#/, '');
+    const short = h.length === 3 || h.length === 4;
+    const chan = (i: number): number => {
+        const s = short ? h[i].repeat(2) : h.slice(i * 2, i * 2 + 2);
+        const v = parseInt(s, 16);
+        return Number.isNaN(v) ? 0 : v / 255;
+    };
+    const hasAlpha = h.length === 4 || h.length === 8;
+    return { r: chan(0), g: chan(1), b: chan(2), a: hasAlpha ? chan(3) : 1.0 };
 }
 
 /** Convert an RGB color object (0-1 range) to hex string. */
