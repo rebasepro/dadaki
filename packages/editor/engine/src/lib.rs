@@ -3935,7 +3935,10 @@ impl Engine {
 
     /// Duplicate a node (and its entire subtree if a group) and return the new id.
     pub fn duplicate_node(&mut self, id: u32) -> u32 {
-        let new_id = self.deep_clone_subtree(id);
+        // Track old->new ids so any Live Paint fills the subtree carries can be
+        // re-attached to the clone's freshly-numbered faces (see below).
+        let mut id_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let new_id = self.deep_clone_subtree_inner(id, true, &mut id_map);
         // Offset the top-level clone by 20px
         if let Some(node) = self.scene.nodes.get_mut(&new_id) {
             node.transform.x += 20.0;
@@ -3947,22 +3950,87 @@ impl Engine {
         self.scene.root_nodes.push(new_id);
         self.update_node_global_transform(new_id);
         self.update_spatial_index_recursive(new_id);
+        // Live Paint face fills live on the vector network keyed by a containment
+        // signature of SOURCE-NODE ids, not on the nodes themselves — so a plain
+        // subtree clone leaves the copy's faces empty (the user sees only the
+        // member strokes). Re-inject the fills under the clone's new ids.
+        self.clone_live_paint_fills(&id_map, 20.0, 20.0);
         self.mark_dirty(new_id);
         new_id
+    }
+
+    /// Re-attach Live Paint face fills onto a freshly-cloned subtree.
+    ///
+    /// Each filled face records the sorted ids of the closed shapes that bound
+    /// it (its signature). For a fill entirely defined by cloned shapes, map the
+    /// signature through `id_map` and queue it as a pending fill offset by the
+    /// clone's own (dx,dy); the next network rebuild's `remap_fills` then lands
+    /// it on the matching new face by exact signature.
+    fn clone_live_paint_fills(
+        &mut self,
+        id_map: &std::collections::HashMap<u32, u32>,
+        dx: f32,
+        dy: f32,
+    ) {
+        if id_map.is_empty() {
+            return;
+        }
+        // The old faces (and their signatures) must exist to copy from.
+        self.ensure_network_clean();
+        let mut pending: Vec<vector_network::PendingFill> = Vec::new();
+        for face in self.scene.vector_network.faces.values() {
+            if face.is_outer || face.signature.is_empty() {
+                continue;
+            }
+            let color = match &face.fill {
+                Some(c) => c.clone(),
+                None => continue,
+            };
+            // Only carry a fill whose bounding shapes were ALL part of the clone.
+            if !face.signature.iter().all(|n| id_map.contains_key(n)) {
+                continue;
+            }
+            let mut sig: Vec<u32> = face.signature.iter().map(|n| id_map[n]).collect();
+            sig.sort();
+            let n = face.boundary_polygon.len().max(1) as f32;
+            let (mut sx, mut sy) = (0.0f32, 0.0f32);
+            for p in &face.boundary_polygon {
+                sx += p[0];
+                sy += p[1];
+            }
+            pending.push(vector_network::PendingFill {
+                centroid: glam::Vec2::new(sx / n + dx, sy / n + dy),
+                signature: sig,
+                color,
+            });
+        }
+        if !pending.is_empty() {
+            self.scene.vector_network.pending_fills.extend(pending);
+            self.scene.vector_network.dirty = true;
+        }
     }
 
     /// Recursively clone a node and all its descendants, returning the new root ID.
     /// The cloned nodes have fresh IDs and correct parent/children pointers.
     /// The cloned root's parent is set to None (caller is responsible for reparenting).
+    #[allow(dead_code)]
     fn deep_clone_subtree(&mut self, id: u32) -> u32 {
-        self.deep_clone_subtree_inner(id, true)
+        let mut id_map = std::collections::HashMap::new();
+        self.deep_clone_subtree_inner(id, true, &mut id_map)
     }
 
     /// Inner recursion for [`Self::deep_clone_subtree`]. The `apply_copy_suffix`
     /// flag is only true for the top-level node being duplicated, so the
     /// " copy" suffix lands on the copied root and not on every descendant.
-    fn deep_clone_subtree_inner(&mut self, id: u32, apply_copy_suffix: bool) -> u32 {
+    /// `id_map` accumulates every old->new id pair in the clone.
+    fn deep_clone_subtree_inner(
+        &mut self,
+        id: u32,
+        apply_copy_suffix: bool,
+        id_map: &mut std::collections::HashMap<u32, u32>,
+    ) -> u32 {
         let new_id = self.alloc_id();
+        id_map.insert(id, new_id);
 
         if let Some(node) = self.scene.nodes.get(&id).cloned() {
             let old_children = node.children.clone();
@@ -3986,7 +4054,7 @@ impl Engine {
 
             // Recursively clone children and reparent them
             for child_id in old_children {
-                let new_child_id = self.deep_clone_subtree_inner(child_id, false);
+                let new_child_id = self.deep_clone_subtree_inner(child_id, false, id_map);
                 // set_parent handles adding to children vec and updating parent pointer
                 if let Some(child_node) = self.scene.nodes.get_mut(&new_child_id) {
                     child_node.parent = Some(new_id);
@@ -6467,6 +6535,37 @@ mod tests {
         engine.move_node(a, 400.0, 400.0); // separate the rects entirely
         let filled = engine.get_filled_faces();
         assert!(filled.contains("\"r\":1.0"), "A's fill must follow the moved rect, got {filled}");
+    }
+
+    #[test]
+    fn test_duplicated_live_paint_group_carries_face_fills() {
+        // Copy-paste (duplicate_node) of a Live Paint group must reproduce its
+        // painted faces on the clone — not just the member strokes. Regression
+        // for: pasted artwork showed only unpainted shapes.
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(50.0, 50.0, 100.0, 100.0);
+        let group = engine.group_nodes(&format!("[{},{}]", a, b));
+        engine.set_node_live_paint(group, true);
+        engine.set_live_paint_group(group);
+        // Paint the A-only region red.
+        let a_only = engine.query_face_at(25.0, 25.0);
+        assert!(a_only >= 0);
+        engine.set_face_fill(a_only as u32, 1.0, 0.0, 0.0, 1.0);
+
+        let filled_before = engine.get_filled_faces();
+        assert!(filled_before.matches("\"r\":1.0").count() >= 1);
+
+        // Duplicate the whole group.
+        let clone = engine.duplicate_node(group);
+        assert_ne!(clone, group);
+
+        // Both the original and the clone must now have a red-filled face.
+        let filled_after = engine.get_filled_faces();
+        assert!(
+            filled_after.matches("\"r\":1.0").count() >= 2,
+            "clone must carry the red fill onto its own face, got {filled_after}"
+        );
     }
 
     #[test]
