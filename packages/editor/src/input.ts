@@ -1352,8 +1352,11 @@ export class InputManager {
         this.renderer.requestRender();
 
         this.spawnTextOverlay({
-            // The paragraph renders with its top at (tx, ty - fontSize); place the
-            // overlay's box there so it sits exactly over the rendered glyphs.
+            // One em above the baseline: the overlay's padding pins its CSS
+            // first-line baseline exactly one em below this point, so the
+            // typed glyphs sit on the same baseline the renderer draws on
+            // (the node's origin). The box edge is approximate; the baseline
+            // is what has to line up.
             world: { x: t[2], y: t[5] - fontSize },
             fontSize,
             fontFamily: fam,

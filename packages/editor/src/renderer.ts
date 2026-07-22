@@ -4057,7 +4057,16 @@ export class Renderer {
                 const layoutWidth = content.includes('\n') ? content.length * fontSize * 0.6 : 1e5;
                 para.layout(layoutWidth);
 
-                canvas.drawParagraph(para, 0, -fontSize);
+                // A text node's origin IS its baseline (SVG `y`, and what the
+                // engine's hit-test assumes: local y spans -font_size…0).
+                // drawParagraph positions the paragraph's TOP, and the first
+                // line's baseline sits `getAlphabeticBaseline()` below that —
+                // which is the font's ascent (plus half-leading), NOT the font
+                // size. Offsetting by -fontSize therefore floated every string
+                // off its baseline by (ascent - size); on Noto Sans at 64px
+                // that was 4 units, and it put the rendered glyphs out of step
+                // with both the hit-test box and the inline edit overlay.
+                canvas.drawParagraph(para, 0, -para.getAlphabeticBaseline());
 
                 para.delete();
                 builder.delete();
