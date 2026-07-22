@@ -4,6 +4,7 @@ import { logAppEvent } from './analytics';
 import { createColorSwatch } from './color_picker';
 import type { ContextBar } from './context_bar';
 import { FileIO } from './file_io';
+import { ensureFontCSS, loadGoogleFontData } from './fonts';
 import { GradientEditController, sampleGradientColor } from './gradient_edit';
 import {
     iconCircle,
@@ -77,6 +78,41 @@ const CLIP_CHILD_TAGS = new Set([
     'text',
     'use',
 ]);
+
+/** CSS generic families: real faces have to come from somewhere else, so these
+ *  are never treated as a concrete family (nor asked of the font CDN). */
+const GENERIC_FONT_FAMILIES = new Set([
+    'serif',
+    'sans-serif',
+    'monospace',
+    'cursive',
+    'fantasy',
+    'system-ui',
+    'ui-sans-serif',
+    'ui-serif',
+    'ui-monospace',
+    'ui-rounded',
+    'inherit',
+    'initial',
+    'unset',
+]);
+
+/**
+ * First concrete family in a CSS font stack, unquoted — e.g.
+ * `"Noto Sans", Arial, sans-serif` → `Noto Sans`. Returns null when the stack
+ * names only generic keywords, so callers can fall back to their own default.
+ */
+function firstRealFontFamily(stack: string | null | undefined): string | null {
+    if (!stack) return null;
+    for (const part of stack.split(',')) {
+        const name = part
+            .trim()
+            .replace(/^['"]|['"]$/g, '')
+            .trim();
+        if (name && !GENERIC_FONT_FAMILIES.has(name.toLowerCase())) return name;
+    }
+    return null;
+}
 
 export class UIEngine {
     ck: CanvasKit;
@@ -5238,6 +5274,13 @@ export class UIEngine {
             'fill-rule',
             'visibility',
             'font-size',
+            // Text properties inherit too, and are routinely set once on a
+            // parent <svg>/<g> rather than on each <text>. Without these an
+            // imported document silently loses its typeface.
+            'font-family',
+            'font-weight',
+            'font-style',
+            'letter-spacing',
         ];
 
         /** Read an element's own presentation attributes (explicit attr + inline style)
@@ -6537,6 +6580,33 @@ export class UIEngine {
         if (weight !== 400 || italic || ls !== 0) {
             try {
                 this.scene.engine!.set_text_style(nodeId, weight, italic, ls);
+            } catch {
+                /* noop */
+            }
+        }
+
+        // font-family. `get` already walks own attribute → inline style →
+        // inherited, so a family declared once on the root <svg> reaches every
+        // <text> under it. A CSS font stack ("Helvetica", Arial, sans-serif)
+        // resolves to its first real family; generic keywords are left unset so
+        // the renderer's own default applies (and so we never ask the font CDN
+        // for "sans-serif").
+        const family = firstRealFontFamily(get('font-family'));
+        if (family) {
+            try {
+                const t = this.scene.getNodeGeometry(nodeId)?.Text;
+                // Preserve alignment/line-height — this setter carries all three.
+                this.scene.engine!.set_text_properties(
+                    nodeId,
+                    family,
+                    t?.text_align ?? 0,
+                    t?.line_height ?? 1.2,
+                );
+                // Start fetching the face now rather than on first paint, so a
+                // render or export that follows the import isn't racing the
+                // network and silently rasterising a fallback.
+                ensureFontCSS(family);
+                void loadGoogleFontData(family);
             } catch {
                 /* noop */
             }

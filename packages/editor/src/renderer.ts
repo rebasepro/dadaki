@@ -3237,7 +3237,9 @@ export class Renderer {
 
         // Pick the largest supersample factor that stays within sane surface
         // limits (memory + max dimension). Falls back to 1× (no supersampling,
-        // analytic AA) for very large exports.
+        // analytic AA) for very large exports. Powers of two only: the
+        // downscale below reduces by exact halvings, which is what makes the
+        // supersampling actually average (see there).
         let ss = 4;
         while (
             ss > 1 &&
@@ -3245,7 +3247,7 @@ export class Renderer {
                 renderH * ss > MAX_DIM ||
                 renderW * ss * (renderH * ss) > MAX_PIXELS)
         ) {
-            ss--;
+            ss /= 2;
         }
 
         const bigW = renderW * ss;
@@ -3271,14 +3273,71 @@ export class Renderer {
         try {
             this.render();
 
-            // Resample the supersampled render to the exact target with a
-            // Mitchell cubic filter. Straight copy only when the dimensions
-            // already match (uniform scale, ss === 1).
+            // Resample the supersampled render down to the exact target.
+            //
+            // This must be an AVERAGING filter or the supersampling buys
+            // nothing. A single cubic minification does not average: Skia's
+            // cubic resampler point-samples through a fixed ~2-source-pixel
+            // kernel, so reducing 4× skips most source pixels entirely and the
+            // aliased (AA-off) edges survive verbatim — every exported PNG came
+            // out hard-edged, and the SVG conformance frames mismatched on
+            // essentially every fixture.
+            //
+            // Halving with a bilinear filter IS an exact box average: each
+            // destination sample lands on the corner shared by four source
+            // texels, which bilinear weights equally at 0.25. Repeat until the
+            // render size is reached (ss is a power of two), then a single
+            // cubic step covers a non-uniform custom size, if any.
             const bigImg = bigSurface.makeImageSnapshot();
             let bytes: Uint8Array | null;
             if (bigW !== W || bigH !== H) {
+                let curImg = bigImg;
+                let curRaster: { surface: Surface; release: () => void } | null = null;
+                let curW = bigW;
+                let curH = bigH;
+                while (curW >= renderW * 2 && curH >= renderH * 2) {
+                    const halfW = Math.max(1, Math.round(curW / 2));
+                    const halfH = Math.max(1, Math.round(curH / 2));
+                    const step = this.makeRasterSurface(halfW, halfH);
+                    if (!step) break; // out of memory: fall through with what we have
+                    const scanvas = step.surface.getCanvas();
+                    scanvas.clear(this.ck.TRANSPARENT);
+                    const spaint = new this.ck.Paint();
+                    scanvas.drawImageRectOptions(
+                        curImg,
+                        this.ck.LTRBRect(0, 0, curW, curH),
+                        this.ck.LTRBRect(0, 0, halfW, halfH),
+                        this.ck.FilterMode.Linear,
+                        this.ck.MipmapMode.None,
+                        spaint,
+                    );
+                    spaint.delete();
+                    const stepImg = step.surface.makeImageSnapshot();
+                    if (curImg !== bigImg) curImg.delete();
+                    curRaster?.release();
+                    curImg = stepImg;
+                    curRaster = step;
+                    curW = halfW;
+                    curH = halfH;
+                }
+
+                if (curW === W && curH === H) {
+                    // The halvings landed exactly on the target. Do NOT run a
+                    // cubic pass "for good measure": Mitchell is a blurring
+                    // kernel, so resampling 1:1 softens every edge it touches.
+                    bytes = curImg.encodeToBytes();
+                    if (curImg !== bigImg) curImg.delete();
+                    curRaster?.release();
+                    bigImg.delete();
+                    return bytes
+                        ? new Blob([bytes as unknown as BlobPart], { type: 'image/png' })
+                        : null;
+                }
+
                 const dstRaster = this.makeRasterSurface(W, H);
                 if (!dstRaster) {
+                    if (curImg !== bigImg) curImg.delete();
+                    curRaster?.release();
                     bigImg.delete();
                     return null;
                 }
@@ -3287,13 +3346,15 @@ export class Renderer {
                 dcanvas.clear(this.ck.TRANSPARENT);
                 const dpaint = new this.ck.Paint();
                 dcanvas.drawImageRectCubic(
-                    bigImg,
-                    this.ck.LTRBRect(0, 0, bigW, bigH),
+                    curImg,
+                    this.ck.LTRBRect(0, 0, curW, curH),
                     this.ck.LTRBRect(0, 0, W, H),
                     1 / 3,
                     1 / 3,
                     dpaint,
                 );
+                if (curImg !== bigImg) curImg.delete();
+                curRaster?.release();
                 const outImg = dstSurface.makeImageSnapshot();
                 bytes = outImg.encodeToBytes(); // defaults to PNG
                 outImg.delete();

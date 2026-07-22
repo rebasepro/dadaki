@@ -56,6 +56,9 @@ function fontsourceId(fontFamily: string): string {
 /** Set of fonts currently being loaded (to avoid duplicate fetches). */
 const loadingFonts = new Set<string>();
 
+/** Families the CDN has no face for — remembered so they aren't retried. */
+const failedFonts = new Set<string>();
+
 /** Callbacks to invoke when a font finishes loading. */
 const fontLoadCallbacks: Array<() => void> = [];
 
@@ -89,6 +92,11 @@ export function ensureFontCSS(fontFamily: string) {
 export async function loadGoogleFontData(fontFamily: string): Promise<ArrayBuffer | null> {
     if (fontDataCache.has(fontFamily)) return fontDataCache.get(fontFamily)!.regular;
     if (loadingFonts.has(fontFamily)) return null; // already in progress
+    // A family the CDN doesn't have must be remembered as absent. The renderer
+    // asks for any unloaded family of every text node it draws, so without this
+    // a document naming an unavailable font re-issues a failing request on
+    // EVERY frame, forever.
+    if (failedFonts.has(fontFamily)) return null;
 
     loadingFonts.add(fontFamily);
     ensureFontCSS(fontFamily); // still needed for the HTML edit overlay (woff2 is fine there)
@@ -134,6 +142,7 @@ export async function loadGoogleFontData(fontFamily: string): Promise<ArrayBuffe
     } catch (err) {
         console.warn(`[fonts] Failed to load "${fontFamily}":`, err);
         loadingFonts.delete(fontFamily);
+        failedFonts.add(fontFamily);
         return null;
     }
 }

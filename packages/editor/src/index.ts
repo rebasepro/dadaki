@@ -66,7 +66,7 @@ export const MAX_SITE_ID = 1023;
  * throwing here would stop the editor opening at all.
  */
 function clampSiteId(site: number | undefined): number {
-    if (typeof site !== "number" || !Number.isFinite(site) || site < 0) return 0;
+    if (typeof site !== 'number' || !Number.isFinite(site) || site < 0) return 0;
     return Math.min(Math.floor(site), MAX_SITE_ID);
 }
 
@@ -191,6 +191,10 @@ export interface EditorHandle {
     renameActive(name: string): void;
     /** Open the built-in export dialog (SVG/PNG, scale, per-artboard). */
     openExportDialog(): void;
+    /** Resolves once no webfont fetch is in flight. Await before rendering or
+     *  exporting straight after an import, or text whose face is still
+     *  downloading is captured in a fallback one. */
+    fontsReady(): Promise<void>;
     /** Dev/test convenience: run the shape stress harness. */
     stress(opts?: import('./dev_stress').StressOptions): Promise<unknown>;
     /** Tear down the editor: stop rendering and clear the container. */
@@ -472,6 +476,10 @@ export async function createEditor(
         },
         exportSVG,
         agent,
+        /** Resolves once no webfont fetch is in flight. Anything that renders
+         *  or exports right after an import should await this, or it captures a
+         *  fallback face for text whose real one is still downloading. */
+        fontsReady: () => fontsSettled(),
         setSiteId: (site: number) => documentManager.setSiteId(clampSiteId(site)),
         loadBytes: (bytes: Uint8Array, name = 'Untitled') => {
             const doc = new Document(name);

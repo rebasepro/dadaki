@@ -42,6 +42,7 @@ async function bootstrap() {
         agent: editor.agent,
         exportSVG: editor.exportSVG,
         newDocument: editor.newDocument,
+        fontsReady: editor.fontsReady,
         ck,
     };
 

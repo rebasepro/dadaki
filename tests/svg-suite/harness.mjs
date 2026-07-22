@@ -144,6 +144,12 @@ async function runInPage(page, svgText, refB64, vp, wantDiff, roundtrip) {
         await app.ui.parseSVG(exported);
       }
 
+      // Text faces are fetched asynchronously (the import kicks them off).
+      // Exporting before they arrive rasterises a fallback face, which measures
+      // a network race rather than rendering fidelity — 316 of the suite's text
+      // tests ask for "Noto Sans".
+      if (app.fontsReady) await app.fontsReady();
+
       const refBytes = Uint8Array.from(atob(refB64), (c) => c.charCodeAt(0));
       const refImg = ck.MakeImageFromEncoded(refBytes);
       const refW = refImg.width(), refH = refImg.height();
