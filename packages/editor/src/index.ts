@@ -30,6 +30,7 @@ import { ensureFontCSS, fontsSettled, loadGoogleFontData } from './fonts';
 import { GuidesController } from './guides';
 import { InputManager } from './input';
 import { PersistenceManager } from './persistence';
+import { PresenceController } from './presence';
 import { Renderer } from './renderer';
 import { TabStrip } from './tab_strip';
 import { Toolbar } from './toolbar';
@@ -141,6 +142,10 @@ export interface EditorHandle {
     readonly ui: UIEngine;
     readonly input: InputManager;
     readonly renderer: Renderer;
+    /** Live collaborator presence (peer cursors + selection). The host pipes a
+     *  transport into it: `presence.setPeers(...)` in, `presence.onLocalPresence(...)`
+     *  out. Inert until the host wires a transport. */
+    readonly presence: PresenceController;
     readonly documentManager: DocumentManager;
     readonly fileService: FileService;
     /** The persistence manager (backups live in the host's IndexedDB). */
@@ -237,6 +242,13 @@ export async function createEditor(
     const ui = new UIEngine(ck, wasmScene);
     const input = new InputManager(canvas, wasmScene, ui, renderer);
     renderer.inputManager = input;
+
+    // Collaborative presence: peer cursors + selection over the canvas. Purely
+    // additive (an overlay + a passive pointer listener) and transport-agnostic
+    // — the host feeds peers in and reads local presence out. Selection changes
+    // reach it through the UI's sync chokepoint.
+    const presence = new PresenceController(canvas, renderer);
+    ui.onSelectionChange = (ids) => presence.reportLocalSelection(ids);
 
     // Tool rail — grouped tools with flyouts
     ui.toolbar = new Toolbar(el<HTMLElement>('toolbar'), ui);
@@ -459,6 +471,7 @@ export async function createEditor(
         ui,
         input,
         renderer,
+        presence,
         documentManager,
         fileService,
         persistence: PersistenceManager,
@@ -499,6 +512,7 @@ export async function createEditor(
             return runStress({ scene: wasmScene, renderer, wasm: wasmScene.wasm }, opts);
         },
         destroy: () => {
+            presence.dispose();
             (renderer as { stop?: () => void }).stop?.();
             container.innerHTML = '';
         },

@@ -128,6 +128,9 @@ export class UIEngine {
     meshEdit: MeshEditController;
     contextBar: ContextBar | null = null;
     toolbar: Toolbar | null = null;
+    /** Fired with the current selection whenever it syncs. The editor wires
+     *  this to collaborative presence; null in single-user hosts. */
+    onSelectionChange: ((ids: number[]) => void) | null = null;
 
     /** Tracks whether we've already taken a history snapshot for the current
      *  property-editing gesture (e.g. a color picker drag). */
@@ -1753,6 +1756,10 @@ export class UIEngine {
         this.gradientEdit.syncSelection();
         this.meshEdit.syncSelection();
         const selection = this.scene.engine!.get_selection();
+        // Notify the host of the selection (for collaborative presence). Cheap
+        // and idempotent — the presence layer throttles and only broadcasts on
+        // an actual change.
+        this.onSelectionChange?.(Array.from(selection));
         // Node selection and artboard selection are mutually exclusive: selecting
         // a node clears any selected artboard. Then reconcile which property
         // sections are visible (Frame vs node properties).
