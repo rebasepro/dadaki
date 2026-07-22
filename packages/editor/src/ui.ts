@@ -5049,7 +5049,17 @@ export class UIEngine {
             // Only userSpaceOnUse-style pixel tiles are supported in v1;
             // objectBoundingBox fractions (<=2) can't be sized without the shape.
             if (!(w > 2 && h > 2)) continue;
-            const scale = 2; // rasterize at 2× for crispness
+            // Tile resolution. A fixed 2× is too coarse the moment the artwork
+            // is viewed or exported above that scale — and badly so for a small
+            // tile, which is exactly what gets magnified (a 4-unit tile baked at
+            // 2× is 8px, then smeared across whatever it fills). Scale so even a
+            // small tile carries real detail, with a cap on the baked bitmap.
+            const MIN_TILE_PX = 256;
+            const MAX_TILE_PX = 2048;
+            const scale = Math.max(
+                4,
+                Math.min(MIN_TILE_PX / Math.max(1, Math.min(w, h)), MAX_TILE_PX / Math.max(w, h)),
+            );
             const svg =
                 `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
                 `width="${w * scale}" height="${h * scale}" viewBox="0 0 ${w} ${h}"><defs>${defsHtml}</defs>${pat.innerHTML}</svg>`;

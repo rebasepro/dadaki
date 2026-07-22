@@ -1113,12 +1113,19 @@ export class Renderer {
             // the luminance→alpha color filter converts RGB to alpha.
             if (!this._lumaPaint) {
                 this._lumaPaint = new this.ck.Paint();
-                // SVG luminance mask: A' = 0.2126·R + 0.7152·G + 0.0722·B
-                // (R,G,B are premultiplied, so we also account for source alpha).
-                const lumaMatrix = [
-                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0,
-                ];
-                this._lumaPaint.setColorFilter(this.ck.ColorFilter.MakeMatrix(lumaMatrix));
+                // SVG luminance mask: A' = luminance(RGB) × A.
+                //
+                // This was a hand-written 4×5 matrix mapping RGB→A, which was
+                // wrong: `MakeMatrix` operates on UNPREMULTIPLIED colour, so
+                // the source alpha never entered the result. A mask painted
+                // white at stop-opacity="0" — which is how the suite (and any
+                // fade-out gradient) builds a mask — came out FULLY OPAQUE
+                // instead of fully transparent, so the masked content showed
+                // through at full strength. A colour matrix is linear and so
+                // cannot multiply two channels; MakeLuma is Skia's own
+                // luminance-to-alpha, defined per the SVG spec and evaluated on
+                // premultiplied colour, which is exactly this product.
+                this._lumaPaint.setColorFilter(this.ck.ColorFilter.MakeLuma());
             }
             canvas.saveLayer(this._lumaPaint, bounds ?? undefined);
         } else {
