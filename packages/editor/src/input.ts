@@ -3338,11 +3338,16 @@ export class InputManager {
             outline: Pt[];
             fill: { r: number; g: number; b: number; a: number };
         }>;
-        const edges = JSON.parse(e.get_painted_edges()) as Array<{
+        // Every edge with an EFFECTIVE stroke — painted, or the source shape's
+        // own. The originals are deleted below, so an edge the user drew but
+        // never bucket-painted has to be baked too or the lines vanish.
+        const edges = JSON.parse(e.get_live_paint_expand_edges()) as Array<{
             polyline?: number[][];
             outline?: Pt[];
             color: { r: number; g: number; b: number; a: number };
             width: number;
+            cap?: number;
+            join?: number;
         }>;
         if (faces.length === 0 && edges.length === 0) {
             this.releaseLivePaintGroup(groupId);
@@ -3392,8 +3397,8 @@ export class InputManager {
                             {
                                 paint: eg.color,
                                 width: eg.width > 0 ? eg.width : 2,
-                                cap: 1,
-                                join: 1,
+                                cap: eg.cap ?? 1,
+                                join: eg.join ?? 1,
                                 dash_array: [],
                                 dash_offset: 0,
                                 miter_limit: 4,

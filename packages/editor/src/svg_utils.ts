@@ -533,6 +533,28 @@ export function composeMatrices(a: number[], b: number[]): number[] {
 }
 
 /**
+ * Invert an affine column-major 3×3 matrix (the bottom row is assumed
+ * [0, 0, 1] — every transform we produce is affine). Returns null when the
+ * linear part is singular (zero scale), where no inverse exists.
+ */
+export function invertMatrix(m: number[]): number[] | null {
+    const [a, b, , c, d, , tx, ty] = m;
+    const det = a * d - b * c;
+    if (!det || !Number.isFinite(det)) return null;
+    const ia = d / det;
+    const ib = -b / det;
+    const ic = -c / det;
+    const id = a / det;
+    return [ia, ib, 0, ic, id, 0, -(ia * tx + ic * ty), -(ib * tx + id * ty), 1];
+}
+
+/** Whether a column-major 3×3 matrix is (numerically) the identity. */
+export function isIdentityMatrix(m: number[], eps = 1e-6): boolean {
+    const I = identityMatrix();
+    return m.length === 9 && m.every((v, i) => Math.abs(v - I[i]) <= eps);
+}
+
+/**
  * Transform a 2D point [x, y] by a column-major 3×3 matrix.
  * Returns [x', y'].
  */

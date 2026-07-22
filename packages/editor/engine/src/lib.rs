@@ -4739,6 +4739,26 @@ impl Engine {
         serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
     }
 
+    /// Edges to bake on Expand: every logical edge of the ACTIVE group with an
+    /// effective stroke — the painted override if set, else the source shape's
+    /// own stroke. Expand deletes the originals, so this is what keeps the drawn
+    /// lines alive. JSON: `[{outline, color, width, cap, join}]`.
+    pub fn get_live_paint_expand_edges(&mut self) -> String {
+        self.ensure_network_clean();
+        let items: Vec<serde_json::Value> = self
+            .live_paint_edges_effective(self.scene.live_paint_group)
+            .into_iter()
+            .map(|(c, width, cap, join, outline)| serde_json::json!({
+                "outline": pathpoints_to_json(&outline),
+                "color": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
+                "width": width,
+                "cap": cap,
+                "join": join,
+            }))
+            .collect();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// Every colored face as (effective color, exact-bézier outline). Effective
     /// color = painted override, else the topmost covering source fill. Shared by
     /// Expand (JSON) and the render writer (in-stream faces). Pure reads.
@@ -4764,6 +4784,50 @@ impl Engine {
             .filter(|le| group.map_or(true, |g| le.group == g))
             .filter_map(|le| le.paint.map(|c| (c, le.width, le.outline.clone())))
             .collect()
+    }
+
+    /// Every logical edge with an EFFECTIVE stroke, as (color, world width, cap,
+    /// join, outline). Effective stroke = the painted override, else the stroke
+    /// of the edge's source shape — Illustrator absorbs source appearance on
+    /// Expand, so lines the user drew (but never bucket-painted) survive it.
+    /// Edges whose source carries no visible stroke are omitted. Pure reads.
+    fn live_paint_edges_effective(
+        &self,
+        group: Option<u32>,
+    ) -> Vec<(Color, f32, u8, u8, Vec<PathPoint>)> {
+        self.scene.vector_network.logical_edges.values()
+            .filter(|le| group.map_or(true, |g| le.group == g))
+            .filter_map(|le| {
+                let (color, width, cap, join) = match le.paint {
+                    // Painted edges render round-capped, in world units already.
+                    Some(c) => (c, le.width, 1u8, 1u8),
+                    None => {
+                        let node = self.scene.nodes.get(&le.source_node)?;
+                        let sk = node.style.strokes.first()?;
+                        let c = sk.paint.as_ref().and_then(paint_color)?;
+                        // The outline is world space; the stroke width is local.
+                        (c, sk.width * self.node_world_scale(le.source_node), sk.cap, sk.join)
+                    }
+                };
+                if width <= 0.0 || color.a <= 0.0 {
+                    return None;
+                }
+                Some((color, width, cap, join, le.outline.clone()))
+            })
+            .collect()
+    }
+
+    /// Average scale factor of a node's global transform (√|det|), for turning
+    /// local lengths — stroke widths — into world lengths. 1.0 if unknown.
+    fn node_world_scale(&self, node: u32) -> f32 {
+        match self.global_transforms.get(&node) {
+            Some(m) => {
+                let mat = Mat3::from_cols_array(m);
+                let det = (mat.x_axis.x * mat.y_axis.y - mat.x_axis.y * mat.y_axis.x).abs();
+                det.sqrt().max(1e-6)
+            }
+            None => 1.0,
+        }
     }
 
     /// Ids of every node flagged as a Live Paint group, ascending (stable order).
@@ -6825,6 +6889,55 @@ mod tests {
         let blue = arr.iter().filter(|f| f["fill"]["b"].as_f64() == Some(1.0)).count();
         assert_eq!(red, 1, "A-only inherits red");
         assert_eq!(blue, 2, "B-only + overlap inherit blue (topmost)");
+    }
+
+    #[test]
+    fn test_expand_edges_inherit_unpainted_source_strokes() {
+        // The bug: a Live Paint group of STROKED shapes with a couple of painted
+        // faces expanded to the faces only — every drawn line vanished, because
+        // Expand baked painted edges and nothing else. Expand's edge list must
+        // carry each edge's effective stroke: the paint if any, else the source
+        // shape's own stroke.
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(50.0, 50.0, 100.0, 100.0);
+        let stroked = |hex: (f32, f32, f32)| format!(
+            r#"{{"fills":[],"strokes":[{{"paint":{{"r":{},"g":{},"b":{},"a":1.0}},"width":3.0,"cap":0,"join":0,"dash_array":[],"dash_offset":0.0,"miter_limit":4.0,"alignment":"Center"}}],"opacity":1.0,"blend_mode":0,"fill_rule":0,"corner_radius":0.0,"effects":[]}}"#,
+            hex.0, hex.1, hex.2);
+        engine.set_node_style(a, &stroked((1.0, 0.0, 0.0)));
+        engine.set_node_style(b, &stroked((1.0, 0.0, 0.0)));
+        flag_scene_lp(&mut engine);
+
+        let json = engine.get_live_paint_expand_edges();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let arr = v.as_array().unwrap();
+        assert!(!arr.is_empty(), "unpainted stroked shapes must still bake edges");
+        assert!(arr.iter().all(|e| e["color"]["r"].as_f64() == Some(1.0)),
+            "edges inherit the source stroke color, got {json}");
+        assert!(arr.iter().all(|e| e["width"].as_f64() == Some(3.0)),
+            "edges inherit the source stroke width, got {json}");
+        // A painted edge overrides the inherited stroke.
+        let edge = engine.query_edge_at(75.0, 50.0, 8.0);
+        assert!(edge >= 0, "the crossing span must be paintable");
+        engine.set_edge_paint(edge as u32, 0.0, 0.0, 1.0, 1.0, 9.0);
+        let v2: serde_json::Value =
+            serde_json::from_str(&engine.get_live_paint_expand_edges()).unwrap();
+        let painted: Vec<_> = v2.as_array().unwrap().iter()
+            .filter(|e| e["color"]["b"].as_f64() == Some(1.0)).collect();
+        assert_eq!(painted.len(), 1, "exactly the painted edge is blue");
+        assert_eq!(painted[0]["width"].as_f64(), Some(9.0), "painted width wins");
+    }
+
+    #[test]
+    fn test_expand_edges_skip_unstroked_sources() {
+        // Fill-only shapes contribute faces, not lines: their edges must not
+        // become hairline strokes on Expand.
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        engine.set_node_style(a, r#"{"fills":[{"r":1.0,"g":0.0,"b":0.0,"a":1.0}],"strokes":[],"opacity":1.0,"blend_mode":0,"fill_rule":0,"corner_radius":0.0,"effects":[]}"#);
+        flag_scene_lp(&mut engine);
+        assert_eq!(engine.get_live_paint_expand_edges(), "[]",
+            "an unstroked source contributes no expanded edges");
     }
 
     #[test]

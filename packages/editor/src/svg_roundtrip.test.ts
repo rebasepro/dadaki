@@ -1297,6 +1297,46 @@ describe('SVG Round-Trip — Export then Parse', () => {
         expect(text.getAttribute('fill')).toBe('#000000');
     });
 
+    it('cancels the ancestor transform for text on a path', () => {
+        // The <textPath> def is in WORLD coordinates (like Live Paint geometry),
+        // and the renderer undoes the text node's world transform before laying
+        // glyphs on the curve. Inside a transformed group the exported text must
+        // therefore carry the inverse of the ancestor chain — an identity
+        // transform would slide the glyphs off the path by the group's offset.
+        const input: SVGExportInput = {
+            docWidth: 800,
+            docHeight: 600,
+            nodes: {
+                1: makeNode({ node_type: 'Group', children: [2] }),
+                2: makeNode({
+                    node_type: 'Text',
+                    geometry: {
+                        Text: {
+                            content: 'on a path',
+                            font_size: 24,
+                            font_family: 'sans-serif',
+                            text_align: 0,
+                            line_height: 1.2,
+                        },
+                    },
+                    style: defaultStyle({ fill: { r: 0, g: 0, b: 0, a: 1 } }),
+                }),
+            },
+            rootNodeIds: [1],
+            localTransforms: {
+                1: [1, 0, 0, 0, 1, 0, 120, 60, 1], // group parked at (120,60)
+                2: [1, 0, 0, 0, 1, 0, 40, 40, 1], // bypassed for on-path text
+            },
+            textPaths: { 2: { pathId: 3, d: 'M 200 200 C 260 120 340 120 400 200' } },
+        };
+
+        const svg = buildSVGFromData(input);
+        const doc = parseSVG(svg);
+        const text = queryTag(doc, 'text')!;
+        expect(text.parentElement!.getAttribute('transform')).toBe('matrix(1,0,0,1,-120,-60)');
+        expect(queryTag(doc, 'textPath')!.getAttribute('href')).toBe('#tp-2');
+    });
+
     it('round-trips dashes + rounded rects', () => {
         const input: SVGExportInput = {
             docWidth: 600,
@@ -1599,6 +1639,78 @@ describe('SVG Export — Live Paint compositing', () => {
         expect(edge.getAttribute('fill')).toBe('none'); // open stroke, not filled
         expect(edge.getAttribute('stroke-width')).toBe('6');
         expect(edge.getAttribute('d')).not.toContain('Z'); // open path
+    });
+
+    it('cancels the group transform for world-space faces and edges', () => {
+        // Faces/edges come out of the engine in WORLD coordinates but are
+        // emitted inside the group's <g transform=…> (for z-order). A group
+        // always carries a translate to its bbox corner, so without an inverse
+        // wrapper the fills land offset by that much — off the artboard, which
+        // is why they went missing from exports of real documents.
+        const input = lpScene();
+        input.localTransforms[1] = [1, 0, 0, 0, 1, 0, 300, 200, 1]; // group at (300,200)
+        input.livePaint = {
+            groups: [1],
+            faces: [
+                {
+                    group: 1,
+                    boundary: [
+                        [300, 200],
+                        [400, 200],
+                        [400, 300],
+                    ],
+                    fill: { r: 0, g: 1, b: 0, a: 1 },
+                },
+            ],
+            edges: [
+                {
+                    group: 1,
+                    width: 6,
+                    color: { r: 0, g: 0, b: 1, a: 1 },
+                    outline: [
+                        { x: 300, y: 200, cp1: [300, 200], cp2: [300, 200] },
+                        { x: 400, y: 200, cp1: [400, 200], cp2: [400, 200] },
+                    ],
+                },
+            ],
+        };
+        const svg = buildSVGFromData(input);
+        const doc = parseSVG(svg);
+        const face = Array.from(queryAllTags(doc, 'path')).find(
+            (p) => p.getAttribute('fill') === '#00ff00',
+        )!;
+        const edge = Array.from(queryAllTags(doc, 'path')).find(
+            (p) => p.getAttribute('stroke') === '#0000ff',
+        )!;
+        expect(face).toBeTruthy();
+        expect(edge).toBeTruthy();
+        // Each sits under a wrapper undoing the group's translate, so the net
+        // transform on the world coordinates is identity.
+        for (const el of [face, edge]) {
+            const wrapper = el.parentElement!;
+            expect(wrapper.getAttribute('transform')).toBe('matrix(1,0,0,1,-300,-200)');
+        }
+    });
+
+    it('leaves world geometry unwrapped when the group is untransformed', () => {
+        const input = lpScene();
+        input.livePaint = {
+            groups: [1],
+            faces: [
+                {
+                    group: 1,
+                    boundary: [
+                        [0, 0],
+                        [100, 0],
+                        [100, 100],
+                    ],
+                    fill: { r: 0, g: 1, b: 0, a: 1 },
+                },
+            ],
+            edges: [],
+        };
+        const svg = buildSVGFromData(input);
+        expect(svg).not.toContain('matrix(1,0,0,1,-0,-0)');
     });
 
     it('renders two Live Paint groups independently', () => {

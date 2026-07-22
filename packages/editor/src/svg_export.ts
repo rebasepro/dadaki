@@ -5,7 +5,15 @@
  */
 
 import { meanColor, meshContentHash } from './mesh_geom';
-import { escapeXml, matrixToSVGTransform, rgbToHex } from './svg_utils';
+import {
+    composeMatrices,
+    escapeXml,
+    identityMatrix,
+    invertMatrix,
+    isIdentityMatrix,
+    matrixToSVGTransform,
+    rgbToHex,
+} from './svg_utils';
 import type { NodeStyle, Paint, SceneNode } from './types';
 import { isGradient, isMeshGradient, isPattern, isSolid } from './types';
 
@@ -194,32 +202,59 @@ export function buildSVGFromData(input: SVGExportInput): string {
         return d;
     };
 
-    const lpFacesSvg = (groupId: number): string => {
-        const faces = facesByGroup.get(groupId);
-        if (!faces || faces.length === 0) return '';
-        return faces
-            .map(
-                (f) =>
-                    `<path d="${faceToPathD(f.outline, f.boundary)}" fill="${rgbToHex(f.fill)}" ` +
-                    `fill-opacity="${f.fill.a}" stroke="none" />`,
-            )
-            .join('');
+    /**
+     * Live Paint faces and edges come out of the engine in WORLD coordinates,
+     * but they are emitted INSIDE the group's `<g transform=…>` (that is where
+     * they belong in z-order). Wrapping them in the inverse of the group's world
+     * transform cancels the ancestor chain, so they land where the canvas draws
+     * them. Groups carry a translate to their bbox corner, so without this the
+     * faces are offset by that much — usually clean off the exported artboard.
+     * Returns '' for an identity/degenerate transform (nothing to undo).
+     */
+    const inverseWrap = (world: number[]): string => {
+        const inv = invertMatrix(world);
+        if (!inv || isIdentityMatrix(world)) return '';
+        return matrixToSVGTransform(inv);
     };
 
-    const lpEdgesSvg = (groupId: number): string => {
+    const wrapWorld = (world: number[], content: string): string => {
+        if (!content) return '';
+        const t = inverseWrap(world);
+        return t ? `<g transform="${t}">${content}</g>` : content;
+    };
+
+    const lpFacesSvg = (groupId: number, world: number[]): string => {
+        const faces = facesByGroup.get(groupId);
+        if (!faces || faces.length === 0) return '';
+        return wrapWorld(
+            world,
+            faces
+                .map(
+                    (f) =>
+                        `<path d="${faceToPathD(f.outline, f.boundary)}" fill="${rgbToHex(f.fill)}" ` +
+                        `fill-opacity="${f.fill.a}" stroke="none" />`,
+                )
+                .join(''),
+        );
+    };
+
+    const lpEdgesSvg = (groupId: number, world: number[]): string => {
         const edges = edgesByGroup.get(groupId);
         if (!edges || edges.length === 0) return '';
-        return edges
-            .map((e) => {
-                const d = edgeToPathD(e.outline);
-                if (!d) return '';
-                return (
-                    `<path d="${d}" fill="none" stroke="${rgbToHex(e.color)}" ` +
-                    `stroke-opacity="${e.color.a}" stroke-width="${e.width}" ` +
-                    `stroke-linecap="round" stroke-linejoin="round" />`
-                );
-            })
-            .join('');
+        return wrapWorld(
+            world,
+            edges
+                .map((e) => {
+                    const d = edgeToPathD(e.outline);
+                    if (!d) return '';
+                    return (
+                        `<path d="${d}" fill="none" stroke="${rgbToHex(e.color)}" ` +
+                        `stroke-opacity="${e.color.a}" stroke-width="${e.width}" ` +
+                        `stroke-linecap="round" stroke-linejoin="round" />`
+                    );
+                })
+                .join(''),
+        );
     };
 
     const vb = viewBox ?? { x: 0, y: 0, w: docWidth, h: docHeight };
@@ -453,7 +488,11 @@ export function buildSVGFromData(input: SVGExportInput): string {
      * group-scoped: only invoked for group children (mutually recursive with
      * renderNodeToSVG), matching the renderer.
      */
-    const renderSiblingsWithMasks = (siblings: number[], suppressFill: boolean): string => {
+    const renderSiblingsWithMasks = (
+        siblings: number[],
+        suppressFill: boolean,
+        parentWorld: number[],
+    ): string => {
         let out = '';
         let ci = 0;
         while (ci < siblings.length) {
@@ -477,7 +516,7 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 const maskTypeVal = mt === 1 ? 'luminance' : 'alpha';
                 maskDefs.push(
                     `<mask id="${maskId}" mask-type="${maskTypeVal}" style="mask-type:${maskTypeVal}">` +
-                        `${renderNodeToSVG(childId, suppressFill)}</mask>`,
+                        `${renderNodeToSVG(childId, suppressFill, parentWorld)}</mask>`,
                 );
                 // Gather content siblings up to the next mask.
                 let contentSvg = '';
@@ -485,12 +524,12 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 for (; j < siblings.length; j++) {
                     const c = nodes[siblings[j]];
                     if (c?.is_mask && c.visible) break;
-                    contentSvg += renderNodeToSVG(siblings[j], suppressFill);
+                    contentSvg += renderNodeToSVG(siblings[j], suppressFill, parentWorld);
                 }
                 out += `<g mask="url(#${maskId})">${contentSvg}</g>`;
                 ci = j;
             } else {
-                out += renderNodeToSVG(childId, suppressFill);
+                out += renderNodeToSVG(childId, suppressFill, parentWorld);
                 ci++;
             }
         }
@@ -499,22 +538,34 @@ export function buildSVGFromData(input: SVGExportInput): string {
 
     /** Recursively render a node and its children to SVG elements.
      *  `suppressFill` is true inside a Live Paint group — member fills are
-     *  provided by the face pass, so shapes emit strokes only. */
-    const renderNodeToSVG = (id: number, suppressFill = false): string => {
+     *  provided by the face pass, so shapes emit strokes only.
+     *  `parentWorld` is the accumulated transform of the ancestors, needed to
+     *  place world-space Live Paint geometry inside a transformed group. */
+    const renderNodeToSVG = (
+        id: number,
+        suppressFill = false,
+        parentWorld: number[] = identityMatrix(),
+    ): string => {
         const node = nodes[id];
         if (!node) return '';
 
         // On-path text is drawn in WORLD space (its <textPath> references a
         // world-space path def), so its node transform is bypassed — the glyphs
-        // follow the path, not the node's parked position.
+        // follow the path, not the node's parked position. The renderer does the
+        // same by concat'ing the inverse of the text node's WORLD transform, so
+        // here the emitted transform must cancel the ancestor chain too — plain
+        // identity would let an enclosing group displace the glyphs off the path.
         const onPath =
             node.node_type === 'Text' && node.geometry.Text ? textPaths?.[id] : undefined;
 
         // Use local (column-major) transform, falling back to identity
         const localTransform = onPath
-            ? [1, 0, 0, 0, 1, 0, 0, 0, 1]
+            ? (invertMatrix(parentWorld) ?? identityMatrix())
             : localTransforms[id] || [1, 0, 0, 0, 1, 0, 0, 0, 1];
         const matrix = matrixToSVGTransform(localTransform);
+        // Accumulated world transform of this node — what a world-space overlay
+        // (Live Paint faces/edges) has to undo to sit where the canvas draws it.
+        const world = composeMatrices(parentWorld, localTransform);
 
         // Build <g> attributes: transform + visibility
         let gAttrs = `transform="${matrix}"`;
@@ -552,10 +603,10 @@ export function buildSVGFromData(input: SVGExportInput): string {
             // strokes) and painted edges (top) — and suppresses member fills.
             const isLP = useLivePaintCompositing && lpGroupSet.has(id);
             const childSuppress = suppressFill || isLP;
-            if (isLP) nodeSvg += lpFacesSvg(id);
+            if (isLP) nodeSvg += lpFacesSvg(id, world);
             // Children are a sibling list — same mask-span semantics as roots.
-            nodeSvg += renderSiblingsWithMasks(node.children || [], childSuppress);
-            if (isLP) nodeSvg += lpEdgesSvg(id);
+            nodeSvg += renderSiblingsWithMasks(node.children || [], childSuppress, world);
+            if (isLP) nodeSvg += lpEdgesSvg(id, world);
         } else {
             // Leaf shape: carry any effect filter on the shape element itself.
             const attrs = buildStyleAttrs(node.style, suppressFill) + filterAttr;
