@@ -38,6 +38,26 @@ export type BridgeCredentials =
 
 const STORAGE_KEY = 'dadaki.agentBridge';
 
+/**
+ * Is this page served from the machine the loopback port would be on?
+ *
+ * Only a loopback origin may use the local transport. From anywhere else
+ * Chrome's Local Network Access checks hold the connection at a permission
+ * prompt ("dadaki.com wants to access other apps and services on this device")
+ * and then block it — so the socket cannot work, but it CAN nag the user on
+ * every load and every reconnect.
+ */
+function isLoopbackOrigin(): boolean {
+    const host = window.location.hostname;
+    return (
+        host === 'localhost' ||
+        host.endsWith('.localhost') ||
+        host === '127.0.0.1' ||
+        host === '[::1]' ||
+        host === '::1'
+    );
+}
+
 /** Parse whatever was stored or supplied into credentials, or null. */
 function toCredentials(raw: {
     kind?: string;
@@ -51,6 +71,30 @@ function toCredentials(raw: {
         return { kind: 'local', port: raw.port, token: raw.token };
     }
     return null;
+}
+
+/**
+ * Drop credentials this page cannot act on, and say why.
+ *
+ * Local credentials on a hosted origin are the one case that matters: they are
+ * usually left over from a session where the same browser drove a local editor,
+ * and they outlive it in localStorage. Dialling loopback from there cannot ever
+ * connect, but it does put a device-access permission prompt in front of the
+ * user on every load and every reconnect — so refuse once, forget, and point at
+ * the transport that does work from here.
+ */
+function usable(creds: BridgeCredentials | null): BridgeCredentials | null {
+    if (creds?.kind === 'local' && !isLoopbackOrigin()) {
+        clearBridgeCredentials();
+        console.warn(
+            '[dadaki] ignoring a local agent bridge on a hosted origin — a page served from ' +
+                `${window.location.origin} is not allowed to reach 127.0.0.1. Stored credentials ` +
+                'cleared. Run the MCP server with `--mode relay` and open the URL it prints ' +
+                '(?agentBridge=cloud&token=…) to drive this editor.',
+        );
+        return null;
+    }
+    return creds;
 }
 
 /**
@@ -68,16 +112,15 @@ export function readBridgeCredentials(): BridgeCredentials | null {
         const target = params.get('agentBridge');
         const token = params.get('token');
         if (target && token) {
-            const creds: BridgeCredentials | null =
+            const creds = usable(
                 target === 'cloud' || target === 'relay'
                     ? { kind: 'relay', token }
-                    : toCredentials({ kind: 'local', port: Number(target), token });
-            if (creds) {
-                try {
-                    localStorage.setItem(STORAGE_KEY, JSON.stringify(creds));
-                } catch {
-                    // Private mode / storage disabled: still connect for this load.
-                }
+                    : toCredentials({ kind: 'local', port: Number(target), token }),
+            );
+            // Strip the parameters whether or not they were usable: a rejected
+            // token left in the address bar would be re-read on every reload,
+            // and re-warn, and still be sitting in history.
+            if (target || token) {
                 params.delete('agentBridge');
                 params.delete('token');
                 const qs = params.toString();
@@ -86,11 +129,19 @@ export function readBridgeCredentials(): BridgeCredentials | null {
                     '',
                     window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash,
                 );
+            }
+            if (creds) {
+                try {
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(creds));
+                } catch {
+                    // Private mode / storage disabled: still connect for this load.
+                }
                 return creds;
             }
+            return null;
         }
         const saved = localStorage.getItem(STORAGE_KEY);
-        return saved ? toCredentials(JSON.parse(saved)) : null;
+        return saved ? usable(toCredentials(JSON.parse(saved))) : null;
     } catch {
         return null;
     }
@@ -342,7 +393,11 @@ export function connectAgentBridge(
     creds: BridgeCredentials,
     opts: BridgeOptions = {},
 ): BridgeHandle {
-    return creds.kind === 'relay'
-        ? connectRelay(agent, creds, opts)
-        : connectLocal(agent, creds, opts);
+    if (creds.kind === 'relay') return connectRelay(agent, creds, opts);
+    // Same rule as `usable`, enforced here as well: this is exported, so a host
+    // can hand us local credentials without going through the reader.
+    if (!usable(creds)) {
+        return { disconnect() {}, connected: false };
+    }
+    return connectLocal(agent, creds, opts);
 }

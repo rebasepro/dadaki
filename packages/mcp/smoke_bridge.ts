@@ -44,7 +44,14 @@ const port = await freePort();
 const served = await serveStatic(APP_DIST);
 const browser = await puppeteer.launch({
     headless: true,
-    args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
+    args: [
+        '--use-gl=swiftshader',
+        '--enable-unsafe-swiftshader',
+        '--no-sandbox',
+        // Lets one test open the same local server under a hostname that is not
+        // loopback, which is the only way to exercise the hosted-origin path.
+        '--host-resolver-rules=MAP hosted.test 127.0.0.1',
+    ],
 });
 const client = new Client({ name: 'dadaki-bridge-smoke', version: '1.0.0' });
 
@@ -179,6 +186,39 @@ try {
     // obvious way back.
     const leftover = await intruder.evaluate(`localStorage.getItem('dadaki.agentBridge')`);
     check('a rejected tab forgets its stale credentials', leftover === null, leftover);
+
+    // A page NOT served from this machine must refuse local credentials outright
+    // rather than dial loopback: the browser blocks that (Local Network Access)
+    // after prompting the user for device access, and stored credentials would
+    // reproduce the prompt on every single load. `hosted.test` resolves here via
+    // --host-resolver-rules, so it is the same server under a public-looking
+    // hostname — exactly the shape of the hosted app.
+    const hosted = await browser.newPage();
+    const warnings: string[] = [];
+    hosted.on('console', (m: { text(): string }) => warnings.push(m.text()));
+    await hosted.goto(
+        `http://hosted.test:${new URL(served.origin).port}/index.html?agentBridge=${port}&token=${TOKEN}`,
+        { waitUntil: 'load' },
+    );
+    await hosted.waitForFunction('Boolean(window.app && window.app.agent)', { timeout: 60_000 });
+    await new Promise((r) => setTimeout(r, 1500));
+    check(
+        'a hosted origin refuses local bridge credentials',
+        warnings.some((w) => w.includes('local agent bridge on a hosted origin')),
+        warnings.filter((w) => w.includes('[dadaki]')),
+    );
+    const hostedStored = await hosted.evaluate(`localStorage.getItem('dadaki.agentBridge')`);
+    check(
+        'a hosted origin does not keep credentials it cannot use',
+        hostedStored === null,
+        hostedStored,
+    );
+    const hostedUrl = await hosted.evaluate('window.location.search');
+    check(
+        'a refused token is still stripped from the URL',
+        !String(hostedUrl).includes(TOKEN),
+        hostedUrl,
+    );
 } catch (err) {
     failures++;
     console.error('FAIL  unexpected error:', (err as Error).message);

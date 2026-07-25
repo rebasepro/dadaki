@@ -190,6 +190,16 @@ export interface EditorHandle {
      * new tab and activate it.
      */
     loadBytes(bytes: Uint8Array, name?: string): void;
+    /**
+     * Mirror a collaborator's snapshot onto the ACTIVE document, in place — no
+     * new tab, no undo step, and without firing `onDocumentMutated` (so a
+     * mirrored peer edit can't loop back out as our own). `bytes` is a
+     * `.dadaki` snapshot from `exportBytes`. Returns false if the swap was
+     * declined — no active document, or a local gesture / text-edit is in
+     * progress and must not be interrupted — in which case the host should
+     * re-apply the freshest bytes once the action ends.
+     */
+    applyRemoteScene(bytes: Uint8Array): boolean;
     /** Create a fresh, blank document in a new tab and activate it. */
     newDocument(name?: string): void;
     /** Rename the active document. */
@@ -499,6 +509,7 @@ export async function createEditor(
             doc.pendingBytes = bytes;
             documentManager.adopt(doc);
         },
+        applyRemoteScene: (bytes: Uint8Array) => documentManager.applyRemoteScene(bytes),
         newDocument: (name = 'Untitled') => {
             documentManager.create(name);
         },

@@ -108,6 +108,22 @@ export function readConfig(argv: string[] = process.argv.slice(2)): Config {
     return { mode, url, port, token };
 }
 
+/** Does `base` point at this machine? Only then can a page there reach the bridge. */
+function isLoopback(base: string): boolean {
+    try {
+        const host = new URL(base).hostname;
+        return (
+            host === 'localhost' ||
+            host.endsWith('.localhost') ||
+            host === '127.0.0.1' ||
+            host === '[::1]' ||
+            host === '::1'
+        );
+    } catch {
+        return false;
+    }
+}
+
 /**
  * Is something serving `base`? Used only to make the startup notice honest,
  * so a short timeout and a swallowed error are the right behaviour — a slow or
@@ -156,6 +172,22 @@ export async function createTransport(
         const base = cfg.url ?? 'http://localhost:5199/';
         const sep = base.includes('?') ? '&' : '?';
         const connectUrl = `${base}${sep}agentBridge=${port}&token=${cfg.token}`;
+
+        // A hosted editor cannot dial loopback — Chrome's Local Network Access
+        // checks block it — so the bridge is the wrong mode against one, and
+        // the tab that tried gets a device-access prompt for its trouble. Say
+        // so instead of printing a URL that can only fail.
+        if (!isLoopback(base)) {
+            return {
+                transport,
+                notice:
+                    `[dadaki-mcp] bridge mode — listening on 127.0.0.1:${port}\n` +
+                    `[dadaki-mcp] WARNING: --url points at ${base}, which is not this machine.\n` +
+                    '[dadaki-mcp] A page served from there cannot reach a loopback port, so no\n' +
+                    '[dadaki-mcp] editor can attach to this bridge. Use --mode relay for a hosted\n' +
+                    '[dadaki-mcp] editor, or drop --url to drive one running locally.',
+            };
+        }
 
         // The bridge listening says nothing about whether there is an editor to
         // attach. Printing a URL to a dev server that isn't running produces a

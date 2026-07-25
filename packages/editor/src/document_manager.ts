@@ -271,6 +271,74 @@ export class DocumentManager {
         this.hostEvents.activated?.(doc);
     }
 
+    /**
+     * Mirror a collaborator's snapshot onto the ACTIVE document, in place.
+     *
+     * This is the receive half of live co-editing: a peer broadcast the latest
+     * bytes of the document we both have open, and we swap them onto the canvas
+     * so their change simply appears — no new tab, no prompt to reload.
+     * Deliberately NOT a mutation: it takes no undo step, doesn't bump the
+     * change counter, and doesn't fire the host `mutated` hook, so mirroring a
+     * peer's edit can never loop back out as our own broadcast/save.
+     *
+     * Declines (returns false) when there is no active engine, or when the
+     * local user is mid-gesture / editing text — yanking the scene out from
+     * under a live drag is worse than a moment's lag, so the caller re-applies
+     * the latest bytes once the action ends.
+     */
+    applyRemoteScene(bytes: Uint8Array): boolean {
+        const doc = this.active();
+        if (!doc?.engine) return false;
+        if (
+            this.scene.inGesture ||
+            this.renderer.editingTextId != null ||
+            this.input.isDraggingHandle
+        ) {
+            return false;
+        }
+        // Keep the local user's selection across the swap. Object ids are
+        // site-partitioned, so they mean the same node in every tab; we drop
+        // any the peer has since deleted.
+        const priorSelection = Array.from(this.scene.getSelection());
+        if (!doc.engine.deserialize_proto(bytes)) return false;
+        // Re-assert OUR object-id site: deserialize resumes the id counter from
+        // the loaded document, but new local objects must keep allocating from
+        // our own site so they can't collide with the peer's.
+        doc.engine.set_site_id(this.siteId);
+        // The peer's snapshot carries its own image-id space; drop decoded-image
+        // caches keyed to the previous content (same reason as the load path).
+        this.renderer.clearImageCache();
+        // Refresh JS + renderer caches and request a frame — but as a load, not
+        // a mutation (invalidateCache(false): no counter bump, no onMutate).
+        this.scene.invalidateCache(false);
+        // Restore selection to the nodes that still exist.
+        doc.engine.clear_selection();
+        if (priorSelection.length) {
+            const present = this.collectNodeIds(doc);
+            for (const id of priorSelection) {
+                if (present.has(id)) doc.engine.select_node(id, true);
+            }
+        }
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+        return true;
+    }
+
+    /** Every node id currently in a document (roots + all descendants). */
+    private collectNodeIds(doc: Document): Set<number> {
+        const engine = doc.engine!;
+        const out = new Set<number>();
+        const walk = (ids: Uint32Array) => {
+            for (const id of ids) {
+                out.add(id);
+                walk(engine.get_node_children(id));
+            }
+        };
+        walk(engine.get_root_nodes());
+        return out;
+    }
+
     // ─── Session restore ──────────────────────────────────────────────────
 
     /**
