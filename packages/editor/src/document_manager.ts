@@ -65,7 +65,7 @@ export class DocumentManager {
      *
      * The host must stop broadcasting and stop saving while this holds. Under
      * last-writer-wins sync our scene is a *lossy* rendering of theirs — every
-     * v9 field decoded to nothing here — so sending it would overwrite their
+     * field it could not decode simply gone — so sending it would overwrite their
      * work with a downgraded copy. Going quiet is the only safe move; the user
      * has been told why.
      */

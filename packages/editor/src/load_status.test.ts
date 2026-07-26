@@ -3,7 +3,7 @@
  * something a user can act on.
  *
  * The behaviour under test is mostly about *not* claiming success. Before the
- * v8 container, every failure mode — truncated file, empty file, a document
+ * container envelope, every failure mode — truncated file, empty file, a document
  * from a newer build — arrived as `false` (or, worse, as a successful load of
  * an empty document), so the UI had nothing to say and often said nothing.
  */
@@ -57,16 +57,16 @@ describe('parseLoadResult', () => {
             JSON.stringify({
                 ok: false,
                 error: 'too_new',
-                detail: 'needs 9',
-                requiredVersion: 9,
-                supportedVersion: 8,
+                detail: 'needs 2',
+                requiredVersion: 2,
+                supportedVersion: 1,
             }),
         );
         expect(r.ok).toBe(false);
         if (!r.ok) {
             expect(r.error).toBe('too_new');
-            expect(r.requiredVersion).toBe(9);
-            expect(r.supportedVersion).toBe(8);
+            expect(r.requiredVersion).toBe(2);
+            expect(r.supportedVersion).toBe(1);
         }
     });
 

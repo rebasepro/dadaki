@@ -123,21 +123,21 @@ describe('pruning', () => {
 });
 
 describe('version floor', () => {
-    it('a document with embedded fonts refuses to open in a build that would drop them', () => {
+    // min_reader_version lives at offset 10 of the header (see container.rs).
+    const floorOf = (e: Engine) => {
+        const saved = new Uint8Array(e.serialize_proto());
+        return new DataView(saved.buffer, saved.byteOffset).getUint32(10, true);
+    };
+
+    it('embedded fonts are part of v1, so they do not raise the floor', () => {
         const e = textDoc();
         e.embed_font('Inter', 400, false, fakeFace('X'), '');
-        const saved = new Uint8Array(e.serialize_proto());
-
-        // min_reader_version lives at offset 10 of the header (see container.rs).
-        const floor = new DataView(saved.buffer, saved.byteOffset).getUint32(10, true);
-        expect(floor).toBe(8);
+        expect(floorOf(e)).toBe(e.get_format_version());
     });
 
-    it('a document without them stays openable by older builds', () => {
+    it('a plain document sits at the same baseline', () => {
         const e = new Engine();
         e.add_rect(0, 0, 10, 10);
-        const saved = new Uint8Array(e.serialize_proto());
-        const floor = new DataView(saved.buffer, saved.byteOffset).getUint32(10, true);
-        expect(floor).toBeLessThan(8);
+        expect(floorOf(e)).toBe(e.get_format_version());
     });
 });

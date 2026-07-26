@@ -35,9 +35,10 @@ fn node(id: u32, children: Vec<u32>) -> ProtoNode {
     }
 }
 
-/// A bare (pre-v8) protobuf document, as older builds wrote them.
-fn legacy_bytes(doc: &ProtoDocument) -> Vec<u8> {
-    doc.encode_to_vec()
+/// A complete `.dadaki` file for `doc` — payload wrapped in a real envelope,
+/// exactly as `serialize_to_proto` would produce it.
+fn file_bytes(doc: &ProtoDocument) -> Vec<u8> {
+    container::wrap(&doc.encode_to_vec(), proto::required_reader_version(doc))
 }
 
 fn simple_doc() -> ProtoDocument {
@@ -129,41 +130,53 @@ fn a_failed_load_does_not_disturb_the_open_document() {
     assert_eq!(engine.serialize_scene(), before, "a rejected load mutated the scene");
 }
 
-/// The floor is content-dependent: a plain document stays openable by old
-/// builds, and only documents using newer features raise it.
+/// Everything in the launch feature set sits at the baseline floor, so no
+/// ordinary document locks itself to a newer build.
+///
+/// When a post-v1 feature lands and it would be damaging to lose, add its check
+/// to `required_reader_version` and a case here.
 #[test]
 fn the_version_floor_tracks_the_features_actually_used() {
-    let plain = simple_doc();
-    assert_eq!(
-        proto::required_reader_version(&plain),
-        2,
-        "a plain document must not lock itself to a new build"
-    );
-
-    let mut with_network = simple_doc();
-    with_network.nodes[0].geometry = Some(ProtoGeometry::path(ProtoPath {
-        subpaths: vec![ProtoSubpath { points: vec![], closed: false }],
-        network: Some(Default::default()),
-        ..Default::default()
-    }));
-    assert_eq!(proto::required_reader_version(&with_network), 3);
-
-    let mut with_fonts = simple_doc();
-    with_fonts.fonts.push(proto::ProtoFontFace {
-        family: "Inter".into(), weight: 400, italic: false,
-        bytes: vec![0, 1, 2], source: "test".into(),
-    });
-    assert_eq!(proto::required_reader_version(&with_fonts), 8);
+    for (what, doc) in [
+        ("a plain document", simple_doc()),
+        ("a vector network", {
+            let mut d = simple_doc();
+            d.nodes[0].geometry = Some(ProtoGeometry::path(ProtoPath {
+                subpaths: vec![ProtoSubpath { points: vec![], closed: false }],
+                network: Some(Default::default()),
+            }));
+            d
+        }),
+        ("embedded fonts", {
+            let mut d = simple_doc();
+            d.fonts.push(proto::ProtoFontFace {
+                family: "Inter".into(), weight: 400, italic: false,
+                bytes: vec![0, 1, 2], source: "test".into(),
+            });
+            d
+        }),
+    ] {
+        assert_eq!(
+            proto::required_reader_version(&doc),
+            FORMAT_VERSION,
+            "{what} must stay readable at the baseline floor"
+        );
+    }
 }
 
 /// A geometry or paint variant from a future build is unnameable here, so the
-/// floor jumps to the current version — the file is refused rather than opened
-/// with the unknown node degraded into a plain rectangle.
+/// floor rises past this reader — the file is refused rather than opened with
+/// the unknown node degraded into a plain rectangle.
 #[test]
-fn an_unknown_variant_raises_the_floor_to_refusal() {
+fn an_unknown_variant_raises_the_floor_beyond_this_build() {
     let mut doc = simple_doc();
     doc.nodes[0].geometry = Some(ProtoGeometry { kind: None });
-    assert_eq!(proto::required_reader_version(&doc), FORMAT_VERSION);
+    assert!(proto::required_reader_version(&doc) > FORMAT_VERSION);
+
+    // ...and such a file is actually declined, not merely flagged.
+    let mut engine = Engine::new();
+    let status = engine.load_document(&file_bytes(&doc));
+    assert!(status.contains(r#""error":"too_new""#), "{status}");
 }
 
 // ─── Crash safety ───────────────────────────────────────────────────────────────
@@ -181,7 +194,7 @@ fn a_cyclic_document_loads_without_crashing() {
     };
 
     let mut engine = Engine::new();
-    let status = engine.load_document(&legacy_bytes(&doc));
+    let status = engine.load_document(&file_bytes(&doc));
     assert!(status.contains(r#""ok":true"#), "{status}");
     assert!(status.contains(r#""repaired":true"#), "{status}");
 
@@ -202,7 +215,25 @@ fn a_self_referencing_node_loads_without_crashing() {
         ..Default::default()
     };
     let mut engine = Engine::new();
-    assert!(engine.load_document(&legacy_bytes(&doc)).contains(r#""ok":true"#));
+    assert!(engine.load_document(&file_bytes(&doc)).contains(r#""ok":true"#));
+}
+
+/// The same id defined twice: conversion into the scene's map silently keeps
+/// the last one, so the collision has to be counted before that happens or it
+/// disappears without trace.
+#[test]
+fn duplicate_node_ids_are_reported() {
+    let doc = ProtoDocument {
+        format_version: FORMAT_VERSION,
+        nodes: vec![node(1, vec![]), node(1, vec![])],
+        root_ids: vec![1],
+        next_id: 2,
+        ..Default::default()
+    };
+    let mut engine = Engine::new();
+    let status = engine.load_document(&file_bytes(&doc));
+    assert!(status.contains(r#""ok":true"#), "{status}");
+    assert!(status.contains(r#""duplicate_ids":1"#), "{status}");
 }
 
 /// Structural damage short of a cycle is repaired and reported, not ignored.
@@ -216,31 +247,37 @@ fn dangling_references_are_repaired_and_reported() {
         ..Default::default()
     };
     let mut engine = Engine::new();
-    let status = engine.load_document(&legacy_bytes(&doc));
+    let status = engine.load_document(&file_bytes(&doc));
     assert!(status.contains(r#""ok":true"#), "{status}");
     assert!(status.contains(r#""dangling_roots":1"#), "{status}");
     assert!(status.contains(r#""dangling_children":1"#), "{status}");
     assert_eq!(engine.get_root_nodes(), vec![1], "the phantom root must be gone");
 }
 
-// ─── Back-compatibility with pre-envelope files ─────────────────────────────────
+// ─── The envelope is mandatory ──────────────────────────────────────────────────
 
-/// Bare protobuf files written before v8 must still open.
+/// Pre-release builds wrote bare protobuf with no header. That format is gone,
+/// and headerless input must be refused rather than guessed at — accepting it
+/// would mean accepting the empty byte string as a valid empty document, which
+/// is the data-loss bug the envelope exists to close.
 #[test]
-fn legacy_bare_protobuf_files_still_open() {
+fn headerless_input_is_refused() {
+    let bare = simple_doc().encode_to_vec();
+    assert!(!container::has_envelope(&bare));
+
     let mut engine = Engine::new();
-    let status = engine.load_document(&legacy_bytes(&simple_doc()));
-    assert!(status.contains(r#""ok":true"#), "{status}");
-    assert_eq!(engine.get_root_nodes(), vec![1]);
+    let status = engine.load_document(&bare);
+    assert!(status.contains(r#""ok":false"#), "{status}");
+    assert!(status.contains(r#""error":"unparseable""#), "{status}");
 }
 
-/// ...and are re-saved in the new enveloped form.
+/// Every file this build writes carries the envelope.
 #[test]
-fn opening_a_legacy_file_and_saving_produces_an_enveloped_one() {
+fn every_saved_file_is_enveloped() {
     let mut engine = Engine::new();
-    assert!(engine.deserialize_proto(&legacy_bytes(&simple_doc())));
+    engine.add_rect(0.0, 0.0, 10.0, 10.0);
     let saved = engine.serialize_proto();
-    assert!(container::has_envelope(&saved), "re-saved file must carry the envelope");
+    assert!(container::has_envelope(&saved));
     assert!(proto::deserialize_from_proto(&saved).is_ok());
 }
 
@@ -296,41 +333,25 @@ fn a_full_document_round_trips_through_a_real_save() {
     assert_eq!(reloaded.get_root_nodes(), engine.get_root_nodes());
 }
 
-/// The typed fields, not the deprecated JSON strings, are what a v8 reader
-/// consumes — proven by blanking the JSON and checking the values survive.
+/// The editor-owned collections are stored as typed messages, not as the opaque
+/// JSON strings a pre-release build used. The editor still speaks JSON, so the
+/// typed values must render back into that form on load.
 #[test]
-fn the_typed_fields_are_authoritative_over_the_deprecated_json() {
+fn the_editor_owned_collections_are_stored_as_typed_messages() {
     let mut engine = Engine::new();
     engine.set_swatches_json(r#"[{"r":0.25,"g":0.5,"b":0.75,"a":1}]"#.into());
     engine.set_markers_json(r#"{"3":{"start":"square"}}"#.into());
 
-    let saved = engine.serialize_proto();
-    let payload = container::unwrap(&saved, FORMAT_VERSION).unwrap();
-    let mut doc = ProtoDocument::decode(&payload[..]).unwrap();
-
-    assert_eq!(doc.swatches.len(), 1, "typed swatches must be written");
-    assert_eq!(doc.markers.len(), 1, "typed markers must be written");
-
-    // Simulate the post-deprecation world: only the typed form remains.
-    doc.swatches_json = String::new();
-    doc.markers_json = String::new();
-    let stripped = container::wrap(&doc.encode_to_vec(), 2);
-
-    let mut reloaded = Engine::new();
-    assert!(reloaded.load_document(&stripped).contains(r#""ok":true"#));
-    assert!(reloaded.get_swatches_json().contains("0.25"), "{}", reloaded.get_swatches_json());
-    assert!(reloaded.get_markers_json().contains("square"), "{}", reloaded.get_markers_json());
-}
-
-/// Both forms are written during the deprecation window, so a v7 reader — which
-/// knows only the JSON strings — still finds its data.
-#[test]
-fn the_deprecated_json_is_still_written_for_older_readers() {
-    let mut engine = Engine::new();
-    engine.set_swatches_json(r#"[{"r":1,"g":0,"b":0,"a":1}]"#.into());
     let payload = container::unwrap(&engine.serialize_proto(), FORMAT_VERSION).unwrap();
     let doc = ProtoDocument::decode(&payload[..]).unwrap();
-    assert!(!doc.swatches_json.is_empty(), "v7 readers would lose their swatches");
+    assert_eq!(doc.swatches.len(), 1, "swatches must be written as typed messages");
+    assert_eq!(doc.markers.len(), 1, "markers must be written as typed messages");
+    assert_eq!(doc.markers[0].node_id, 3);
+
+    let mut reloaded = Engine::new();
+    assert!(reloaded.load_document(&engine.serialize_proto()).contains(r#""ok":true"#));
+    assert!(reloaded.get_swatches_json().contains("0.25"), "{}", reloaded.get_swatches_json());
+    assert!(reloaded.get_markers_json().contains("square"), "{}", reloaded.get_markers_json());
 }
 
 // ─── Compression ────────────────────────────────────────────────────────────────
@@ -344,7 +365,7 @@ fn a_realistic_document_compresses_substantially() {
         engine.add_rect(i as f32 * 1.7, i as f32 * 2.3, 40.0, 25.0);
     }
     let saved = engine.serialize_proto();
-    let raw = proto::serialize_to_proto_bare(&engine.scene_for_test(), 501);
+    let raw = proto::serialize_payload_only(&engine.scene_for_test(), 501);
 
     assert!(
         saved.len() * 2 < raw.len(),

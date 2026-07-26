@@ -16,70 +16,54 @@ use crate::{
 
 /// Current file format version — the newest schema this build can *write*.
 ///
-/// v3: per-node vector network.
-/// v4: Live Paint face fills.
-/// v5: Multiple strokes and non-destructive transforms.
-/// v6: Live Paint face-fill signatures (source_nodes) + gap-bridge distance.
-/// v7: mesh gradient paint (ProtoPaint.mesh) — additive, no migration needed.
-/// v8: container envelope, document metadata, embedded fonts, and typed
-///     replacements for the four editor-owned JSON blobs.
-pub const FORMAT_VERSION: u32 = 8;
-
-/// The floor for a document that uses nothing a modern reader would misread.
+/// v1 is the launch format. Everything the editor can express today — paths and
+/// vector networks, Live Paint, mesh gradients, multiple strokes, embedded
+/// fonts, artboards — is part of it. Earlier numbers existed only during
+/// development, were never released, and are not readable: there is no v0.
 ///
-/// Deliberately low: most documents are plain paths and solid fills, and those
-/// should stay openable by any build indefinitely. `required_reader_version`
-/// raises it only for documents that actually use newer features.
-const BASE_READER_VERSION: u32 = 2;
+/// Bump this when the schema gains something, and see `required_reader_version`
+/// for whether the new feature also raises the floor a *reader* must meet.
+pub const FORMAT_VERSION: u32 = 1;
+
+/// The floor for a document using nothing beyond the launch feature set.
+///
+/// Everything in v1 is readable by every build that will ever exist, so a plain
+/// document should never lock itself to a newer editor.
+const BASE_READER_VERSION: u32 = 1;
 
 /// The oldest reader that can open `doc` **without silently losing anything**,
 /// written into the container as `min_reader_version`.
 ///
-/// The rule: a feature raises the floor when losing it would visibly damage the
-/// artwork. Losing a mesh gradient turns a shape a different colour, so it
-/// counts; losing the document's uuid or title is recoverable and does not, or
-/// every document would be locked to the newest build for no benefit.
-///
 /// This is what makes forward compatibility safe rather than merely detectable.
-/// prost drops unknown fields, so an older reader *cannot* preserve what it
-/// does not understand — the only way to protect the data is to decline to open
-/// the file, which is what a floor above the reader's `FORMAT_VERSION` does.
+/// prost drops unknown fields, so an older reader *cannot* preserve what it does
+/// not understand — the only way to protect the data is to decline to open the
+/// file, which is what a floor above the reader's `FORMAT_VERSION` does.
+///
+/// Today every documented feature is v1, so the floor only rises for a construct
+/// this build cannot name at all — a geometry or paint variant from a future
+/// version. That case is the mechanism proving itself: such a file is refused
+/// rather than opened with the unknown node degraded into a grey rectangle.
+///
+/// **When adding a feature**, raise the floor only if losing it would visibly
+/// damage the artwork. A mesh gradient would qualify — dropping it changes a
+/// shape's colour. The document title would not, and treating it as though it
+/// did would lock every document to the newest build for no benefit. Add the
+/// check here, and a case to `the_version_floor_tracks_the_features_actually_used`.
 pub fn required_reader_version(doc: &ProtoDocument) -> u32 {
     let mut floor = BASE_READER_VERSION;
     let mut require = |v: u32| floor = floor.max(v);
 
-    if !doc.face_fills.is_empty() {
-        require(4);
-    }
-    if doc.face_fills.iter().any(|f| !f.source_nodes.is_empty())
-        || doc.gap_bridge_distance > 0.0
-        || !doc.painted_edges.is_empty()
-    {
-        require(6);
-    }
-    if !doc.fonts.is_empty() {
-        require(8);
-    }
-
     for node in &doc.nodes {
         if let Some(geo) = &node.geometry {
-            match &geo.kind {
-                Some(proto_geometry::Kind::Path(p)) if p.network.is_some() => require(3),
-                // A geometry this build cannot name is by definition one it
-                // would drop. Refuse rather than degrade it into a rectangle.
-                None => require(FORMAT_VERSION),
-                _ => {}
+            // An unset oneof means a variant written by a newer build.
+            if geo.kind.is_none() {
+                require(FORMAT_VERSION + 1);
             }
         }
         let Some(style) = &node.style else { continue };
-        if style.strokes.len() > 1 {
-            require(5);
-        }
         for paint in style.fills.iter().chain(style.strokes.iter().filter_map(|s| s.paint.as_ref())) {
-            match &paint.kind {
-                Some(proto_paint::Kind::Mesh(_)) => require(7),
-                None => require(FORMAT_VERSION),
-                _ => {}
+            if paint.kind.is_none() {
+                require(FORMAT_VERSION + 1);
             }
         }
     }
@@ -124,7 +108,7 @@ pub mod proto_paint {
         Gradient(ProtoGradient),
         #[prost(message, tag = "3")]
         Pattern(ProtoPattern),
-        /// v7: Coons-patch mesh gradient.
+        /// Coons-patch mesh gradient.
         #[prost(message, tag = "4")]
         Mesh(ProtoMeshGradient),
     }
@@ -364,14 +348,12 @@ pub struct ProtoEllipse {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct ProtoPath {
-    /// v1 flat point list (single implicit subpath). Only read during
-    /// migration of old files; v2+ writers leave this empty.
-    #[prost(message, repeated, tag = "1")]
-    pub legacy_points: Vec<ProtoPathPoint>,
-    /// v2+ explicit subpaths.
+    // Tag 1 is reserved: a pre-release build stored a flat point list there.
+    // Never reuse it — a stray file from that era would decode as subpaths.
+    /// The path's subpaths.
     #[prost(message, repeated, tag = "2")]
     pub subpaths: Vec<ProtoSubpath>,
-    /// Per-node vector network (v3+).
+    /// Per-node vector network, when the path has one.
     #[prost(message, optional, tag = "3")]
     pub network: Option<ProtoNodeNetwork>,
 }
@@ -734,35 +716,25 @@ pub struct ProtoDocument {
     /// Horizontal ruler guides — world y positions.
     #[prost(float, repeated, tag = "15")]
     pub guides_y: Vec<f32>,
-    /// DEPRECATED (v8): superseded by `swatches` (tag 22). Still written so a
-    /// v7 reader keeps its swatches; drop once v7 is retired.
-    #[prost(string, tag = "16")]
-    pub swatches_json: String,
-    /// DEPRECATED (v8): superseded by `text_paths` (tag 23).
-    #[prost(string, tag = "17")]
-    pub text_paths_json: String,
-    /// DEPRECATED (v8): superseded by `markers` (tag 24).
-    #[prost(string, tag = "18")]
-    pub markers_json: String,
-    /// DEPRECATED (v8): superseded by `guide_locks` (tag 25).
-    #[prost(string, tag = "19")]
-    pub guide_locks_json: String,
-
-    // ── v8 ──────────────────────────────────────────────────────────────────
+    // Tags 16–19 are reserved: a pre-release build stored swatches, text-path
+    // links, markers, and guide locks there as opaque JSON strings. Never reuse
+    // them — the typed messages below replaced them outright.
     /// Identity and provenance.
     #[prost(message, optional, tag = "20")]
     pub meta: Option<ProtoDocumentMeta>,
     /// Font faces embedded so the document renders without a network fetch.
     #[prost(message, repeated, tag = "21")]
     pub fonts: Vec<ProtoFontFace>,
-    /// Typed replacements for the four JSON blobs above. During the deprecation
-    /// window both forms are written and these win on read.
+    /// Document colour swatches.
     #[prost(message, repeated, tag = "22")]
     pub swatches: Vec<ProtoSwatch>,
+    /// Text nodes bound to a path they flow along.
     #[prost(message, repeated, tag = "23")]
     pub text_paths: Vec<ProtoTextPath>,
+    /// Arrowheads / line endings, per node.
     #[prost(message, repeated, tag = "24")]
     pub markers: Vec<ProtoNodeMarkers>,
+    /// Ruler guides that cannot be dragged.
     #[prost(message, optional, tag = "25")]
     pub guide_locks: Option<ProtoGuideLocks>,
 }
@@ -1142,7 +1114,6 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
             proto_geometry::Kind::Ellipse(ProtoEllipse { radius_x: *radius_x, radius_y: *radius_y })
         }
         Geometry::Path { ref subpaths, ref network } => proto_geometry::Kind::Path(ProtoPath {
-            legacy_points: Vec::new(),
             subpaths: subpaths.iter().map(|sp| ProtoSubpath {
                 points: sp.points.iter().map(|p| p.into()).collect(),
                 closed: sp.closed,
@@ -1178,25 +1149,12 @@ fn proto_to_geometry(g: &ProtoGeometry) -> Geometry {
             Geometry::Ellipse { radius_x: e.radius_x, radius_y: e.radius_y }
         }
         Some(proto_geometry::Kind::Path(p)) => {
-            // Defensive: if migrate() didn't run (direct to_scene call on a v1
-            // doc), still honor the legacy flat point list.
-            if p.subpaths.is_empty() && !p.legacy_points.is_empty() {
-                let sp = legacy_points_to_subpath(p.legacy_points.clone());
-                Geometry::Path {
-                    subpaths: vec![crate::Subpath {
-                        points: sp.points.iter().map(|pp| pp.into()).collect(),
-                        closed: sp.closed,
-                    }],
-                    network: p.network.as_ref().map(|n| proto_to_network(n)),
-                }
-            } else {
-                Geometry::Path {
-                    subpaths: p.subpaths.iter().map(|sp| crate::Subpath {
-                        points: sp.points.iter().map(|pp| pp.into()).collect(),
-                        closed: sp.closed,
-                    }).collect(),
-                    network: p.network.as_ref().map(|n| proto_to_network(n)),
-                }
+            Geometry::Path {
+                subpaths: p.subpaths.iter().map(|sp| crate::Subpath {
+                    points: sp.points.iter().map(|pp| pp.into()).collect(),
+                    closed: sp.closed,
+                }).collect(),
+                network: p.network.as_ref().map(|n| proto_to_network(n)),
             }
         }
         Some(proto_geometry::Kind::Text(t)) => Geometry::Text {
@@ -1319,17 +1277,16 @@ fn proto_to_node(pn: &ProtoNode) -> Node {
 
 // ─── Editor-owned blobs: JSON ⇄ typed messages ──────────────────────────────────
 //
-// Four document fields were shipped as opaque JSON strings the engine never
-// looked inside. That is a schema-less hole in a schema'd format: nothing
-// validates them, nothing versions them, and any tool other than this editor
-// has to reverse-engineer them. v8 gives each a real message.
+// A pre-release build shipped four document fields as opaque JSON strings the
+// engine never looked inside — a schema-less hole in a schema'd format: nothing
+// validated them, nothing versioned them, and any tool other than this editor
+// had to reverse-engineer them. Each is a real message in v1.
 //
-// The editor still reads and writes the JSON form, so these converters keep the
-// two representations in lockstep: the JSON is the input, the typed fields are
-// derived on write, and the typed fields win on read. Both are written during
-// the deprecation window so a v7 reader loses nothing. Every converter is
-// total — malformed JSON yields an empty list rather than an error, matching
-// the editor's existing `catch { return [] }` behaviour.
+// The editor still holds them as JSON strings, so these converters bridge the
+// two representations: the JSON is the input on write, and the typed fields are
+// rendered back into JSON on read. Every converter is total — malformed JSON
+// yields an empty list rather than an error, matching the editor's existing
+// `catch { return [] }` behaviour.
 
 /// Marker kind names, indexed by their wire code. Order is the wire contract.
 const MARKER_KINDS: [&str; 4] = ["none", "arrow", "circle", "square"];
@@ -1568,24 +1525,6 @@ impl ProtoDocument {
             live_paint_group: scene.live_paint_group.unwrap_or(0),
             guides_x: scene.guides_x.clone(),
             guides_y: scene.guides_y.clone(),
-            // The JSON blobs are still written for v7 readers, but in the
-            // *canonical* rendering of the typed data rather than verbatim from
-            // the scene.
-            //
-            // That normalization is required, not cosmetic. On load the typed
-            // fields win and the JSON string is regenerated from them, so
-            // writing the editor's raw string here would make the first
-            // save/load hop change the bytes — breaking the
-            // serialize→deserialize→serialize fixed point that undo coalescing
-            // relies on (see `gesture_history.test.ts`). Emitting the canonical
-            // form on both sides makes the very first round trip stable.
-            swatches_json: swatches_to_json(&swatches),
-            text_paths_json: text_paths_to_json(&text_paths),
-            markers_json: markers_to_json(&markers),
-            guide_locks_json: guide_locks
-                .as_ref()
-                .map(guide_locks_to_json)
-                .unwrap_or_default(),
             meta: Some(ProtoDocumentMeta {
                 uuid: scene.meta.uuid.clone(),
                 created_at_ms: scene.meta.created_at_ms,
@@ -1698,28 +1637,19 @@ impl ProtoDocument {
             live_paint_group: if self.live_paint_group != 0 { Some(self.live_paint_group) } else { None },
             guides_x: self.guides_x.clone(),
             guides_y: self.guides_y.clone(),
-            // Typed fields win; the deprecated JSON blobs are the fallback for
-            // documents written before v8. The editor still consumes the JSON
-            // form, so the typed values are rendered back into it here.
-            swatches_json: if self.swatches.is_empty() {
-                self.swatches_json.clone()
-            } else {
-                swatches_to_json(&self.swatches)
-            },
-            text_paths_json: if self.text_paths.is_empty() {
-                self.text_paths_json.clone()
-            } else {
-                text_paths_to_json(&self.text_paths)
-            },
-            markers_json: if self.markers.is_empty() {
-                self.markers_json.clone()
-            } else {
-                markers_to_json(&self.markers)
-            },
-            guide_locks_json: match &self.guide_locks {
-                Some(locks) => guide_locks_to_json(locks),
-                None => self.guide_locks_json.clone(),
-            },
+            // The editor holds these four as JSON strings, so the typed fields
+            // are rendered back into that form here. The rendering is canonical
+            // on both sides, which keeps serialize→deserialize→serialize a
+            // byte-exact fixed point — the property undo coalescing depends on
+            // (see `gesture_history.test.ts`).
+            swatches_json: swatches_to_json(&self.swatches),
+            text_paths_json: text_paths_to_json(&self.text_paths),
+            markers_json: markers_to_json(&self.markers),
+            guide_locks_json: self
+                .guide_locks
+                .as_ref()
+                .map(guide_locks_to_json)
+                .unwrap_or_default(),
             meta: self.meta.as_ref().map(|m| crate::DocumentMeta {
                 uuid: m.uuid.clone(),
                 created_at_ms: m.created_at_ms,
@@ -1765,34 +1695,42 @@ pub fn serialize_to_proto(scene: &Scene, next_id: u32) -> Vec<u8> {
     container::wrap(&doc.encode_to_vec(), floor)
 }
 
-/// Serialize without the envelope — bare protobuf, as written before v8.
-/// Kept for tests that need to construct legacy input.
+/// Serialize the payload without the envelope. Test-only: it is what a
+/// well-formed file looks like *inside* the container, and lets tests forge
+/// header fields directly.
 #[cfg(test)]
-pub fn serialize_to_proto_bare(scene: &Scene, next_id: u32) -> Vec<u8> {
+pub fn serialize_payload_only(scene: &Scene, next_id: u32) -> Vec<u8> {
     ProtoDocument::from_scene(scene, next_id).encode_to_vec()
 }
 
-/// Read a `.dadaki` file: envelope if present, bare protobuf if not.
+/// Read a `.dadaki` file.
+///
+/// The envelope is mandatory. Pre-release builds wrote bare protobuf with no
+/// header, and that path is deliberately gone: accepting headerless input would
+/// mean accepting the empty byte string as a valid empty document, which is
+/// exactly how a truncated save used to open as a blank canvas and then
+/// overwrite the original.
 ///
 /// Returns the scene plus a report of anything that had to be repaired.
 pub fn deserialize_from_proto(data: &[u8]) -> Result<(Scene, u32, RepairReport), LoadError> {
-    let payload = if container::has_envelope(data) {
-        container::unwrap(data, FORMAT_VERSION).map_err(LoadError::Container)?
-    } else {
-        // Pre-v8 bare protobuf. The empty byte string decodes as a *valid*
-        // empty document, which is how a truncated save used to open as a blank
-        // canvas and then overwrite the original — so reject it outright.
-        // Enveloped files get this for free from the length and CRC checks.
-        if data.is_empty() {
-            return Err(LoadError::Container(ContainerError::Empty));
-        }
-        data.to_vec()
-    };
+    if data.is_empty() {
+        return Err(LoadError::Container(ContainerError::Empty));
+    }
+    if !container::has_envelope(data) {
+        return Err(LoadError::Unparseable);
+    }
+    let payload = container::unwrap(data, FORMAT_VERSION).map_err(LoadError::Container)?;
 
-    let mut doc = ProtoDocument::decode(&payload[..]).map_err(|_| LoadError::Unparseable)?;
-    migrate(&mut doc);
+    let doc = ProtoDocument::decode(&payload[..]).map_err(|_| LoadError::Unparseable)?;
+
+    // Count duplicate ids before conversion: `to_scene` collapses them into a
+    // `HashMap` where the last definition silently wins, so this is the only
+    // point at which the collision is still visible.
+    let duplicates = validate::count_duplicate_ids(doc.nodes.iter().map(|n| n.id));
+
     let (scene, next_id) = doc.to_scene();
-    let (scene, report) = validate::repair(scene);
+    let (scene, mut report) = validate::repair(scene);
+    report.duplicate_ids = duplicates;
     Ok((scene, next_id, report))
 }
 
@@ -1810,8 +1748,7 @@ pub fn serialize_snapshot(scene: &Scene, next_id: u32) -> Vec<u8> {
 /// Restores selection (which the plain document path drops).
 pub fn deserialize_snapshot(data: &[u8]) -> Option<(Scene, u32)> {
     let snap = ProtoSnapshot::decode(data).ok()?;
-    let mut doc = snap.document?;
-    migrate(&mut doc);
+    let doc = snap.document?;
     let (mut scene, next_id) = doc.to_scene();
     scene.selection = snap.selection;
     Some((scene, next_id))
@@ -1862,44 +1799,10 @@ impl LoadError {
     }
 }
 
-/// Run schema migrations on older format versions.
-fn migrate(doc: &mut ProtoDocument) {
-    if doc.format_version <= 1 {
-        migrate_v1_to_v2(doc);
-    }
-    doc.format_version = FORMAT_VERSION;
-}
-
-/// v1 → v2: wrap each path's flat point list into a single subpath.
-/// Closed-ness in v1 was implied by a duplicated end point (≈ first point);
-/// we detect it, drop the duplicate, and preserve its incoming control handle.
-fn migrate_v1_to_v2(doc: &mut ProtoDocument) {
-    for node in &mut doc.nodes {
-        let Some(geo) = node.geometry.as_mut() else { continue };
-        let Some(proto_geometry::Kind::Path(path)) = geo.kind.as_mut() else { continue };
-        if !path.legacy_points.is_empty() && path.subpaths.is_empty() {
-            let points = std::mem::take(&mut path.legacy_points);
-            path.subpaths.push(legacy_points_to_subpath(points));
-        }
-    }
-}
-
-fn legacy_points_to_subpath(mut points: Vec<ProtoPathPoint>) -> ProtoSubpath {
-    let mut closed = false;
-    if points.len() >= 3 {
-        let first = &points[0];
-        let last = &points[points.len() - 1];
-        if (first.x - last.x).abs() < 0.01 && (first.y - last.y).abs() < 0.01 {
-            closed = true;
-            // The duplicated closing point carried the incoming handle of the
-            // closing segment; move it onto the first point before dropping.
-            let dup = points.pop().unwrap();
-            points[0].cp1_x = dup.cp1_x;
-            points[0].cp1_y = dup.cp1_y;
-        }
-    }
-    ProtoSubpath { points, closed }
-}
+// No migrations exist. v1 is the first released format, and the container
+// refuses anything a build cannot read losslessly, so there is no older shape
+// to convert from. When v2 arrives, add the migration here and call it from
+// `deserialize_from_proto` before `to_scene`.
 
 #[cfg(test)]
 mod tests {
@@ -1933,139 +1836,9 @@ mod tests {
         ProtoPathPoint { x, y, cp1_x: x, cp1_y: y, cp2_x: x, cp2_y: y, corner_radius: 0.0 }
     }
 
-    /// A v1 file (legacy flat point list, duplicated closing point) must decode
-    /// into a single closed subpath without the duplicate.
+    /// Round trip: subpaths, closed flags, and document size survive.
     #[test]
-    fn test_v1_file_migrates_to_subpaths() {
-        // v1 writers encoded `points` at tag 1 of ProtoPath — identical wire
-        // bytes to encoding `legacy_points` today, so this fixture is
-        // wire-exact with a real v1 file.
-        let v1_doc = ProtoDocument {
-            format_version: 1,
-            nodes: vec![ProtoNode {
-                id: 1,
-                name: "Triangle".into(),
-                node_type: 0, // Path
-                transform: Some(ident_transform()),
-                style: Some(make_style()),
-                geometry: Some(ProtoGeometry::path(ProtoPath {
-                        legacy_points: vec![
-                            pp(0.0, 0.0), pp(100.0, 0.0), pp(50.0, 80.0),
-                            pp(0.0, 0.0), // v1 closing duplicate
-                        ],
-                        subpaths: Vec::new(),
-                        network: None,
-                    })),
-                children: Vec::new(),
-                parent: None,
-                visible: true,
-                locked: false,
-                is_mask: false,
-                mask_type: 0,
-                clip_content: false,
-                live_paint: false,
-                boolean_op: 0,
-            }],
-            root_ids: vec![1],
-            next_id: 2,
-            face_fills: Vec::new(),
-            gap_tolerance: 2.0,
-            document_width: None,
-            document_height: None,
-            images: Vec::new(),
-            artboards: Vec::new(),
-            gap_bridge_distance: 0.0,
-            painted_edges: Vec::new(),
-            live_paint_group: 0,
-            guides_x: Vec::new(),
-            guides_y: Vec::new(),
-            swatches_json: String::new(),
-            text_paths_json: String::new(),
-            markers_json: String::new(),
-            guide_locks_json: String::new(),
-            ..Default::default()
-        };
-
-        let bytes = v1_doc.encode_to_vec();
-        let (scene, next_id, _) = deserialize_from_proto(&bytes).expect("v1 file must decode");
-        assert_eq!(next_id, 2);
-
-        let node = scene.nodes.get(&1).expect("node present");
-        match &node.geometry {
-            Geometry::Path { subpaths, .. } => {
-                assert_eq!(subpaths.len(), 1);
-                assert!(subpaths[0].closed, "duplicated end point implies closed");
-                assert_eq!(subpaths[0].points.len(), 3, "closing duplicate dropped");
-            }
-            other => panic!("expected Path geometry, got {:?}", other),
-        }
-        // v1 files without document dimensions get defaults
-        assert_eq!(scene.document_width, 1000.0);
-        assert_eq!(scene.document_height, 1000.0);
-    }
-
-    /// An open v1 path (no duplicated end point) stays open.
-    #[test]
-    fn test_v1_open_path_stays_open() {
-        let mut doc = ProtoDocument {
-            format_version: 1,
-            nodes: vec![],
-            root_ids: vec![],
-            next_id: 1,
-            face_fills: Vec::new(),
-            gap_tolerance: 2.0,
-            document_width: None,
-            document_height: None,
-            images: Vec::new(),
-            artboards: Vec::new(),
-            gap_bridge_distance: 0.0,
-            painted_edges: Vec::new(),
-            live_paint_group: 0,
-            guides_x: Vec::new(),
-            guides_y: Vec::new(),
-            swatches_json: String::new(),
-            text_paths_json: String::new(),
-            markers_json: String::new(),
-            guide_locks_json: String::new(),
-            ..Default::default()
-        };
-        doc.nodes.push(ProtoNode {
-            id: 1,
-            name: "Line".into(),
-            node_type: 0,
-            transform: Some(ident_transform()),
-            style: Some(make_style()),
-            geometry: Some(ProtoGeometry::path(ProtoPath {
-                    legacy_points: vec![pp(0.0, 0.0), pp(50.0, 50.0)],
-                    subpaths: Vec::new(),
-                    network: None,
-                })),
-            children: Vec::new(),
-            parent: None,
-            visible: true,
-            locked: false,
-            is_mask: false,
-            mask_type: 0,
-            clip_content: false,
-            live_paint: false,
-            boolean_op: 0,
-        });
-
-        let bytes = doc.encode_to_vec();
-        let (scene, _, _) = deserialize_from_proto(&bytes).unwrap();
-        match &scene.nodes.get(&1).unwrap().geometry {
-            Geometry::Path { subpaths, .. } => {
-                assert_eq!(subpaths.len(), 1);
-                assert!(!subpaths[0].closed);
-                assert_eq!(subpaths[0].points.len(), 2);
-            }
-            other => panic!("expected Path geometry, got {:?}", other),
-        }
-    }
-
-    /// v2 round trip: subpaths, closed flags, and document size survive.
-    #[test]
-    fn test_v2_round_trip() {
+    fn test_round_trip() {
         let mut nodes = HashMap::new();
         nodes.insert(7, Node {
             id: 7,
@@ -2224,8 +1997,9 @@ mod tests {
     }
 
     #[test]
-    fn test_old_bytes_without_artboards_synthesize_one() {
-        // A document encoded WITHOUT tag 10 (pre-artboard writer): only doc dims.
+    fn test_bytes_without_artboards_synthesize_one() {
+        // A document carrying no `artboards` (tag 10) — only the legacy doc
+        // dims. `to_scene` must synthesize a single artboard from them.
         let old = ProtoDocument {
             format_version: FORMAT_VERSION,
             nodes: Vec::new(),
@@ -2242,13 +2016,9 @@ mod tests {
             live_paint_group: 0,
             guides_x: Vec::new(),
             guides_y: Vec::new(),
-            swatches_json: String::new(),
-            text_paths_json: String::new(),
-            markers_json: String::new(),
-            guide_locks_json: String::new(),
             ..Default::default()
         };
-        let bytes = old.encode_to_vec();
+        let bytes = container::wrap(&old.encode_to_vec(), required_reader_version(&old));
         let (scene, _, _) = deserialize_from_proto(&bytes).unwrap();
         assert_eq!(scene.artboards.len(), 1);
         assert_eq!(scene.artboards[0].name, "Artwork 1");
@@ -2285,7 +2055,7 @@ mod tests {
         assert_eq!(snap1, snap2);
     }
 
-    // ─── Mesh gradients (v7) ────────────────────────────────────────────────
+    // ─── Mesh gradients ─────────────────────────────────────────────────────
 
     fn sample_mesh() -> crate::MeshGradient {
         // 1×2 patch grid → 2×3 vertices, mixed auto/stored handles.

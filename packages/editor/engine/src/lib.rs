@@ -5656,7 +5656,7 @@ impl Engine {
     }
 
     /// Peek at a file's version floor without loading it. Returns the
-    /// `min_reader_version`, or 0 if `data` carries no envelope (pre-v8).
+    /// `min_reader_version`, or 0 if `data` carries no envelope at all.
     ///
     /// Cloud sync uses this to decide whether it may apply an incoming scene
     /// before it touches the live document.

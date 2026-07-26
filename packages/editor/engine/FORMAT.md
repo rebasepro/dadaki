@@ -1,8 +1,12 @@
 # The `.dadaki` file format
 
-Version 8. This document is the normative description of the on-disk format —
+Version 1. This document is the normative description of the on-disk format —
 enough to write an independent reader or writer without reading the editor's
 source.
+
+v1 is the first released format. Pre-release builds wrote other shapes, none of
+which are readable and none of which need to be: there is no v0, and no
+migrations exist.
 
 ## 1. Container
 
@@ -60,22 +64,15 @@ back on the next save. Under last-writer-wins sync, that destroys the document
 for every collaborator, not just locally. Refusing is the only way to protect
 the data.
 
-The floor is content-dependent so that the format stays permissive by default:
+The floor is content-dependent so that the format stays permissive by default.
+Everything in v1 — paths, vector networks, Live Paint, mesh gradients, multiple
+strokes, embedded fonts, artboards, text — is readable by every build that will
+ever exist, so an ordinary document reports a floor of `1` and stays openable
+forever.
 
-| Floor | Raised by                                                            |
-| ----: | -------------------------------------------------------------------- |
-|     2 | baseline — paths, rectangles, ellipses, text, solid fills, gradients  |
-|     3 | a path carrying a vector network                                      |
-|     4 | Live Paint face fills                                                 |
-|     5 | a node with more than one stroke                                      |
-|     6 | face-fill signatures, gap bridging, or painted edges                  |
-|     7 | a mesh gradient paint                                                 |
-|     8 | embedded fonts                                                        |
-|   `n` | any `geometry` or `paint` whose `oneof` is unset (an unknown variant)  |
-
-A document of plain paths and solid fills therefore stays openable by any build
-indefinitely. Only documents genuinely using newer features lock themselves to
-newer readers.
+Only one thing raises the floor today: a `geometry` or `paint` whose `oneof` is
+unset, which can only mean a variant written by a newer version. Such a file
+reports a floor above this reader and is refused.
 
 **When adding a feature**, raise the floor only if losing that feature would
 visibly damage the artwork. Losing a mesh gradient changes a shape's colour, so
@@ -106,14 +103,13 @@ variant was written by a newer build; it is not a valid document in its own
 right, and `min_reader_version` will already have caused such a file to be
 refused.
 
-### Deprecated fields
+### Reserved tags
 
-Tags 16–19 (`swatches_json`, `text_paths_json`, `markers_json`,
-`guide_locks_json`) hold the same data as tags 22–25 as opaque JSON strings.
-v8 writers emit **both**, so that v7 readers lose nothing. Readers must prefer
-the typed fields and fall back to the JSON only when the typed field is empty.
-The JSON fields will be dropped once v7 is retired; new readers should not rely
-on them.
+`Document` tags **16–19** and `Path` tag **1** are reserved and must never be
+reused. Pre-release builds stored the editor-owned collections as opaque JSON
+strings at 16–19, and a flat point list at Path tag 1. Nothing reads them now,
+but a stray file from that era would decode into the wrong fields if the numbers
+were recycled.
 
 ## 4. Structural validity
 
@@ -137,14 +133,12 @@ Coordinates are `f32` and clamped to ±1e6 (`MAX_COORD`). Beyond that, the gap
 between representable values exceeds 1/16 unit and editing operations start to
 silently no-op. Group nesting is bounded at 1024 deep.
 
-## 5. Legacy files
+## 5. There are no legacy files
 
-Files without the `DADAKI` magic are bare `Document` protobuf, as written before
-v8. They are still readable. A bare document's effective `min_reader_version` is
-unknown, so it is read without a version check — acceptable because no build
-that wrote one is newer than this reader.
-
-A legacy file is upgraded to the enveloped form on the next save.
+The envelope is mandatory. Input without the `DADAKI` magic is rejected as
+unparseable rather than guessed at — accepting headerless protobuf would mean
+accepting the empty byte string as a valid empty document, which is exactly the
+data-loss path §1 exists to close.
 
 ## 6. Undo snapshots are not this format
 
@@ -165,6 +159,8 @@ editor and stored on the scene; the same requirement applies to any future field
 2. Decide whether the feature raises `min_reader_version` (§2) and add it to
    `required_reader_version` if so.
 3. Add a round-trip test, and a case to the version-floor test.
-4. Bump `FORMAT_VERSION`. Bump `CONTAINER_VERSION` only if the *header* changes.
+4. Bump `FORMAT_VERSION`, and add the migration in `deserialize_from_proto` if
+   the change is not purely additive. Bump `CONTAINER_VERSION` only if the
+   *header* layout changes.
 5. Confirm `serialize→deserialize→serialize` is still byte-exact — the undo
    fixed point in `format_tests.rs` will catch it if not.

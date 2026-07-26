@@ -22,7 +22,7 @@
 //! work, and dropping it on the floor for one bad edge would be the worse
 //! failure. Nodes are only ever re-homed, never deleted.
 
-use crate::{Geometry, Node, Scene, MAX_COORD};
+use crate::{Geometry, Scene, MAX_COORD};
 use std::collections::{HashMap, HashSet};
 
 /// What `repair` had to change. Empty means the file was well-formed.
@@ -328,7 +328,7 @@ pub fn count_duplicate_ids(encoded_ids: impl Iterator<Item = u32>) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Color, Paint, Style, Transform2D};
+    use crate::{Color, Node, Paint, Style, Transform2D};
 
     fn group(id: u32, children: Vec<u32>) -> Node {
         Node {

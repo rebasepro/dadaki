@@ -474,7 +474,7 @@ export class InputManager {
                     if (minX < maxX && minY < maxY) {
                         const dx = dropWorld.x - (minX + maxX) / 2;
                         const dy = dropWorld.y - (minY + maxY) / 2;
-                        this.scene.moveNodes(newRoots, dx, dy);
+                        for (const id of newRoots) this.scene.engine!.move_node(id, dx, dy);
                     }
                     this.scene.engine!.clear_selection();
                     for (const id of newRoots) this.scene.selectNode(id, true);
