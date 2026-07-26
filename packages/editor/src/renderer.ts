@@ -326,7 +326,25 @@ export class Renderer {
     private _spriteBakeRootId: number | null = null;
     /** Subtree filter for the sprite-bake render pass. */
     private _bakeSubset: Set<number> | null = null;
-    private static readonly SPRITE_MIN_SUBTREE = 30;
+    /**
+     * Smallest subtree worth baking into a sprite.
+     *
+     * The cost this trades against is command re-recording at ~12us/node, and
+     * what matters is the TOTAL nodes re-recorded per frame, not the size of any
+     * one group - 100 groups of 13 nodes cost the same as 13 groups of 100. The
+     * previous floor of 30 was set thinking about single heavy groups, and it
+     * silently excluded the most common shape of imported artwork: a mascot,
+     * icon or logo is typically 10-30 paths. Dragging 100 such groups (1300
+     * nodes) re-recorded all of them every frame - measured 43.9ms/frame, 23fps,
+     * with zero sprites baked. At a floor of 8 all 100 bake and the same drag
+     * runs at 16.7ms/frame.
+     *
+     * 8 nodes is ~96us of recording versus a few us to blit a bitmap, so the
+     * bitmap wins comfortably from here up. Below it the texture isn't worth its
+     * bake and memory. Sprite count stays bounded regardless: only on-screen
+     * roots bake, and they bake on a debounced, budgeted tick.
+     */
+    private static readonly SPRITE_MIN_SUBTREE = 8;
     // Per-sprite texture budget. 4096² ≈ 64 MB RGBA, but only groups on screen
     // bake, and at the deep zoom where a group needs this many pixels only one
     // or two are visible — so peak memory stays bounded while a zoomed-in group

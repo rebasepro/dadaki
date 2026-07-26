@@ -1,6 +1,6 @@
 import type { CanvasKit } from 'canvaskit-wasm';
 import { adaptiveTileSources } from './adaptive_tiles';
-import { logAppEvent } from './analytics';
+import { logAppEvent, withBulkAnalytics } from './analytics';
 import { createColorSwatch } from './color_picker';
 import type { ContextBar } from './context_bar';
 import { FileIO } from './file_io';
@@ -1903,9 +1903,16 @@ export class UIEngine {
             if (this.typographySection) this.typographySection.style.display = 'none';
         }
 
-        // Render dynamic lists
-        this.renderFillsList(node);
-        this.renderStrokesList(node);
+        // Render dynamic lists. Skipped during a gesture, as the contract at the
+        // top of this method states: both walk the selection into its paintable
+        // leaves (getPaintTargets descends every group) and then read each leaf's
+        // full node JSON out of wasm, and a move/resize/rotate cannot change a
+        // fill or stroke anyway. Mouse-up issues the full sync that repopulates
+        // them.
+        if (!gesture) {
+            this.renderFillsList(node);
+            this.renderStrokesList(node);
+        }
     }
 
     /** Clear the property panel (when nothing is selected). Show the CURRENT style (what a newly drawn
@@ -4708,14 +4715,24 @@ export class UIEngine {
         // Decode <image> elements up-front (intrinsic size, preserveAspectRatio
         // fitting, SVG-in-image rasterization); tags each with __imageFit.
         await this.preprocessImages(doc);
-        this.scene.transaction(() => {
-            const before = new Set(this.scene.getRootNodes());
-            this.parseSVGInternal(svgText, patternImages, doc);
-            const newRoots = Array.from(this.scene.getRootNodes()).filter((id) => !before.has(id));
-            // Imported artwork starts collapsed so a deep SVG tree doesn't flood
-            // the Objects panel; the user expands the parts they care about.
-            for (const rootId of newRoots) this.collapseSubtreeByDefault(rootId);
-            if (afterImport) afterImport(newRoots);
+        // One user action, so one analytics event: the per-node helpers below
+        // would otherwise emit two events per imported element (a 2000-element
+        // file fired 4000), and each one reaches the backend's cookie/dataLayer
+        // path. Collapsed into a single `svg_imported` carrying the counts.
+        let importedRoots = 0;
+        withBulkAnalytics('svg_imported', () => ({ roots: importedRoots }), () => {
+            this.scene.transaction(() => {
+                const before = new Set(this.scene.getRootNodes());
+                this.parseSVGInternal(svgText, patternImages, doc);
+                const newRoots = Array.from(this.scene.getRootNodes()).filter(
+                    (id) => !before.has(id),
+                );
+                importedRoots = newRoots.length;
+                // Imported artwork starts collapsed so a deep SVG tree doesn't flood
+                // the Objects panel; the user expands the parts they care about.
+                for (const rootId of newRoots) this.collapseSubtreeByDefault(rootId);
+                if (afterImport) afterImport(newRoots);
+            });
         });
     }
 
