@@ -79,35 +79,34 @@ trees. To refresh, re-download the upstream repo, copy those two directories
 over `fixtures/`, and re-run with `--update` to regenerate the baseline (review
 the diff — an upstream change can legitimately move scores).
 
-## Known: the committed baseline is stale (26 pre-existing regressions)
+## Known: 5 stale baseline entries, all diagnosed
 
-As of 2026-07-19 a clean run reports **26 regressions against `baseline.json`**
-that are *not* caused by any pending change. Verified by building the engine
-from an unmodified tree and re-running: the scores come out byte-identical to a
-run with local changes applied, so they predate them.
+A clean run reports **927/1679 passing** and **5 regressions against
+`baseline.json`**. None are caused by pending work — verified by building from
+an unmodified tree at the pre-change commit and re-running: the scores come out
+identical.
 
-They cluster by feature, which is what you'd expect from a rendering/filter
-change that was never re-baselined:
+All five are *stale high-water marks*. `baseline.json` is maintained by raising
+only (`max(old, new)`), so a score recorded under an earlier renderer sticks
+even when the current architecture cannot reach it again. Each has been
+diagnosed rather than left as a mystery:
 
-| Area | Tests | Scores |
+| Test | Baseline → now | Diagnosis |
 |---|---|---|
-| `filters/feTile` | 3 | 1.000 → 0.878–0.904 |
-| `filters/feComposite` | 3 | 1.000 → 0.956 |
-| `filters/feConvolveMatrix` | 4 | 1.000 → 0.934–0.959 |
-| `structure/image/preserveAspectRatio` | 6 | ~0.99 → ~0.95 |
-| `painting/image-rendering/optimizeSpeed` | 1 | 1.000 → 0.824 |
-| text / markers / misc filters | 9 | ~0.98 → ~0.96 |
+| `filters/feTile/*` (3) | 1.000 → 0.896–0.941 | Tile **phase** offset, not blur — the diff is an alternating checkerboard, displaced by exactly the fixture's `feOffset dx/dy`. Unsupported filters are rasterized *by the browser*, and Chrome and resvg disagree on which subregion `feTile` repeats. Not fixable without implementing the filter pipeline natively. |
+| `filters/feConvolveMatrix/preserveAlpha=true` | 1.000 → 0.950 | Edge antialiasing only — the diff shows magenta tracing tile **outlines** while every interior matches exactly. `preserveAlpha` itself is handled correctly. This is the AA/colour-space ceiling against a different rasterizer. |
+| `painting/image-rendering/optimizeSpeed` | 1.000 → 0.956 | **Was** a genuine missing feature at 0.824 (`image-rendering` was never parsed); now implemented end to end. The residual 0.044 is the same AA ceiling. |
 
-Note the suite also now reports **522 passing vs the ~495 the baseline
-encodes** — more tests pass than when it was written, further evidence the
-baseline simply hasn't been refreshed.
+An earlier revision of this section listed **26** regressions and 522 passing.
+Most were four real bugs — a broken supersampled export, a text baseline error,
+a dropped `font-family` on import, and luminance masks ignoring alpha — since
+fixed, which is what took the suite from 522 to 927.
 
-**Deliberately not `--update`d here.** Refreshing the baseline would bury these
-26 alongside the genuine improvements, and `optimizeSpeed` at 0.824 and `feTile`
-at 0.878 look like real fidelity losses worth diagnosing rather than accepting.
-Decide per-area: fix the regression, or re-baseline once it's understood.
+**Deliberately not `--update`d.** Refreshing would silently bless the three
+feTile/feConvolveMatrix entries as correct, and their diffs are the clearest
+record of what still differs. Nothing is left here that is merely unexplained.
 
-Until then, the gate is noisy — when checking whether *your* change regressed
-anything, compare against a control run of the same subset
-(`node harness.mjs --filter <area>`) with your change reverted, rather than
-trusting the pass/fail exit code.
+Reading a run: the 5 lines above are expected. **Anything else** in the
+regression list is yours. Errors are not regressions but score 0.000, so check
+the `N test(s) errored` block first — a busy machine can time a test out, and
+the harness retries once before believing it.
