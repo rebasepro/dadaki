@@ -71,14 +71,12 @@ describe('embedding and round-trip', () => {
         const reloaded = new Engine();
         expect(reloaded.load_document(new Uint8Array(saved))).toContain('"ok":true');
 
-        const embedded = JSON.parse(reloaded.get_embedded_fonts_json());
-        expect(embedded).toHaveLength(1);
-        expect(embedded[0].family).toBe('Inter');
-        expect(embedded[0].weight).toBe(400);
-        expect(embedded[0].italic).toBe(false);
-
-        const decoded = Uint8Array.from(atob(embedded[0].bytes), (c) => c.charCodeAt(0));
-        expect(Array.from(decoded)).toEqual(Array.from(bytes));
+        expect(reloaded.embedded_font_count()).toBe(1);
+        expect(reloaded.embedded_font_family(0)).toBe('Inter');
+        expect(reloaded.embedded_font_weight(0)).toBe(400);
+        expect(reloaded.embedded_font_italic(0)).toBe(false);
+        // Bytes come back raw, not base64 inside a JSON blob.
+        expect(Array.from(reloaded.embedded_font_bytes(0))).toEqual(Array.from(bytes));
     });
 
     it('replaces rather than duplicates when the same face is embedded twice', () => {
@@ -86,9 +84,9 @@ describe('embedding and round-trip', () => {
         e.embed_font('Inter', 400, false, fakeFace('FIRST'), 'a');
         e.embed_font('Inter', 400, false, fakeFace('SECOND'), 'b');
 
-        const embedded = JSON.parse(e.get_embedded_fonts_json());
-        expect(embedded).toHaveLength(1);
-        expect(embedded[0].source).toBe('b');
+        expect(e.embedded_font_count()).toBe(1);
+        // The later embed replaced the earlier one rather than duplicating it.
+        expect(Array.from(e.embedded_font_bytes(0))).toEqual(Array.from(fakeFace('SECOND')));
     });
 
     it('keeps weight and slant variants of one family apart', () => {
@@ -96,7 +94,7 @@ describe('embedding and round-trip', () => {
         e.embed_font('Inter', 400, false, fakeFace('R'), '');
         e.embed_font('Inter', 700, false, fakeFace('B'), '');
         e.embed_font('Inter', 400, true, fakeFace('I'), '');
-        expect(JSON.parse(e.get_embedded_fonts_json())).toHaveLength(3);
+        expect(e.embedded_font_count()).toBe(3);
     });
 });
 
@@ -105,14 +103,13 @@ describe('pruning', () => {
         const e = textDoc();
         e.embed_font('Inter', 400, false, fakeFace('USED'), '');
         e.embed_font('Comic Sans', 400, false, fakeFace('UNUSED'), '');
-        expect(JSON.parse(e.get_embedded_fonts_json())).toHaveLength(2);
+        expect(e.embedded_font_count()).toBe(2);
 
         // A document shouldn't accumulate megabytes of typefaces for text that
         // has since been deleted.
         expect(e.prune_unused_fonts()).toBe(1);
-        const left = JSON.parse(e.get_embedded_fonts_json());
-        expect(left).toHaveLength(1);
-        expect(left[0].family).toBe('Inter');
+        expect(e.embedded_font_count()).toBe(1);
+        expect(e.embedded_font_family(0)).toBe('Inter');
     });
 
     it('keeps a face still referenced by text', () => {

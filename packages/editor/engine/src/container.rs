@@ -141,18 +141,6 @@ pub fn has_envelope(data: &[u8]) -> bool {
     data.len() >= MAGIC.len() && &data[..MAGIC.len()] == MAGIC
 }
 
-/// Read just the version floor out of an enveloped file, without verifying the
-/// checksum or decompressing anything. `None` for a pre-envelope file.
-///
-/// This is the cheap check a sync client makes on an incoming scene *before*
-/// deciding whether it is allowed to apply it to the live document.
-pub fn peek_min_reader_version(data: &[u8]) -> Option<u32> {
-    if !has_envelope(data) || data.len() < HEADER_LEN {
-        return None;
-    }
-    Some(u32::from_le_bytes([data[10], data[11], data[12], data[13]]))
-}
-
 /// Wrap a protobuf payload in the envelope, compressing when it pays off.
 pub fn wrap(payload: &[u8], min_reader_version: u32) -> Vec<u8> {
     let uncompressed_len = payload.len() as u32;

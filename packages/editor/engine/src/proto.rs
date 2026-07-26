@@ -1285,143 +1285,6 @@ fn proto_to_node(pn: &ProtoNode) -> Node {
     }
 }
 
-// ─── Editor-owned blobs: JSON ⇄ typed messages ──────────────────────────────────
-//
-// A pre-release build shipped four document fields as opaque JSON strings the
-// engine never looked inside — a schema-less hole in a schema'd format: nothing
-// validated them, nothing versioned them, and any tool other than this editor
-// had to reverse-engineer them. Each is a real message in v1.
-//
-// The editor still holds them as JSON strings, so these converters bridge the
-// two representations: the JSON is the input on write, and the typed fields are
-// rendered back into JSON on read. Every converter is total — malformed JSON
-// yields an empty list rather than an error, matching the editor's existing
-// `catch { return [] }` behaviour.
-
-/// Marker kind names, indexed by their wire code. Order is the wire contract.
-const MARKER_KINDS: [&str; 4] = ["none", "arrow", "circle", "square"];
-
-fn marker_kind_to_u32(s: &str) -> u32 {
-    MARKER_KINDS.iter().position(|&k| k == s).unwrap_or(0) as u32
-}
-
-fn marker_kind_from_u32(v: u32) -> &'static str {
-    MARKER_KINDS.get(v as usize).copied().unwrap_or("none")
-}
-
-fn swatches_from_json(json: &str) -> Vec<ProtoSwatch> {
-    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .map(|v| {
-            let f = |k: &str, d: f32| v.get(k).and_then(|x| x.as_f64()).unwrap_or(d as f64) as f32;
-            ProtoSwatch {
-                color: Some(ProtoColor { r: f("r", 0.0), g: f("g", 0.0), b: f("b", 0.0), a: f("a", 1.0) }),
-                name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            }
-        })
-        .collect()
-}
-
-fn swatches_to_json(swatches: &[ProtoSwatch]) -> String {
-    let items: Vec<serde_json::Value> = swatches
-        .iter()
-        .map(|s| {
-            let c = s.color.clone().unwrap_or_default();
-            let mut obj = serde_json::Map::new();
-            obj.insert("r".into(), c.r.into());
-            obj.insert("g".into(), c.g.into());
-            obj.insert("b".into(), c.b.into());
-            obj.insert("a".into(), c.a.into());
-            if !s.name.is_empty() {
-                obj.insert("name".into(), s.name.clone().into());
-            }
-            serde_json::Value::Object(obj)
-        })
-        .collect();
-    serde_json::to_string(&items).unwrap_or_else(|_| "[]".into())
-}
-
-fn text_paths_from_json(json: &str) -> Vec<ProtoTextPath> {
-    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Vec::new();
-    };
-    let mut out: Vec<ProtoTextPath> = map
-        .iter()
-        .filter_map(|(k, v)| {
-            Some(ProtoTextPath { text_id: k.parse().ok()?, path_id: v.as_u64()? as u32 })
-        })
-        .collect();
-    out.sort_by_key(|t| t.text_id);
-    out
-}
-
-fn text_paths_to_json(links: &[ProtoTextPath]) -> String {
-    let mut obj = serde_json::Map::new();
-    for l in links {
-        obj.insert(l.text_id.to_string(), l.path_id.into());
-    }
-    serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_else(|_| "{}".into())
-}
-
-fn markers_from_json(json: &str) -> Vec<ProtoNodeMarkers> {
-    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Vec::new();
-    };
-    let mut out: Vec<ProtoNodeMarkers> = map
-        .iter()
-        .filter_map(|(k, v)| {
-            let kind = |end: &str| {
-                v.get(end).and_then(|x| x.as_str()).map(marker_kind_to_u32).unwrap_or(0)
-            };
-            Some(ProtoNodeMarkers { node_id: k.parse().ok()?, start: kind("start"), end: kind("end") })
-        })
-        .collect();
-    out.sort_by_key(|m| m.node_id);
-    out
-}
-
-fn markers_to_json(markers: &[ProtoNodeMarkers]) -> String {
-    let mut obj = serde_json::Map::new();
-    for m in markers {
-        let mut entry = serde_json::Map::new();
-        if m.start != 0 {
-            entry.insert("start".into(), marker_kind_from_u32(m.start).into());
-        }
-        if m.end != 0 {
-            entry.insert("end".into(), marker_kind_from_u32(m.end).into());
-        }
-        // An all-"none" entry is how the editor represents "no markers here";
-        // it removes the key entirely rather than storing empties.
-        if !entry.is_empty() {
-            obj.insert(m.node_id.to_string(), serde_json::Value::Object(entry));
-        }
-    }
-    serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_else(|_| "{}".into())
-}
-
-fn guide_locks_from_json(json: &str) -> Option<ProtoGuideLocks> {
-    let parsed = serde_json::from_str::<serde_json::Value>(json).ok()?;
-    let axis = |k: &str| -> Vec<f32> {
-        parsed
-            .get(k)
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect())
-            .unwrap_or_default()
-    };
-    let (x, y) = (axis("x"), axis("y"));
-    if x.is_empty() && y.is_empty() {
-        return None;
-    }
-    Some(ProtoGuideLocks { x, y })
-}
-
-fn guide_locks_to_json(locks: &ProtoGuideLocks) -> String {
-    serde_json::json!({ "x": locks.x, "y": locks.y }).to_string()
-}
-
 // ─── Document-Level Conversion ──────────────────────────────────────────────────
 
 impl ProtoDocument {
@@ -1495,12 +1358,6 @@ impl ProtoDocument {
             .map(|a| (a.w, a.h))
             .unwrap_or((scene.document_width, scene.document_height));
 
-        // Parse the editor's JSON blobs once; both the typed fields and the
-        // deprecated string fields below are rendered from these.
-        let swatches = swatches_from_json(&scene.swatches_json);
-        let text_paths = text_paths_from_json(&scene.text_paths_json);
-        let markers = markers_from_json(&scene.markers_json);
-        let guide_locks = guide_locks_from_json(&scene.guide_locks_json);
 
         ProtoDocument {
             format_version: FORMAT_VERSION,
@@ -1556,10 +1413,30 @@ impl ProtoDocument {
                     .then(a.italic.cmp(&b.italic)));
                 fonts
             },
-            swatches,
-            text_paths,
-            markers,
-            guide_locks,
+            swatches: scene.swatches.iter().map(|s| ProtoSwatch {
+                color: Some((&s.color).into()),
+                name: s.name.clone(),
+            }).collect(),
+            // BTreeMap iteration is ordered, so these are deterministic without
+            // an explicit sort — required for byte-exact undo snapshots.
+            text_paths: scene.text_paths.iter()
+                .map(|(&text_id, &path_id)| ProtoTextPath { text_id, path_id })
+                .collect(),
+            markers: scene.markers.iter()
+                .map(|(&node_id, m)| ProtoNodeMarkers {
+                    node_id,
+                    start: m.start as u32,
+                    end: m.end as u32,
+                })
+                .collect(),
+            guide_locks: if scene.guide_locks.x.is_empty() && scene.guide_locks.y.is_empty() {
+                None
+            } else {
+                Some(ProtoGuideLocks {
+                    x: scene.guide_locks.x.clone(),
+                    y: scene.guide_locks.y.clone(),
+                })
+            },
         }
     }
 
@@ -1647,18 +1524,17 @@ impl ProtoDocument {
             live_paint_group: if self.live_paint_group != 0 { Some(self.live_paint_group) } else { None },
             guides_x: self.guides_x.clone(),
             guides_y: self.guides_y.clone(),
-            // The editor holds these four as JSON strings, so the typed fields
-            // are rendered back into that form here. The rendering is canonical
-            // on both sides, which keeps serialize→deserialize→serialize a
-            // byte-exact fixed point — the property undo coalescing depends on
-            // (see `gesture_history.test.ts`).
-            swatches_json: swatches_to_json(&self.swatches),
-            text_paths_json: text_paths_to_json(&self.text_paths),
-            markers_json: markers_to_json(&self.markers),
-            guide_locks_json: self
-                .guide_locks
-                .as_ref()
-                .map(guide_locks_to_json)
+            swatches: self.swatches.iter().map(|s| crate::Swatch {
+                color: s.color.as_ref().map(Color::from)
+                    .unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                name: s.name.clone(),
+            }).collect(),
+            text_paths: self.text_paths.iter().map(|t| (t.text_id, t.path_id)).collect(),
+            markers: self.markers.iter()
+                .map(|m| (m.node_id, crate::NodeMarkers { start: m.start as u8, end: m.end as u8 }))
+                .collect(),
+            guide_locks: self.guide_locks.as_ref()
+                .map(|l| crate::GuideLocks { x: l.x.clone(), y: l.y.clone() })
                 .unwrap_or_default(),
             meta: self.meta.as_ref().map(|m| crate::DocumentMeta {
                 uuid: m.uuid.clone(),
@@ -1917,10 +1793,10 @@ mod tests {
             live_paint_group: None,
             guides_x: Vec::new(),
             guides_y: Vec::new(),
-            swatches_json: String::new(),
-            text_paths_json: String::new(),
-            markers_json: String::new(),
-            guide_locks_json: String::new(),
+            swatches: Vec::new(),
+            text_paths: Default::default(),
+            markers: Default::default(),
+            guide_locks: Default::default(),
             meta: Default::default(),
             fonts: Vec::new(),
         };
@@ -1972,10 +1848,10 @@ mod tests {
             live_paint_group: None,
             guides_x: Vec::new(),
             guides_y: Vec::new(),
-            swatches_json: String::new(),
-            text_paths_json: String::new(),
-            markers_json: String::new(),
-            guide_locks_json: String::new(),
+            swatches: Vec::new(),
+            text_paths: Default::default(),
+            markers: Default::default(),
+            guide_locks: Default::default(),
             meta: Default::default(),
             fonts: Vec::new(),
         }

@@ -74,6 +74,28 @@ Only one thing raises the floor today: a `geometry` or `paint` whose `oneof` is
 unset, which can only mean a variant written by a newer version. Such a file
 reports a floor above this reader and is refused.
 
+### What the floor cannot catch
+
+`min_reader_version` detects **structural** change — a new field, a new `oneof`
+variant, anything an older reader would decode as absent. It cannot detect a
+**semantic** change to a field that already exists: same tag, same wire type,
+new meaning. Such a file decodes cleanly and silently renders wrong.
+
+This is not hypothetical. The decomposed transform's two skew angles were
+redefined during development, from a sequential `Kx·Ky` product to a single
+shear naming both edge directions. Identical bytes, different picture for any
+node that skews on both axes. Nothing in this section would have flagged it.
+
+There is no cheap general fix — detecting it would mean versioning the meaning
+of every field, not just its presence. The rule instead is a process one:
+
+> **Never redefine an existing field. Add a new one and leave the old.**
+
+If a field's interpretation genuinely must change, it needs a `FORMAT_VERSION`
+bump *and* a floor raise, so older readers refuse the file rather than draw it
+incorrectly — the one case where the floor must rise even though nothing was
+structurally added.
+
 **When adding a feature**, raise the floor only if losing that feature would
 visibly damage the artwork. Losing a mesh gradient changes a shape's colour, so
 it counts. Losing the document title does not, and treating it as though it did

@@ -1,8 +1,7 @@
 use wasm_bindgen::prelude::*;
 use glam::{Mat3, Vec2, Vec3};
 use serde::{Serialize, Deserialize};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod vector_network;
 pub use vector_network::{VectorNetwork, NodeVectorNetwork, NetworkVertex, NetworkEdge, NetworkRegion};
@@ -70,7 +69,7 @@ pub enum NodeType {
     Image,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Color {
     pub r: f32,
     pub g: f32,
@@ -1378,22 +1377,22 @@ pub struct Scene {
     /// Horizontal ruler guides — world y positions.
     #[serde(default)]
     pub guides_y: Vec<f32>,
-    /// Document color swatches, as a JS-owned JSON array string (the engine
-    /// treats it as an opaque blob; the editor defines the schema).
+    /// Document colour swatches.
     #[serde(default)]
-    pub swatches_json: String,
-    /// Text-on-path links, as a JS-owned JSON object string (`{textId: pathId}`).
-    /// Opaque to the engine — the editor defines the schema.
+    pub swatches: Vec<Swatch>,
+    /// Text-on-path links: text node id → the path its glyphs follow.
+    ///
+    /// `BTreeMap`, not `HashMap`, because serialization must be deterministic:
+    /// undo coalescing compares snapshots byte-for-byte, and hash iteration
+    /// order is not stable across runs.
     #[serde(default)]
-    pub text_paths_json: String,
-    /// Arrowhead / line-ending markers per node (editor-owned JSON object
-    /// `{nodeId:{start,end}}`). Opaque to the engine.
+    pub text_paths: BTreeMap<u32, u32>,
+    /// Arrowheads / line endings, per node id. `BTreeMap` for the same reason.
     #[serde(default)]
-    pub markers_json: String,
-    /// Locked ruler guides (editor-owned JSON `{"x":[pos…],"y":[pos…]}`, the
-    /// positions that can't be dragged). Opaque to the engine.
+    pub markers: BTreeMap<u32, NodeMarkers>,
+    /// Ruler guides that cannot be dragged.
     #[serde(default)]
-    pub guide_locks_json: String,
+    pub guide_locks: GuideLocks,
     /// Stable identity and provenance for this document.
     #[serde(default)]
     pub meta: DocumentMeta,
@@ -1402,6 +1401,37 @@ pub struct Scene {
     #[serde(default)]
     pub fonts: Vec<FontFace>,
 }
+
+/// A document colour swatch.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Swatch {
+    pub color: Color,
+    /// Optional user-visible name; empty when unnamed.
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Arrowheads / line endings on one node's path ends.
+/// 0 = none, 1 = arrow, 2 = circle, 3 = square.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NodeMarkers {
+    #[serde(default)]
+    pub start: u8,
+    #[serde(default)]
+    pub end: u8,
+}
+
+/// Ruler guide positions that cannot be dragged.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct GuideLocks {
+    #[serde(default)]
+    pub x: Vec<f32>,
+    #[serde(default)]
+    pub y: Vec<f32>,
+}
+
+/// Marker kind names, indexed by wire code. Order is the contract.
+pub const MARKER_KINDS: [&str; 4] = ["none", "arrow", "circle", "square"];
 
 /// Identity and provenance that travel with the document.
 ///
@@ -1481,10 +1511,10 @@ impl Engine {
                 live_paint_group: None,
                 guides_x: Vec::new(),
                 guides_y: Vec::new(),
-                swatches_json: String::new(),
-                text_paths_json: String::new(),
-                markers_json: String::new(),
-                guide_locks_json: String::new(),
+                swatches: Vec::new(),
+                text_paths: BTreeMap::new(),
+                markers: BTreeMap::new(),
+                guide_locks: GuideLocks::default(),
                 // Left empty on purpose: identity is assigned by the editor
                 // (which owns the clock and the uuid source), never invented
                 // here. See `DocumentMeta`.
@@ -5685,15 +5715,6 @@ impl Engine {
         }
     }
 
-    /// Peek at a file's version floor without loading it. Returns the
-    /// `min_reader_version`, or 0 if `data` carries no envelope at all.
-    ///
-    /// Cloud sync uses this to decide whether it may apply an incoming scene
-    /// before it touches the live document.
-    pub fn peek_required_version(data: &[u8]) -> u32 {
-        container::peek_min_reader_version(data).unwrap_or(0)
-    }
-
     /// Get the current format version — the newest this build can write.
     pub fn get_format_version(&self) -> u32 {
         FORMAT_VERSION
@@ -5773,25 +5794,35 @@ impl Engine {
         }
     }
 
-    /// The faces embedded in this document, as JSON `[{family,weight,italic,
-    /// source,bytes}]` where `bytes` is base64. Used by the editor to register
-    /// them with the renderer before the first paint.
-    pub fn get_embedded_fonts_json(&self) -> String {
-        let items: Vec<serde_json::Value> = self
-            .scene
-            .fonts
-            .iter()
-            .map(|f| {
-                serde_json::json!({
-                    "family": f.family,
-                    "weight": f.weight,
-                    "italic": f.italic,
-                    "source": f.source,
-                    "bytes": BASE64.encode(&f.bytes),
-                })
-            })
-            .collect();
-        serde_json::to_string(&items).unwrap_or_else(|_| "[]".into())
+    /// How many font faces this document embeds.
+    pub fn embedded_font_count(&self) -> u32 {
+        self.scene.fonts.len() as u32
+    }
+
+    /// The raw bytes of embedded face `index`.
+    ///
+    /// Returned directly rather than base64 inside a JSON blob, matching
+    /// `get_image_bytes`. A face is 100–300 KB; base64 inflates it by a third,
+    /// and routing it through a JSON string means building that string in wasm,
+    /// copying it out, parsing it, and decoding it back to the bytes we already
+    /// had — several times the size of the payload, on every document open.
+    pub fn embedded_font_bytes(&self, index: u32) -> Vec<u8> {
+        self.scene.fonts.get(index as usize).map(|f| f.bytes.clone()).unwrap_or_default()
+    }
+
+    /// Family name of embedded face `index`.
+    pub fn embedded_font_family(&self, index: u32) -> String {
+        self.scene.fonts.get(index as usize).map(|f| f.family.clone()).unwrap_or_default()
+    }
+
+    /// CSS weight of embedded face `index` (400 regular, 700 bold).
+    pub fn embedded_font_weight(&self, index: u32) -> u32 {
+        self.scene.fonts.get(index as usize).map(|f| f.weight as u32).unwrap_or(400)
+    }
+
+    /// Whether embedded face `index` is italic.
+    pub fn embedded_font_italic(&self, index: u32) -> bool {
+        self.scene.fonts.get(index as usize).map(|f| f.italic).unwrap_or(false)
     }
 
     /// Which (family, weight, italic) faces the document's text actually needs.
@@ -6072,36 +6103,98 @@ impl Engine {
     // Stored as an opaque JSON string owned by the editor. History rides the
     // scene snapshot, so this setter is history-free (the caller decides).
 
+    // These four are stored as typed values on the `Scene` and converted to and
+    // from JSON *here*, at the boundary, because the editor's existing API
+    // speaks JSON for them.
+    //
+    // The conversion deliberately does not live any deeper. They used to be
+    // JSON strings in the model itself, which meant `from_scene` parsed and
+    // re-rendered all four on every save — including every undo snapshot, i.e.
+    // every mutation. That cost ~17% of snapshot time on a document with a
+    // populated swatch list and scaled with blob size rather than node count.
+    // Now it is paid only when the editor actually reads or writes them, which
+    // is at user-action frequency.
+
     pub fn get_swatches_json(&self) -> String {
-        self.scene.swatches_json.clone()
+        let items: Vec<serde_json::Value> = self.scene.swatches.iter().map(|s| {
+            let mut o = serde_json::Map::new();
+            o.insert("r".into(), s.color.r.into());
+            o.insert("g".into(), s.color.g.into());
+            o.insert("b".into(), s.color.b.into());
+            o.insert("a".into(), s.color.a.into());
+            if !s.name.is_empty() { o.insert("name".into(), s.name.clone().into()); }
+            serde_json::Value::Object(o)
+        }).collect();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".into())
     }
 
     pub fn set_swatches_json(&mut self, json: String) {
-        self.scene.swatches_json = json;
+        let Ok(serde_json::Value::Array(items)) = serde_json::from_str(&json) else {
+            self.scene.swatches.clear();
+            return;
+        };
+        self.scene.swatches = items.iter().map(|v| {
+            let f = |k: &str, d: f32| v.get(k).and_then(|x| x.as_f64()).unwrap_or(d as f64) as f32;
+            Swatch {
+                color: Color { r: f("r", 0.0), g: f("g", 0.0), b: f("b", 0.0), a: f("a", 1.0) },
+                name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            }
+        }).collect();
     }
 
     pub fn get_text_paths_json(&self) -> String {
-        self.scene.text_paths_json.clone()
+        let mut o = serde_json::Map::new();
+        for (t, p) in &self.scene.text_paths {
+            o.insert(t.to_string(), (*p).into());
+        }
+        serde_json::to_string(&serde_json::Value::Object(o)).unwrap_or_else(|_| "{}".into())
     }
 
     pub fn set_text_paths_json(&mut self, json: String) {
-        self.scene.text_paths_json = json;
+        self.scene.text_paths.clear();
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&json) else { return };
+        for (k, v) in map {
+            if let (Ok(t), Some(p)) = (k.parse::<u32>(), v.as_u64()) {
+                self.scene.text_paths.insert(t, p as u32);
+            }
+        }
     }
 
     pub fn get_markers_json(&self) -> String {
-        self.scene.markers_json.clone()
+        let name = |c: u8| MARKER_KINDS.get(c as usize).copied().unwrap_or("none");
+        let mut o = serde_json::Map::new();
+        for (id, m) in &self.scene.markers {
+            let mut e = serde_json::Map::new();
+            if m.start != 0 { e.insert("start".into(), name(m.start).into()); }
+            if m.end != 0 { e.insert("end".into(), name(m.end).into()); }
+            if !e.is_empty() { o.insert(id.to_string(), serde_json::Value::Object(e)); }
+        }
+        serde_json::to_string(&serde_json::Value::Object(o)).unwrap_or_else(|_| "{}".into())
     }
 
     pub fn set_markers_json(&mut self, json: String) {
-        self.scene.markers_json = json;
+        let code = |s: &str| MARKER_KINDS.iter().position(|&k| k == s).unwrap_or(0) as u8;
+        self.scene.markers.clear();
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&json) else { return };
+        for (k, v) in map {
+            let Ok(id) = k.parse::<u32>() else { continue };
+            let get = |end: &str| v.get(end).and_then(|x| x.as_str()).map(&code).unwrap_or(0);
+            self.scene.markers.insert(id, NodeMarkers { start: get("start"), end: get("end") });
+        }
     }
 
     pub fn get_guide_locks_json(&self) -> String {
-        self.scene.guide_locks_json.clone()
+        serde_json::json!({ "x": self.scene.guide_locks.x, "y": self.scene.guide_locks.y }).to_string()
     }
 
     pub fn set_guide_locks_json(&mut self, json: String) {
-        self.scene.guide_locks_json = json;
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+        let axis = |k: &str| -> Vec<f32> {
+            parsed.get(k).and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect())
+                .unwrap_or_default()
+        };
+        self.scene.guide_locks = GuideLocks { x: axis("x"), y: axis("y") };
     }
 }
 

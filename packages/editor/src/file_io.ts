@@ -129,35 +129,30 @@ export async function embedRequiredFonts(engine: Engine): Promise<void> {
  * the face its author used rather than briefly flashing a CDN fallback.
  */
 export async function adoptEmbeddedFonts(engine: Engine): Promise<number> {
-    let raw: Array<{ family: string; weight: number; italic: boolean; bytes: string }>;
-    try {
-        raw = JSON.parse(engine.get_embedded_fonts_json());
-    } catch {
-        return 0;
+    const count = engine.embedded_font_count();
+    if (count === 0) return 0;
+
+    // Bytes come across raw, one face at a time — the same way images do. The
+    // earlier shape handed back every face base64-encoded inside a single JSON
+    // blob, which for a typical 100-300 KB face meant building a string a third
+    // larger than the payload in wasm, copying it out, parsing it, and decoding
+    // it back to the bytes the engine already had.
+    const faces = [];
+    for (let i = 0; i < count; i++) {
+        const bytes = engine.embedded_font_bytes(i);
+        if (!bytes.length) continue;
+        faces.push({
+            family: engine.embedded_font_family(i),
+            weight: engine.embedded_font_weight(i),
+            italic: engine.embedded_font_italic(i),
+            // `bytes` is a fresh copy owned by JS, so the buffer is safe to keep.
+            bytes: bytes.buffer as ArrayBuffer,
+        });
     }
-    if (!raw.length) return 0;
+    if (!faces.length) return 0;
 
     const { registerEmbeddedFaces } = await import('./fonts');
-    const faces = raw
-        .map((f) => ({
-            family: f.family,
-            weight: f.weight,
-            italic: f.italic,
-            bytes: base64ToArrayBuffer(f.bytes),
-        }))
-        .filter((f) => f.bytes.byteLength > 0);
     return registerEmbeddedFaces(faces);
-}
-
-function base64ToArrayBuffer(b64: string): ArrayBuffer {
-    try {
-        const binary = atob(b64);
-        const out = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-        return out.buffer;
-    } catch {
-        return new ArrayBuffer(0);
-    }
 }
 
 /** No repairs — the shape `LoadResult.repairs` expects for a clean load. */
