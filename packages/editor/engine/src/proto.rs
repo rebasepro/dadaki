@@ -433,6 +433,12 @@ pub struct ProtoImage {
     pub height: f32,
     #[prost(uint32, tag = "3")]
     pub image_id: u32,
+    /// Sample with nearest-neighbour rather than smoothing when scaled — SVG's
+    /// `image-rendering: optimizeSpeed | pixelated | crisp-edges`. Defaults to
+    /// false, which is the smoothing every existing document already gets, so
+    /// this is purely additive.
+    #[prost(bool, tag = "4")]
+    pub pixelated: bool,
 }
 
 /// A node's geometry. Exactly one variant is set.
@@ -1142,8 +1148,10 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
                 letter_spacing: *letter_spacing,
             })
         }
-        Geometry::Image { width, height, image_id } => {
-            proto_geometry::Kind::Image(ProtoImage { width: *width, height: *height, image_id: *image_id })
+        Geometry::Image { width, height, image_id, pixelated } => {
+            proto_geometry::Kind::Image(ProtoImage {
+                width: *width, height: *height, image_id: *image_id, pixelated: *pixelated,
+            })
         }
     };
     ProtoGeometry { kind: Some(kind) }
@@ -1152,7 +1160,7 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
 fn proto_to_geometry(g: &ProtoGeometry) -> Geometry {
     match &g.kind {
         Some(proto_geometry::Kind::Image(img)) => {
-            Geometry::Image { width: img.width, height: img.height, image_id: img.image_id }
+            Geometry::Image { width: img.width, height: img.height, image_id: img.image_id, pixelated: img.pixelated }
         }
         Some(proto_geometry::Kind::Rect(r)) => Geometry::Rect { width: r.width, height: r.height },
         Some(proto_geometry::Kind::Ellipse(e)) => {

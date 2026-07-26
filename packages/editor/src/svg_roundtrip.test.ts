@@ -261,6 +261,31 @@ describe('SVG Export — Masks', () => {
         expect(queryTag(doc, 'rect'), 'content untouched').toBeTruthy();
     });
 
+    it.each([
+        [true, 'optimizeSpeed'],
+        [false, null],
+    ])('an image node with pixelated=%s exports image-rendering=%s', (pixelated, expected) => {
+        // `image-rendering` is a rendering instruction, not decoration: if the
+        // export drops it, reopening the file silently blurs pixel art and the
+        // loss is invisible in the markup — the <image> is still there.
+        const input: SVGExportInput = {
+            docWidth: 200,
+            docHeight: 200,
+            nodes: {
+                1: makeNode({
+                    geometry: { Image: { width: 64, height: 64, image_id: 7, pixelated } },
+                }),
+            },
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY },
+            imageDataUris: { 7: 'data:image/png;base64,AAAA' },
+        };
+        const doc = parseSVG(buildSVGFromData(input));
+        const image = queryTag(doc, 'image');
+        expect(image, 'an <image> is emitted').toBeTruthy();
+        expect(image!.getAttribute('image-rendering')).toBe(expected);
+    });
+
     it('a pattern-filled node exports a <pattern> with an <image> tile', () => {
         const input: SVGExportInput = {
             docWidth: 400,

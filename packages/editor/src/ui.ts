@@ -5048,6 +5048,7 @@ export class UIEngine {
                 y,
                 w: vw,
                 h: vh,
+                isSvg: parsed.isSvg,
             };
         }
     }
@@ -5467,6 +5468,7 @@ export class UIEngine {
             'fill-opacity',
             'fill-rule',
             'visibility',
+            'image-rendering',
             'font-size',
             // Text properties inherit too, and are routinely set once on a
             // parent <svg>/<g> rather than on each <text>. Without these an
@@ -6627,6 +6629,23 @@ export class UIEngine {
                     );
                 }
             } else if (tag === 'image') {
+                // `image-rendering` is an inherited presentation attribute, so
+                // it may be declared on an ancestor rather than the element —
+                // `resolveAttr` walks the merged inherited styles for us.
+                const rendering = (
+                    resolveAttr(
+                        el,
+                        'image-rendering',
+                        parseInlineStyle(el),
+                        mergedStyles,
+                        '',
+                    ) || ''
+                ).trim();
+                const wantsPixelated =
+                    rendering === 'optimizeSpeed' ||
+                    rendering === 'pixelated' ||
+                    rendering === 'crisp-edges';
+
                 // preprocessImages (async pre-pass) decoded the image: intrinsic
                 // size, preserveAspectRatio fit, and SVG-in-image rasterization.
                 const fit = (
@@ -6637,6 +6656,7 @@ export class UIEngine {
                             y: number;
                             w: number;
                             h: number;
+                            isSvg?: boolean;
                         };
                     }
                 ).__imageFit;
@@ -6678,6 +6698,16 @@ export class UIEngine {
                             href.slice(0, 64),
                         );
                     }
+                }
+                // Applies to whichever branch created the node — but NOT when
+                // the href was itself an SVG. `image-rendering` governs how a
+                // *raster* is resampled; vector content is drawn at the target
+                // resolution, so the spec says it has no effect there (the
+                // suite's own fixture is titled exactly that). We rasterize
+                // SVG-in-image internally, so without this check that internal
+                // detail would leak out as visibly wrong pixelation.
+                if (nodeId !== null && wantsPixelated && !fit?.isSvg) {
+                    this.scene.engine!.set_image_pixelated(nodeId, true);
                 }
             }
 

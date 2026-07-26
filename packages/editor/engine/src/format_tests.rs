@@ -432,3 +432,33 @@ fn metadata_does_not_make_snapshots_unstable() {
     let b = engine.serialize_scene();
     assert_eq!(a, b, "serializing twice must produce identical bytes");
 }
+
+/// `image-rendering` must survive a round trip.
+///
+/// It is a rendering *instruction*, not decoration: losing it silently blurs
+/// pixel art on reopen, and the loss is invisible in the file — the image is
+/// still there, just sampled wrongly.
+#[test]
+fn image_pixelated_survives_a_round_trip() {
+    for pixelated in [false, true] {
+        let mut engine = Engine::new();
+        let img = engine.register_image(&[0x89, b'P', b'N', b'G', 1, 2, 3], "image/png".into());
+        let id = engine.add_image(0.0, 0.0, 64.0, 64.0, img);
+        engine.set_image_pixelated(id, pixelated);
+        assert_eq!(engine.get_image_pixelated(id), pixelated);
+
+        let mut reloaded = Engine::new();
+        let status = reloaded.load_document(&engine.serialize_proto());
+        assert!(status.contains(r#""ok":true"#), "{status}");
+        assert_eq!(
+            reloaded.get_image_pixelated(id),
+            pixelated,
+            "image-rendering was lost through a save/load cycle",
+        );
+
+        // ...and through an undo snapshot, which takes the other serializer.
+        let mut undone = Engine::new();
+        undone.deserialize_scene(&engine.serialize_scene());
+        assert_eq!(undone.get_image_pixelated(id), pixelated, "lost through a snapshot");
+    }
+}

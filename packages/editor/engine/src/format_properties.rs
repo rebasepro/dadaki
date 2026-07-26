@@ -206,7 +206,7 @@ fn geometry_variant(i: usize) -> Geometry {
             italic: true,
             letter_spacing: 1.25,
         },
-        3 => Geometry::Image { width: 64.0, height: 48.0, image_id: 1 },
+        3 => Geometry::Image { width: 64.0, height: 48.0, image_id: 1, pixelated: i % 2 == 0 },
         // Multi-subpath with per-vertex corner radii, one open and one closed.
         4 => Geometry::Path {
             subpaths: vec![

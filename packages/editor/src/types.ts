@@ -273,6 +273,9 @@ export interface ImageGeometry {
     width: number;
     height: number;
     image_id: number;
+    /** Sample with nearest-neighbour when scaled — SVG `image-rendering:
+     *  optimizeSpeed | pixelated | crisp-edges`. Absent means smooth. */
+    pixelated?: boolean;
 }
 
 /**
