@@ -259,15 +259,33 @@ for (const svgPath of tests) {
   const vp = parseViewport(svgText) || { ...pngSize(refBuf), hasViewBox: false };
   const refB64 = refBuf.toString('base64');
 
-  let res;
-  try {
-    res = await Promise.race([
+  // A timed-out test is recorded as an error and scores 0.000, which reads
+  // exactly like a regression — so a machine busy with something else (a
+  // parallel build, another suite) manufactures phantom regressions. Retry once
+  // on timeout before believing it: a genuine hang times out twice, while
+  // transient contention almost never does.
+  const attempt = () =>
+    Promise.race([
       runInPage(page, svgText, refB64, vp, WRITE_DIFF, ROUNDTRIP),
       new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000)),
     ]);
+
+  let res;
+  try {
+    res = await attempt();
   } catch (e) {
-    res = { status: 'error', error: String(e.message || e) };
+    const timedOut = String(e.message || e) === 'timeout';
     await loadApp(); // recover the page after a hang/crash
+    if (timedOut) {
+      try {
+        res = await attempt();
+      } catch (e2) {
+        res = { status: 'error', error: `${String(e2.message || e2)} (twice)` };
+        await loadApp();
+      }
+    } else {
+      res = { status: 'error', error: String(e.message || e) };
+    }
   }
 
   // A CanvasKit `Aborted()` (WASM OOM) is caught *inside* runInPage and returned
@@ -343,6 +361,27 @@ console.log('  by category:');
 for (const [cat, c] of Object.entries(cats).sort()) {
   console.log(`    ${cat.padEnd(14)} pass ${String(c.pass).padStart(4)}/${String(c.n).padStart(4)}` +
     `   mean ${(c.sum / Math.max(c.n - c.err, 1)).toFixed(3)}${c.err ? `   err ${c.err}` : ''}`);
+}
+
+// An errored test scores 0 and drags the pass count down, so an unexplained
+// `errors: N` looks exactly like a real regression. The message was recorded in
+// results.json but never shown, which left the only actionable detail buried in
+// a file nobody opens. Print it, grouped, so a flaky run is diagnosable from the
+// console it was run in.
+if (errCount) {
+  const byMessage = new Map();
+  for (const [rel, r] of Object.entries(results)) {
+    if (r.status !== 'error') continue;
+    const key = String(r.error || 'unknown');
+    if (!byMessage.has(key)) byMessage.set(key, []);
+    byMessage.get(key).push(rel);
+  }
+  console.log(`\n  ${errCount} test(s) errored (each scores 0.000):`);
+  for (const [msg, rels] of [...byMessage].sort((a, b) => b[1].length - a[1].length)) {
+    console.log(`    ${rels.length}x  ${msg}`);
+    for (const rel of rels.slice(0, 5)) console.log(`          ${rel}`);
+    if (rels.length > 5) console.log(`          …and ${rels.length - 5} more`);
+  }
 }
 
 // ── Baseline: update or gate on regressions ────────────────────────────────
