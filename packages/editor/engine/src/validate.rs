@@ -217,16 +217,34 @@ fn sanitize_coordinates(scene: &mut Scene, report: &mut RepairReport) {
     report.coords_clamped += fixed;
 }
 
-/// Remove the child edges that close a cycle, by depth-first walk from the
-/// roots. An edge to a node already on the current path is a back edge and is
+/// Remove the child edges that close a cycle, by depth-first walk over **every**
+/// node. An edge to a node already on the current path is a back edge and is
 /// dropped; an edge to a node visited on an earlier branch is legal sharing of
 /// nothing (the graph is a forest) and is dropped too, since a node with two
 /// parents would be drawn and transformed twice.
+///
+/// Walking from the roots alone is not enough, and getting that wrong is
+/// exactly how a cycle survived repair: a component no root can reach is never
+/// visited, so its cycles stay intact — and `rebuild_parents` then promotes
+/// those very nodes to roots, publishing the cycle into the scene the renderer
+/// walks. Starting a fresh DFS at every unvisited node closes that hole and
+/// makes the "no cycles anywhere" guarantee actually hold.
 fn break_cycles(scene: &mut Scene, report: &mut RepairReport) {
     let mut visited: HashSet<u32> = HashSet::new();
     let mut removals: Vec<(u32, u32)> = Vec::new();
 
-    for &root in &scene.root_nodes {
+    // Roots first so that when a cycle must be broken, the edge that survives
+    // is the one reachable from a root — the arrangement closest to what the
+    // file intended. Remaining nodes are taken in id order for determinism.
+    let mut starts: Vec<u32> = scene.root_nodes.clone();
+    let mut rest: Vec<u32> = scene.nodes.keys().copied().collect();
+    rest.sort_unstable();
+    starts.extend(rest);
+
+    for root in starts {
+        if visited.contains(&root) {
+            continue;
+        }
         // Explicit stack: the recursive form is what overflowed in the first
         // place, and a repair pass must survive input a naive walk cannot.
         let mut stack: Vec<(u32, usize)> = vec![(root, 0)];
@@ -287,6 +305,18 @@ fn rebuild_parents(scene: &mut Scene, report: &mut RepairReport) {
         }
     }
 
+    // A node some group claims as a child cannot also be a root, however the
+    // file listed it — it would be drawn once at the top level and again inside
+    // its parent. `children` is authoritative, so the root entry loses.
+    //
+    // This is reachable through no fault of the root list: a file can name a
+    // node as a root that another node also lists as a child, and cycle
+    // breaking legitimately keeps the child edge when it meets that node
+    // mid-descent. The node then has a parent while still sitting in
+    // `root_nodes`. It is already counted by the reparent above, so no
+    // additional bookkeeping is needed here.
+    scene.root_nodes.retain(|id| !parent_of.contains_key(id));
+
     // Anything the roots can't reach is invisible and uneditable — effectively
     // deleted, but still taking up space in the file. Put it back at the top
     // level so the user can see and remove it deliberately.
@@ -301,17 +331,24 @@ fn rebuild_parents(scene: &mut Scene, report: &mut RepairReport) {
         }
     }
 
+    // Re-home only the TOP of each unreachable subtree — a node no root can
+    // reach and that no group claims as a child. Its descendants come back with
+    // it and keep their parents.
+    //
+    // Promoting every unreachable node instead would detach children from
+    // groups that legitimately own them: the node would be listed both as a
+    // root and in its parent's `children`, with `parent` cleared — leaving the
+    // scene inconsistent in exactly the way this pass exists to prevent, and
+    // making repair non-idempotent. `break_cycles` has already run, so every
+    // parent chain terminates and each unreachable component has such a top.
     let mut orphans: Vec<u32> = scene
         .nodes
         .keys()
         .copied()
-        .filter(|id| !reachable.contains(id))
+        .filter(|id| !reachable.contains(id) && !parent_of.contains_key(id))
         .collect();
     orphans.sort_unstable(); // deterministic ordering for byte-exact snapshots
     for id in orphans {
-        if let Some(node) = scene.nodes.get_mut(&id) {
-            node.parent = None;
-        }
         scene.root_nodes.push(id);
         report.orphans_rehomed += 1;
     }
@@ -445,6 +482,78 @@ mod tests {
         let (out, report) = repair(scene);
         assert_eq!(report.cycles_broken, 1);
         assert!(out.nodes[&4].children.is_empty());
+    }
+
+    /// A cycle in a component **no root can reach**.
+    ///
+    /// Found by the format fuzzer. Cycle breaking used to walk only from the
+    /// roots, so this component was never visited and kept its cycle — and then
+    /// orphan re-homing promoted its nodes to roots, publishing the intact
+    /// cycle into the scene. The engine's recursive bounds walks then
+    /// stack-overflowed on load, which in wasm kills the editor outright.
+    #[test]
+    fn a_cycle_no_root_can_reach_is_still_broken() {
+        // Root 1 is a lone node; 2 ↔ 3 form an island with a cycle.
+        let scene = scene_of(vec![rect(1), group(2, vec![3]), group(3, vec![2])], vec![1]);
+        let (out, report) = repair(scene);
+
+        assert!(report.cycles_broken >= 1, "the unreachable cycle was not broken");
+        assert_no_cycles(&out);
+        // ...and the island is still present, not silently dropped.
+        assert!(out.nodes.contains_key(&2) && out.nodes.contains_key(&3));
+    }
+
+    /// A node listed as a root that another group also claims as a child.
+    ///
+    /// Found by the format fuzzer. Cycle breaking can legitimately keep the
+    /// child edge when it meets such a node mid-descent, which left it both a
+    /// root and a child — so it was drawn twice and traversals reached it
+    /// twice. `children` is authoritative, so the root entry must lose.
+    #[test]
+    fn a_node_that_is_both_a_root_and_a_child_stops_being_a_root() {
+        let scene = scene_of(vec![group(1, vec![2]), rect(2)], vec![1, 2]);
+        let (out, _) = repair(scene);
+
+        assert_eq!(out.root_nodes, vec![1], "node 2 must not remain a root");
+        assert_eq!(out.nodes[&2].parent, Some(1));
+        assert_eq!(out.nodes[&1].children, vec![2]);
+    }
+
+    /// Re-homing must lift only the TOP of an unreachable subtree. Promoting
+    /// every unreachable node detached children from groups that legitimately
+    /// owned them, leaving `parent` cleared while the group still listed them —
+    /// which also made repair non-idempotent.
+    #[test]
+    fn rehoming_lifts_the_subtree_top_and_keeps_its_children_attached() {
+        // 5 → 6 → 7 is a valid subtree that simply has no root.
+        let scene = scene_of(
+            vec![rect(1), group(5, vec![6]), group(6, vec![7]), rect(7)],
+            vec![1],
+        );
+        let (out, report) = repair(scene);
+
+        assert_eq!(report.orphans_rehomed, 1, "only the subtree top should be re-homed");
+        assert!(out.root_nodes.contains(&5));
+        assert!(!out.root_nodes.contains(&6) && !out.root_nodes.contains(&7));
+        assert_eq!(out.nodes[&6].parent, Some(5));
+        assert_eq!(out.nodes[&7].parent, Some(6));
+    }
+
+    /// Walk from the roots and assert every node is reached exactly once —
+    /// which is "no cycles" and "nothing orphaned" in one check.
+    fn assert_no_cycles(scene: &Scene) {
+        let mut seen = HashSet::new();
+        let mut stack = scene.root_nodes.clone();
+        let mut steps = 0;
+        while let Some(id) = stack.pop() {
+            steps += 1;
+            assert!(steps <= scene.nodes.len() * 4 + 16, "traversal did not terminate");
+            assert!(seen.insert(id), "node {id} reached twice");
+            if let Some(n) = scene.nodes.get(&id) {
+                stack.extend(n.children.iter().copied());
+            }
+        }
+        assert_eq!(seen.len(), scene.nodes.len(), "some nodes are unreachable");
     }
 
     #[test]

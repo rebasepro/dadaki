@@ -119,15 +119,29 @@ reader must not assume any of the following and must not crash on their absence:
 - `root_ids` and `children` may reference ids that are not present.
 - The node graph may contain **cycles**, including self-references. A naive
   recursive walk over `children` will not terminate.
+- A cycle may sit in a component **no root can reach**. Walking only from the
+  roots therefore does not find every cycle.
+- A node named in `root_ids` may *also* be claimed as someone's child. It cannot
+  be both; `children` wins.
 - A node's `parent` may disagree with the group listing it in `children`.
   `children` is authoritative.
 - Nodes may be reachable from no root.
+- The same id may be defined more than once.
 - Coordinates may be NaN or infinite.
 - `image_id` may reference bytes absent from `images`.
 
 This implementation repairs all of these on load rather than rejecting the file
 (see `src/validate.rs`), reports what it changed, and never deletes a node —
-unreachable ones are re-homed to the top level. Repair is idempotent.
+the top of each unreachable subtree is re-homed to the root and brings its
+descendants with it. Repair is idempotent.
+
+After repair the scene satisfies, for every document: every root exists and is
+listed once; every child exists and is claimed by exactly one parent; `parent`
+agrees with `children`; and every node is reachable from the roots exactly once
+(which is "no cycles" and "nothing orphaned" together). These are asserted
+against randomly generated malformed graphs in `format_properties.rs`, not just
+against hand-picked examples — the two cases in the list above marked as easy to
+miss were both found that way, after example-based tests had passed.
 
 Coordinates are `f32` and clamped to ±1e6 (`MAX_COORD`). Beyond that, the gap
 between representable values exceeds 1/16 unit and editing operations start to
