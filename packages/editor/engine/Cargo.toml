@@ -21,6 +21,9 @@ geo = "0.28"
 ordered-float = "4"
 prost = "0.13"
 base64 = "0.22"
+# Pure-Rust backend: the C/zlib backends do not build for wasm32.
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+crc32fast = "1.4"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
