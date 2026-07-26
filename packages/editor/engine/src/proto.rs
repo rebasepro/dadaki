@@ -114,6 +114,9 @@ pub mod proto_paint {
     }
 }
 
+/// Constructors and accessors for the paint oneof. See `ProtoGeometry` above
+/// for why these are `allow(dead_code)`.
+#[allow(dead_code)]
 impl ProtoPaint {
     pub fn solid(color: ProtoColor) -> Self {
         Self { kind: Some(proto_paint::Kind::Solid(color)) }
@@ -465,6 +468,13 @@ pub mod proto_geometry {
     }
 }
 
+/// Constructors and accessors for the geometry oneof.
+///
+/// `#[allow(dead_code)]` because the non-test build reaches geometry through
+/// `geometry_to_proto`/`proto_to_geometry` and never names a variant directly;
+/// these exist so tests and any future caller can build one without spelling
+/// out the `Some(Kind::…)` wrapper.
+#[allow(dead_code)]
 impl ProtoGeometry {
     pub fn rect(width: f32, height: f32) -> Self {
         Self { kind: Some(proto_geometry::Kind::Rect(ProtoRect { width, height })) }

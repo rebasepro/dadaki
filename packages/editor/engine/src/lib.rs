@@ -19,6 +19,9 @@ pub use proto::{FORMAT_VERSION, LoadError};
 #[cfg(test)]
 mod format_tests;
 
+#[cfg(test)]
+mod format_properties;
+
 /// Largest absolute world coordinate the editor supports, on any axis.
 ///
 /// Geometry is stored as `f32`, whose precision degrades with magnitude: the
@@ -2770,6 +2773,21 @@ impl Engine {
 
     /// Recursively collect AABB bounds of all descendants of a node.
     fn collect_descendant_bounds(&self, id: u32, min_x: &mut f32, min_y: &mut f32, max_x: &mut f32, max_y: &mut f32) {
+        self.collect_descendant_bounds_bounded(id, min_x, min_y, max_x, max_y, 0);
+    }
+
+    /// Depth-bounded body of `collect_descendant_bounds`.
+    ///
+    /// `validate::repair` guarantees an acyclic graph on load, so the bound
+    /// should be unreachable — but this runs on every spatial-index rebuild,
+    /// and overflowing it traps the wasm instance and kills the editor outright.
+    /// That is far too harsh a penalty for a bug in an invariant maintained
+    /// elsewhere, so the recursion is capped the same way the render walk is.
+    fn collect_descendant_bounds_bounded(&self, id: u32, min_x: &mut f32, min_y: &mut f32, max_x: &mut f32, max_y: &mut f32, depth: u32) {
+        if depth > MAX_NODE_DEPTH {
+            log_error(&format!("bounds: node {id} exceeds max nesting depth; subtree ignored"));
+            return;
+        }
         if let Some(node) = self.scene.nodes.get(&id) {
             for &child_id in &node.children {
                 let is_child_group = self.scene.nodes.get(&child_id)
@@ -2777,7 +2795,7 @@ impl Engine {
                     .unwrap_or(false);
                 if is_child_group {
                     // Recurse into child groups
-                    self.collect_descendant_bounds(child_id, min_x, min_y, max_x, max_y);
+                    self.collect_descendant_bounds_bounded(child_id, min_x, min_y, max_x, max_y, depth + 1);
                 } else if let Some(spatial) = self.node_to_spatial.get(&child_id) {
                     let lower = spatial.aabb.lower();
                     let upper = spatial.aabb.upper();
@@ -2811,11 +2829,23 @@ impl Engine {
     /// `node_to_spatial` (so parent groups can union their descendants) and
     /// appends it to `out` for a single `bulk_load`. Does not touch the R-tree.
     fn collect_spatial_bottom_up(&mut self, id: u32, out: &mut Vec<SpatialNode>) {
+        self.collect_spatial_bottom_up_bounded(id, out, 0);
+    }
+
+    /// Depth-bounded body of `collect_spatial_bottom_up`. Same reasoning as
+    /// `collect_descendant_bounds_bounded`: repair should make this
+    /// unreachable, but a stack overflow here is unrecoverable rather than
+    /// merely wrong.
+    fn collect_spatial_bottom_up_bounded(&mut self, id: u32, out: &mut Vec<SpatialNode>, depth: u32) {
+        if depth > MAX_NODE_DEPTH {
+            log_error(&format!("spatial: node {id} exceeds max nesting depth; subtree skipped"));
+            return;
+        }
         let children: Vec<u32> = self.scene.nodes.get(&id)
             .map(|n| n.children.clone())
             .unwrap_or_default();
         for child_id in children {
-            self.collect_spatial_bottom_up(child_id, out);
+            self.collect_spatial_bottom_up_bounded(child_id, out, depth + 1);
         }
         if let Some(spatial_node) = self.compute_spatial_node(id) {
             self.node_to_spatial.insert(id, spatial_node);
