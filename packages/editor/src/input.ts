@@ -472,7 +472,7 @@ export class InputManager {
                     if (minX < maxX && minY < maxY) {
                         const dx = dropWorld.x - (minX + maxX) / 2;
                         const dy = dropWorld.y - (minY + maxY) / 2;
-                        for (const id of newRoots) this.scene.engine!.move_node(id, dx, dy);
+                        this.scene.moveNodes(newRoots, dx, dy);
                     }
                     this.scene.engine!.clear_selection();
                     for (const id of newRoots) this.scene.selectNode(id, true);
@@ -1117,10 +1117,10 @@ export class InputManager {
                     this.nudgeTimer = null;
                 }, 500);
 
-                for (const id of selection) {
-                    // moveNode performs the (transform-only) invalidation.
-                    this.scene.moveNode(id, dx, dy);
-                }
+                // moveNodes performs the (transform-only) invalidation, and
+                // batches so a large selection stays linear rather than
+                // re-unioning each shared group ancestor once per node.
+                this.scene.moveNodes(selection, dx, dy);
                 this.ui.syncWithSelection();
             }
         }
@@ -1835,7 +1835,14 @@ export class InputManager {
             const stepDx = totalDx - d.movedDx;
             const stepDy = totalDy - d.movedDy;
             if (stepDx !== 0 || stepDy !== 0) {
-                for (const nid of d.contained) this.scene.engine!.move_node(nid, stepDx, stepDy);
+                // Batched: this runs every frame of a frame-drag, and the
+                // contained set is often large. Full invalidation is kept (the
+                // artboard's own bounds changed too, not just translations).
+                this.scene.engine!.move_nodes(
+                    JSON.stringify(
+                        Array.from(d.contained).map((nid) => ({ id: nid, dx: stepDx, dy: stepDy })),
+                    ),
+                );
                 this.scene.invalidateCache();
                 d.movedDx = totalDx;
                 d.movedDy = totalDy;
@@ -4739,10 +4746,17 @@ export class InputManager {
                     this.canvas.style.cursor = 'move';
                 }
 
-                for (const id of moveTargets) {
-                    const local = this.worldDeltaToLocal(id, totalDx, totalDy);
-                    this.scene.engine!.move_node(id, local.dx, local.dy);
-                }
+                // Batched: moving each node separately re-unions every shared
+                // group ancestor's AABB once per node, which is quadratic in the
+                // size of the selection (a 4000-node drag frame cost 436ms).
+                this.scene.engine!.move_nodes(
+                    JSON.stringify(
+                        moveTargets.map((id) => {
+                            const local = this.worldDeltaToLocal(id, totalDx, totalDy);
+                            return { id, dx: local.dx, dy: local.dy };
+                        }),
+                    ),
+                );
                 // The moving set feeds the drag-layer cache: during an Alt
                 // clone-drag the unmoved originals must render live too (they
                 // were excluded from the static snapshots).

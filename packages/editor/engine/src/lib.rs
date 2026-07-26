@@ -347,16 +347,37 @@ fn default_miter_limit() -> f32 { 4.0 }
 fn default_alignment() -> StrokeAlignment { StrokeAlignment::Center }
 
 /// Decomposed local transform — THE source of truth; matrices are always derived.
-/// Matrix = T(x,y) · R(rotation_deg) · Kx(skew_x_deg) · Ky(skew_y_deg) · S(scale_x, scale_y)
+/// Matrix = T(x,y) · R(rotation_deg) · K(skew_x_deg, skew_y_deg) · S(scale_x, scale_y)
 ///
-/// The skew matrices use edge-length-preserving (sin/cos) form:
-///   Kx = [[1, sin(skx)], [0, cos(skx)]]  — tilts y-axis by skx, preserving y-edge length
-///   Ky = [[cos(sky), 0], [sin(sky), 1]]   — tilts x-axis by sky, preserving x-edge length
+/// The skew angles name the two EDGE DIRECTIONS directly, and both edges keep
+/// unit length:
+///   x-edge (local +X) points at  sky      degrees from horizontal
+///   y-edge (local +Y) points at  90 - skx degrees from horizontal
 ///
-/// This differs from the CSS `tan`-based model. The key advantage is that
-/// skew preserves edge lengths, enabling constructions like isometric cubes
-/// to tile perfectly: three identical squares with matching skew+rotation
-/// will share edges of equal length.
+/// so the combined shear is
+///   K = [[cos(sky), sin(skx)],
+///        [sin(sky), cos(skx)]]        det(K) = cos(skx + sky)
+///
+/// This differs from the CSS `tan`-based model, and from the earlier
+/// sequential `Kx · Ky` form in which skx bled into the x-edge and shortened
+/// it (a square at skx=60°, sky=-30° came out half as wide as it should be,
+/// so isometric top faces never tiled without a manual resize).
+///
+/// The two axes are now genuinely independent: each edge's direction and
+/// length depends on exactly one skew angle. That is what makes an isometric
+/// cube fall out of skew alone, with no rotation and no rescaling:
+///   left  face: sky = +30°
+///   right face: sky = -30°
+///   top   face: skx = +60°, sky = -30°
+/// All three keep unit-length edges, so the faces share edges exactly and a
+/// corner radius set on one face is identical on all three.
+///
+/// The single-axis cases are bit-identical to the previous model (set either
+/// angle to 0 and the two agree), so existing documents that skew on one axis
+/// are unaffected.
+///
+/// Degenerate case: the two edges become parallel when skx + sky = ±90°, which
+/// `is_valid` rejects — the shape would collapse to a line.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Transform2D {
     pub x: f32,
@@ -380,17 +401,34 @@ impl Transform2D {
         Self { x, y, ..Self::IDENTITY }
     }
 
-    /// Compose: M = T(x,y) · R(θ) · Kx · Ky · S
+    /// Compose: M = T(x,y) · R(θ) · K · S
     ///
-    /// Edge-length-preserving skew matrices:
-    ///   Kx = [[1, sin(skx)], [0, cos(skx)]]  — tilts y-axis by skx
-    ///   Ky = [[cos(sky), 0], [sin(sky), 1]]   — tilts x-axis by sky
+    /// K = [[cos(sky), sin(skx)],
+    ///      [sin(sky), cos(skx)]]
     ///
-    /// Kx·Ky = [[cos(sky)+sin(skx)·sin(sky), sin(skx)],
-    ///          [cos(skx)·sin(sky),           cos(skx)]]
+    /// Column 0 (the x-edge) is the unit vector at angle `sky`; column 1 (the
+    /// y-edge) is the unit vector at angle `90° - skx`. Each edge is governed
+    /// by exactly one angle and neither is shortened by the other.
     ///
-    /// det(Kx·Ky) = cos(skx)·cos(sky), which is positive for |skx|,|sky| < 90°.
+    /// det(K) = cos(skx + sky) — positive while |skx + sky| < 90°, zero at the
+    /// boundary where the two edges become parallel.
     pub fn to_mat3(&self) -> Mat3 {
+        // Fast path for the axis-aligned node: a pure scale + translate, and by
+        // far the most common transform in a real document. Worth special-casing
+        // because this runs for every node of a subtree on every transform
+        // change (see `compute_global_transform_recursive`) and the general path
+        // below costs six trig calls.
+        //
+        // Bit-identical to the general path, not an approximation: at exactly
+        // zero, cos is 1.0 and sin is 0.0, so p/ckx collapse to 1 and ry/q to 0,
+        // leaving precisely the matrix built here.
+        if self.rotation_deg == 0.0 && self.skew_x_deg == 0.0 && self.skew_y_deg == 0.0 {
+            return Mat3::from_cols(
+                Vec3::new(self.scale_x, 0.0, 0.0),
+                Vec3::new(0.0, self.scale_y, 0.0),
+                Vec3::new(self.x, self.y, 1.0),
+            );
+        }
         let r = self.rotation_deg.to_radians();
         let cos_r = r.cos();
         let sin_r = r.sin();
@@ -398,12 +436,12 @@ impl Transform2D {
         let sky = self.skew_y_deg.to_radians();
         let sx = self.scale_x;
         let sy = self.scale_y;
-        // Kx·Ky combined elements:
-        let p   = sky.cos() + skx.sin() * sky.sin();  // [0,0]
-        let q   = skx.sin();                           // [0,1]
-        let ry  = skx.cos() * sky.sin();               // [1,0]
-        let ckx = skx.cos();                           // [1,1]
-        // (R · Kx·Ky · S) columns (glam is column-major):
+        // K elements — each column is a unit edge direction set by one angle:
+        let p   = sky.cos();  // [0,0]  x-edge  ┐ direction sky
+        let ry  = sky.sin();  // [1,0]          ┘
+        let q   = skx.sin();  // [0,1]  y-edge  ┐ direction 90° - skx
+        let ckx = skx.cos();  // [1,1]          ┘
+        // (R · K · S) columns (glam is column-major):
         Mat3::from_cols(
             Vec3::new((cos_r * p  - sin_r * ry) * sx, (sin_r * p  + cos_r * ry) * sx, 0.0),
             Vec3::new((cos_r * q  - sin_r * ckx) * sy, (sin_r * q  + cos_r * ckx) * sy, 0.0),
@@ -445,48 +483,168 @@ impl Transform2D {
     }
 
     /// Decompose an arbitrary 2D affine matrix into components.
-    /// skew_y_deg is always 0 in the result.
+    pub fn normalize_deg(deg: f32) -> Option<f32> {
+        if deg.is_nan() || deg.is_infinite() {
+            None
+        } else {
+            let mut d = deg % 360.0;
+            if d > 180.0 { d -= 360.0; }
+            if d <= -180.0 { d += 360.0; }
+            Some(d)
+        }
+    }
+
+    /// Distance metric between two transform decomposition representations.
+    pub fn component_distance(&self, other: &Transform2D) -> f32 {
+        let dr = (self.rotation_deg - other.rotation_deg).abs();
+        let dr_norm = dr.min(360.0 - dr);
+        let dskx = (self.skew_x_deg - other.skew_x_deg).abs();
+        let dsky = (self.skew_y_deg - other.skew_y_deg).abs();
+        let dsx = (self.scale_x - other.scale_x).abs();
+        let dsy = (self.scale_y - other.scale_y).abs();
+        // Translation is deliberately excluded: both candidates copy it
+        // verbatim from the matrix, so it cancels — and px could not be
+        // compared against degrees meaningfully anyway. The weights only have
+        // to rank two candidates for the SAME matrix, so their absolute scale
+        // is irrelevant; scale is weighted up because a decomposition that
+        // invents a scale change reads far more wrong to a user than one that
+        // shifts a few degrees between rotation and skew.
+        dr_norm * 2.0 + dskx + dsky + (dsx + dsy) * 10.0
+    }
+
+    /// Decompose an arbitrary 2D affine matrix into components.
     /// Guarantees: from_mat3(m).to_mat3() ≈ m to float precision.
     pub fn from_mat3(m: &Mat3) -> Self {
+        Self::from_mat3_hint(m, None)
+    }
+
+    /// Decompose a 2D affine matrix into components, preferring a decomposition
+    /// closest in component space to `hint` when multiple decompositions exist.
+    pub fn from_mat3_hint(m: &Mat3, hint: Option<&Transform2D>) -> Self {
+        // Exact path: if the linear part is unchanged and only the translation
+        // moved, the hint's components are still literally correct — reuse them.
+        //
+        // This is the common case for every reparent the UI performs (copy /
+        // paste, group, ungroup between parents that differ only by offset), and
+        // it is the ONLY way a two-axis skew survives. `decompose_skew_x` and
+        // `decompose_skew_y` can each represent just one skew axis, so a face
+        // like skx=60°, sky=-30° has no faithful candidate: both would return
+        // the same matrix expressed as rotation + a single skew, silently
+        // rewriting the values the user typed. Matching the linear part first
+        // sidesteps the choice entirely.
+        if let Some(h) = hint {
+            let hm = h.to_mat3();
+            let close = |a: f32, b: f32| {
+                (a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1.0)
+            };
+            if close(hm.x_axis.x, m.x_axis.x)
+                && close(hm.x_axis.y, m.x_axis.y)
+                && close(hm.y_axis.x, m.y_axis.x)
+                && close(hm.y_axis.y, m.y_axis.y)
+            {
+                return Self { x: m.z_axis.x, y: m.z_axis.y, ..*h };
+            }
+        }
+
+        let cand_x = Self::decompose_skew_x(m);
+        let cand_y = Self::decompose_skew_y(m);
+
+        // The linear part genuinely changed (a transformed group, a flip, a
+        // scale about an anchor). Both candidates reproduce `m` exactly, so pick
+        // whichever reads closer to what the node had before.
+        if let Some(h) = hint {
+            let dist_x = cand_x.component_distance(h);
+            let dist_y = cand_y.component_distance(h);
+            if dist_y < dist_x {
+                return cand_y;
+            } else {
+                return cand_x;
+            }
+        }
+
+        // Without a hint, prefer the reading a user would recognise. A pure
+        // skew_y matrix is equally expressible as rotation + skew_x, and the
+        // skew_x branch always picks the latter; when the skew_y branch can
+        // account for the same matrix with NO rotation, that is the honest
+        // reading. (`cand_y.skew_x_deg` is 0 by construction, so only the
+        // rotation test carries information here.)
+        if cand_x.skew_x_deg.abs() > 0.1 && cand_y.rotation_deg.abs() < 1e-3 {
+            return cand_y;
+        }
+
+        cand_x
+    }
+
+    /// Decompose matrix assuming skew_y = 0 (standard skew_x representation).
+    fn decompose_skew_x(m: &Mat3) -> Self {
         let a = m.x_axis.x;
         let b = m.x_axis.y;
         let c = m.y_axis.x;
         let d = m.y_axis.y;
         let det = a * d - b * c;
-        // Scale x = length of column 0 (always positive)
         let sx = (a * a + b * b).sqrt().max(1e-10);
-        // Rotation from column 0 direction
         let rotation = b.atan2(a);
         let cos_r = rotation.cos();
         let sin_r = rotation.sin();
-        // R^-1 · M gives the shear·scale product:
-        //   [[sx, sin(skx)·sy], [0, cos(skx)·sy]]
         let m01_prime = cos_r * c + sin_r * d;
         let m11_prime = -sin_r * c + cos_r * d;
-        // skewX = atan2(sin(skx)·sy, cos(skx)·sy) = atan2(m01', m11')
-        // but atan2 can return values in (-180°,180°] — we need |skewX| < 90°.
-        // When m11_prime < 0 it means sy < 0 (flip), not |skewX| > 90°.
-        // Absorb the sign into sy by flipping both inputs when m11' < 0:
         let (m01_adj, m11_adj) = if m11_prime >= 0.0 {
             (m01_prime, m11_prime)
         } else {
             (-m01_prime, -m11_prime)
         };
         let skew_x = m01_adj.atan2(m11_adj);
-        // det(M) = sx · sy · cos(skx) · cos(sky). With sky=0: det = sx · sy · cos(skx).
         let cos_skx = skew_x.cos();
         let sy = if cos_skx.abs() > 1e-10 {
             det / (sx * cos_skx)
         } else {
-            // Fallback for skewX near ±90° (shouldn't happen with valid inputs)
             let sin_skx = skew_x.sin();
             if sin_skx.abs() > 1e-10 { m01_prime / sin_skx } else { 1.0 }
         };
+        let rot_deg = Self::normalize_deg(rotation.to_degrees()).unwrap_or(0.0);
+        let skx_deg = Self::normalize_deg(skew_x.to_degrees()).unwrap_or(0.0);
         Self {
             x: m.z_axis.x, y: m.z_axis.y,
-            rotation_deg: rotation.to_degrees(),
-            skew_x_deg: skew_x.to_degrees(),
+            rotation_deg: rot_deg,
+            skew_x_deg: skx_deg,
             skew_y_deg: 0.0,
+            scale_x: sx, scale_y: sy,
+        }
+    }
+
+    /// Decompose matrix assuming skew_x = 0 (pure skew_y representation).
+    fn decompose_skew_y(m: &Mat3) -> Self {
+        let a = m.x_axis.x;
+        let b = m.x_axis.y;
+        let c = m.y_axis.x;
+        let d = m.y_axis.y;
+        let det = a * d - b * c;
+        let sy = (c * c + d * d).sqrt().max(1e-10);
+        let rotation = (-c).atan2(d);
+        let cos_r = rotation.cos();
+        let sin_r = rotation.sin();
+        let m00_prime = cos_r * a + sin_r * b;
+        let m10_prime = -sin_r * a + cos_r * b;
+        let (m00_adj, m10_adj) = if m00_prime >= 0.0 {
+            (m00_prime, m10_prime)
+        } else {
+            (-m00_prime, -m10_prime)
+        };
+        let skew_y = m10_adj.atan2(m00_adj);
+        let cos_sky = skew_y.cos();
+        let sx = if cos_sky.abs() > 1e-10 {
+            det / (sy * cos_sky)
+        } else {
+            let sin_sky = skew_y.sin();
+            if sin_sky.abs() > 1e-10 { m10_prime / sin_sky } else { 1.0 }
+        };
+        let rot_deg = Self::normalize_deg(rotation.to_degrees()).unwrap_or(0.0);
+        let sky_deg = Self::normalize_deg(skew_y.to_degrees()).unwrap_or(0.0);
+        Self {
+            x: m.z_axis.x, y: m.z_axis.y,
+            rotation_deg: rot_deg,
+            skew_x_deg: 0.0,
+            skew_y_deg: sky_deg,
             scale_x: sx, scale_y: sy,
         }
     }
@@ -2778,6 +2936,88 @@ impl Engine {
         self.after_local_transform_change(id);
     }
 
+    /// Move many nodes at once, each by its own delta.
+    ///
+    /// `moves_json` is `[{"id":1,"dx":2.0,"dy":3.0}, ...]`. Deltas are per-node
+    /// because a drag converts one world delta into a different local delta for
+    /// every node (each may sit under a differently-transformed parent).
+    ///
+    /// This exists for complexity, not tidiness. `move_node` finishes by
+    /// re-unioning every group ancestor's AABB, and a group's AABB is the union
+    /// of ALL its descendants — so moving N children of one group costs N × O(N).
+    /// A 4000-node drag frame measured 436ms that way. Here the translations are
+    /// applied first, then each distinct group ancestor is refreshed exactly
+    /// once, deepest first so a parent's union reads its children's fresh
+    /// entries. That makes a drag frame linear in the number of moved nodes.
+    pub fn move_nodes(&mut self, moves_json: &str) {
+        #[derive(Deserialize)]
+        struct NodeMove {
+            id: u32,
+            dx: f32,
+            dy: f32,
+        }
+        let moves: Vec<NodeMove> = match serde_json::from_str(moves_json) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let mut touched: Vec<u32> = Vec::with_capacity(moves.len());
+        for m in &moves {
+            if !m.dx.is_finite() || !m.dy.is_finite() {
+                continue;
+            }
+            if let Some(node) = self.scene.nodes.get_mut(&m.id) {
+                node.transform.x += m.dx;
+                node.transform.y += m.dy;
+                touched.push(m.id);
+            }
+        }
+        if touched.is_empty() {
+            return;
+        }
+
+        // Each moved subtree: globals, then its own spatial entries.
+        for &id in &touched {
+            self.update_node_global_transform(id);
+            self.update_spatial_index_recursive(id);
+            self.mark_dirty(id);
+        }
+
+        // Collect the distinct group ancestors and how deep each sits.
+        let mut ancestors: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        for &id in &touched {
+            let mut current = id;
+            while let Some(parent_id) = self.scene.nodes.get(&current).and_then(|n| n.parent) {
+                let is_group = self.scene.nodes.get(&parent_id)
+                    .map(|n| matches!(n.node_type, NodeType::Group))
+                    .unwrap_or(false);
+                if is_group && !ancestors.contains_key(&parent_id) {
+                    ancestors.insert(parent_id, self.depth_from_root(parent_id));
+                }
+                current = parent_id;
+            }
+        }
+
+        // Deepest first: a group's union reads `node_to_spatial` for its
+        // descendants, so children must already be up to date.
+        let mut ordered: Vec<(u32, u32)> = ancestors.into_iter().collect();
+        ordered.sort_by(|a, b| b.1.cmp(&a.1));
+        for (group_id, _) in ordered {
+            self.update_spatial_index(group_id);
+        }
+    }
+
+    /// Number of parent links between `id` and the root.
+    fn depth_from_root(&self, id: u32) -> u32 {
+        let mut depth = 0;
+        let mut current = id;
+        while let Some(parent_id) = self.scene.nodes.get(&current).and_then(|n| n.parent) {
+            depth += 1;
+            current = parent_id;
+        }
+        depth
+    }
+
     pub fn bring_to_front(&mut self, id: u32) {
         let parent_id = self.scene.nodes.get(&id).and_then(|n| n.parent);
         if let Some(pid) = parent_id {
@@ -2920,7 +3160,8 @@ impl Engine {
             let g = self.global_transforms.get(&id)
                 .map(|&m| Mat3::from_cols_array(&m))
                 .unwrap_or(Mat3::IDENTITY);
-            (id, Transform2D::from_mat3(&(inv_parent * g)))
+            let hint = self.scene.nodes.get(&id).map(|n| &n.transform);
+            (id, Transform2D::from_mat3_hint(&(inv_parent * g), hint))
         }).collect();
 
         // Remove all moved nodes from their current parents / root list.
@@ -3498,7 +3739,8 @@ impl Engine {
         let scale_about = Mat3::from_translation(anchor)
             * Mat3::from_scale(Vec2::new(sx, sy))
             * Mat3::from_translation(-anchor);
-        let new_local = Transform2D::from_mat3(&(parent_global.inverse() * scale_about * global));
+        let hint = self.scene.nodes.get(&id).map(|n| n.transform);
+        let new_local = Transform2D::from_mat3_hint(&(parent_global.inverse() * scale_about * global), hint.as_ref());
         if !new_local.is_valid() {
             return;
         }
@@ -3537,7 +3779,12 @@ impl Engine {
             Ok(v) => v,
             Err(_) => return,
         };
-        let t = Transform2D::from_mat3(&Mat3::from_cols_array(&parsed));
+        // Hint with the node's current components. Interactive drags (oriented
+        // resize, marquee transforms) route through here, and without a hint a
+        // two-axis skew would be silently re-read as rotation + one skew the
+        // first time the user grabs a handle.
+        let hint = self.scene.nodes.get(&id).map(|n| n.transform);
+        let t = Transform2D::from_mat3_hint(&Mat3::from_cols_array(&parsed), hint.as_ref());
         if !t.is_valid() {
             return;
         }
@@ -3629,8 +3876,13 @@ impl Engine {
         });
     }
 
-    /// Skew is clamped to ±89° — tan() diverges at 90° and the shape would
-    /// degenerate to a line.
+    /// Each angle is clamped to ±89°: at 90° the corresponding edge has turned
+    /// a full quarter-turn and the shape degenerates to a line.
+    ///
+    /// The pair must also satisfy |x_deg + y_deg| < 90°, or the two edges are
+    /// parallel and the shape collapses. That case is not clamped — it is
+    /// rejected by the `is_valid` rollback in `set_components_about_center`,
+    /// leaving the node exactly as it was (same contract as a zero scale).
     pub fn set_node_skew(&mut self, id: u32, x_deg: f32, y_deg: f32) {
         if !x_deg.is_finite() || !y_deg.is_finite() {
             return;
@@ -3797,7 +4049,11 @@ impl Engine {
         let mirror = Mat3::from_translation(c)
             * Mat3::from_scale(s)
             * Mat3::from_translation(-c);
-        let t = Transform2D::from_mat3(&(parent_global.inverse() * mirror * global));
+        let hint = self.scene.nodes.get(&id).map(|n| n.transform);
+        let t = Transform2D::from_mat3_hint(
+            &(parent_global.inverse() * mirror * global),
+            hint.as_ref(),
+        );
         if !t.is_valid() {
             return;
         }
@@ -3860,7 +4116,8 @@ impl Engine {
                 for &child_id in &children {
                     if let Some(child) = self.scene.nodes.get_mut(&child_id) {
                         let child_mat = child.transform.to_mat3();
-                        child.transform = Transform2D::from_mat3(&(linear * child_mat));
+                        let hint = child.transform;
+                        child.transform = Transform2D::from_mat3_hint(&(linear * child_mat), Some(&hint));
                     }
                 }
                 if let Some(node) = self.scene.nodes.get_mut(&id) {
@@ -4193,7 +4450,8 @@ impl Engine {
 
             // Update transform and parent
             if let Some(node) = self.scene.nodes.get_mut(&id) {
-                node.transform = Transform2D::from_mat3(&child_new_local);
+                let hint = node.transform;
+                node.transform = Transform2D::from_mat3_hint(&child_new_local, Some(&hint));
                 node.parent = Some(group_id);
             }
             if let Some(g) = self.scene.nodes.get_mut(&group_id) {
@@ -4251,7 +4509,8 @@ impl Engine {
             let child_new_local = parent_global_inv * child_global;
 
             if let Some(child) = self.scene.nodes.get_mut(&child_id) {
-                child.transform = Transform2D::from_mat3(&child_new_local);
+                let hint = child.transform;
+                child.transform = Transform2D::from_mat3_hint(&child_new_local, Some(&hint));
                 child.parent = group_parent;
             }
 
@@ -7110,6 +7369,42 @@ mod tests {
                     "from_mat3 not exact at {}: {} vs {}", i, m[i], round[i]);
             }
         }
+    }
+
+    #[test]
+    fn test_pure_skew_y_decomposition_and_duplication() {
+        // Pure skew_y (e.g. skew_y = 30°, rotation = 0°) must decompose with rotation = 0° and skew_y = 30°.
+        let t_orig = Transform2D {
+            x: 100.0,
+            y: 100.0,
+            rotation_deg: 0.0,
+            skew_x_deg: 0.0,
+            skew_y_deg: 30.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+        };
+        let m = t_orig.to_mat3();
+        let decomp = Transform2D::from_mat3(&m);
+        assert!((decomp.rotation_deg - 0.0).abs() < 1e-3, "rotation must remain 0: got {}", decomp.rotation_deg);
+        assert!((decomp.skew_x_deg - 0.0).abs() < 1e-3, "skew_x must remain 0: got {}", decomp.skew_x_deg);
+        assert!((decomp.skew_y_deg - 30.0).abs() < 1e-3, "skew_y must remain 30: got {}", decomp.skew_y_deg);
+        assert!((decomp.scale_x - 1.0).abs() < 1e-3, "scale_x must remain 1: got {}", decomp.scale_x);
+        assert!((decomp.scale_y - 1.0).abs() < 1e-3, "scale_y must remain 1: got {}", decomp.scale_y);
+
+        // Duplication with hint must preserve exact components
+        let decomp_hint = Transform2D::from_mat3_hint(&m, Some(&t_orig));
+        assert!((decomp_hint.rotation_deg - 0.0).abs() < 1e-3);
+        assert!((decomp_hint.skew_x_deg - 0.0).abs() < 1e-3);
+        assert!((decomp_hint.skew_y_deg - 30.0).abs() < 1e-3);
+
+        // Test duplication in Engine
+        let mut engine = Engine::new();
+        let id = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        engine.set_node_skew(id, 0.0, 30.0);
+        let dup_id = engine.duplicate_node(id);
+        let dup_t = engine.scene.nodes.get(&dup_id).unwrap().transform;
+        assert!((dup_t.rotation_deg - 0.0).abs() < 1e-3, "duplicated rotation must be 0: got {}", dup_t.rotation_deg);
+        assert!((dup_t.skew_y_deg - 30.0).abs() < 1e-3, "duplicated skew_y must be 30: got {}", dup_t.skew_y_deg);
     }
 
     #[test]

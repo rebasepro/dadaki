@@ -675,6 +675,22 @@ export class WasmScene {
         // No autosave on every move frame — too expensive. Saved on mouseUp via saveHistoryAndPersist().
     }
 
+    /**
+     * Move many nodes by one shared delta in a single engine call.
+     *
+     * Prefer this over a `moveNode` loop for anything touching a whole
+     * selection: `move_node` re-unions every group ancestor's AABB on each
+     * call, so N siblings under one group cost N × O(N). See
+     * `Engine::move_nodes`. Cache discipline matches `moveNode` — translation
+     * never changes local geometry, so renderer caches survive.
+     */
+    moveNodes(ids: ArrayLike<number>, dx: number, dy: number) {
+        const list = Array.from(ids);
+        if (list.length === 0) return;
+        this.engine!.move_nodes(JSON.stringify(list.map((id) => ({ id, dx, dy }))));
+        this.invalidateCacheTransformOnly(list);
+    }
+
     /** Call after a drag operation is complete to save state for undo. */
     saveMoveHistory() {
         this.saveHistory();
