@@ -982,6 +982,12 @@ pub enum Geometry {
         width: f32,
         height: f32,
         image_id: u32,
+        /// How to sample the image when it is scaled. `false` (the default)
+        /// smooths; `true` keeps hard pixel edges, which is what SVG's
+        /// `image-rendering: optimizeSpeed | pixelated | crisp-edges` asks for
+        /// and the only correct way to magnify pixel art.
+        #[serde(default)]
+        pixelated: bool,
     },
 }
 
@@ -1917,11 +1923,14 @@ impl Engine {
                     self.render_buffer.extend_from_slice(&width.to_le_bytes());
                     self.render_buffer.extend_from_slice(&height.to_le_bytes());
                 }
-                Geometry::Image { width, height, image_id } => {
-                    self.render_buffer.extend_from_slice(&12u32.to_le_bytes()); // Size: 2*f32 + u32
+                Geometry::Image { width, height, image_id, pixelated } => {
+                    // 2*f32 + u32 id + u32 flags. Stays 4-byte aligned, which
+                    // the JS reader relies on for zero-copy Float32Array views.
+                    self.render_buffer.extend_from_slice(&16u32.to_le_bytes());
                     self.render_buffer.extend_from_slice(&width.to_le_bytes());
                     self.render_buffer.extend_from_slice(&height.to_le_bytes());
                     self.render_buffer.extend_from_slice(&image_id.to_le_bytes());
+                    self.render_buffer.extend_from_slice(&(*pixelated as u32).to_le_bytes());
                 }
                 Geometry::Ellipse { radius_x, radius_y } => {
                     self.render_buffer.extend_from_slice(&8u32.to_le_bytes()); // Size: 2 * f32
@@ -4836,6 +4845,31 @@ impl Engine {
     }
 
     /// Add a raster image node referencing a previously-registered image id.
+    /// Set whether an image node samples with nearest-neighbour when scaled.
+    ///
+    /// SVG spells this `image-rendering`; `optimizeSpeed`, `pixelated` and
+    /// `crisp-edges` all mean "do not smooth". Without it, magnifying pixel art
+    /// blurs it, which is both wrong per spec and the opposite of what anyone
+    /// drawing pixel art wants.
+    pub fn set_image_pixelated(&mut self, id: u32, on: bool) -> bool {
+        let Some(node) = self.scene.nodes.get_mut(&id) else { return false };
+        let Geometry::Image { pixelated, .. } = &mut node.geometry else { return false };
+        *pixelated = on;
+        // Same as every sibling setter: the flag rides the render buffer, so
+        // without this an interactive toggle would not repaint until something
+        // else happened to dirty the node.
+        self.mark_dirty(id);
+        true
+    }
+
+    /// Whether an image node samples with nearest-neighbour.
+    pub fn get_image_pixelated(&self, id: u32) -> bool {
+        match self.scene.nodes.get(&id).map(|n| &n.geometry) {
+            Some(Geometry::Image { pixelated, .. }) => *pixelated,
+            _ => false,
+        }
+    }
+
     pub fn add_image(&mut self, x: f32, y: f32, w: f32, h: f32, image_id: u32) -> u32 {
         let id = self.alloc_id();
 
@@ -4853,7 +4887,7 @@ impl Engine {
                 corner_radius: 0.0,
                 effects: Vec::new(),
             },
-            geometry: Geometry::Image { width: w, height: h, image_id },
+            geometry: Geometry::Image { width: w, height: h, image_id, pixelated: false },
             children: Vec::new(),
             parent: None,
             visible: true,

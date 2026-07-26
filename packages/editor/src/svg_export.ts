@@ -661,7 +661,12 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 const href = imageDataUris?.[geo.Image.image_id] ?? '';
                 const op = node.style.opacity ?? 1.0;
                 const opAttr = op < 1 ? ` opacity="${op}"` : '';
-                nodeSvg += `<image x="0" y="0" width="${geo.Image.width}" height="${geo.Image.height}" href="${href}"${opAttr}${filterAttr} preserveAspectRatio="none" />`;
+                // Emit `image-rendering` so nearest-neighbour sampling survives
+                // an export/re-import round trip. `pixelated` is the CSS Images
+                // 3 keyword; `optimizeSpeed` is the SVG 1.1 spelling that resvg
+                // and older renderers understand, so prefer it for portability.
+                const renderAttr = geo.Image.pixelated ? ' image-rendering="optimizeSpeed"' : '';
+                nodeSvg += `<image x="0" y="0" width="${geo.Image.width}" height="${geo.Image.height}" href="${href}"${opAttr}${renderAttr}${filterAttr} preserveAspectRatio="none" />`;
             } else if (geo.Text) {
                 const textAnchorMap = ['start', 'middle', 'end'];
                 const fontFamily = geo.Text.font_family

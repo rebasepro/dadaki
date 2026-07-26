@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn missing_image_bytes_are_reported_but_the_node_survives() {
         let mut n = rect(1);
-        n.geometry = Geometry::Image { width: 10.0, height: 10.0, image_id: 7 };
+        n.geometry = Geometry::Image { width: 10.0, height: 10.0, image_id: 7, pixelated: false };
         let (out, report) = repair(scene_of(vec![n], vec![1]));
         assert_eq!(report.missing_images, 1);
         assert!(out.nodes.contains_key(&1));

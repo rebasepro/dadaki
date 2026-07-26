@@ -997,7 +997,14 @@ export class Renderer {
     }
 
     /** Draw a raster image node at (0,0,w,h) in the current (local) space. */
-    private drawImageNode(canvas: Canvas, imageId: number, w: number, h: number, alpha: number) {
+    private drawImageNode(
+        canvas: Canvas,
+        imageId: number,
+        w: number,
+        h: number,
+        alpha: number,
+        pixelated = false,
+    ) {
         let img = this.getImage(imageId);
 
         // Zoom-adaptive filter tiles: draw the re-baked bitmap when one
@@ -1034,9 +1041,24 @@ export class Renderer {
             ip.setColor(this.ck.Color4f(1, 1, 1, 1));
             ip.setAlphaf(alpha);
             const src = this.ck.XYWHRect(0, 0, img.width(), img.height());
-            // Mitchell cubic so a zoomed raster / filter tile up-scales smoothly
-            // instead of showing blocky (nearest-neighbour) pixels.
-            canvas.drawImageRectCubic(img, src, dst, 1 / 3, 1 / 3, ip);
+            if (pixelated) {
+                // `image-rendering: optimizeSpeed | pixelated | crisp-edges`:
+                // nearest-neighbour, so magnified pixel art keeps hard edges.
+                // Smoothing it would be both wrong per spec and the opposite of
+                // what the author asked for.
+                canvas.drawImageRectOptions(
+                    img,
+                    src,
+                    dst,
+                    this.ck.FilterMode.Nearest,
+                    this.ck.MipmapMode.None,
+                    ip,
+                );
+            } else {
+                // Mitchell cubic so a zoomed raster / filter tile up-scales
+                // smoothly instead of showing blocky pixels.
+                canvas.drawImageRectCubic(img, src, dst, 1 / 3, 1 / 3, ip);
+            }
         } else {
             // Decode failed / missing bytes — draw a magenta placeholder.
             ip.setColor(this.ck.Color4f(1, 0, 1, 0.6 * alpha));
@@ -2751,7 +2773,8 @@ export class Renderer {
                     const iw = reader.f32();
                     const ih = reader.f32();
                     const imageId = reader.u32();
-                    this.drawImageNode(canvas, imageId, iw, ih, nodeAlpha);
+                    const pixelated = reader.u32() !== 0;
+                    this.drawImageNode(canvas, imageId, iw, ih, nodeAlpha, pixelated);
                     reader.offset = startGeoOffset + 4 + geoSize;
                 }
                 // Fill Pass(es)
