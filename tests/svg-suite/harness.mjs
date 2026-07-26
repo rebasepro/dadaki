@@ -259,11 +259,21 @@ for (const svgPath of tests) {
   const vp = parseViewport(svgText) || { ...pngSize(refBuf), hasViewBox: false };
   const refB64 = refBuf.toString('base64');
 
-  // A timed-out test is recorded as an error and scores 0.000, which reads
-  // exactly like a regression — so a machine busy with something else (a
-  // parallel build, another suite) manufactures phantom regressions. Retry once
-  // on timeout before believing it: a genuine hang times out twice, while
-  // transient contention almost never does.
+  // An errored test is recorded as 0.000, which reads exactly like a
+  // regression — so anything transient manufactures phantom regressions. Two
+  // failures are known to be transient rather than real:
+  //
+  //   * `timeout` — the budget is a fixed 20s, so a machine busy with
+  //     something else (a parallel build, another suite) pushes a slow test
+  //     over it.
+  //   * `Execution context was destroyed` — vite reloads the page when it
+  //     first optimises a lazily-imported dependency, which can land in the
+  //     middle of a test.
+  //
+  // Both survive a retry on a fresh page; neither reproduces when the affected
+  // tests are run on their own. A genuine hang or crash fails twice, and the
+  // second failure is labelled so the distinction stays visible.
+  const TRANSIENT = /^timeout$|Execution context was destroyed/;
   const attempt = () =>
     Promise.race([
       runInPage(page, svgText, refB64, vp, WRITE_DIFF, ROUNDTRIP),
@@ -274,9 +284,9 @@ for (const svgPath of tests) {
   try {
     res = await attempt();
   } catch (e) {
-    const timedOut = String(e.message || e) === 'timeout';
+    const transient = TRANSIENT.test(String(e.message || e));
     await loadApp(); // recover the page after a hang/crash
-    if (timedOut) {
+    if (transient) {
       try {
         res = await attempt();
       } catch (e2) {
