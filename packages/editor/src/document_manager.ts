@@ -9,9 +9,10 @@
 import { Engine, History } from '../engine/pkg/engine';
 import { logAppEvent } from './analytics';
 import { Document } from './document';
-import { FileIO, isNativeDoc } from './file_io';
+import { adoptEmbeddedFonts, FileIO, isNativeDoc } from './file_io';
 import type { FileService } from './file_service';
 import type { InputManager } from './input';
+import { parseLoadResult, reportLoadFailure } from './load_status';
 import { AutosaveManager, type BackupEntry, PersistenceManager } from './persistence';
 import type { Renderer } from './renderer';
 import type { TabStrip } from './tab_strip';
@@ -54,6 +55,46 @@ export class DocumentManager {
          */
         private siteId = 0,
     ) {}
+
+    /** True once we've told the user a peer is on a newer build. */
+    private warnedAboutNewerPeer = false;
+
+    /**
+     * True when a collaborator is editing this document with a newer format
+     * than this build understands.
+     *
+     * The host must stop broadcasting and stop saving while this holds. Under
+     * last-writer-wins sync our scene is a *lossy* rendering of theirs — every
+     * v9 field decoded to nothing here — so sending it would overwrite their
+     * work with a downgraded copy. Going quiet is the only safe move; the user
+     * has been told why.
+     */
+    hasNewerPeer(): boolean {
+        return this.warnedAboutNewerPeer;
+    }
+
+    /**
+     * Tell the user, once per session, that a collaborator's edits can't be
+     * shown here.
+     *
+     * Once, because peers re-broadcast their scene on every change: without the
+     * latch this would open a dialog on each keystroke of theirs. And it must
+     * be said at all — otherwise the tab simply stops updating, which looks
+     * exactly like a broken connection.
+     */
+    private warnOnceAboutNewerPeer(required: number, supported: number): void {
+        console.warn(
+            `[collab] a peer is editing with a newer document format ` +
+                `(needs v${required}, this build supports v${supported}); ignoring their updates`,
+        );
+        if (this.warnedAboutNewerPeer) return;
+        this.warnedAboutNewerPeer = true;
+        reportLoadFailure(
+            'Someone else in this document is using a newer version of Dadaki.\n\n' +
+                "Their changes can't be shown here, and this tab will not send changes " +
+                'that would overwrite them. Please update Dadaki to keep collaborating.',
+        );
+    }
 
     /**
      * Change the site used for NEW object ids. Applies to already-open
@@ -300,7 +341,28 @@ export class DocumentManager {
         // site-partitioned, so they mean the same node in every tab; we drop
         // any the peer has since deleted.
         const priorSelection = Array.from(this.scene.getSelection());
-        if (!doc.engine.deserialize_proto(bytes)) return false;
+
+        // Refuse a scene this build would silently downgrade.
+        //
+        // This is the sharpest edge of the whole format: sync is last-writer-
+        // wins over full snapshots, so if a stale tab applied a newer peer's
+        // scene it would drop every field it didn't understand and then
+        // broadcast the lossy version back as authoritative — destroying that
+        // work for everyone in the session, not just locally. Declining costs
+        // this one client freshness; applying costs everyone their data.
+        const result = parseLoadResult(doc.engine.load_document(bytes));
+        if (!result.ok) {
+            if (result.error === 'too_new' || result.error === 'container_too_new') {
+                this.warnOnceAboutNewerPeer(result.requiredVersion, result.supportedVersion);
+            } else {
+                console.warn('[collab] ignoring an unreadable peer scene:', result.detail);
+            }
+            return false;
+        }
+        if (result.repaired) {
+            console.warn('[collab] peer scene needed repairs:', result.summary);
+        }
+        void adoptEmbeddedFonts(doc.engine);
         // Re-assert OUR object-id site: deserialize resumes the id counter from
         // the loaded document, but new local objects must keep allocating from
         // our own site so they can't collide with the peer's.
@@ -402,7 +464,12 @@ export class DocumentManager {
         // counter from what the document already holds, so the order matters.
         doc.engine.set_site_id(this.siteId);
         if (doc.pendingBytes) {
-            doc.engine.deserialize_proto(doc.pendingBytes);
+            const result = parseLoadResult(doc.engine.load_document(doc.pendingBytes));
+            // Tell the user rather than silently presenting an empty canvas.
+            // This path covers restoring an autosave and reopening a tab, where
+            // a truncated or too-new document used to look like a blank one.
+            FileIO.announce(result, doc.name);
+            if (result.ok) void adoptEmbeddedFonts(doc.engine);
             doc.pendingBytes = null;
         }
         doc.history = new History(this.maxHistory);

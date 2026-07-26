@@ -9,16 +9,82 @@ use glam::Vec2;
 
 use crate::{
     Color, Geometry, Gradient, GradientFocal, GradientStop, GradientType, Node, NodeType, Paint, PathPoint, Scene, Style,
+    container::{self, ContainerError},
+    validate::{self, RepairReport},
     vector_network::{VectorNetwork, NodeVectorNetwork, NetworkVertex, NetworkEdge, NetworkRegion},
 };
 
-/// Current file format version. Bump when schema changes.
+/// Current file format version — the newest schema this build can *write*.
+///
 /// v3: per-node vector network.
 /// v4: Live Paint face fills.
 /// v5: Multiple strokes and non-destructive transforms.
 /// v6: Live Paint face-fill signatures (source_nodes) + gap-bridge distance.
 /// v7: mesh gradient paint (ProtoPaint.mesh) — additive, no migration needed.
-pub const FORMAT_VERSION: u32 = 7;
+/// v8: container envelope, document metadata, embedded fonts, and typed
+///     replacements for the four editor-owned JSON blobs.
+pub const FORMAT_VERSION: u32 = 8;
+
+/// The floor for a document that uses nothing a modern reader would misread.
+///
+/// Deliberately low: most documents are plain paths and solid fills, and those
+/// should stay openable by any build indefinitely. `required_reader_version`
+/// raises it only for documents that actually use newer features.
+const BASE_READER_VERSION: u32 = 2;
+
+/// The oldest reader that can open `doc` **without silently losing anything**,
+/// written into the container as `min_reader_version`.
+///
+/// The rule: a feature raises the floor when losing it would visibly damage the
+/// artwork. Losing a mesh gradient turns a shape a different colour, so it
+/// counts; losing the document's uuid or title is recoverable and does not, or
+/// every document would be locked to the newest build for no benefit.
+///
+/// This is what makes forward compatibility safe rather than merely detectable.
+/// prost drops unknown fields, so an older reader *cannot* preserve what it
+/// does not understand — the only way to protect the data is to decline to open
+/// the file, which is what a floor above the reader's `FORMAT_VERSION` does.
+pub fn required_reader_version(doc: &ProtoDocument) -> u32 {
+    let mut floor = BASE_READER_VERSION;
+    let mut require = |v: u32| floor = floor.max(v);
+
+    if !doc.face_fills.is_empty() {
+        require(4);
+    }
+    if doc.face_fills.iter().any(|f| !f.source_nodes.is_empty())
+        || doc.gap_bridge_distance > 0.0
+        || !doc.painted_edges.is_empty()
+    {
+        require(6);
+    }
+    if !doc.fonts.is_empty() {
+        require(8);
+    }
+
+    for node in &doc.nodes {
+        if let Some(geo) = &node.geometry {
+            match &geo.kind {
+                Some(proto_geometry::Kind::Path(p)) if p.network.is_some() => require(3),
+                // A geometry this build cannot name is by definition one it
+                // would drop. Refuse rather than degrade it into a rectangle.
+                None => require(FORMAT_VERSION),
+                _ => {}
+            }
+        }
+        let Some(style) = &node.style else { continue };
+        if style.strokes.len() > 1 {
+            require(5);
+        }
+        for paint in style.fills.iter().chain(style.strokes.iter().filter_map(|s| s.paint.as_ref())) {
+            match &paint.kind {
+                Some(proto_paint::Kind::Mesh(_)) => require(7),
+                None => require(FORMAT_VERSION),
+                _ => {}
+            }
+        }
+    }
+    floor
+}
 
 // ─── Proto Message Types ────────────────────────────────────────────────────────
 
@@ -34,17 +100,56 @@ pub struct ProtoColor {
     pub a: f32,
 }
 
+/// A paint. Exactly one variant is set.
+///
+/// This is a real `oneof`, which encodes on the wire byte-for-byte identically
+/// to the four parallel `optional` fields it replaced (same tags, same order) —
+/// so existing files read back unchanged — but makes "exactly one of these"
+/// a property of the type instead of a convention the reader had to enforce by
+/// checking the variants in the right order.
 #[derive(Clone, PartialEq, Message)]
 pub struct ProtoPaint {
-    #[prost(message, optional, tag = "1")]
-    pub solid: Option<ProtoColor>,
-    #[prost(message, optional, tag = "2")]
-    pub gradient: Option<ProtoGradient>,
-    #[prost(message, optional, tag = "3")]
-    pub pattern: Option<ProtoPattern>,
-    /// v7: Coons-patch mesh gradient.
-    #[prost(message, optional, tag = "4")]
-    pub mesh: Option<ProtoMeshGradient>,
+    #[prost(oneof = "proto_paint::Kind", tags = "1, 2, 3, 4")]
+    pub kind: Option<proto_paint::Kind>,
+}
+
+pub mod proto_paint {
+    use super::*;
+
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Kind {
+        #[prost(message, tag = "1")]
+        Solid(ProtoColor),
+        #[prost(message, tag = "2")]
+        Gradient(ProtoGradient),
+        #[prost(message, tag = "3")]
+        Pattern(ProtoPattern),
+        /// v7: Coons-patch mesh gradient.
+        #[prost(message, tag = "4")]
+        Mesh(ProtoMeshGradient),
+    }
+}
+
+impl ProtoPaint {
+    pub fn solid(color: ProtoColor) -> Self {
+        Self { kind: Some(proto_paint::Kind::Solid(color)) }
+    }
+    pub fn gradient(g: ProtoGradient) -> Self {
+        Self { kind: Some(proto_paint::Kind::Gradient(g)) }
+    }
+    pub fn pattern(p: ProtoPattern) -> Self {
+        Self { kind: Some(proto_paint::Kind::Pattern(p)) }
+    }
+    pub fn mesh(m: ProtoMeshGradient) -> Self {
+        Self { kind: Some(proto_paint::Kind::Mesh(m)) }
+    }
+    /// The mesh gradient, if this paint is one.
+    pub fn as_mesh(&self) -> Option<&ProtoMeshGradient> {
+        match &self.kind {
+            Some(proto_paint::Kind::Mesh(m)) => Some(m),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -345,19 +450,62 @@ pub struct ProtoImage {
     pub image_id: u32,
 }
 
+/// A node's geometry. Exactly one variant is set.
+///
+/// Real `oneof`, wire-identical to the five parallel `optional` fields it
+/// replaced. The important gain is at the *read* end: `kind: None` now means
+/// unambiguously "a geometry written by a newer build", which
+/// `required_reader_version` turns into a refusal to open. Previously that case
+/// was indistinguishable from an absent field and fell through to a default
+/// 100×100 rectangle — a future node type would open as a plausible-looking
+/// grey box and then be saved that way.
 #[derive(Clone, PartialEq, Message)]
 pub struct ProtoGeometry {
-    /// Only one of these will be set (simulated oneof).
-    #[prost(message, optional, tag = "1")]
-    pub rect: Option<ProtoRect>,
-    #[prost(message, optional, tag = "2")]
-    pub ellipse: Option<ProtoEllipse>,
-    #[prost(message, optional, tag = "3")]
-    pub path: Option<ProtoPath>,
-    #[prost(message, optional, tag = "4")]
-    pub text: Option<ProtoText>,
-    #[prost(message, optional, tag = "5")]
-    pub image: Option<ProtoImage>,
+    #[prost(oneof = "proto_geometry::Kind", tags = "1, 2, 3, 4, 5")]
+    pub kind: Option<proto_geometry::Kind>,
+}
+
+pub mod proto_geometry {
+    use super::*;
+
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Kind {
+        #[prost(message, tag = "1")]
+        Rect(ProtoRect),
+        #[prost(message, tag = "2")]
+        Ellipse(ProtoEllipse),
+        #[prost(message, tag = "3")]
+        Path(ProtoPath),
+        #[prost(message, tag = "4")]
+        Text(ProtoText),
+        #[prost(message, tag = "5")]
+        Image(ProtoImage),
+    }
+}
+
+impl ProtoGeometry {
+    pub fn rect(width: f32, height: f32) -> Self {
+        Self { kind: Some(proto_geometry::Kind::Rect(ProtoRect { width, height })) }
+    }
+    pub fn ellipse(radius_x: f32, radius_y: f32) -> Self {
+        Self { kind: Some(proto_geometry::Kind::Ellipse(ProtoEllipse { radius_x, radius_y })) }
+    }
+    pub fn path(p: ProtoPath) -> Self {
+        Self { kind: Some(proto_geometry::Kind::Path(p)) }
+    }
+    pub fn text(t: ProtoText) -> Self {
+        Self { kind: Some(proto_geometry::Kind::Text(t)) }
+    }
+    pub fn image(i: ProtoImage) -> Self {
+        Self { kind: Some(proto_geometry::Kind::Image(i)) }
+    }
+    /// The path geometry, if this node is one.
+    pub fn as_path(&self) -> Option<&ProtoPath> {
+        match &self.kind {
+            Some(proto_geometry::Kind::Path(p)) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 /// Encoded raster image bytes stored at the document level.
@@ -471,6 +619,77 @@ pub struct ProtoArtboard {
     pub background: Option<ProtoColor>,
 }
 
+/// Identity and provenance. See `crate::DocumentMeta`.
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoDocumentMeta {
+    #[prost(string, tag = "1")]
+    pub uuid: String,
+    #[prost(uint64, tag = "2")]
+    pub created_at_ms: u64,
+    #[prost(uint64, tag = "3")]
+    pub modified_at_ms: u64,
+    #[prost(string, tag = "4")]
+    pub app_version: String,
+    #[prost(string, tag = "5")]
+    pub title: String,
+}
+
+/// An embedded font face. See `crate::FontFace`.
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoFontFace {
+    #[prost(string, tag = "1")]
+    pub family: String,
+    #[prost(uint32, tag = "2")]
+    pub weight: u32,
+    #[prost(bool, tag = "3")]
+    pub italic: bool,
+    #[prost(bytes = "vec", tag = "4")]
+    pub bytes: Vec<u8>,
+    #[prost(string, tag = "5")]
+    pub source: String,
+}
+
+/// A document colour swatch. Replaces an entry of the `swatches_json` blob.
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoSwatch {
+    #[prost(message, optional, tag = "1")]
+    pub color: Option<ProtoColor>,
+    /// Optional swatch name — the JSON blob had nowhere to put one.
+    #[prost(string, tag = "2")]
+    pub name: String,
+}
+
+/// Binds a text node to the path its glyphs flow along. Replaces an entry of
+/// the `text_paths_json` blob.
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoTextPath {
+    #[prost(uint32, tag = "1")]
+    pub text_id: u32,
+    #[prost(uint32, tag = "2")]
+    pub path_id: u32,
+}
+
+/// Arrowheads / line endings on one node. Replaces an entry of the
+/// `markers_json` blob. 0 = none, 1 = arrow, 2 = circle, 3 = square.
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoNodeMarkers {
+    #[prost(uint32, tag = "1")]
+    pub node_id: u32,
+    #[prost(uint32, tag = "2")]
+    pub start: u32,
+    #[prost(uint32, tag = "3")]
+    pub end: u32,
+}
+
+/// Ruler guides that cannot be dragged. Replaces the `guide_locks_json` blob.
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoGuideLocks {
+    #[prost(float, repeated, tag = "1")]
+    pub x: Vec<f32>,
+    #[prost(float, repeated, tag = "2")]
+    pub y: Vec<f32>,
+}
+
 /// The top-level document message.
 #[derive(Clone, PartialEq, Message)]
 pub struct ProtoDocument {
@@ -515,18 +734,37 @@ pub struct ProtoDocument {
     /// Horizontal ruler guides — world y positions.
     #[prost(float, repeated, tag = "15")]
     pub guides_y: Vec<f32>,
-    /// Document color swatches (editor-owned JSON blob).
+    /// DEPRECATED (v8): superseded by `swatches` (tag 22). Still written so a
+    /// v7 reader keeps its swatches; drop once v7 is retired.
     #[prost(string, tag = "16")]
     pub swatches_json: String,
-    /// Text-on-path links (editor-owned JSON blob, `{textId: pathId}`).
+    /// DEPRECATED (v8): superseded by `text_paths` (tag 23).
     #[prost(string, tag = "17")]
     pub text_paths_json: String,
-    /// Arrowhead / line-ending markers (editor-owned JSON blob).
+    /// DEPRECATED (v8): superseded by `markers` (tag 24).
     #[prost(string, tag = "18")]
     pub markers_json: String,
-    /// Locked ruler guides (editor-owned JSON blob, `{"x":[…],"y":[…]}`).
+    /// DEPRECATED (v8): superseded by `guide_locks` (tag 25).
     #[prost(string, tag = "19")]
     pub guide_locks_json: String,
+
+    // ── v8 ──────────────────────────────────────────────────────────────────
+    /// Identity and provenance.
+    #[prost(message, optional, tag = "20")]
+    pub meta: Option<ProtoDocumentMeta>,
+    /// Font faces embedded so the document renders without a network fetch.
+    #[prost(message, repeated, tag = "21")]
+    pub fonts: Vec<ProtoFontFace>,
+    /// Typed replacements for the four JSON blobs above. During the deprecation
+    /// window both forms are written and these win on read.
+    #[prost(message, repeated, tag = "22")]
+    pub swatches: Vec<ProtoSwatch>,
+    #[prost(message, repeated, tag = "23")]
+    pub text_paths: Vec<ProtoTextPath>,
+    #[prost(message, repeated, tag = "24")]
+    pub markers: Vec<ProtoNodeMarkers>,
+    #[prost(message, optional, tag = "25")]
+    pub guide_locks: Option<ProtoGuideLocks>,
 }
 
 /// A history/undo/drag snapshot. Wraps a full document plus the transient
@@ -705,40 +943,34 @@ impl From<&ProtoTransform> for crate::Transform2D {
 
 impl From<&Paint> for ProtoPaint {
     fn from(p: &Paint) -> Self {
-        let empty = ProtoPaint { solid: None, gradient: None, pattern: None, mesh: None };
-        match p {
-            Paint::Solid(c) => ProtoPaint { solid: Some(c.into()), ..empty },
-            Paint::Gradient(g) => ProtoPaint { gradient: Some(g.into()), ..empty },
-            Paint::Pattern(pat) => ProtoPaint {
-                pattern: Some(ProtoPattern {
-                    image_id: pat.image_id,
-                    width: pat.width,
-                    height: pat.height,
-                    transform: pat.transform.to_vec(),
-                }),
-                ..empty
-            },
-            Paint::Mesh(m) => ProtoPaint {
-                mesh: Some(ProtoMeshGradient {
-                    rows: m.rows,
-                    cols: m.cols,
-                    vertices: m
-                        .vertices
-                        .iter()
-                        .map(|v| ProtoMeshVertex {
-                            x: v.x,
-                            y: v.y,
-                            color: Some((&v.color).into()),
-                            handle_e: v.handles.e.map_or_else(Vec::new, |h| h.to_vec()),
-                            handle_w: v.handles.w.map_or_else(Vec::new, |h| h.to_vec()),
-                            handle_s: v.handles.s.map_or_else(Vec::new, |h| h.to_vec()),
-                            handle_n: v.handles.n.map_or_else(Vec::new, |h| h.to_vec()),
-                        })
-                        .collect(),
-                }),
-                ..empty
-            },
-        }
+        let kind = match p {
+            Paint::Solid(c) => proto_paint::Kind::Solid(c.into()),
+            Paint::Gradient(g) => proto_paint::Kind::Gradient(g.into()),
+            Paint::Pattern(pat) => proto_paint::Kind::Pattern(ProtoPattern {
+                image_id: pat.image_id,
+                width: pat.width,
+                height: pat.height,
+                transform: pat.transform.to_vec(),
+            }),
+            Paint::Mesh(m) => proto_paint::Kind::Mesh(ProtoMeshGradient {
+                rows: m.rows,
+                cols: m.cols,
+                vertices: m
+                    .vertices
+                    .iter()
+                    .map(|v| ProtoMeshVertex {
+                        x: v.x,
+                        y: v.y,
+                        color: Some((&v.color).into()),
+                        handle_e: v.handles.e.map_or_else(Vec::new, |h| h.to_vec()),
+                        handle_w: v.handles.w.map_or_else(Vec::new, |h| h.to_vec()),
+                        handle_s: v.handles.s.map_or_else(Vec::new, |h| h.to_vec()),
+                        handle_n: v.handles.n.map_or_else(Vec::new, |h| h.to_vec()),
+                    })
+                    .collect(),
+            }),
+        };
+        ProtoPaint { kind: Some(kind) }
     }
 }
 
@@ -748,8 +980,9 @@ fn proto_handle(h: &[f32]) -> Option<[f32; 2]> {
 
 impl From<&ProtoPaint> for Paint {
     fn from(p: &ProtoPaint) -> Self {
-        if let Some(m) = &p.mesh {
-            let mesh = crate::MeshGradient {
+        match &p.kind {
+            Some(proto_paint::Kind::Mesh(m)) => {
+                let mesh = crate::MeshGradient {
                 rows: m.rows,
                 cols: m.cols,
                 vertices: m
@@ -771,27 +1004,34 @@ impl From<&ProtoPaint> for Paint {
                         },
                     })
                     .collect(),
-            };
-            // Corrupt grid → solid black, same degradation as unknown paints.
-            if mesh.is_valid() {
-                Paint::Mesh(mesh)
-            } else {
-                Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+                };
+                // Corrupt grid → solid black, same degradation as unknown paints.
+                if mesh.is_valid() {
+                    Paint::Mesh(mesh)
+                } else {
+                    Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+                }
             }
-        } else if let Some(pat) = &p.pattern {
-            let t = &pat.transform;
-            let transform = if t.len() == 6 {
-                [t[0], t[1], t[2], t[3], t[4], t[5]]
-            } else {
-                [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-            };
-            Paint::Pattern(crate::Pattern { image_id: pat.image_id, width: pat.width, height: pat.height, transform })
-        } else if let Some(g) = &p.gradient {
-            Paint::Gradient(g.into())
-        } else if let Some(c) = &p.solid {
-            Paint::Solid(c.into())
-        } else {
-            Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+            Some(proto_paint::Kind::Pattern(pat)) => {
+                let t = &pat.transform;
+                let transform = if t.len() == 6 {
+                    [t[0], t[1], t[2], t[3], t[4], t[5]]
+                } else {
+                    [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+                };
+                Paint::Pattern(crate::Pattern {
+                    image_id: pat.image_id,
+                    width: pat.width,
+                    height: pat.height,
+                    transform,
+                })
+            }
+            Some(proto_paint::Kind::Gradient(g)) => Paint::Gradient(g.into()),
+            Some(proto_paint::Kind::Solid(c)) => Paint::Solid(c.into()),
+            // Unset, or a variant from a newer build. The container's
+            // `min_reader_version` gate should have refused the file long
+            // before this, so reaching here means a genuinely malformed paint.
+            None => Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
         }
     }
 }
@@ -894,31 +1134,23 @@ fn u32_to_node_type(v: u32) -> NodeType {
 }
 
 fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
-    match g {
-        Geometry::Rect { width, height } => ProtoGeometry {
-            rect: Some(ProtoRect { width: *width, height: *height }),
-            ellipse: None, path: None, text: None, image: None,
-        },
-        Geometry::Ellipse { radius_x, radius_y } => ProtoGeometry {
-            rect: None,
-            ellipse: Some(ProtoEllipse { radius_x: *radius_x, radius_y: *radius_y }),
-            path: None, text: None, image: None,
-        },
-        Geometry::Path { ref subpaths, ref network } => ProtoGeometry {
-            rect: None, ellipse: None,
-            path: Some(ProtoPath {
-                legacy_points: Vec::new(),
-                subpaths: subpaths.iter().map(|sp| ProtoSubpath {
-                    points: sp.points.iter().map(|p| p.into()).collect(),
-                    closed: sp.closed,
-                }).collect(),
-                network: network.as_ref().map(|n| network_to_proto(n)),
-            }),
-            text: None, image: None,
-        },
-        Geometry::Text { content, font_size, ref font_family, text_align, line_height, font_weight, italic, letter_spacing } => ProtoGeometry {
-            rect: None, ellipse: None, path: None, image: None,
-            text: Some(ProtoText {
+    let kind = match g {
+        Geometry::Rect { width, height } => {
+            proto_geometry::Kind::Rect(ProtoRect { width: *width, height: *height })
+        }
+        Geometry::Ellipse { radius_x, radius_y } => {
+            proto_geometry::Kind::Ellipse(ProtoEllipse { radius_x: *radius_x, radius_y: *radius_y })
+        }
+        Geometry::Path { ref subpaths, ref network } => proto_geometry::Kind::Path(ProtoPath {
+            legacy_points: Vec::new(),
+            subpaths: subpaths.iter().map(|sp| ProtoSubpath {
+                points: sp.points.iter().map(|p| p.into()).collect(),
+                closed: sp.closed,
+            }).collect(),
+            network: network.as_ref().map(|n| network_to_proto(n)),
+        }),
+        Geometry::Text { content, font_size, ref font_family, text_align, line_height, font_weight, italic, letter_spacing } => {
+            proto_geometry::Kind::Text(ProtoText {
                 content: content.clone(),
                 font_size: *font_size,
                 font_family: font_family.clone(),
@@ -927,45 +1159,47 @@ fn geometry_to_proto(g: &Geometry) -> ProtoGeometry {
                 font_weight: *font_weight as u32,
                 italic: *italic,
                 letter_spacing: *letter_spacing,
-            }),
-        },
-        Geometry::Image { width, height, image_id } => ProtoGeometry {
-            rect: None, ellipse: None, path: None, text: None,
-            image: Some(ProtoImage { width: *width, height: *height, image_id: *image_id }),
-        },
-    }
+            })
+        }
+        Geometry::Image { width, height, image_id } => {
+            proto_geometry::Kind::Image(ProtoImage { width: *width, height: *height, image_id: *image_id })
+        }
+    };
+    ProtoGeometry { kind: Some(kind) }
 }
 
 fn proto_to_geometry(g: &ProtoGeometry) -> Geometry {
-    if let Some(img) = &g.image {
-        Geometry::Image { width: img.width, height: img.height, image_id: img.image_id }
-    } else if let Some(r) = &g.rect {
-        Geometry::Rect { width: r.width, height: r.height }
-    } else if let Some(e) = &g.ellipse {
-        Geometry::Ellipse { radius_x: e.radius_x, radius_y: e.radius_y }
-    } else if let Some(p) = &g.path {
-        // Defensive: if migrate() didn't run (direct to_scene call on a v1
-        // doc), still honor the legacy flat point list.
-        if p.subpaths.is_empty() && !p.legacy_points.is_empty() {
-            let sp = legacy_points_to_subpath(p.legacy_points.clone());
-            Geometry::Path {
-                subpaths: vec![crate::Subpath {
-                    points: sp.points.iter().map(|pp| pp.into()).collect(),
-                    closed: sp.closed,
-                }],
-                network: p.network.as_ref().map(|n| proto_to_network(n)),
-            }
-        } else {
-            Geometry::Path {
-                subpaths: p.subpaths.iter().map(|sp| crate::Subpath {
-                    points: sp.points.iter().map(|pp| pp.into()).collect(),
-                    closed: sp.closed,
-                }).collect(),
-                network: p.network.as_ref().map(|n| proto_to_network(n)),
+    match &g.kind {
+        Some(proto_geometry::Kind::Image(img)) => {
+            Geometry::Image { width: img.width, height: img.height, image_id: img.image_id }
+        }
+        Some(proto_geometry::Kind::Rect(r)) => Geometry::Rect { width: r.width, height: r.height },
+        Some(proto_geometry::Kind::Ellipse(e)) => {
+            Geometry::Ellipse { radius_x: e.radius_x, radius_y: e.radius_y }
+        }
+        Some(proto_geometry::Kind::Path(p)) => {
+            // Defensive: if migrate() didn't run (direct to_scene call on a v1
+            // doc), still honor the legacy flat point list.
+            if p.subpaths.is_empty() && !p.legacy_points.is_empty() {
+                let sp = legacy_points_to_subpath(p.legacy_points.clone());
+                Geometry::Path {
+                    subpaths: vec![crate::Subpath {
+                        points: sp.points.iter().map(|pp| pp.into()).collect(),
+                        closed: sp.closed,
+                    }],
+                    network: p.network.as_ref().map(|n| proto_to_network(n)),
+                }
+            } else {
+                Geometry::Path {
+                    subpaths: p.subpaths.iter().map(|sp| crate::Subpath {
+                        points: sp.points.iter().map(|pp| pp.into()).collect(),
+                        closed: sp.closed,
+                    }).collect(),
+                    network: p.network.as_ref().map(|n| proto_to_network(n)),
+                }
             }
         }
-    } else if let Some(t) = &g.text {
-        Geometry::Text {
+        Some(proto_geometry::Kind::Text(t)) => Geometry::Text {
             content: t.content.clone(),
             font_size: t.font_size,
             font_family: t.font_family.clone(),
@@ -974,9 +1208,12 @@ fn proto_to_geometry(g: &ProtoGeometry) -> Geometry {
             font_weight: if t.font_weight > 0 { t.font_weight as u16 } else { 400 },
             italic: t.italic,
             letter_spacing: t.letter_spacing,
-        }
-    } else {
-        Geometry::Rect { width: 100.0, height: 100.0 }
+        },
+        // Unset, or a geometry from a newer build. `required_reader_version`
+        // raises the floor to FORMAT_VERSION for this case, so a file that
+        // reaches here has already been refused by the container gate; the
+        // rectangle is a last-resort placeholder, not a supported degradation.
+        None => Geometry::Rect { width: 100.0, height: 100.0 },
     }
 }
 
@@ -1080,6 +1317,144 @@ fn proto_to_node(pn: &ProtoNode) -> Node {
     }
 }
 
+// ─── Editor-owned blobs: JSON ⇄ typed messages ──────────────────────────────────
+//
+// Four document fields were shipped as opaque JSON strings the engine never
+// looked inside. That is a schema-less hole in a schema'd format: nothing
+// validates them, nothing versions them, and any tool other than this editor
+// has to reverse-engineer them. v8 gives each a real message.
+//
+// The editor still reads and writes the JSON form, so these converters keep the
+// two representations in lockstep: the JSON is the input, the typed fields are
+// derived on write, and the typed fields win on read. Both are written during
+// the deprecation window so a v7 reader loses nothing. Every converter is
+// total — malformed JSON yields an empty list rather than an error, matching
+// the editor's existing `catch { return [] }` behaviour.
+
+/// Marker kind names, indexed by their wire code. Order is the wire contract.
+const MARKER_KINDS: [&str; 4] = ["none", "arrow", "circle", "square"];
+
+fn marker_kind_to_u32(s: &str) -> u32 {
+    MARKER_KINDS.iter().position(|&k| k == s).unwrap_or(0) as u32
+}
+
+fn marker_kind_from_u32(v: u32) -> &'static str {
+    MARKER_KINDS.get(v as usize).copied().unwrap_or("none")
+}
+
+fn swatches_from_json(json: &str) -> Vec<ProtoSwatch> {
+    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .map(|v| {
+            let f = |k: &str, d: f32| v.get(k).and_then(|x| x.as_f64()).unwrap_or(d as f64) as f32;
+            ProtoSwatch {
+                color: Some(ProtoColor { r: f("r", 0.0), g: f("g", 0.0), b: f("b", 0.0), a: f("a", 1.0) }),
+                name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            }
+        })
+        .collect()
+}
+
+fn swatches_to_json(swatches: &[ProtoSwatch]) -> String {
+    let items: Vec<serde_json::Value> = swatches
+        .iter()
+        .map(|s| {
+            let c = s.color.clone().unwrap_or_default();
+            let mut obj = serde_json::Map::new();
+            obj.insert("r".into(), c.r.into());
+            obj.insert("g".into(), c.g.into());
+            obj.insert("b".into(), c.b.into());
+            obj.insert("a".into(), c.a.into());
+            if !s.name.is_empty() {
+                obj.insert("name".into(), s.name.clone().into());
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+    serde_json::to_string(&items).unwrap_or_else(|_| "[]".into())
+}
+
+fn text_paths_from_json(json: &str) -> Vec<ProtoTextPath> {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let mut out: Vec<ProtoTextPath> = map
+        .iter()
+        .filter_map(|(k, v)| {
+            Some(ProtoTextPath { text_id: k.parse().ok()?, path_id: v.as_u64()? as u32 })
+        })
+        .collect();
+    out.sort_by_key(|t| t.text_id);
+    out
+}
+
+fn text_paths_to_json(links: &[ProtoTextPath]) -> String {
+    let mut obj = serde_json::Map::new();
+    for l in links {
+        obj.insert(l.text_id.to_string(), l.path_id.into());
+    }
+    serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_else(|_| "{}".into())
+}
+
+fn markers_from_json(json: &str) -> Vec<ProtoNodeMarkers> {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let mut out: Vec<ProtoNodeMarkers> = map
+        .iter()
+        .filter_map(|(k, v)| {
+            let kind = |end: &str| {
+                v.get(end).and_then(|x| x.as_str()).map(marker_kind_to_u32).unwrap_or(0)
+            };
+            Some(ProtoNodeMarkers { node_id: k.parse().ok()?, start: kind("start"), end: kind("end") })
+        })
+        .collect();
+    out.sort_by_key(|m| m.node_id);
+    out
+}
+
+fn markers_to_json(markers: &[ProtoNodeMarkers]) -> String {
+    let mut obj = serde_json::Map::new();
+    for m in markers {
+        let mut entry = serde_json::Map::new();
+        if m.start != 0 {
+            entry.insert("start".into(), marker_kind_from_u32(m.start).into());
+        }
+        if m.end != 0 {
+            entry.insert("end".into(), marker_kind_from_u32(m.end).into());
+        }
+        // An all-"none" entry is how the editor represents "no markers here";
+        // it removes the key entirely rather than storing empties.
+        if !entry.is_empty() {
+            obj.insert(m.node_id.to_string(), serde_json::Value::Object(entry));
+        }
+    }
+    serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_else(|_| "{}".into())
+}
+
+fn guide_locks_from_json(json: &str) -> Option<ProtoGuideLocks> {
+    let parsed = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    let axis = |k: &str| -> Vec<f32> {
+        parsed
+            .get(k)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect())
+            .unwrap_or_default()
+    };
+    let (x, y) = (axis("x"), axis("y"));
+    if x.is_empty() && y.is_empty() {
+        return None;
+    }
+    Some(ProtoGuideLocks { x, y })
+}
+
+fn guide_locks_to_json(locks: &ProtoGuideLocks) -> String {
+    serde_json::json!({ "x": locks.x, "y": locks.y }).to_string()
+}
+
 // ─── Document-Level Conversion ──────────────────────────────────────────────────
 
 impl ProtoDocument {
@@ -1153,6 +1528,13 @@ impl ProtoDocument {
             .map(|a| (a.w, a.h))
             .unwrap_or((scene.document_width, scene.document_height));
 
+        // Parse the editor's JSON blobs once; both the typed fields and the
+        // deprecated string fields below are rendered from these.
+        let swatches = swatches_from_json(&scene.swatches_json);
+        let text_paths = text_paths_from_json(&scene.text_paths_json);
+        let markers = markers_from_json(&scene.markers_json);
+        let guide_locks = guide_locks_from_json(&scene.guide_locks_json);
+
         ProtoDocument {
             format_version: FORMAT_VERSION,
             nodes,
@@ -1186,10 +1568,49 @@ impl ProtoDocument {
             live_paint_group: scene.live_paint_group.unwrap_or(0),
             guides_x: scene.guides_x.clone(),
             guides_y: scene.guides_y.clone(),
-            swatches_json: scene.swatches_json.clone(),
-            text_paths_json: scene.text_paths_json.clone(),
-            markers_json: scene.markers_json.clone(),
-            guide_locks_json: scene.guide_locks_json.clone(),
+            // The JSON blobs are still written for v7 readers, but in the
+            // *canonical* rendering of the typed data rather than verbatim from
+            // the scene.
+            //
+            // That normalization is required, not cosmetic. On load the typed
+            // fields win and the JSON string is regenerated from them, so
+            // writing the editor's raw string here would make the first
+            // save/load hop change the bytes — breaking the
+            // serialize→deserialize→serialize fixed point that undo coalescing
+            // relies on (see `gesture_history.test.ts`). Emitting the canonical
+            // form on both sides makes the very first round trip stable.
+            swatches_json: swatches_to_json(&swatches),
+            text_paths_json: text_paths_to_json(&text_paths),
+            markers_json: markers_to_json(&markers),
+            guide_locks_json: guide_locks
+                .as_ref()
+                .map(guide_locks_to_json)
+                .unwrap_or_default(),
+            meta: Some(ProtoDocumentMeta {
+                uuid: scene.meta.uuid.clone(),
+                created_at_ms: scene.meta.created_at_ms,
+                modified_at_ms: scene.meta.modified_at_ms,
+                app_version: scene.meta.app_version.clone(),
+                title: scene.meta.title.clone(),
+            }),
+            fonts: {
+                let mut fonts: Vec<ProtoFontFace> = scene.fonts.iter().map(|f| ProtoFontFace {
+                    family: f.family.clone(),
+                    weight: f.weight as u32,
+                    italic: f.italic,
+                    bytes: f.bytes.clone(),
+                    source: f.source.clone(),
+                }).collect();
+                // Deterministic order for byte-exact snapshots.
+                fonts.sort_by(|a, b| a.family.cmp(&b.family)
+                    .then(a.weight.cmp(&b.weight))
+                    .then(a.italic.cmp(&b.italic)));
+                fonts
+            },
+            swatches,
+            text_paths,
+            markers,
+            guide_locks,
         }
     }
 
@@ -1277,10 +1698,42 @@ impl ProtoDocument {
             live_paint_group: if self.live_paint_group != 0 { Some(self.live_paint_group) } else { None },
             guides_x: self.guides_x.clone(),
             guides_y: self.guides_y.clone(),
-            swatches_json: self.swatches_json.clone(),
-            text_paths_json: self.text_paths_json.clone(),
-            markers_json: self.markers_json.clone(),
-            guide_locks_json: self.guide_locks_json.clone(),
+            // Typed fields win; the deprecated JSON blobs are the fallback for
+            // documents written before v8. The editor still consumes the JSON
+            // form, so the typed values are rendered back into it here.
+            swatches_json: if self.swatches.is_empty() {
+                self.swatches_json.clone()
+            } else {
+                swatches_to_json(&self.swatches)
+            },
+            text_paths_json: if self.text_paths.is_empty() {
+                self.text_paths_json.clone()
+            } else {
+                text_paths_to_json(&self.text_paths)
+            },
+            markers_json: if self.markers.is_empty() {
+                self.markers_json.clone()
+            } else {
+                markers_to_json(&self.markers)
+            },
+            guide_locks_json: match &self.guide_locks {
+                Some(locks) => guide_locks_to_json(locks),
+                None => self.guide_locks_json.clone(),
+            },
+            meta: self.meta.as_ref().map(|m| crate::DocumentMeta {
+                uuid: m.uuid.clone(),
+                created_at_ms: m.created_at_ms,
+                modified_at_ms: m.modified_at_ms,
+                app_version: m.app_version.clone(),
+                title: m.title.clone(),
+            }).unwrap_or_default(),
+            fonts: self.fonts.iter().map(|f| crate::FontFace {
+                family: f.family.clone(),
+                weight: f.weight as u16,
+                italic: f.italic,
+                bytes: f.bytes.clone(),
+                source: f.source.clone(),
+            }).collect(),
         };
 
         let next_id = if self.next_id > 0 {
@@ -1295,18 +1748,52 @@ impl ProtoDocument {
 }
 
 // ─── Serialize / Deserialize ────────────────────────────────────────────────────
+//
+// Two distinct paths, deliberately:
+//
+//   * **Files** (`serialize_to_proto` / `deserialize_from_proto`) carry the
+//     container envelope — magic, version floor, checksum, compression.
+//   * **Undo snapshots** (`serialize_snapshot` / `deserialize_snapshot`) stay
+//     bare protobuf. They are in-memory only, produced on every mutation, and
+//     must be a byte-exact fixed point; compressing them would cost real time
+//     on every edit to protect bytes that never reach a disk.
 
-/// Serialize a scene to protobuf bytes.
+/// Serialize a scene to a complete `.dadaki` file (enveloped, compressed).
 pub fn serialize_to_proto(scene: &Scene, next_id: u32) -> Vec<u8> {
     let doc = ProtoDocument::from_scene(scene, next_id);
-    doc.encode_to_vec()
+    let floor = required_reader_version(&doc);
+    container::wrap(&doc.encode_to_vec(), floor)
 }
 
-/// Deserialize a scene from protobuf bytes.
-pub fn deserialize_from_proto(data: &[u8]) -> Option<(Scene, u32)> {
-    let mut doc = ProtoDocument::decode(data).ok()?;
+/// Serialize without the envelope — bare protobuf, as written before v8.
+/// Kept for tests that need to construct legacy input.
+#[cfg(test)]
+pub fn serialize_to_proto_bare(scene: &Scene, next_id: u32) -> Vec<u8> {
+    ProtoDocument::from_scene(scene, next_id).encode_to_vec()
+}
+
+/// Read a `.dadaki` file: envelope if present, bare protobuf if not.
+///
+/// Returns the scene plus a report of anything that had to be repaired.
+pub fn deserialize_from_proto(data: &[u8]) -> Result<(Scene, u32, RepairReport), LoadError> {
+    let payload = if container::has_envelope(data) {
+        container::unwrap(data, FORMAT_VERSION).map_err(LoadError::Container)?
+    } else {
+        // Pre-v8 bare protobuf. The empty byte string decodes as a *valid*
+        // empty document, which is how a truncated save used to open as a blank
+        // canvas and then overwrite the original — so reject it outright.
+        // Enveloped files get this for free from the length and CRC checks.
+        if data.is_empty() {
+            return Err(LoadError::Container(ContainerError::Empty));
+        }
+        data.to_vec()
+    };
+
+    let mut doc = ProtoDocument::decode(&payload[..]).map_err(|_| LoadError::Unparseable)?;
     migrate(&mut doc);
-    Some(doc.to_scene())
+    let (scene, next_id) = doc.to_scene();
+    let (scene, report) = validate::repair(scene);
+    Ok((scene, next_id, report))
 }
 
 /// Serialize a full history/undo/drag snapshot (document + selection).
@@ -1337,9 +1824,42 @@ pub fn serialize_to_base64(scene: &Scene, next_id: u32) -> String {
 }
 
 /// Deserialize a scene from base64-encoded protobuf (from SVG metadata).
-pub fn deserialize_from_base64(b64: &str) -> Option<(Scene, u32)> {
-    let bytes = BASE64.decode(b64.trim()).ok()?;
+pub fn deserialize_from_base64(b64: &str) -> Result<(Scene, u32, RepairReport), LoadError> {
+    let bytes = BASE64.decode(b64.trim()).map_err(|_| LoadError::Unparseable)?;
     deserialize_from_proto(&bytes)
+}
+
+/// Why a document could not be loaded.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoadError {
+    /// The envelope rejected it — too new, truncated, or corrupt.
+    Container(ContainerError),
+    /// The payload is not a `ProtoDocument` at all.
+    Unparseable,
+}
+
+impl LoadError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            LoadError::Container(e) => e.code(),
+            LoadError::Unparseable => "unparseable",
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match self {
+            LoadError::Container(e) => e.detail(),
+            LoadError::Unparseable => "the file is not a Dadaki document".into(),
+        }
+    }
+
+    /// The format version this file needs, when that is why it was refused.
+    pub fn required_version(&self) -> Option<u32> {
+        match self {
+            LoadError::Container(ContainerError::TooNew { required, .. }) => Some(*required),
+            _ => None,
+        }
+    }
 }
 
 /// Run schema migrations on older format versions.
@@ -1356,7 +1876,7 @@ fn migrate(doc: &mut ProtoDocument) {
 fn migrate_v1_to_v2(doc: &mut ProtoDocument) {
     for node in &mut doc.nodes {
         let Some(geo) = node.geometry.as_mut() else { continue };
-        let Some(path) = geo.path.as_mut() else { continue };
+        let Some(proto_geometry::Kind::Path(path)) = geo.kind.as_mut() else { continue };
         if !path.legacy_points.is_empty() && path.subpaths.is_empty() {
             let points = std::mem::take(&mut path.legacy_points);
             path.subpaths.push(legacy_points_to_subpath(points));
@@ -1389,12 +1909,7 @@ mod tests {
 
     fn make_style() -> ProtoStyle {
         ProtoStyle {
-            fills: vec![ProtoPaint {
-                solid: Some(ProtoColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
-                gradient: None,
-                pattern: None,
-                mesh: None,
-            }],
+            fills: vec![ProtoPaint::solid(ProtoColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 })],
             strokes: Vec::new(),
             opacity: Some(1.0),
             corner_radius: 0.0,
@@ -1433,20 +1948,14 @@ mod tests {
                 node_type: 0, // Path
                 transform: Some(ident_transform()),
                 style: Some(make_style()),
-                geometry: Some(ProtoGeometry {
-                    rect: None,
-                    ellipse: None,
-                    path: Some(ProtoPath {
+                geometry: Some(ProtoGeometry::path(ProtoPath {
                         legacy_points: vec![
                             pp(0.0, 0.0), pp(100.0, 0.0), pp(50.0, 80.0),
                             pp(0.0, 0.0), // v1 closing duplicate
                         ],
                         subpaths: Vec::new(),
                         network: None,
-                    }),
-                    text: None,
-                    image: None,
-                }),
+                    })),
                 children: Vec::new(),
                 parent: None,
                 visible: true,
@@ -1474,10 +1983,11 @@ mod tests {
             text_paths_json: String::new(),
             markers_json: String::new(),
             guide_locks_json: String::new(),
+            ..Default::default()
         };
 
         let bytes = v1_doc.encode_to_vec();
-        let (scene, next_id) = deserialize_from_proto(&bytes).expect("v1 file must decode");
+        let (scene, next_id, _) = deserialize_from_proto(&bytes).expect("v1 file must decode");
         assert_eq!(next_id, 2);
 
         let node = scene.nodes.get(&1).expect("node present");
@@ -1517,6 +2027,7 @@ mod tests {
             text_paths_json: String::new(),
             markers_json: String::new(),
             guide_locks_json: String::new(),
+            ..Default::default()
         };
         doc.nodes.push(ProtoNode {
             id: 1,
@@ -1524,17 +2035,11 @@ mod tests {
             node_type: 0,
             transform: Some(ident_transform()),
             style: Some(make_style()),
-            geometry: Some(ProtoGeometry {
-                rect: None,
-                ellipse: None,
-                path: Some(ProtoPath {
+            geometry: Some(ProtoGeometry::path(ProtoPath {
                     legacy_points: vec![pp(0.0, 0.0), pp(50.0, 50.0)],
                     subpaths: Vec::new(),
                     network: None,
-                }),
-                text: None,
-                image: None,
-            }),
+                })),
             children: Vec::new(),
             parent: None,
             visible: true,
@@ -1547,7 +2052,7 @@ mod tests {
         });
 
         let bytes = doc.encode_to_vec();
-        let (scene, _) = deserialize_from_proto(&bytes).unwrap();
+        let (scene, _, _) = deserialize_from_proto(&bytes).unwrap();
         match &scene.nodes.get(&1).unwrap().geometry {
             Geometry::Path { subpaths, .. } => {
                 assert_eq!(subpaths.len(), 1);
@@ -1633,10 +2138,12 @@ mod tests {
             text_paths_json: String::new(),
             markers_json: String::new(),
             guide_locks_json: String::new(),
+            meta: Default::default(),
+            fonts: Vec::new(),
         };
 
         let bytes = serialize_to_proto(&scene, 8);
-        let (scene2, next_id) = deserialize_from_proto(&bytes).unwrap();
+        let (scene2, next_id, _) = deserialize_from_proto(&bytes).unwrap();
         assert_eq!(next_id, 8);
         assert_eq!(scene2.document_width, 800.0);
         assert_eq!(scene2.document_height, 600.0);
@@ -1686,6 +2193,8 @@ mod tests {
             text_paths_json: String::new(),
             markers_json: String::new(),
             guide_locks_json: String::new(),
+            meta: Default::default(),
+            fonts: Vec::new(),
         }
     }
 
@@ -1703,7 +2212,7 @@ mod tests {
             ab(2, "Hero", 900.0, 0.0, 1200.0, 400.0),
         ]);
         let bytes = serialize_to_proto(&scene, 3);
-        let (scene2, _) = deserialize_from_proto(&bytes).unwrap();
+        let (scene2, _, _) = deserialize_from_proto(&bytes).unwrap();
         assert_eq!(scene2.artboards.len(), 2);
         assert_eq!(scene2.artboards[1].name, "Hero");
         assert_eq!(scene2.artboards[1].x, 900.0);
@@ -1737,9 +2246,10 @@ mod tests {
             text_paths_json: String::new(),
             markers_json: String::new(),
             guide_locks_json: String::new(),
+            ..Default::default()
         };
         let bytes = old.encode_to_vec();
-        let (scene, _) = deserialize_from_proto(&bytes).unwrap();
+        let (scene, _, _) = deserialize_from_proto(&bytes).unwrap();
         assert_eq!(scene.artboards.len(), 1);
         assert_eq!(scene.artboards[0].name, "Artwork 1");
         assert_eq!(scene.artboards[0].w, 1920.0);
@@ -1818,7 +2328,10 @@ mod tests {
     #[test]
     fn test_mesh_paint_corrupt_grid_degrades_to_solid() {
         let mut proto: ProtoPaint = (&Paint::Mesh(sample_mesh())).into();
-        proto.mesh.as_mut().unwrap().vertices.pop(); // count mismatch
+        match proto.kind.as_mut() {
+            Some(proto_paint::Kind::Mesh(m)) => m.vertices.pop(), // count mismatch
+            _ => panic!("expected a mesh paint"),
+        };
         match Paint::from(&proto) {
             Paint::Solid(_) => {}
             other => panic!("expected solid degradation, got {:?}", other),

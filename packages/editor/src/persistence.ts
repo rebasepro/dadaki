@@ -11,6 +11,7 @@
  * IndexedDB; re-permissioning on restore is handled by FileService.
  */
 import type { Engine } from '../engine/pkg/engine';
+import { stampDocumentIdentity } from './file_io';
 
 export interface StoredDoc {
     id: string;
@@ -243,12 +244,18 @@ export class AutosaveManager {
 
     /** Force a version snapshot now, ignoring the throttle (Save / tab close). */
     snapshotNow(): void {
+        stampDocumentIdentity(this.engine);
         this.writeBackup(this.engine.serialize_proto());
     }
 
     private save(): void {
         this.timeout = null;
         const meta = this.getMeta();
+        // Assign the document's uuid and creation time on the first autosave if
+        // it doesn't have them yet, so identity is established before the
+        // document ever reaches a file or the cloud. Fonts are deliberately not
+        // embedded here: autosave runs constantly and must not await a fetch.
+        stampDocumentIdentity(this.engine, meta.name);
         const bytes = this.engine.serialize_proto();
         PersistenceManager.saveDocument({
             id: this.docId,

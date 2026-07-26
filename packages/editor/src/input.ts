@@ -2,9 +2,11 @@ import { blendNodes } from './blend';
 import { nodeToWorldPath, pathToSubpaths, transformSubpaths } from './boolean_ops';
 import type { DocumentManager } from './document_manager';
 import { computeEqualSpacing } from './equal_spacing';
+import { adoptEmbeddedFonts, FileIO } from './file_io';
 import type { FileService } from './file_service';
 import { DEFAULT_TEXT_FONT, ensureFontCSS, loadGoogleFontData } from './fonts';
 import type { GuideHit, GuidesController } from './guides';
+import { parseLoadResult } from './load_status';
 import type { MeshEditController } from './mesh_edit';
 import { offsetPath } from './offset_path';
 import { outlineStroke } from './outline_stroke';
@@ -480,8 +482,12 @@ export class InputManager {
             } else if (name.endsWith('.dadaki')) {
                 const bytes = new Uint8Array(await file.arrayBuffer());
                 this.scene.saveMoveHistory(); // snapshot current doc so the drop is undoable
-                this.scene.engine.deserialize_proto(bytes);
-                this.scene.renderer?.clearImageCache(); // ids may map to new bytes
+                const result = parseLoadResult(this.scene.engine.load_document(bytes));
+                FileIO.announce(result, file.name);
+                if (result.ok) {
+                    void adoptEmbeddedFonts(this.scene.engine);
+                    this.scene.renderer?.clearImageCache(); // ids may map to new bytes
+                }
             } else if (file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/.test(name)) {
                 const bytes = new Uint8Array(await file.arrayBuffer());
                 // Natural pixel size (fallback to a square if decode fails).

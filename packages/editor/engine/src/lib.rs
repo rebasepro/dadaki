@@ -1,13 +1,44 @@
 use wasm_bindgen::prelude::*;
 use glam::{Mat3, Vec2, Vec3};
 use serde::{Serialize, Deserialize};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use std::collections::{HashMap, HashSet};
 
 mod vector_network;
 pub use vector_network::{VectorNetwork, NodeVectorNetwork, NetworkVertex, NetworkEdge, NetworkRegion};
 
+mod container;
+pub use container::{ContainerError, CONTAINER_VERSION};
+
+mod validate;
+pub use validate::RepairReport;
+
 mod proto;
-pub use proto::FORMAT_VERSION;
+pub use proto::{FORMAT_VERSION, LoadError};
+
+#[cfg(test)]
+mod format_tests;
+
+/// Largest absolute world coordinate the editor supports, on any axis.
+///
+/// Geometry is stored as `f32`, whose precision degrades with magnitude: the
+/// gap between representable values is ~0.00006 units at 1e3, 0.0078 at 1e5,
+/// 0.0625 at 1e6, and a full unit at 1e7. Past this limit, nudging a point by a
+/// small amount would silently do nothing, and snapping would land visibly off
+/// target. 1e6 keeps the worst-case step at 1/16 of a unit — imperceptible at
+/// any usable zoom — while still being ~60× the largest artboard anyone sets up.
+///
+/// `validate::repair` clamps incoming documents to this range, so no file can
+/// push the editor into the region where arithmetic stops behaving.
+pub const MAX_COORD: f32 = 1.0e6;
+
+/// Deepest group nesting the renderer will descend.
+///
+/// Recursion in wasm runs on a ~1 MB stack, so an unbounded walk traps the
+/// instance — the editor dies, rather than reporting an error — at a depth well
+/// below what a hostile (or merely broken) file can encode. No real artwork
+/// nests anywhere near this far.
+pub const MAX_NODE_DEPTH: u32 = 1024;
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
@@ -1360,6 +1391,61 @@ pub struct Scene {
     /// positions that can't be dragged). Opaque to the engine.
     #[serde(default)]
     pub guide_locks_json: String,
+    /// Stable identity and provenance for this document.
+    #[serde(default)]
+    pub meta: DocumentMeta,
+    /// Font faces embedded in the document so it renders identically without a
+    /// network round-trip. See `FontFace`.
+    #[serde(default)]
+    pub fonts: Vec<FontFace>,
+}
+
+/// Identity and provenance that travel with the document.
+///
+/// Every field here is set by the editor, never invented during serialization.
+/// That is load-bearing: `serialize_snapshot` runs on every undo step and must
+/// be a byte-exact fixed point (see `gesture_history.test.ts`), so a timestamp
+/// or uuid generated inside `from_scene` would make two snapshots of an
+/// unchanged scene differ and break undo coalescing.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+pub struct DocumentMeta {
+    /// Stable document identity, assigned once at creation and preserved across
+    /// every save, copy, and sync. Cloud sync needs this to tell "the same
+    /// document edited twice" from "two documents"; filenames cannot.
+    #[serde(default)]
+    pub uuid: String,
+    /// Unix epoch milliseconds. 0 = unknown (documents predating this field).
+    #[serde(default)]
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub modified_at_ms: u64,
+    /// Version of the editor that last wrote the file — the first thing worth
+    /// knowing on any "this file won't open" report.
+    #[serde(default)]
+    pub app_version: String,
+    /// Human-readable document title, independent of the filename.
+    #[serde(default)]
+    pub title: String,
+}
+
+/// A font face embedded in the document.
+///
+/// Text nodes reference a family by name and the renderer fetches faces from a
+/// CDN at draw time, which means a document is not self-contained: offline, or
+/// after the CDN reissues a family with different metrics, the same file lays
+/// out differently. Embedding the faces actually used makes the file archival.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct FontFace {
+    pub family: String,
+    /// CSS weight (400 regular, 700 bold).
+    pub weight: u16,
+    pub italic: bool,
+    /// The raw TTF/OTF bytes.
+    pub bytes: Vec<u8>,
+    /// Provenance, e.g. `fontsource:inter@latest/latin-400-normal`. Purely
+    /// informational — the bytes are authoritative.
+    #[serde(default)]
+    pub source: String,
 }
 
 fn default_document_size() -> f32 { 1000.0 }
@@ -1396,6 +1482,11 @@ impl Engine {
                 text_paths_json: String::new(),
                 markers_json: String::new(),
                 guide_locks_json: String::new(),
+                // Left empty on purpose: identity is assigned by the editor
+                // (which owns the clock and the uuid source), never invented
+                // here. See `DocumentMeta`.
+                meta: DocumentMeta::default(),
+                fonts: Vec::new(),
             },
             next_id: 1,
             id_high_water: 1,
@@ -1484,7 +1575,7 @@ impl Engine {
         // stray flag can never clip the whole document.
         let root_nodes = self.scene.root_nodes.clone();
         for root_id in root_nodes {
-            self.write_node_recursive(root_id, &visible_set, &sprite_set, &mut total_nodes);
+            self.write_node_recursive(root_id, &visible_set, &sprite_set, &mut total_nodes, 0);
         }
 
         // Fill in the total node count (number of "commands")
@@ -1518,6 +1609,7 @@ impl Engine {
         visible_set: &HashSet<u32>,
         sprite_set: &HashSet<u32>,
         total_nodes: &mut u32,
+        depth: u32,
     ) {
         let mut open_mask = false;
         for (i, &child_id) in siblings.iter().enumerate() {
@@ -1534,11 +1626,11 @@ impl Engine {
                     self.emit_mask_cmd(CMD_END_MASK, child_id, 0, total_nodes);
                 }
                 self.emit_mask_cmd(CMD_BEGIN_MASK, child_id, mt, total_nodes);
-                self.write_node_recursive(child_id, visible_set, sprite_set, total_nodes);
+                self.write_node_recursive(child_id, visible_set, sprite_set, total_nodes, depth + 1);
                 self.emit_mask_cmd(CMD_BEGIN_MASKED_CONTENT, child_id, 0, total_nodes);
                 open_mask = true;
             } else {
-                self.write_node_recursive(child_id, visible_set, sprite_set, total_nodes);
+                self.write_node_recursive(child_id, visible_set, sprite_set, total_nodes, depth + 1);
             }
         }
         if open_mask {
@@ -1585,11 +1677,21 @@ impl Engine {
         id: u32,
         visible_set: &HashSet<u32>,
         sprite_set: &HashSet<u32>,
-        total_nodes: &mut u32
+        total_nodes: &mut u32,
+        depth: u32,
     ) {
         // Every command must start 4-byte aligned so the JS reader can take
         // zero-copy Float32Array views over the buffer.
         debug_assert_eq!(self.render_buffer.len() % 4, 0, "render buffer misaligned before command");
+
+        // Bound the recursion. `validate::repair` guarantees an acyclic graph
+        // on load, so this should be unreachable — but overflowing here traps
+        // the wasm instance and kills the editor outright, which is far too
+        // harsh a penalty for a bug in an invariant maintained elsewhere.
+        if depth > MAX_NODE_DEPTH {
+            log_error(&format!("render: node {id} exceeds max nesting depth; subtree skipped"));
+            return;
+        }
 
         let node = match self.scene.nodes.get(&id) {
             Some(n) => n,
@@ -1654,7 +1756,7 @@ impl Engine {
                 self.write_lp_faces(id, total_nodes);
             }
 
-            self.write_siblings_with_masks(&children, visible_set, sprite_set, total_nodes);
+            self.write_siblings_with_masks(&children, visible_set, sprite_set, total_nodes, depth);
 
             if is_lp {
                 self.write_lp_edges(id, total_nodes);
@@ -2884,37 +2986,73 @@ impl Engine {
         Self::compute_global_transform_recursive(&self.scene.nodes, id, parent_transform, &mut self.global_transforms);
     }
 
+    /// Pre-order walk of the subtree at `id`, composing global transforms.
+    ///
+    /// Iterative with an explicit stack, and it refuses to visit a node twice.
+    /// Both properties are load-bearing rather than stylistic: the recursive
+    /// version stack-overflowed — an unrecoverable wasm trap, not a catchable
+    /// error — on both a parent/child cycle and on legitimately deep nesting,
+    /// and a scene can reach this code from paths that never went through
+    /// `validate::repair` (an undo snapshot, or a mid-edit mutation).
     fn compute_global_transform_recursive(nodes: &HashMap<u32, Node>, id: u32, parent_transform: Mat3, transforms: &mut HashMap<u32, [f32; 9]>) {
-        if let Some(node) = nodes.get(&id) {
-            let local_transform = node.transform.to_mat3();
-            let global_transform = parent_transform * local_transform;
+        let mut stack = vec![(id, parent_transform)];
+        let mut visited = HashSet::new();
+        while let Some((node_id, parent)) = stack.pop() {
+            if !visited.insert(node_id) {
+                continue;
+            }
+            let Some(node) = nodes.get(&node_id) else { continue };
+            let global_transform = parent * node.transform.to_mat3();
             // Store in glam's native column-major format
-            transforms.insert(id, global_transform.to_cols_array());
-
+            transforms.insert(node_id, global_transform.to_cols_array());
             for &child_id in &node.children {
-                Self::compute_global_transform_recursive(nodes, child_id, global_transform, transforms);
+                stack.push((child_id, global_transform));
             }
         }
     }
 
+    /// Post-order walk of the subtree at `id`, refreshing spatial index entries
+    /// children-first so a group unions AABBs that are already current.
+    ///
+    /// Iterative and cycle-guarded, for the same reason as the transform walk.
     fn update_spatial_index_recursive(&mut self, id: u32) {
-        // First, recurse into children (bottom-up: children before parent)
-        let children = if let Some(node) = self.scene.nodes.get(&id) {
-            node.children.clone()
-        } else {
-            return;
-        };
-        for child_id in children {
-            self.update_spatial_index_recursive(child_id);
+        // Collect the post-order sequence first, then apply it. Doing both in
+        // one pass would need a mutable borrow of the scene while still walking
+        // it.
+        let mut order: Vec<u32> = Vec::new();
+        let mut stack = vec![(id, false)];
+        let mut visited = HashSet::new();
+        while let Some((node_id, children_done)) = stack.pop() {
+            if children_done {
+                order.push(node_id);
+                continue;
+            }
+            if !visited.insert(node_id) {
+                continue;
+            }
+            let Some(node) = self.scene.nodes.get(&node_id) else { continue };
+            stack.push((node_id, true));
+            for &child_id in &node.children {
+                stack.push((child_id, false));
+            }
         }
-        // Then update this node (for groups, this unions the now-updated child AABBs)
-        self.update_spatial_index(id);
+        for node_id in order {
+            self.update_spatial_index(node_id);
+        }
     }
 
     /// Walk up the parent chain and re-update spatial index for each Group ancestor.
+    ///
+    /// The visited set matters here too, but the failure mode is different: a
+    /// cycle in `parent` links makes this loop *forever* rather than overflow,
+    /// hanging the tab with no crash to diagnose.
     fn update_ancestor_group_bounds(&mut self, id: u32) {
         let mut current = id;
+        let mut visited = HashSet::from([id]);
         while let Some(parent_id) = self.scene.nodes.get(&current).and_then(|n| n.parent) {
+            if !visited.insert(parent_id) {
+                break;
+            }
             let is_group = self.scene.nodes.get(&parent_id)
                 .map(|n| matches!(n.node_type, NodeType::Group))
                 .unwrap_or(false);
@@ -5466,23 +5604,31 @@ impl Engine {
         proto::serialize_to_proto(&self.scene, self.next_id)
     }
 
-    /// Deserialize scene from protobuf bytes (.vec file format).
-    /// Returns true on success.
+    /// Deserialize scene from a `.dadaki` file. Returns true on success.
+    ///
+    /// Prefer `load_document`, which reports *why* a load failed and what had
+    /// to be repaired. This boolean form is kept for callers that genuinely
+    /// only branch on success.
     pub fn deserialize_proto(&mut self, data: &[u8]) -> bool {
+        self.load_document(data).starts_with("{\"ok\":true")
+    }
+
+    /// Load a `.dadaki` file, returning a JSON status object.
+    ///
+    /// On success: `{"ok":true,"repairs":{…},"repaired":bool,"summary":"…"}`.
+    /// On failure: `{"ok":false,"error":"too_new","detail":"…","requiredVersion":9,
+    /// "supportedVersion":8}`.
+    ///
+    /// Failure leaves the current scene **untouched**. That matters: the old
+    /// path assigned `self.scene` before it knew the load was sound, so a bad
+    /// file could half-replace a good document.
+    pub fn load_document(&mut self, data: &[u8]) -> String {
         match proto::deserialize_from_proto(data) {
-            Some((scene, _next_id)) => {
-                self.scene = scene;
-                // Opening a document: resume this site's counter from what THIS
-                // document contains, rather than inheriting a counter from
-                // whatever was open before.
-                self.recompute_next_id();
-                self.update_all_global_transforms();
-                self.update_all_spatial_indices();
-                self.rebuild_live_paint_cache();
-                self.rebuild_boolean_groups_cache();
-                true
+            Ok((scene, _next_id, report)) => {
+                self.adopt_loaded_scene(scene);
+                Self::load_ok_json(&report)
             }
-            None => false,
+            Err(e) => Self::load_error_json(&e),
         }
     }
 
@@ -5494,26 +5640,230 @@ impl Engine {
     /// Deserialize scene from base64-encoded protobuf (from SVG metadata).
     /// Returns true on success.
     pub fn deserialize_proto_base64(&mut self, b64: &str) -> bool {
+        self.load_document_base64(b64).starts_with("{\"ok\":true")
+    }
+
+    /// Base64 counterpart of `load_document`, for the payload embedded in an
+    /// exported SVG. Same JSON status contract.
+    pub fn load_document_base64(&mut self, b64: &str) -> String {
         match proto::deserialize_from_base64(b64) {
-            Some((scene, _next_id)) => {
-                self.scene = scene;
-                // As above: a document being opened defines its own counter.
-                self.recompute_next_id();
-                self.update_all_global_transforms();
-                self.update_all_spatial_indices();
-                self.rebuild_live_paint_cache();
-                self.rebuild_boolean_groups_cache();
-                true
+            Ok((scene, _next_id, report)) => {
+                self.adopt_loaded_scene(scene);
+                Self::load_ok_json(&report)
             }
-            None => false,
+            Err(e) => Self::load_error_json(&e),
         }
     }
 
-    /// Get the current format version.
+    /// Peek at a file's version floor without loading it. Returns the
+    /// `min_reader_version`, or 0 if `data` carries no envelope (pre-v8).
+    ///
+    /// Cloud sync uses this to decide whether it may apply an incoming scene
+    /// before it touches the live document.
+    pub fn peek_required_version(data: &[u8]) -> u32 {
+        container::peek_min_reader_version(data).unwrap_or(0)
+    }
+
+    /// Get the current format version — the newest this build can write.
     pub fn get_format_version(&self) -> u32 {
         FORMAT_VERSION
     }
 
+    // ─── Document metadata ──────────────────────────────────────────────────
+    //
+    // Set by the editor, never invented here: `serialize_snapshot` runs on
+    // every undo step and must be a byte-exact fixed point, which a clock or a
+    // uuid generator inside serialization would destroy.
+
+    /// Replace the document's identity block. `created_at_ms`/`modified_at_ms`
+    /// are Unix epoch milliseconds; 0 means unknown.
+    pub fn set_document_meta(
+        &mut self,
+        uuid: String,
+        created_at_ms: f64,
+        modified_at_ms: f64,
+        app_version: String,
+        title: String,
+    ) {
+        self.scene.meta = DocumentMeta {
+            uuid,
+            // f64 at the boundary because JS numbers are doubles and
+            // wasm-bindgen has no u64 that survives the crossing cleanly.
+            created_at_ms: created_at_ms.max(0.0) as u64,
+            modified_at_ms: modified_at_ms.max(0.0) as u64,
+            app_version,
+            title,
+        };
+    }
+
+    pub fn get_document_uuid(&self) -> String {
+        self.scene.meta.uuid.clone()
+    }
+
+    pub fn get_document_title(&self) -> String {
+        self.scene.meta.title.clone()
+    }
+
+    pub fn get_document_created_at(&self) -> f64 {
+        self.scene.meta.created_at_ms as f64
+    }
+
+    pub fn get_document_modified_at(&self) -> f64 {
+        self.scene.meta.modified_at_ms as f64
+    }
+
+    pub fn get_document_app_version(&self) -> String {
+        self.scene.meta.app_version.clone()
+    }
+
+    /// Stamp the modification time, called by the editor just before a save.
+    pub fn touch_modified_at(&mut self, now_ms: f64) {
+        self.scene.meta.modified_at_ms = now_ms.max(0.0) as u64;
+    }
+
+    // ─── Embedded fonts ─────────────────────────────────────────────────────
+
+    /// Embed (or replace) a font face. Faces are keyed by family+weight+italic,
+    /// so re-embedding the same face overwrites rather than duplicating it.
+    pub fn embed_font(
+        &mut self,
+        family: String,
+        weight: u32,
+        italic: bool,
+        bytes: Vec<u8>,
+        source: String,
+    ) {
+        let weight = weight as u16;
+        let face = FontFace { family, weight, italic, bytes, source };
+        match self.scene.fonts.iter_mut().find(|f| {
+            f.family == face.family && f.weight == face.weight && f.italic == face.italic
+        }) {
+            Some(existing) => *existing = face,
+            None => self.scene.fonts.push(face),
+        }
+    }
+
+    /// The faces embedded in this document, as JSON `[{family,weight,italic,
+    /// source,bytes}]` where `bytes` is base64. Used by the editor to register
+    /// them with the renderer before the first paint.
+    pub fn get_embedded_fonts_json(&self) -> String {
+        let items: Vec<serde_json::Value> = self
+            .scene
+            .fonts
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "family": f.family,
+                    "weight": f.weight,
+                    "italic": f.italic,
+                    "source": f.source,
+                    "bytes": BASE64.encode(&f.bytes),
+                })
+            })
+            .collect();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// Which (family, weight, italic) faces the document's text actually needs.
+    /// Returned as JSON so the editor can fetch and embed exactly these — there
+    /// is no point shipping a bold face for text that is never bold.
+    pub fn get_required_fonts_json(&self) -> String {
+        let mut needed: Vec<(String, u16, bool)> = self
+            .scene
+            .nodes
+            .values()
+            .filter_map(|n| match &n.geometry {
+                Geometry::Text { font_family, font_weight, italic, .. }
+                    if !font_family.is_empty() =>
+                {
+                    Some((font_family.clone(), *font_weight, *italic))
+                }
+                _ => None,
+            })
+            .collect();
+        needed.sort();
+        needed.dedup();
+
+        let items: Vec<serde_json::Value> = needed
+            .into_iter()
+            .map(|(family, weight, italic)| {
+                serde_json::json!({ "family": family, "weight": weight, "italic": italic })
+            })
+            .collect();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// Drop embedded faces no text node references any more, so a document
+    /// doesn't accumulate megabytes of fonts from text that has been deleted.
+    pub fn prune_unused_fonts(&mut self) -> u32 {
+        let used: HashSet<(String, u16, bool)> = self
+            .scene
+            .nodes
+            .values()
+            .filter_map(|n| match &n.geometry {
+                Geometry::Text { font_family, font_weight, italic, .. } => {
+                    Some((font_family.clone(), *font_weight, *italic))
+                }
+                _ => None,
+            })
+            .collect();
+        let before = self.scene.fonts.len();
+        self.scene
+            .fonts
+            .retain(|f| used.contains(&(f.family.clone(), f.weight, f.italic)));
+        (before - self.scene.fonts.len()) as u32
+    }
+}
+
+#[cfg(test)]
+impl Engine {
+    /// Read-only view of the scene, for format tests that need to serialize it
+    /// through a different entry point than the engine's own.
+    pub fn scene_for_test(&self) -> Scene {
+        self.scene.clone()
+    }
+}
+
+impl Engine {
+    /// Install a scene that has already been validated, and rebuild every
+    /// derived index from it.
+    fn adopt_loaded_scene(&mut self, scene: Scene) {
+        self.scene = scene;
+        // Opening a document: resume this site's counter from what THIS
+        // document contains, rather than inheriting a counter from
+        // whatever was open before.
+        self.recompute_next_id();
+        self.update_all_global_transforms();
+        self.update_all_spatial_indices();
+        self.rebuild_live_paint_cache();
+        self.rebuild_boolean_groups_cache();
+    }
+
+    fn load_ok_json(report: &RepairReport) -> String {
+        // Hand-built rather than serde_json::to_string so the `{"ok":true`
+        // prefix the boolean wrappers test for is guaranteed to lead.
+        format!(
+            r#"{{"ok":true,"repaired":{},"summary":{},"repairs":{}}}"#,
+            !report.is_clean(),
+            serde_json::to_string(&report.summary()).unwrap_or_else(|_| "\"\"".into()),
+            serde_json::to_string(report).unwrap_or_else(|_| "{}".into()),
+        )
+    }
+
+    fn load_error_json(e: &LoadError) -> String {
+        let required = e.required_version().unwrap_or(0);
+        format!(
+            r#"{{"ok":false,"error":{},"detail":{},"requiredVersion":{},"supportedVersion":{}}}"#,
+            serde_json::to_string(e.code()).unwrap_or_else(|_| "\"error\"".into()),
+            serde_json::to_string(&e.detail()).unwrap_or_else(|_| "\"\"".into()),
+            required,
+            FORMAT_VERSION,
+        )
+    }
+}
+
+#[wasm_bindgen]
+impl Engine {
     pub fn get_document_width(&self) -> f32 {
         // Legacy shim: the primary artboard is the source of truth.
         self.scene.artboards.first().map(|a| a.w).unwrap_or(self.scene.document_width)

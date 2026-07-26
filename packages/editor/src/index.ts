@@ -25,6 +25,7 @@ import { ContextBar } from './context_bar';
 import { Document } from './document';
 import { DocumentManager } from './document_manager';
 import { ExportDialog, type ExportOptions } from './export_dialog';
+import { stampDocumentIdentity } from './file_io';
 import { FileService } from './file_service';
 import { ensureFontCSS, fontsSettled, loadGoogleFontData } from './fonts';
 import { GuidesController } from './guides';
@@ -200,6 +201,18 @@ export interface EditorHandle {
      * re-apply the freshest bytes once the action ends.
      */
     applyRemoteScene(bytes: Uint8Array): boolean;
+    /**
+     * True when a collaborator is using a newer document format than this build
+     * can read.
+     *
+     * The host **must** stop broadcasting scenes and stop saving while this is
+     * true. Sync is last-writer-wins over whole snapshots, so anything this
+     * build sends is a lossy copy of the peer's document — every field it
+     * couldn't decode is simply gone — and writing it would destroy their work
+     * for the entire session. The user has already been told why the tab has
+     * gone quiet.
+     */
+    hasNewerPeer(): boolean;
     /** Create a fresh, blank document in a new tab and activate it. */
     newDocument(name?: string): void;
     /** Rename the active document. */
@@ -495,6 +508,12 @@ export async function createEditor(
             const doc = docId ? documentManager.byId(docId) : documentManager.active();
             const engine = doc?.engine;
             if (!engine) return null;
+            // Stamp identity synchronously. Font embedding is deliberately NOT
+            // done here: this runs on the cloud-sync broadcast path, which
+            // fires on every edit and must stay synchronous and cheap. Fonts
+            // are embedded on the explicit save paths (`FileIO.prepareBytes`),
+            // where a network fetch is affordable.
+            stampDocumentIdentity(engine, doc?.name);
             return new Uint8Array(engine.serialize_proto());
         },
         exportSVG,
@@ -510,6 +529,7 @@ export async function createEditor(
             documentManager.adopt(doc);
         },
         applyRemoteScene: (bytes: Uint8Array) => documentManager.applyRemoteScene(bytes),
+        hasNewerPeer: () => documentManager.hasNewerPeer(),
         newDocument: (name = 'Untitled') => {
             documentManager.create(name);
         },

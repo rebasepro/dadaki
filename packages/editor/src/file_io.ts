@@ -10,6 +10,14 @@
  * actually used so they can persist it.
  */
 import type { Engine } from '../engine/pkg/engine';
+import {
+    type LoadResult,
+    loadErrorMessage,
+    parseLoadResult,
+    repairNoticeMessage,
+    reportLoadFailure,
+    reportRepairs,
+} from './load_status';
 
 /** Outcome of a save. `handle` is null when the download fallback was used. */
 export interface SaveResult {
@@ -21,6 +29,148 @@ export interface OpenResult {
     handle: FileSystemFileHandle | null;
     name: string;
 }
+
+/**
+ * Version of the editor written into every saved document, so a bug report can
+ * say which build produced the file. Replaced at build time.
+ */
+export const APP_VERSION: string = (import.meta as any).env?.VITE_APP_VERSION ?? 'dev';
+
+/** RFC-4122 v4 id, via crypto when available. */
+function newUuid(): string {
+    const c: Crypto | undefined = typeof crypto !== 'undefined' ? crypto : undefined;
+    if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+    // Fallback for older Safari: still random, just assembled by hand.
+    const bytes = new Uint8Array(16);
+    if (c?.getRandomValues) c.getRandomValues(bytes);
+    else for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Give the document a stable uuid and creation time if it doesn't have them,
+ * and stamp the modification time and app version.
+ *
+ * The uuid is assigned once and preserved forever after — cloud sync uses it to
+ * tell "the same document, edited twice" from "two documents", which filenames
+ * cannot do.
+ */
+export function stampDocumentIdentity(engine: Engine, suggestedName?: string): void {
+    const now = Date.now();
+    const existingUuid = engine.get_document_uuid();
+    const created = engine.get_document_created_at();
+    const title =
+        engine.get_document_title() || (suggestedName ? stripDadakiExt(suggestedName) : '');
+    engine.set_document_meta(
+        existingUuid || newUuid(),
+        created > 0 ? created : now,
+        now,
+        APP_VERSION,
+        title,
+    );
+}
+
+function stripDadakiExt(name: string): string {
+    return name.replace(/\.dadaki$/i, '');
+}
+
+/**
+ * Embed the font faces the document's text actually uses.
+ *
+ * Without this a `.dadaki` file is not self-contained: faces are fetched from a
+ * CDN at render time, so the same document lays out differently offline, or
+ * after the CDN reissues a family with different metrics. Only the
+ * family/weight/italic combinations in use are embedded, and faces for text
+ * that has since been deleted are pruned, so the file doesn't accumulate
+ * megabytes of unused typefaces.
+ *
+ * Failures are non-fatal: a document that can't embed its fonts is still worth
+ * saving, it just falls back to the CDN on open as before.
+ */
+export async function embedRequiredFonts(engine: Engine): Promise<void> {
+    let required: Array<{ family: string; weight: number; italic: boolean }>;
+    try {
+        required = JSON.parse(engine.get_required_fonts_json());
+    } catch {
+        return;
+    }
+    if (!required.length) {
+        engine.prune_unused_fonts();
+        return;
+    }
+
+    const { getFaceBytes } = await import('./fonts');
+    for (const face of required) {
+        try {
+            const bytes = await getFaceBytes(face.family, face.weight, face.italic);
+            if (bytes) {
+                engine.embed_font(
+                    face.family,
+                    face.weight,
+                    face.italic,
+                    new Uint8Array(bytes),
+                    `fontsource:${face.family}`,
+                );
+            }
+        } catch (e) {
+            console.warn(`[file_io] could not embed "${face.family}":`, e);
+        }
+    }
+    engine.prune_unused_fonts();
+}
+
+/**
+ * Register any faces embedded in the freshly-loaded document.
+ *
+ * Called after every successful load, before the first paint, so text draws in
+ * the face its author used rather than briefly flashing a CDN fallback.
+ */
+export async function adoptEmbeddedFonts(engine: Engine): Promise<number> {
+    let raw: Array<{ family: string; weight: number; italic: boolean; bytes: string }>;
+    try {
+        raw = JSON.parse(engine.get_embedded_fonts_json());
+    } catch {
+        return 0;
+    }
+    if (!raw.length) return 0;
+
+    const { registerEmbeddedFaces } = await import('./fonts');
+    const faces = raw
+        .map((f) => ({
+            family: f.family,
+            weight: f.weight,
+            italic: f.italic,
+            bytes: base64ToArrayBuffer(f.bytes),
+        }))
+        .filter((f) => f.bytes.byteLength > 0);
+    return registerEmbeddedFaces(faces);
+}
+
+function base64ToArrayBuffer(b64: string): ArrayBuffer {
+    try {
+        const binary = atob(b64);
+        const out = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+        return out.buffer;
+    } catch {
+        return new ArrayBuffer(0);
+    }
+}
+
+/** No repairs — the shape `LoadResult.repairs` expects for a clean load. */
+const EMPTY_REPAIRS = {
+    duplicate_ids: 0,
+    dangling_roots: 0,
+    dangling_children: 0,
+    cycles_broken: 0,
+    reparented: 0,
+    orphans_rehomed: 0,
+    missing_images: 0,
+    coords_clamped: 0,
+} as const;
 
 /** True when the native File System Access API is available. */
 export function hasFileSystemAccess(): boolean {
@@ -46,13 +196,28 @@ export class FileIO {
         handle: FileSystemFileHandle | null,
         suggestedName = 'untitled.dadaki',
     ): Promise<SaveResult | null> {
-        const bytes = engine.serialize_proto();
+        const bytes = await FileIO.prepareBytes(engine, suggestedName);
 
         if (handle) {
             await FileIO.writeToHandle(handle, bytes);
             return { handle };
         }
         return FileIO.saveDadakiAs(engine, suggestedName);
+    }
+
+    /**
+     * Serialize the document for writing to disk: stamp its identity, embed the
+     * fonts its text needs, then encode.
+     *
+     * Kept separate from `serialize_proto` because those two steps are *save*
+     * concerns, not serialization concerns — the engine must not invent a
+     * timestamp or reach for the network during the byte-exact snapshot that
+     * every undo step takes.
+     */
+    static async prepareBytes(engine: Engine, suggestedName?: string): Promise<Uint8Array> {
+        stampDocumentIdentity(engine, suggestedName);
+        await embedRequiredFonts(engine);
+        return new Uint8Array(engine.serialize_proto());
     }
 
     /**
@@ -63,7 +228,7 @@ export class FileIO {
         engine: Engine,
         suggestedName = 'untitled.dadaki',
     ): Promise<SaveResult | null> {
-        const bytes = engine.serialize_proto();
+        const bytes = await FileIO.prepareBytes(engine, suggestedName);
 
         if ('showSaveFilePicker' in window) {
             try {
@@ -166,21 +331,63 @@ export class FileIO {
     }
 
     /**
-     * Load a file (auto-detect native .dadaki vs .svg).
+     * Load a document into `engine`, reporting the outcome to the user.
+     *
+     * Returns false on failure — and, critically, the engine's scene is
+     * untouched in that case, so the caller can leave the current document
+     * exactly as it was.
      */
     static async loadFile(
         engine: Engine,
         file: File,
         fallbackParser?: (svgText: string) => void,
     ): Promise<boolean> {
+        const result = await FileIO.loadFileDetailed(engine, file, fallbackParser);
+        return result.ok;
+    }
+
+    /**
+     * As `loadFile`, but returns *why* it failed rather than just whether it
+     * did. Also surfaces the message to the user: a file that refuses to open
+     * because it is newer than this build is the one case where saying nothing
+     * would be actively misleading.
+     */
+    static async loadFileDetailed(
+        engine: Engine,
+        file: File,
+        fallbackParser?: (svgText: string) => void,
+    ): Promise<LoadResult> {
+        const result = await FileIO.loadFileQuiet(engine, file, fallbackParser);
+        FileIO.announce(result, file.name);
+        return result;
+    }
+
+    /** Load without notifying the user — for callers that render their own UI. */
+    static async loadFileQuiet(
+        engine: Engine,
+        file: File,
+        fallbackParser?: (svgText: string) => void,
+    ): Promise<LoadResult> {
+        let result: LoadResult;
         if (isNativeDoc(file.name)) {
             const bytes = new Uint8Array(await file.arrayBuffer());
-            return engine.deserialize_proto(bytes);
+            result = parseLoadResult(engine.load_document(bytes));
+        } else {
+            // SVG: check for embedded protobuf payload
+            const text = await file.text();
+            result = FileIO.loadSVGTextDetailed(engine, text, fallbackParser);
         }
+        if (result.ok) await adoptEmbeddedFonts(engine);
+        return result;
+    }
 
-        // SVG: check for embedded protobuf payload
-        const text = await file.text();
-        return FileIO.loadSVGText(engine, text, fallbackParser);
+    /** Show the user the outcome of a load, when there is something to say. */
+    static announce(result: LoadResult, fileName?: string): void {
+        if (!result.ok) {
+            reportLoadFailure(loadErrorMessage(result, fileName));
+        } else if (result.repaired) {
+            reportRepairs(repairNoticeMessage(result, fileName));
+        }
     }
 
     /**
@@ -192,25 +399,44 @@ export class FileIO {
         text: string,
         fallbackParser?: (svgText: string) => void,
     ): boolean {
+        return FileIO.loadSVGTextDetailed(engine, text, fallbackParser).ok;
+    }
+
+    static loadSVGTextDetailed(
+        engine: Engine,
+        text: string,
+        fallbackParser?: (svgText: string) => void,
+    ): LoadResult {
         // Check for an embedded protobuf payload.
         const match = text.match(/<dadaki:data[^>]*>([\s\S]*?)<\/dadaki:data>/);
         if (match) {
-            const b64 = match[1].trim();
-            if (engine.deserialize_proto_base64(b64)) {
-                return true;
+            const result = parseLoadResult(engine.load_document_base64(match[1].trim()));
+            // A payload that is merely *newer* than this build must not fall
+            // through to the plain-SVG parser: the SVG is a lossy rendering of
+            // the same document, so importing it would look like success while
+            // quietly discarding everything the payload carried.
+            if (result.ok || result.error === 'too_new' || result.error === 'container_too_new') {
+                return result;
             }
+            console.warn('[file_io] embedded dadaki payload unreadable:', result.detail);
         }
 
         // Fallback to standard SVG parsing via UI parser
         if (fallbackParser) {
             fallbackParser(text);
-            return true;
+            return { ok: true, repaired: false, summary: '', repairs: EMPTY_REPAIRS };
         }
 
         console.warn(
             'No dadaki:data payload found in SVG. Standard SVG import not yet implemented.',
         );
-        return false;
+        return {
+            ok: false,
+            error: 'unparseable',
+            detail: 'no Dadaki payload and no SVG parser available',
+            requiredVersion: 0,
+            supportedVersion: 0,
+        };
     }
 
     /**

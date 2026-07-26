@@ -211,3 +211,76 @@ export function getFontDataForWeight(
     if (italic) return faces.italic ?? faces.regular;
     return faces.regular;
 }
+
+// ─── Document embedding ─────────────────────────────────────────────────────
+//
+// A saved document embeds the faces its text uses, so it renders identically
+// offline and stays correct if the CDN later reissues a family with different
+// metrics. These two functions are the save and load ends of that.
+
+/**
+ * The bytes for one face, fetching the family first if it isn't loaded yet.
+ * Used when saving, to embed exactly the faces the document needs.
+ */
+export async function getFaceBytes(
+    fontFamily: string,
+    weight: number,
+    italic = false,
+): Promise<ArrayBuffer | null> {
+    if (!fontDataCache.has(fontFamily)) {
+        await loadGoogleFontData(fontFamily);
+        // `loadGoogleFontData` returns null while a fetch is already in flight
+        // for this family, so wait for whichever request is running to land
+        // rather than reporting the face as unavailable.
+        await fontsSettled();
+    }
+    return getFontDataForWeight(fontFamily, weight, italic);
+}
+
+/** One face as embedded in a document. */
+export interface EmbeddedFace {
+    family: string;
+    weight: number;
+    italic: boolean;
+    bytes: ArrayBuffer;
+}
+
+/**
+ * Register faces carried inside a document, so its text renders correctly with
+ * no network round-trip.
+ *
+ * Embedded faces take precedence over anything the CDN would serve: the whole
+ * point is that the document looks the way its author saw it. Returns the
+ * number of families affected, so the caller knows whether to rebuild the
+ * renderer's font provider.
+ */
+export function registerEmbeddedFaces(faces: EmbeddedFace[]): number {
+    const touched = new Set<string>();
+    for (const face of faces) {
+        if (!face.bytes || face.bytes.byteLength === 0) continue;
+        const existing = fontDataCache.get(face.family) ?? {
+            regular: face.bytes,
+            bold: null,
+            italic: null,
+            boldItalic: null,
+        };
+        const slot: keyof FontFaces =
+            face.weight >= 600
+                ? face.italic
+                    ? 'boldItalic'
+                    : 'bold'
+                : face.italic
+                  ? 'italic'
+                  : 'regular';
+        existing[slot] = face.bytes;
+        fontDataCache.set(face.family, existing);
+        // A family that previously 404'd may well be embedded here; clear the
+        // negative cache so it is no longer treated as unavailable.
+        failedFonts.delete(face.family);
+        touched.add(face.family);
+    }
+    if (touched.size) {
+        for (const cb of fontLoadCallbacks) cb();
+    }
+    return touched.size;
+}
