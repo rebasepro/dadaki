@@ -492,6 +492,10 @@ export class Renderer {
          *  bitmaps (sprites/tiles/images); pure-vector content stays sharp
          *  at any zoom so it gets a wider band. */
         maxUp: number;
+        /** Whether any baked bitmap made it into the recording — replaying a
+         *  vector-only picture re-rasterizes sharp at any scale, a bitmap one
+         *  does not. Sets how far the gesture band may be widened. */
+        hasBitmaps: boolean;
     } | null = null;
     /** Bumped whenever something OUTSIDE the engine buffer changes rendered
      *  pixels: renderer cache wipes, adaptive-tile swaps, sprite bakes. */
@@ -503,6 +507,13 @@ export class Renderer {
     /** Zoom-out floor: below half the recorded zoom, re-record (keeps the
      *  recorded cull region from dominating and AA geometry reasonable). */
     private static readonly SCENE_PIC_MIN_DOWN = 0.5;
+    /** Zoom band used only on frames that are rasterizing the gesture: those
+     *  frames are already being served through a texture and re-record as soon
+     *  as the zoom settles, so riding a stale picture beats a mid-gesture
+     *  decode. Ordinary frames keep the tight band above. A recording holding
+     *  baked bitmaps gets the smaller boost — those really do upscale. */
+    private static readonly SCENE_PIC_GESTURE_UP = 4.0;
+    private static readonly SCENE_PIC_GESTURE_UP_BITMAP = 2.0;
 
     /** A valid, empty render stream (header only, zero commands). Fed to the
      *  decode loop on picture-replay frames so the shared code path runs
@@ -585,10 +596,20 @@ export class Renderer {
      *  the very first pan would invalidate the capture. */
     private static readonly VIEW_SNAP_MIN_EXPAND = 1.3;
     private static readonly VIEW_SNAP_MAX_EXPAND = 1.6;
+    /** Expansion ceiling while the view is zooming OUT. The viewport grows in
+     *  world units on every tick, so margin — not resolution — is what keeps a
+     *  capture alive; 2.0 matches the picture's own recorded expansion
+     *  (SCENE_PIC_MARGIN 0.5 per side), past which the region is clamped away
+     *  anyway. */
+    private static readonly VIEW_SNAP_MAX_EXPAND_OUT = 2.0;
     /** How far the gesture may zoom IN past the captured resolution before the
      *  upscale reads as soft and it's worth re-capturing. */
     private static readonly VIEW_SNAP_MAX_UP = 1.35;
     private static readonly VIEW_GESTURE_SETTLE_MS = 140;
+    /** this.zoom as of the previous frame, so a capture can tell which way the
+     *  gesture is heading: zooming out (or pure panning) is the case where a
+     *  wider captured region actually buys anything. */
+    private _lastRenderZoom = 0;
 
     /** Tell the renderer the VIEW (not the content) is being gestured, so it
      *  may serve frames from a cached raster. Call from wheel/pan handlers. */
@@ -651,7 +672,7 @@ export class Renderer {
     /** Rasterize the retained picture into an offscreen texture covering the
      *  viewport plus as much margin as the pixel budget allows at native
      *  resolution. Returns false (harmlessly) if anything isn't ready. */
-    private captureViewSnapshot(dpr: number): boolean {
+    private captureViewSnapshot(dpr: number, zoomingIn: boolean): boolean {
         const sp = this._scenePic;
         if (!sp || !this.grContext || this._exporting || this._dragLayer) return false;
         if (this.canvas.width === 0 || this.canvas.height === 0) return false;
@@ -660,6 +681,15 @@ export class Renderer {
         // capture stays 1:1 sharp and still tolerates panning / zooming out.
         const devPx = Math.max(1, this.canvas.width * this.canvas.height);
         const budget = Renderer.VIEW_SNAP_PIXEL_BUDGET;
+        // A capture dies of softness when the gesture zooms IN and of missing
+        // margin when it zooms OUT. Only zooming out can be bought off cheaply:
+        // spare budget goes into a wider region, which costs no sharpness. (The
+        // symmetric trick — supersampling on the way in — was measured and
+        // rejected: minifying the blit aliases hairlines and text badly enough
+        // to see, for ~20% fewer captures.)
+        const maxExpand = zoomingIn
+            ? Renderer.VIEW_SNAP_MAX_EXPAND
+            : Renderer.VIEW_SNAP_MAX_EXPAND_OUT;
         let k = Math.sqrt(budget / devPx);
         let resolutionScale = 1;
         if (k < Renderer.VIEW_SNAP_MIN_EXPAND) {
@@ -669,7 +699,7 @@ export class Renderer {
             k = Renderer.VIEW_SNAP_MIN_EXPAND;
             resolutionScale = Math.sqrt(budget / (devPx * k * k));
         }
-        k = Math.min(k, Renderer.VIEW_SNAP_MAX_EXPAND);
+        k = Math.min(k, maxExpand);
         const viewW = this.canvas.width / dpr / this.zoom;
         const viewH = this.canvas.height / dpr / this.zoom;
         const margin = (k - 1) / 2;
@@ -1954,22 +1984,47 @@ export class Renderer {
             this.drawViewSnapshot(canvas);
             viewBlitted = true;
         }
+        // No usable raster but the gesture is running: this frame has to build
+        // one. It then blits that fresh texture instead of ALSO painting the
+        // picture to the screen — the two produce the same image, and one
+        // replay of a large picture is the single most expensive thing in the
+        // gesture. Decided up front so the content pass below can skip its
+        // on-screen draw.
+        const capturingThisFrame = viewGesturing && !viewBlitted;
+        const zoomingIn = this.zoom > this._lastRenderZoom;
+        if (!exporting && snapshotPass === null) this._lastRenderZoom = this.zoom;
 
         let scenePicReplayed = false;
         if (!viewBlitted && picEligible && this._scenePic) {
             const sp = this._scenePic;
+            // Re-recording the picture means a full decode — the one thing that
+            // still hitches mid-gesture. While the gesture is being served as a
+            // raster the frame already goes through an 8-bit texture and a
+            // settle re-record follows within 180 ms, so the band is widened
+            // rather than paying that decode in the middle of the motion.
+            const bandUp = capturingThisFrame
+                ? Math.max(
+                      sp.maxUp,
+                      sp.hasBitmaps
+                          ? Renderer.SCENE_PIC_GESTURE_UP_BITMAP
+                          : Renderer.SCENE_PIC_GESTURE_UP,
+                  )
+                : sp.maxUp;
+            // Zoom-out is NOT widened: the cull-rect test below expires at the
+            // same 2× the floor does, so a wider floor buys nothing (measured).
             if (
                 sp.changeCounter === this.scene.changeCounter &&
                 sp.gen === this._scenePicGen &&
                 sp.dpr === dpr &&
-                this.zoom <= sp.zoom * sp.maxUp &&
+                this.zoom <= sp.zoom * bandUp &&
                 this.zoom >= sp.zoom * Renderer.SCENE_PIC_MIN_DOWN &&
                 viewportMinX >= sp.cullMinX &&
                 viewportMinY >= sp.cullMinY &&
                 viewportMaxX <= sp.cullMaxX &&
                 viewportMaxY <= sp.cullMaxY
             ) {
-                this.drawScenePicture(canvas, sp);
+                // On a capture frame the blit below stands in for this draw.
+                if (!capturingThisFrame) this.drawScenePicture(canvas, sp);
                 scenePicReplayed = true;
                 // Zoom moved while riding the picture: re-record once it
                 // settles so the zoom-dependent heuristics inside the decode
@@ -3045,32 +3100,40 @@ export class Renderer {
                 cullMaxX,
                 cullMaxY,
                 maxUp: hasBitmaps ? 1.12 : 2.0,
+                hasBitmaps,
             };
             // This frame's content itself comes from the recording (V_rec
-            // equals the current view, so the corrective concat is identity).
-            this.drawScenePicture(canvas, this._scenePic);
+            // equals the current view, so the corrective concat is identity) —
+            // unless it is about to be captured, in which case the blit below
+            // paints it instead of replaying the picture a second time.
+            if (!capturingThisFrame) this.drawScenePicture(canvas, this._scenePic);
         }
 
         // What the content pass actually cost in JS this frame. Blit frames are
         // excluded: they measure the blit, not the work it replaced, so
         // including them would decay the estimate and disengage the raster.
-        if (!viewBlitted && !exporting && snapshotPass === null) {
+        // Capture frames are excluded for the same reason — they deliberately
+        // skip the on-screen replay, so what they measure is not what a plain
+        // frame would cost, and letting them drive the estimate down would
+        // disengage the raster mid-gesture and re-engage it a frame later.
+        if (!viewBlitted && !capturingThisFrame && !exporting && snapshotPass === null) {
             const cost = performance.now() - contentT0;
             this._contentCostMs =
                 this._contentCostMs === 0 ? cost : this._contentCostMs * 0.7 + cost * 0.3;
         }
 
-        // A gesture is under way and this frame had to pay the full content
-        // pass — rasterize it now so the rest of the gesture is a blit. Costs
-        // one extra picture replay into an offscreen surface, once per capture.
-        if (
-            picEligible &&
-            !viewBlitted &&
-            this._scenePic &&
-            performance.now() < this._viewGestureUntil &&
-            this._contentCostMs >= Renderer.VIEW_SNAP_MIN_COST_MS
-        ) {
-            this.captureViewSnapshot(dpr);
+        // A gesture is under way and this frame had to pay the content pass —
+        // rasterize it now so the rest of the gesture is a blit, and paint THIS
+        // frame from that same texture. If the capture can't be made (no
+        // picture, no GL, region unusable) the picture is drawn directly, which
+        // is exactly what a non-gesture frame would have done.
+        if (capturingThisFrame) {
+            const captured = this._scenePic ? this.captureViewSnapshot(dpr, zoomingIn) : false;
+            if (captured) {
+                this.drawViewSnapshot(canvas);
+            } else if (this._scenePic) {
+                this.drawScenePicture(canvas, this._scenePic);
+            }
         }
 
         // Live Paint faces/edges are no longer drawn here — they're emitted
