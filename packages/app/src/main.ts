@@ -72,18 +72,13 @@ async function bootstrap() {
 
     // Dev-only handle for debugging and automated testing.
     if (import.meta.env.DEV) {
+        // The whole handle, so a test can drive the same surface a host does
+        // (exportSVG, exportThumbnail, exportBytes…) and not just the internals.
         (window as unknown as Record<string, unknown>).__editor = {
-            scene: editor.scene,
-            ui: editor.ui,
-            input: editor.input,
-            renderer: editor.renderer,
-            documentManager: editor.documentManager,
-            fileService: editor.fileService,
-            persistence: editor.persistence,
+            ...editor,
             get doc() {
                 return editor.activeDocument();
             },
-            stress: editor.stress,
         };
     }
 

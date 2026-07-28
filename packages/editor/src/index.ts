@@ -180,6 +180,17 @@ export interface EditorHandle {
     /** Serialize the active document to an SVG string (good for previews). */
     exportSVG(): string;
     /**
+     * A raster preview of the active document as a `data:image/png;base64,…`
+     * URI, framed exactly like `exportSVG`.
+     *
+     * Use this rather than `exportSVG` wherever the preview has to fit a
+     * budget: an SVG's length grows with the artwork (a traced logo runs to
+     * hundreds of kilobytes), while this is bounded by `maxPx` no matter how
+     * many nodes the document holds. Resolves to null if there is nothing to
+     * render. Waits for webfonts, so text is not captured in a fallback face.
+     */
+    exportThumbnail(maxPx?: number): Promise<string | null>;
+    /**
      * Authoring API for autonomous agents: intent-level verbs (create, style,
      * align, group, boolean) plus `describe()` so an agent can see the scene it
      * is editing. Each call is one undo step; agent edits are ordinary edits as
@@ -414,22 +425,55 @@ export async function createEditor(
     // for thumbnails, and what the agent API renders through. Artboards default
     // to a transparent background, so fall back to white (the canvas colour
     // shown in the editor) when there's no opaque fill.
-    const exportSVG = (): string => {
-        const white = { r: 1, g: 1, b: 1, a: 1 };
-        const canvasBg = (bg?: { r: number; g: number; b: number; a: number }) =>
-            bg && bg.a > 0 ? bg : white;
+    const WHITE = { r: 1, g: 1, b: 1, a: 1 };
+    const canvasBg = (bg?: { r: number; g: number; b: number; a: number }) =>
+        bg && bg.a > 0 ? bg : WHITE;
+    /** The rect and backdrop every preview shares, so the SVG, the raster
+     *  thumbnail and an agent's PNG always frame the same thing. */
+    const previewFrame = () => {
         const arts = wasmScene.getArtboards();
-        if (arts.length === 1) {
-            const ab = arts[0];
-            return ui.buildSVGString(
-                { x: ab.x, y: ab.y, w: ab.w, h: ab.h },
-                canvasBg(ab.background),
-            );
+        const ab = arts[0];
+        return {
+            bounds:
+                arts.length === 1 && ab
+                    ? { x: ab.x, y: ab.y, w: ab.w, h: ab.h }
+                    : renderer.getArtboardsBounds(),
+            background: canvasBg(ab?.background),
+        };
+    };
+
+    const exportSVG = (): string => {
+        const arts = wasmScene.getArtboards();
+        if (arts.length === 0) return ui.buildSVGString(undefined, WHITE);
+        const { bounds, background } = previewFrame();
+        return ui.buildSVGString(bounds, background);
+    };
+
+    /** PNG bytes → base64. Chunked: `String.fromCharCode(...bytes)` overflows
+     *  the call stack on anything but a tiny image. 8k arguments stays well
+     *  clear of the engine's spread limit, which a big render at high scale
+     *  would otherwise approach — failing the render rather than the thing that
+     *  is actually oversized. */
+    const pngToBase64 = (bytes: Uint8Array): string => {
+        let binary = '';
+        const CHUNK = 0x2000;
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
         }
-        if (arts.length > 1) {
-            return ui.buildSVGString(renderer.getArtboardsBounds(), canvasBg(arts[0].background));
-        }
-        return ui.buildSVGString(undefined, white);
+        return btoa(binary);
+    };
+
+    /** Rasterize the preview frame so its longest side is `maxPx`. */
+    const renderPreviewPNG = async (maxPx: number): Promise<Uint8Array | null> => {
+        // Text added moments ago may still be fetching its faces; without this
+        // the image captures a fallback face.
+        await fontsSettled();
+        const { bounds, background } = previewFrame();
+        const longest = Math.max(bounds.w, bounds.h);
+        if (!(longest > 0)) return null;
+        const blob = renderer.exportPNG(maxPx / longest, bounds, background);
+        if (!blob) return null;
+        return new Uint8Array(await blob.arrayBuffer());
     };
 
     // Agent authoring surface. Selection goes through the engine (whose
@@ -454,34 +498,13 @@ export async function createEditor(
             void loadGoogleFontData(family);
         },
         renderPNG: async (scale: number) => {
-            // Text added moments ago may still be fetching its faces; without
-            // this the image shows a fallback face and an agent reading it
-            // draws the wrong conclusion about its own work.
-            await fontsSettled();
             // Frame the artboard, matching exportSVG, so an agent's PNG and its
-            // SVG deliverable always show the same thing. The artboard's own
-            // background is used, falling back to the white the editor shows.
-            const arts = wasmScene.getArtboards();
-            const ab = arts[0];
-            const bounds = ab
-                ? { x: ab.x, y: ab.y, w: ab.w, h: ab.h }
-                : renderer.getArtboardsBounds();
-            const bg =
-                ab?.background && ab.background.a > 0 ? ab.background : { r: 1, g: 1, b: 1, a: 1 };
-            const blob = renderer.exportPNG(scale, bounds, bg);
+            // SVG deliverable always show the same thing.
+            await fontsSettled();
+            const { bounds, background } = previewFrame();
+            const blob = renderer.exportPNG(scale, bounds, background);
             if (!blob) throw new Error('[agent] PNG export failed (no render surface)');
-            const bytes = new Uint8Array(await blob.arrayBuffer());
-            // Chunked: String.fromCharCode(...bytes) overflows the call stack
-            // on anything but a tiny image. 8k arguments stays well clear of
-            // the engine's spread limit, which a big render at high scale would
-            // otherwise approach — failing the render rather than the thing
-            // that is actually oversized.
-            let binary = '';
-            const CHUNK = 0x2000;
-            for (let i = 0; i < bytes.length; i += CHUNK) {
-                binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-            }
-            return btoa(binary);
+            return pngToBase64(new Uint8Array(await blob.arrayBuffer()));
         },
         importSVG: (svg: string) =>
             new Promise<number[]>((resolve, reject) => {
@@ -517,6 +540,10 @@ export async function createEditor(
             return new Uint8Array(engine.serialize_proto());
         },
         exportSVG,
+        exportThumbnail: async (maxPx = 512) => {
+            const bytes = await renderPreviewPNG(maxPx);
+            return bytes ? `data:image/png;base64,${pngToBase64(bytes)}` : null;
+        },
         agent,
         /** Resolves once no webfont fetch is in flight. Anything that renders
          *  or exports right after an import should await this, or it captures a
