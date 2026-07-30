@@ -3569,6 +3569,44 @@ impl Engine {
         self.scene.nodes.get(&id).map(|n| n.visible).unwrap_or(false)
     }
 
+    /// True when this node OR any ancestor is locked. The raw flag is not
+    /// enough for anything interactive: locking a group is meant to protect its
+    /// contents, so every "can the user grab this?" test has to read the chain.
+    pub fn is_locked_in_tree(&self, id: u32) -> bool {
+        self.flag_in_tree(id, |n| n.locked)
+    }
+
+    /// True when this node and every ancestor is visible — what the user can
+    /// actually see, as opposed to the node's own flag.
+    pub fn is_visible_in_tree(&self, id: u32) -> bool {
+        !self.flag_in_tree(id, |n| !n.visible)
+    }
+
+    /// Walk `id` and its ancestors, returning true as soon as `pred` holds.
+    /// Depth-capped like the render and bounds walks: a cycle here would hang
+    /// the tab rather than crash it.
+    fn flag_in_tree(&self, id: u32, pred: fn(&Node) -> bool) -> bool {
+        let mut current = Some(id);
+        let mut depth = 0;
+        while let Some(cid) = current {
+            depth += 1;
+            if depth > MAX_NODE_DEPTH {
+                log_error(&format!("flag walk: node {id} exceeds max nesting depth"));
+                return false;
+            }
+            match self.scene.nodes.get(&cid) {
+                Some(node) => {
+                    if pred(node) {
+                        return true;
+                    }
+                    current = node.parent;
+                }
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// Get a node's locked flag.
     pub fn get_node_locked(&self, id: u32) -> bool {
         self.scene.nodes.get(&id).map(|n| n.locked).unwrap_or(false)
@@ -3802,8 +3840,21 @@ impl Engine {
         result
     }
 
-    /// Depth-first traversal collecting all node IDs in draw order.
+    /// Depth-first traversal collecting the hit-testable IDs in draw order.
+    ///
+    /// Hidden and locked SUBTREES are pruned whole. `hit_test` also checks both
+    /// flags per node, but that alone only ever protects the node the cursor
+    /// lands on — always a leaf — while `hit_test_grouped` then promotes the
+    /// result to its top-level group. So locking or hiding a *group* protected
+    /// nothing: a click on any child selected (and dragged, and deleted) the
+    /// locked group. The flags have to be inherited, and pruning here is where
+    /// that costs nothing.
     fn collect_draw_order(&self, id: u32, out: &mut Vec<u32>) {
+        if let Some(node) = self.scene.nodes.get(&id) {
+            if !node.visible || node.locked {
+                return;
+            }
+        }
         out.push(id);
         if let Some(node) = self.scene.nodes.get(&id) {
             // A Boolean Group's operands are consumed by the op and never
@@ -3819,14 +3870,21 @@ impl Engine {
     }
 
     /// Depth-first traversal collecting only IDs present in the visible set.
+    ///
+    /// A hidden subtree is pruned whole: its children are still in the R-tree
+    /// (visibility doesn't affect indexing), so without this a leaf inside a
+    /// hidden group came back as "visible" and a marquee swept up the hidden
+    /// group. Locked nodes are NOT filtered here — this also feeds the
+    /// renderer's subset path, and locked artwork still has to draw. Callers
+    /// that need it (marquee, scissors) ask `is_locked_in_tree`.
     fn collect_visible_in_order(&self, id: u32, visible_set: &std::collections::HashSet<u32>, out: &mut Vec<u32>) {
-        if visible_set.contains(&id) {
-            // Only include nodes that are actually visible (not hidden by user)
-            if let Some(node) = self.scene.nodes.get(&id) {
-                if node.visible {
-                    out.push(id);
-                }
+        if let Some(node) = self.scene.nodes.get(&id) {
+            if !node.visible {
+                return;
             }
+        }
+        if visible_set.contains(&id) {
+            out.push(id);
         }
         if let Some(node) = self.scene.nodes.get(&id) {
             // A Boolean Group stands in for its operands: they are never drawn,
@@ -6679,6 +6737,42 @@ mod tests {
         // After bring_to_front(rect_b), rect_b should be on top again
         engine.bring_to_front(rect_b);
         assert_eq!(engine.hit_test(75.0, 75.0), Some(rect_b));
+    }
+
+    #[test]
+    fn locking_a_group_protects_its_children() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(200.0, 0.0, 100.0, 100.0);
+        let g = engine.group_nodes(&format!("[{a},{b}]"));
+        assert_eq!(engine.hit_test(50.0, 50.0), Some(a));
+
+        // Lock the GROUP, not the children — the children's own flags stay false.
+        engine.set_node_locked(g, true);
+        assert!(!engine.get_node_locked(a), "child's own flag is untouched");
+        assert!(engine.is_locked_in_tree(a), "but it is locked through its parent");
+        // Without inheritance this returned `a`, and hit_test_grouped promoted it
+        // back to the locked group — so a locked group was selectable and draggable.
+        assert_eq!(engine.hit_test(50.0, 50.0), None);
+        assert_eq!(engine.hit_test_grouped(50.0, 50.0), None);
+
+        engine.set_node_locked(g, false);
+        assert_eq!(engine.hit_test(50.0, 50.0), Some(a));
+    }
+
+    #[test]
+    fn hiding_a_group_hides_it_from_picking_and_marquee() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let g = engine.group_nodes(&format!("[{a}]"));
+        engine.set_node_visible(g, false);
+
+        assert!(engine.get_node_visible(a), "child's own flag is untouched");
+        assert!(!engine.is_visible_in_tree(a), "but it is hidden through its parent");
+        assert_eq!(engine.hit_test(50.0, 50.0), None);
+        // The child stays in the R-tree, so the marquee query has to prune the
+        // subtree itself — otherwise it swept up the hidden group.
+        assert!(engine.get_visible_nodes(-10.0, -10.0, 110.0, 110.0).is_empty());
     }
 
     /// Two 200×200 rects offset by 100, intersected: only x 200..300 is painted.

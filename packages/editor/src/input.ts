@@ -1661,32 +1661,19 @@ export class InputManager {
     // (move / delete / copy) and then stays fixed for that action.
 
     /** World-space AABB of a node including all descendants, or null when it has
-     *  no spatial geometry. Groups aren't in the engine R-tree, so their bounds
-     *  are unioned from their leaf descendants. */
+     *  no spatial geometry.
+     *
+     *  Groups ARE in the engine's spatial index — the old comment here claimed
+     *  otherwise and hand-unioned the children, which quietly disagreed with the
+     *  engine for a Boolean Group (whose box is its painted outline, not the
+     *  union of the operands it consumed). One source of truth instead. */
     private nodeWorldBounds(
         id: number,
     ): { minX: number; minY: number; maxX: number; maxY: number } | null {
-        const children = this.scene.getNodeChildren(id);
-        if (children.length === 0) {
-            const b = this.scene.getNodeBounds(id); // [minX, minY, maxX, maxY]
-            // The engine returns all-zeros for a node with no spatial entry.
-            if (b[0] === 0 && b[1] === 0 && b[2] === 0 && b[3] === 0) return null;
-            return { minX: b[0], minY: b[1], maxX: b[2], maxY: b[3] };
-        }
-        let acc: { minX: number; minY: number; maxX: number; maxY: number } | null = null;
-        for (const c of children) {
-            const cb = this.nodeWorldBounds(c);
-            if (!cb) continue;
-            acc = acc
-                ? {
-                      minX: Math.min(acc.minX, cb.minX),
-                      minY: Math.min(acc.minY, cb.minY),
-                      maxX: Math.max(acc.maxX, cb.maxX),
-                      maxY: Math.max(acc.maxY, cb.maxY),
-                  }
-                : cb;
-        }
-        return acc;
+        const b = this.scene.getNodeBounds(id); // [minX, minY, maxX, maxY]
+        // The engine returns all-zeros for a node with no spatial entry.
+        if (b[0] === 0 && b[1] === 0 && b[2] === 0 && b[3] === 0) return null;
+        return { minX: b[0], minY: b[1], maxX: b[2], maxY: b[3] };
     }
 
     /** Top-level nodes whose center lies within the artwork's rect — the set
@@ -2719,6 +2706,8 @@ export class InputManager {
         let best: ScissorTarget | null = null;
 
         for (const id of ids) {
+            // Locked artwork is inert — the scissors must not cut it either.
+            if (this.scene.isLockedInTree(id)) continue;
             const geo = this.scene.getNodeGeometry(id);
             if (!geo?.Path) continue;
             const subpaths = geo.Path.subpaths;
@@ -3970,7 +3959,7 @@ export class InputManager {
         let best: { nodeId: number; subpathIndex: number; end: 'start' | 'end' } | null = null;
         let bestDist = r;
         for (const id of candidates) {
-            if (this.scene.getNodeLocked(id) || !this.scene.getNodeVisible(id)) continue;
+            if (this.scene.isLockedInTree(id) || !this.scene.isVisibleInTree(id)) continue;
             const geo = this.scene.getNodeGeometry(id);
             if (!geo?.Path) continue;
             const t = this.scene.getTransform(id);
@@ -4883,22 +4872,43 @@ export class InputManager {
 
         // Update live preview for shape creation
         if (this.previewRect) {
-            // Snap the moving corner (skipped with Shift/Alt so the square /
-            // from-center constraints stay exact; Cmd/Ctrl bypasses).
+            // Snap the moving corner. Cmd/Ctrl bypasses.
             let cur = this.currentPos;
             this.activeSnapGuides = [];
-            if (!e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
-                const s = this.snap.snapPoint(cur.x, cur.y, 8 / this.renderer.zoom);
-                cur = { x: s.x, y: s.y };
-                this.activeSnapGuides = s.guides;
+            // Which axis leads the drag. Under Shift the square's side is taken
+            // from it, so it's also the only axis that can snap.
+            const xDrives = Math.abs(cur.x - this.startPos.x) >= Math.abs(cur.y - this.startPos.y);
+            if (!e.metaKey && !e.ctrlKey) {
+                const thr = 8 / this.renderer.zoom;
+                if (e.shiftKey) {
+                    // A square's two sides are one number, so snapping both axes
+                    // would fight the constraint — snap the leading one and let
+                    // the other follow. Skipping snapping altogether (the old
+                    // behaviour) meant you couldn't draw a square onto a guide.
+                    const s = xDrives
+                        ? this.snap.snapAxis('x', cur.x, thr)
+                        : this.snap.snapAxis('y', cur.y, thr);
+                    if (s) {
+                        cur = xDrives ? { x: s.value, y: cur.y } : { x: cur.x, y: s.value };
+                        this.activeSnapGuides = [s.guide];
+                    }
+                } else {
+                    // Alt (from-centre) snaps too: the cursor corner is still a
+                    // real corner of the result, the opposite one just mirrors it.
+                    const s = this.snap.snapPoint(cur.x, cur.y, thr);
+                    cur = { x: s.x, y: s.y };
+                    this.activeSnapGuides = s.guides;
+                }
             }
 
             let w = Math.abs(cur.x - this.startPos.x);
             let h = Math.abs(cur.y - this.startPos.y);
 
-            // Shift: constrain to square/circle
+            // Shift: constrain to square/circle. The side comes from the leading
+            // axis rather than max(w,h) — same value when nothing snapped, but it
+            // keeps the snapped edge exact when a snap shortened that axis.
             if (e.shiftKey) {
-                const side = Math.max(w, h);
+                const side = xDrives ? w : h;
                 w = side;
                 h = side;
             }
@@ -5266,11 +5276,13 @@ export class InputManager {
             if (!isShift) {
                 this.scene.engine!.clear_selection();
             }
-            // Filter out locked nodes — they shouldn't be selectable via marquee
-            // Promote leaf nodes to their topmost group ancestor (Figma-style)
+            // Filter out locked nodes — they shouldn't be selectable via marquee.
+            // Tested against the whole ancestor chain, because the next step
+            // promotes a leaf to its topmost group: reading the leaf's own flag
+            // let a marquee select a locked group through an unlocked child.
             const groupPromoted = new Set<number>();
             for (const id of nodesInRect) {
-                if (this.scene.getNodeLocked(id) || !this.scene.getNodeVisible(id)) continue;
+                if (this.scene.isLockedInTree(id) || !this.scene.isVisibleInTree(id)) continue;
                 // Walk up to find topmost group ancestor
                 let promoted = id;
                 let current = id;

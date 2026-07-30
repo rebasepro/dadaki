@@ -526,6 +526,16 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
         const node = scene.getNode(id);
         if (!node) return null;
 
+        // A Boolean Group is the exception to walking a group: it paints ONE
+        // resolved outline and never its operands, so unioning the children
+        // would report geometry that isn't drawn. Its engine bounds are that
+        // outline, and no text estimate can be involved — a boolean result is a
+        // path.
+        if (scene.isBooleanGroup(id)) {
+            const bb = scene.getNodeBounds(id);
+            return [bb[0], bb[1], bb[2], bb[3]];
+        }
+
         const kids = node.children ?? [];
         if (kids.length) {
             let box: [number, number, number, number] | null = null;

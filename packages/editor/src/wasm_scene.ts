@@ -933,6 +933,22 @@ export class WasmScene {
         return this.engine!.get_node_locked(id);
     }
 
+    /**
+     * True when this node OR an ancestor is locked — the question every
+     * "can the user grab this?" test actually wants. The raw flag only protects
+     * the node it's set on, so a locked GROUP left its children grabbable, and
+     * selection promotes a grabbed child back to the locked group.
+     */
+    isLockedInTree(id: number): boolean {
+        return this.engine?.is_locked_in_tree(id) ?? false;
+    }
+
+    /** True when this node and all its ancestors are visible (what's on screen),
+     *  as opposed to `getNodeVisible`'s own-flag-only answer. */
+    isVisibleInTree(id: number): boolean {
+        return this.engine?.is_visible_in_tree(id) ?? true;
+    }
+
     /** Get a node's children IDs. */
     getNodeChildren(id: number): Uint32Array {
         return this.engine!.get_node_children(id);
