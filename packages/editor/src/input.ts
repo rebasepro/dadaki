@@ -1917,7 +1917,9 @@ export class InputManager {
                 this.startPos.y,
                 5 / this.renderer.zoom,
             );
-            if (hit) {
+            // ...but a handle drawn on top of the guide wins the click, so a guide
+            // parked on a shape's edge can't make that handle unreachable.
+            if (hit && !this.hasCanvasControlAt(this.startPos)) {
                 // Select the guide (drives the guide action bar) and clear any node
                 // selection so the two don't fight.
                 this.selectedGuide = hit;
@@ -4058,7 +4060,7 @@ export class InputManager {
                 this.currentPos.y,
                 5 / this.renderer.zoom,
             );
-            if (gh) {
+            if (gh && !this.hasCanvasControlAt(this.currentPos)) {
                 if (
                     !this.highlightedGuide ||
                     this.highlightedGuide.axis !== gh.axis ||
@@ -4521,42 +4523,78 @@ export class InputManager {
                     moveY = -deltaH;
                 }
 
-                // Snap the dragged edge(s) to nearby geometry. Skipped with
-                // Shift/Alt (aspect and center-resize win) and bypassed with
-                // Cmd/Ctrl (Figma/Illustrator-style temporary disable).
+                // Snap the dragged edge(s) to nearby geometry. Skipped with Alt
+                // (resize-from-centre moves both edges, so there's no single one
+                // to snap) and bypassed with Cmd/Ctrl (Figma/Illustrator-style
+                // temporary disable).
                 this.activeSnapGuides = [];
-                if (!e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+                const aspectLocked = e.shiftKey && this.resizeHandleType.length === 2;
+                if (!e.altKey && !e.metaKey && !e.ctrlKey) {
                     const threshold = 8 / this.renderer.zoom;
-                    if (this.resizeHandleType.includes('e')) {
-                        const s = this.snap.snapAxis('x', bounds.x + newW, threshold);
-                        if (s) {
-                            newW = s.value - bounds.x;
-                            this.activeSnapGuides.push(s.guide);
+                    if (aspectLocked) {
+                        // Shift keeps the ratio, so only ONE axis is free. Snap the
+                        // axis that is driving the scale — the same one the aspect
+                        // maths above follows — and let the other side derive from
+                        // it. Snapping both would fight the constraint, which is why
+                        // this used to bail out entirely and leave a Shift-resize
+                        // with no snapping at all. (A Shift-drag on an EDGE handle
+                        // constrains nothing, so it snaps normally, below.)
+                        const aspect = bounds.w / bounds.h;
+                        const right = this.resizeHandleType.includes('e');
+                        const bottom = this.resizeHandleType.includes('s');
+                        if (Math.abs(rdx) / bounds.w > Math.abs(rdy) / bounds.h) {
+                            const edge = right ? bounds.x + newW : bounds.x + moveX;
+                            const s = this.snap.snapAxis('x', edge, threshold);
+                            if (s) {
+                                newW = right ? s.value - bounds.x : bounds.x + bounds.w - s.value;
+                                newH = newW / aspect;
+                                this.activeSnapGuides.push(s.guide);
+                            }
+                        } else {
+                            const edge = bottom ? bounds.y + newH : bounds.y + moveY;
+                            const s = this.snap.snapAxis('y', edge, threshold);
+                            if (s) {
+                                newH = bottom ? s.value - bounds.y : bounds.y + bounds.h - s.value;
+                                newW = newH * aspect;
+                                this.activeSnapGuides.push(s.guide);
+                            }
                         }
-                    }
-                    if (this.resizeHandleType.includes('w')) {
-                        const s = this.snap.snapAxis('x', bounds.x + moveX, threshold);
-                        if (s) {
-                            const d = s.value - (bounds.x + moveX);
-                            moveX += d;
-                            newW -= d;
-                            this.activeSnapGuides.push(s.guide);
+                        // A w/n handle pins the opposite edge, so the origin has to
+                        // follow whatever the constraint just made of the size.
+                        if (!right) moveX = bounds.w - newW;
+                        if (!bottom) moveY = bounds.h - newH;
+                    } else {
+                        if (this.resizeHandleType.includes('e')) {
+                            const s = this.snap.snapAxis('x', bounds.x + newW, threshold);
+                            if (s) {
+                                newW = s.value - bounds.x;
+                                this.activeSnapGuides.push(s.guide);
+                            }
                         }
-                    }
-                    if (this.resizeHandleType.includes('s')) {
-                        const s = this.snap.snapAxis('y', bounds.y + newH, threshold);
-                        if (s) {
-                            newH = s.value - bounds.y;
-                            this.activeSnapGuides.push(s.guide);
+                        if (this.resizeHandleType.includes('w')) {
+                            const s = this.snap.snapAxis('x', bounds.x + moveX, threshold);
+                            if (s) {
+                                const d = s.value - (bounds.x + moveX);
+                                moveX += d;
+                                newW -= d;
+                                this.activeSnapGuides.push(s.guide);
+                            }
                         }
-                    }
-                    if (this.resizeHandleType.includes('n')) {
-                        const s = this.snap.snapAxis('y', bounds.y + moveY, threshold);
-                        if (s) {
-                            const d = s.value - (bounds.y + moveY);
-                            moveY += d;
-                            newH -= d;
-                            this.activeSnapGuides.push(s.guide);
+                        if (this.resizeHandleType.includes('s')) {
+                            const s = this.snap.snapAxis('y', bounds.y + newH, threshold);
+                            if (s) {
+                                newH = s.value - bounds.y;
+                                this.activeSnapGuides.push(s.guide);
+                            }
+                        }
+                        if (this.resizeHandleType.includes('n')) {
+                            const s = this.snap.snapAxis('y', bounds.y + moveY, threshold);
+                            if (s) {
+                                const d = s.value - (bounds.y + moveY);
+                                moveY += d;
+                                newH -= d;
+                                this.activeSnapGuides.push(s.guide);
+                            }
                         }
                     }
                 }
@@ -5398,6 +5436,37 @@ export class InputManager {
         }
         if (minX === Infinity) return null;
         return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+    }
+
+    /**
+     * True when a precise on-canvas control sits under `pos`: a resize, rotate,
+     * corner-radius or artboard handle, or a gradient stop.
+     *
+     * Ruler guides are grabbed before any of these, because they're drawn above
+     * the artwork. But a handle is not artwork — it's a control drawn on top of
+     * everything, it only exists at that one point, and it only exists while
+     * something is selected. A guide, by contrast, can be grabbed anywhere along
+     * its full length. So when the two overlap the handle has to win: otherwise a
+     * guide parked on a shape's edge makes that edge's handle unreachable, with
+     * no way to tell from the cursor why the drag keeps moving the guide.
+     */
+    hasCanvasControlAt(pos: { x: number; y: number }): boolean {
+        if (this.editingNodeId !== null || this.ui.activeTool !== 'selection') return false;
+        if (
+            this.renderer.selectedArtboardId !== null &&
+            this.renderer.artboardHandleHitTest(pos.x, pos.y)
+        ) {
+            return true;
+        }
+        if (
+            this.ui.gradientEdit.isActive() &&
+            this.ui.gradientEdit.hitTest(pos, this.renderer.zoom)
+        )
+            return true;
+        const frame = this.getSelectionFrame();
+        if (frame && (this.checkResizeHandle(pos, frame) || this.checkRotateHandle(pos, frame)))
+            return true;
+        return !!this.checkCornerRadiusHandle(pos);
     }
 
     checkResizeHandle(
