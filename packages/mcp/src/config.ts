@@ -149,7 +149,7 @@ export async function createTransport(
         // The hosted app: both sides connect outward and its backend pairs
         // them. A browser on a public origin cannot reach loopback at all, so
         // this is the only arrangement that works against a deployment.
-        const origin = cfg.url ?? 'https://dadaki.apps.rebase.pro';
+        const origin = cfg.url ?? 'https://dadaki.rebase.website';
         const transport = new RelayTransport({ origin, token: cfg.token });
         const base = origin.replace(/\/+$/, '');
         const connectUrl = `${base}/edit/new/blank?agentBridge=cloud&token=${cfg.token}`;
