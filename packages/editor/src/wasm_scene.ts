@@ -1204,6 +1204,18 @@ export class WasmScene {
     }
 
     /**
+     * A Boolean Group's resolved outline bounds in its own LOCAL space, or null
+     * when the node isn't a Boolean Group (or its outline hasn't been recomputed
+     * yet — `bool_cache` isn't serialized, so it's empty until the pass after a
+     * load). World bounds come from `getNodeBounds` as for any other node.
+     */
+    getBooleanLocalBounds(id: number): { x: number; y: number; w: number; h: number } | null {
+        const b = this.engine?.get_boolean_local_bounds(id);
+        if (!b || b.length < 4) return null;
+        return { x: b[0], y: b[1], w: b[2] - b[0], h: b[3] - b[1] };
+    }
+
+    /**
      * Group the given nodes (2+) into a non-destructive Boolean Group and cache
      * its resolved outline. The group carries the bottom operand's style. Returns
      * the new group id, or -1 if the boolean produced no geometry. Undoable.

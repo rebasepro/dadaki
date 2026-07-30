@@ -36,6 +36,43 @@ function makeScene(
     } as unknown as WasmScene;
 }
 
+/** Scene stub with a real parent→children tree, plus per-node flags. */
+function makeTree(
+    nodes: Record<number, [number, number, number, number]>,
+    parents: Record<number, number> = {},
+    flags: {
+        locked?: number[];
+        hidden?: number[];
+        masks?: number[];
+        boolGroups?: number[];
+    } = {},
+): WasmScene {
+    const ids = Object.keys(nodes).map(Number);
+    const locked = new Set(flags.locked ?? []);
+    const hidden = new Set(flags.hidden ?? []);
+    const masks = new Set(flags.masks ?? []);
+    const boolGroups = new Set(flags.boolGroups ?? []);
+    return {
+        engine: { get_document_width: () => 1000, get_document_height: () => 1000 },
+        // One artboard, parked far off-screen so its edges never collide with
+        // the node coordinates under test.
+        getArtboards: () => [
+            { id: 99, name: 'far', x: -5000, y: -5000, w: 100, h: 100, background: bg },
+        ],
+        getRootNodes: () => Uint32Array.from(ids.filter((id) => !(id in parents))),
+        getNodeParent: (id: number) => parents[id] ?? -1,
+        getNodeChildren: (id: number) =>
+            Uint32Array.from(ids.filter((c) => parents[c] === id).sort((a, b) => a - b)),
+        getNodeVisible: (id: number) => !hidden.has(id),
+        getNodeLocked: (id: number) => locked.has(id),
+        getNodeIsMask: (id: number) => masks.has(id),
+        isBooleanGroup: (id: number) => boolGroups.has(id),
+        getNodeBounds: (id: number) => Float32Array.from(nodes[id]),
+        getResolvedSubpaths: () => [],
+        getTransform: () => Float32Array.from([1, 0, 0, 0, 1, 0, 0, 0, 1]),
+    } as unknown as WasmScene;
+}
+
 describe('SnapEngine', () => {
     it('snaps a box edge to another node edge within threshold', () => {
         const engine = new SnapEngine();
@@ -102,6 +139,58 @@ describe('SnapEngine', () => {
         expect(engine.snapAxis('x', 503, 8)?.value).toBe(500);
         engine.end();
         expect(engine.snapAxis('x', 503, 8)).toBeNull();
+    });
+
+    it('ignores locked artwork', () => {
+        const engine = new SnapEngine();
+        engine.begin(makeTree({ 1: [100, 100, 200, 200] }, {}, { locked: [1] }), []);
+        expect(engine.snapAxis('x', 202, 8)).toBeNull();
+
+        // ...including a locked group's children.
+        const grouped = new SnapEngine();
+        grouped.begin(
+            makeTree(
+                { 1: [100, 100, 200, 200], 2: [100, 100, 200, 200] },
+                { 2: 1 },
+                { locked: [1] },
+            ),
+            [],
+        );
+        expect(grouped.snapAxis('x', 202, 8)).toBeNull();
+    });
+
+    it('snaps to a Boolean Group outline, not to its operands', () => {
+        const engine = new SnapEngine();
+        // Group 1 (intersect): operands span 0..300, and the group's own bounds
+        // are the painted intersection 100..200 (what the engine reports for a
+        // Boolean Group). The operand edges must not leak in as targets.
+        const scene = makeTree(
+            { 1: [100, 100, 200, 200], 2: [0, 0, 200, 200], 3: [100, 100, 300, 300] },
+            { 2: 1, 3: 1 },
+            { boolGroups: [1] },
+        );
+        engine.begin(scene, []);
+
+        expect(engine.snapAxis('x', 102, 8)?.value).toBe(100); // visible left edge
+        expect(engine.snapAxis('x', 198, 8)?.value).toBe(200); // visible right edge
+        expect(engine.snapAxis('x', 298, 8)).toBeNull(); // operand edge — invisible
+        expect(engine.snapAxis('x', 2, 8)).toBeNull();
+    });
+
+    it('clips masked siblings to the mask', () => {
+        const engine = new SnapEngine();
+        // In group 1, node 2 masks node 3 (painted above it). Node 3 runs to 500,
+        // but only the part inside the mask (…200) is on screen.
+        const scene = makeTree(
+            { 1: [0, 0, 500, 500], 2: [0, 0, 200, 200], 3: [50, 50, 500, 500] },
+            { 2: 1, 3: 1 },
+            { masks: [2] },
+        );
+        engine.begin(scene, []);
+
+        expect(engine.snapAxis('x', 198, 8)?.value).toBe(200); // mask edge
+        expect(engine.snapAxis('x', 498, 8)).toBeNull(); // masked-away edge
+        expect(engine.snapAxis('x', 52, 8)?.value).toBe(50); // still visible
     });
 
     it('includes the edges of every artboard as snap targets', () => {

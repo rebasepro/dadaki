@@ -13,6 +13,31 @@ export interface SnapDelta {
     guides: SnapGuide[];
 }
 
+/** A world-space clip region (from a mask) limiting where geometry is visible. */
+interface ClipRect {
+    x0: number;
+    y0: number;
+    x1: number;
+    y1: number;
+}
+
+/** Intersection of two clips; `null` on either side means "unclipped". The
+ *  result may be empty (x1 <= x0 or y1 <= y0) — callers check with `clipEmpty`. */
+function intersectClip(a: ClipRect | null, b: ClipRect | null): ClipRect | null {
+    if (!a) return b;
+    if (!b) return a;
+    return {
+        x0: Math.max(a.x0, b.x0),
+        y0: Math.max(a.y0, b.y0),
+        x1: Math.min(a.x1, b.x1),
+        y1: Math.min(a.y1, b.y1),
+    };
+}
+
+function clipEmpty(c: ClipRect | null): boolean {
+    return !!c && (c.x1 <= c.x0 || c.y1 <= c.y0);
+}
+
 /**
  * Snapping engine for interactive drags (move / resize / draw).
  *
@@ -111,40 +136,98 @@ export class SnapEngine {
         // Collect edges/centers/anchors from every LEAF shape, recursing into
         // groups so nested shapes (e.g. an expanded Live Paint group) each snap
         // as themselves — not just to their parent group's overall box.
+        //
+        // Only geometry the user can actually SEE may become a target. Snapping
+        // to something invisible reads as the snap jumping to a random place:
+        // hidden and locked subtrees are skipped, a Boolean Group contributes
+        // its resolved outline instead of its (unpainted) operands, and masked
+        // siblings are clipped to the mask before their edges are taken.
         const canAnchors =
             typeof scene.getResolvedSubpaths === 'function' &&
             typeof scene.getTransform === 'function';
-        const collect = (id: number) => {
+
+        /** Push a rect's edges + centers, cropped to `clip` (the visible part). */
+        const pushRect = (b: ArrayLike<number>, clip: ClipRect | null) => {
+            let x0 = b[0];
+            let y0 = b[1];
+            let x1 = b[2];
+            let y1 = b[3];
+            if (clip) {
+                x0 = Math.max(x0, clip.x0);
+                y0 = Math.max(y0, clip.y0);
+                x1 = Math.min(x1, clip.x1);
+                y1 = Math.min(y1, clip.y1);
+                if (x1 < x0 || y1 < y0) return; // entirely masked away
+            }
+            if (x1 <= x0 && y1 <= y0) return; // empty bounds
+            this.xTargets.push(x0, (x0 + x1) / 2, x1);
+            this.yTargets.push(y0, (y0 + y1) / 2, y1);
+        };
+
+        /** Push world-space subpath vertices as exact 2D anchors. */
+        const pushAnchors = (
+            subs: { points: { x: number; y: number }[] }[],
+            t: ArrayLike<number>,
+            clip: ClipRect | null,
+        ) => {
+            for (const sp of subs) {
+                for (const p of sp.points) {
+                    const x = t[0] * p.x + t[1] * p.y + t[2];
+                    const y = t[3] * p.x + t[4] * p.y + t[5];
+                    if (clip && (x < clip.x0 || x > clip.x1 || y < clip.y0 || y > clip.y1))
+                        continue;
+                    this.points.push({ x, y });
+                }
+            }
+        };
+
+        const collect = (id: number, clip: ClipRect | null) => {
             if (!scene.getNodeVisible(id)) return; // skips a hidden group's whole subtree
+            if (scene.getNodeLocked?.(id)) return; // locked artwork is inert, snapping included
+            if (clipEmpty(clip)) return; // masked away entirely
+
+            // A Boolean Group paints ONE outline (its cached boolean result) and
+            // never its operands, so the operand edges are phantoms — often on the
+            // far side of the visible shape, which is exactly what makes a snap
+            // look like it jumped to the opposite edge. Its own bounds already
+            // hug the painted outline (compute_spatial_node special-cases it), so
+            // it snaps as the leaf it looks like.
+            if (scene.isBooleanGroup?.(id)) {
+                pushRect(scene.getNodeBounds(id), clip);
+                return;
+            }
+
             const children = scene.getNodeChildren ? scene.getNodeChildren(id) : [];
             if (children.length > 0) {
-                for (const c of children) collect(c);
+                // Within a group, a visible mask clips every LATER sibling (the
+                // ones painted above it) up to the next mask.
+                let maskClip: ClipRect | null = null;
+                for (const c of children) {
+                    if (scene.getNodeIsMask?.(c) && scene.getNodeVisible(c)) {
+                        const mb = scene.getNodeBounds(c);
+                        maskClip = { x0: mb[0], y0: mb[1], x1: mb[2], y1: mb[3] };
+                        collect(c, clip); // the mask shape bounds the visible result
+                        continue;
+                    }
+                    collect(c, intersectClip(clip, maskClip));
+                }
                 return; // a group contributes only through its children
             }
-            const b = scene.getNodeBounds(id);
-            if (b[2] <= b[0] && b[3] <= b[1]) return; // empty bounds
-            this.xTargets.push(b[0], (b[0] + b[2]) / 2, b[2]);
-            this.yTargets.push(b[1], (b[1] + b[3]) / 2, b[3]);
+
+            pushRect(scene.getNodeBounds(id), clip);
 
             // Path vertices as exact 2D snap points (endpoint chaining).
             if (canAnchors) {
                 const subs = scene.getResolvedSubpaths(id);
                 if (subs.length > 0) {
-                    const t = scene.getTransform(id); // row-major world [a,b,tx, c,d,ty, …]
-                    for (const sp of subs) {
-                        for (const p of sp.points) {
-                            this.points.push({
-                                x: t[0] * p.x + t[1] * p.y + t[2],
-                                y: t[3] * p.x + t[4] * p.y + t[5],
-                            });
-                        }
-                    }
+                    // row-major world [a,b,tx, c,d,ty, …]
+                    pushAnchors(subs, scene.getTransform(id), clip);
                 }
             }
         };
         for (const rootId of scene.getRootNodes()) {
             if (excludedRoots.has(rootId)) continue;
-            collect(rootId);
+            collect(rootId, null);
         }
 
         // Ruler guides — a vertical guide snaps x, a horizontal guide snaps y.

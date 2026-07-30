@@ -618,6 +618,14 @@ export class InputManager {
         // Check if the currently selected node is a group
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 1) {
+            // A Boolean Group hit-tests as itself (its operands aren't drawn, so
+            // they aren't pickable), which means the drill-down below has no leaf
+            // to walk up from. Enter it the same way the Edit button does, so a
+            // second double-click still reaches the operands.
+            if (selection[0] === hitId && this.scene.isBooleanGroup(hitId)) {
+                this.enterSelectedNode(hitId);
+                return;
+            }
             const selectedNode = this.scene.getNode(selection[0]);
             if (selectedNode && selectedNode.node_type === 'Group') {
                 // Double-click on a group → drill down ONE level:
@@ -4705,11 +4713,19 @@ export class InputManager {
                         (g) => (g.axis === 'x' && !xLocked) || (g.axis === 'y' && !yLocked),
                     );
 
-                    // Figma-style equal spacing. It OVERRIDES edge/grid alignment on
-                    // an axis when the equal position is within reach — otherwise
-                    // alignment or grid snapping there would block it entirely. A
-                    // touch grabbier than edge alignment, since an exact equal
-                    // position is harder to hit by hand than a shared edge.
+                    // Figma-style equal spacing. It takes over an axis from
+                    // edge/grid alignment when the equal position is within reach —
+                    // otherwise alignment or grid snapping there would block it
+                    // entirely. A touch grabbier than edge alignment, since an exact
+                    // equal position is harder to hit by hand than a shared edge.
+                    //
+                    // But only when it is the nearer of the two. Equal spacing is
+                    // measured from the ALREADY-snapped position, so the pointer's
+                    // distance to it is `snapped.d? + es.delta`, while the distance
+                    // to the edge alignment is `snapped.d?`. Overriding an edge
+                    // alignment the user is a hair away from — for an equal position
+                    // three times further off — is what makes a snap feel like it
+                    // jumps somewhere else entirely.
                     const thr = 12 / this.renderer.zoom;
                     const es = computeEqualSpacing(this.scene, this.moveOriginalIds, [
                         sb.x + totalDx,
@@ -4717,13 +4733,17 @@ export class InputManager {
                         sb.x + totalDx + sb.w,
                         sb.y + totalDy + sb.h,
                     ]);
+                    const beatsAlignment = (delta: number, edgeDelta: number, axis: 'x' | 'y') =>
+                        Math.abs(delta) < thr &&
+                        (!snapped.guides.some((g) => g.axis === axis) ||
+                            Math.abs(edgeDelta + delta) < Math.abs(edgeDelta));
                     const matches: import('./equal_spacing').EqualMatch[] = [];
-                    if (!xLocked && es.x && Math.abs(es.x.delta) < thr) {
+                    if (!xLocked && es.x && beatsAlignment(es.x.delta, snapped.dx, 'x')) {
                         totalDx += es.x.delta;
                         this.activeSnapGuides = this.activeSnapGuides.filter((g) => g.axis !== 'x');
                         matches.push(es.x);
                     }
-                    if (!yLocked && es.y && Math.abs(es.y.delta) < thr) {
+                    if (!yLocked && es.y && beatsAlignment(es.y.delta, snapped.dy, 'y')) {
                         totalDy += es.y.delta;
                         this.activeSnapGuides = this.activeSnapGuides.filter((g) => g.axis !== 'y');
                         matches.push(es.y);
@@ -5478,6 +5498,12 @@ export class InputManager {
     ): { x: number; y: number; w: number; h: number } | null {
         if (depth > 16) return null;
         if (this.scene.getNodeType(id) === 3) {
+            // Boolean Group: the operands are consumed by the op and never
+            // painted, so the frame follows the resolved outline. Without this
+            // the selection box (and the resize handles on it) would span the
+            // operand union — visibly wider than the shape it is framing.
+            const bb = this.scene.getBooleanLocalBounds(id);
+            if (bb) return bb;
             // Group
             const kids = this.scene.getNodeChildren(id);
             let minX = Infinity,

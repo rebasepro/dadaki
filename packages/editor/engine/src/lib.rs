@@ -2615,6 +2615,10 @@ impl Engine {
             self.dirty_boolean_groups.remove(&id);
         }
         self.dirty_flags.insert(id, true);
+        // Becoming (or ceasing to be) a Boolean Group switches which geometry
+        // defines the group's box: the cached outline vs. the operand union.
+        self.update_spatial_index(id);
+        self.update_ancestor_group_bounds(id);
     }
 
     /// The boolean op on a Group (0..3), or -1 if it isn't a Boolean Group.
@@ -2642,6 +2646,10 @@ impl Engine {
         if applied {
             self.dirty_boolean_groups.remove(&id);
             self.dirty_flags.insert(id, true);
+            // The group's bounds ARE its outline now, so a new outline is a new
+            // box — for the group and for every ancestor that unions it.
+            self.update_spatial_index(id);
+            self.update_ancestor_group_bounds(id);
         }
     }
 
@@ -2723,6 +2731,17 @@ impl Engine {
             .unwrap_or(false);
 
         if is_group {
+            // A Boolean Group paints its cached outline and NOTHING else — the
+            // operands are consumed by the op (see write_boolean_group_draw). Its
+            // bounds must hug that outline, not the operand union: an intersect of
+            // two shapes is smaller than either, and a subtract's hole leaves the
+            // subtrahend entirely outside the painted result. Anything reading
+            // bounds — selection frame, resize handles, align/distribute, spacing,
+            // snapping — would otherwise work off a box the user cannot see.
+            if let Some(aabb) = self.boolean_group_aabb(id) {
+                return Some(SpatialNode { id, aabb });
+            }
+
             // Group AABB = union of all descendant AABBs
             let children = self.scene.nodes.get(&id)
                 .map(|n| n.children.clone())
@@ -2810,6 +2829,63 @@ impl Engine {
         }
     }
 
+    /// Bounds of a Boolean Group's resolved outline as `[minX, minY, maxX, maxY]`,
+    /// in local space when `transform` is `None` and world space otherwise.
+    /// `None` when the node isn't a Boolean Group, or its `bool_cache` is empty —
+    /// JS recomputes the outline after a snapshot load, so between the load and
+    /// that pass the descendant union is the only bound available.
+    ///
+    /// Resolved exactly as the renderer resolves it: rounded, then flattened —
+    /// so the box matches the pixels rather than the control polygon.
+    fn boolean_outline_bounds(&self, id: u32, transform: Option<Mat3>) -> Option<[f32; 4]> {
+        let node = self.scene.nodes.get(&id)?;
+        node.boolean_op?;
+        if node.bool_cache.is_empty() {
+            return None;
+        }
+
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        let mut has_points = false;
+        for sp in &round_subpaths(&node.bool_cache) {
+            for lp in &flatten_subpath(sp) {
+                has_points = true;
+                let p = match transform {
+                    Some(t) => t.transform_point2(*lp),
+                    None => *lp,
+                };
+                min_x = min_x.min(p.x);
+                min_y = min_y.min(p.y);
+                max_x = max_x.max(p.x);
+                max_y = max_y.max(p.y);
+            }
+        }
+        if !has_points {
+            return None;
+        }
+        Some([min_x, min_y, max_x, max_y])
+    }
+
+    /// World AABB of a Boolean Group's resolved outline (see `boolean_outline_bounds`).
+    fn boolean_group_aabb(&self, id: u32) -> Option<AABB<[f32; 2]>> {
+        let transform_bytes = self.global_transforms.get(&id)?;
+        let transform = Mat3::from_cols_array(transform_bytes);
+        let b = self.boolean_outline_bounds(id, Some(transform))?;
+        Some(AABB::from_corners([b[0], b[1]], [b[2], b[3]]))
+    }
+
+    /// A Boolean Group's outline bounds in its OWN local space, as
+    /// `[minX, minY, maxX, maxY]` — empty when it isn't a Boolean Group with a
+    /// usable cache. JS needs this for the oriented selection frame, which is
+    /// built in local space and then transformed (so it can sit rotated).
+    pub fn get_boolean_local_bounds(&self, id: u32) -> Vec<f32> {
+        self.boolean_outline_bounds(id, None)
+            .map(|b| b.to_vec())
+            .unwrap_or_default()
+    }
+
     /// Recursively collect AABB bounds of all descendants of a node.
     fn collect_descendant_bounds(&self, id: u32, min_x: &mut f32, min_y: &mut f32, max_x: &mut f32, max_y: &mut f32) {
         self.collect_descendant_bounds_bounded(id, min_x, min_y, max_x, max_y, 0);
@@ -2833,6 +2909,18 @@ impl Engine {
                     .map(|n| matches!(n.node_type, NodeType::Group))
                     .unwrap_or(false);
                 if is_child_group {
+                    // A nested Boolean Group contributes its resolved outline and
+                    // not its operands — the same reason compute_spatial_node
+                    // special-cases it, applied one level down.
+                    if let Some(aabb) = self.boolean_group_aabb(child_id) {
+                        let lower = aabb.lower();
+                        let upper = aabb.upper();
+                        *min_x = min_x.min(lower[0]);
+                        *min_y = min_y.min(lower[1]);
+                        *max_x = max_x.max(upper[0]);
+                        *max_y = max_y.max(upper[1]);
+                        continue;
+                    }
                     // Recurse into child groups
                     self.collect_descendant_bounds_bounded(child_id, min_x, min_y, max_x, max_y, depth + 1);
                 } else if let Some(spatial) = self.node_to_spatial.get(&child_id) {
@@ -3562,6 +3650,30 @@ impl Engine {
                 let inv_transform = global_transform.inverse();
                 let local_point = inv_transform.transform_point2(Vec2::new(x, y));
 
+                // Local-space tolerance: HIT_TOLERANCE is in world pixels, so
+                // divide by the transform's average scale factor.
+                let local_tol = {
+                    let det = (global_transform.x_axis.x * global_transform.y_axis.y
+                        - global_transform.x_axis.y * global_transform.y_axis.x).abs();
+                    HIT_TOLERANCE / det.sqrt().max(1e-6)
+                };
+
+                // A Group is never hit as itself — its leaves are — with one
+                // exception: a Boolean Group IS a leaf as far as the canvas is
+                // concerned. It paints one resolved outline and its operands are
+                // never drawn, so it is picked through that outline. Its children
+                // don't reach this loop at all (collect_draw_order stops at the
+                // group), which is what keeps a click in a subtract's hole, or
+                // beside an intersection, from selecting the shape.
+                if node.node_type == NodeType::Group {
+                    if node.boolean_op.is_some()
+                        && path_hit(&node.bool_cache, &node.style, local_point, local_tol)
+                    {
+                        return Some(id);
+                    }
+                    continue;
+                }
+
                 let is_hit = match node.geometry {
                     Geometry::Rect { width, height } | Geometry::Image { width, height, .. } => {
                         local_point.x >= 0.0 && local_point.x <= width &&
@@ -3574,12 +3686,6 @@ impl Engine {
                     },
                     Geometry::Path { ref subpaths, .. } => {
                         // Precise geometric test against the actual outline.
-                        // Tolerance is in world pixels; convert to local space
-                        // by dividing by the transform's average scale factor.
-                        let det = (global_transform.x_axis.x * global_transform.y_axis.y
-                            - global_transform.x_axis.y * global_transform.y_axis.x).abs();
-                        let scale = det.sqrt().max(1e-6);
-                        let local_tol = HIT_TOLERANCE / scale;
                         path_hit(subpaths, &node.style, local_point, local_tol)
                     },
                     Geometry::Text { ref content, font_size, .. } => {
@@ -3700,6 +3806,12 @@ impl Engine {
     fn collect_draw_order(&self, id: u32, out: &mut Vec<u32>) {
         out.push(id);
         if let Some(node) = self.scene.nodes.get(&id) {
+            // A Boolean Group's operands are consumed by the op and never
+            // painted, so they aren't part of the draw order — same stop the
+            // renderer makes in write_node_recursive.
+            if node.boolean_op.is_some() {
+                return;
+            }
             for &child_id in &node.children {
                 self.collect_draw_order(child_id, out);
             }
@@ -3717,6 +3829,12 @@ impl Engine {
             }
         }
         if let Some(node) = self.scene.nodes.get(&id) {
+            // A Boolean Group stands in for its operands: they are never drawn,
+            // so a marquee that only crosses one of them must not sweep up the
+            // group. The group's own entry is bounded by its outline.
+            if node.boolean_op.is_some() {
+                return;
+            }
             for &child_id in &node.children {
                 self.collect_visible_in_order(child_id, visible_set, out);
             }
@@ -6561,6 +6679,79 @@ mod tests {
         // After bring_to_front(rect_b), rect_b should be on top again
         engine.bring_to_front(rect_b);
         assert_eq!(engine.hit_test(75.0, 75.0), Some(rect_b));
+    }
+
+    /// Two 200×200 rects offset by 100, intersected: only x 200..300 is painted.
+    /// Returns (engine, group_id, operand_ids).
+    fn intersect_boolean_group() -> (Engine, u32, [u32; 2]) {
+        let mut engine = Engine::new();
+        let r1 = engine.add_rect(100.0, 200.0, 200.0, 200.0); // 100..300
+        let r2 = engine.add_rect(200.0, 200.0, 200.0, 200.0); // 200..400
+        let gid = engine.group_nodes(&format!("[{r1},{r2}]"));
+        engine.set_boolean_op(gid, 0);
+        // A Boolean Group carries the bottom operand's style (makeBooleanGroup
+        // does this). Without a fill it would only be pickable on its outline.
+        let style = engine.get_node_style_json(r1);
+        engine.set_node_style(gid, &style);
+
+        // The outline JS would compute for the intersection. bool_cache is in the
+        // group's LOCAL space, and group_nodes parks the group's origin on the
+        // union's top-left, so shift the world rect by that origin.
+        let m = engine.global_transforms[&gid];
+        let (ox, oy) = (m[6], m[7]);
+        let corner = |x: f32, y: f32| {
+            format!(r#"{{"x":{},"y":{},"cp1":[{},{}],"cp2":[{},{}]}}"#,
+                x - ox, y - oy, x - ox, y - oy, x - ox, y - oy)
+        };
+        engine.set_bool_cache(gid, &format!(
+            r#"[{{"points":[{},{},{},{}],"closed":true}}]"#,
+            corner(200.0, 200.0), corner(300.0, 200.0),
+            corner(300.0, 400.0), corner(200.0, 400.0),
+        ));
+        assert!(!engine.scene.nodes[&gid].bool_cache.is_empty(), "bool_cache JSON must parse");
+        (engine, gid, [r1, r2])
+    }
+
+    #[test]
+    fn boolean_group_is_picked_through_its_outline() {
+        let (engine, gid, _) = intersect_boolean_group();
+
+        // Inside the painted intersection → the group itself.
+        assert_eq!(engine.hit_test(250.0, 300.0), Some(gid));
+        // Inside an operand but outside the paint → nothing. The operands are
+        // never drawn, so they must not be clickable.
+        assert_eq!(engine.hit_test(150.0, 300.0), None);
+        assert_eq!(engine.hit_test(350.0, 300.0), None);
+        // Well clear of everything.
+        assert_eq!(engine.hit_test(700.0, 700.0), None);
+    }
+
+    #[test]
+    fn boolean_group_marquee_ignores_operands() {
+        let (engine, gid, _) = intersect_boolean_group();
+
+        // A marquee over the painted band selects the group.
+        assert_eq!(engine.get_visible_nodes(240.0, 280.0, 260.0, 320.0), vec![gid]);
+        // A marquee over operand-only space selects nothing — and never an operand.
+        assert!(engine.get_visible_nodes(120.0, 280.0, 180.0, 320.0).is_empty());
+    }
+
+    #[test]
+    fn boolean_group_bounds_follow_the_outline() {
+        let (mut engine, gid, ops) = intersect_boolean_group();
+
+        // The painted intersection, not the operand union (100..400).
+        assert_eq!(engine.get_node_bounds(gid), vec![200.0, 200.0, 300.0, 400.0]);
+        // Same box in the group's own space (its origin sits at the union's
+        // top-left, 100,200) — what the oriented selection frame is built from.
+        assert_eq!(engine.get_boolean_local_bounds(gid), vec![100.0, 0.0, 200.0, 200.0]);
+
+        // Releasing the boolean hands the box back to the operand union.
+        engine.set_boolean_op(gid, -1);
+        assert_eq!(engine.get_node_bounds(gid), vec![100.0, 200.0, 400.0, 400.0]);
+        assert!(engine.get_boolean_local_bounds(gid).is_empty());
+        // ...and the operands become pickable again.
+        assert_eq!(engine.hit_test(150.0, 300.0), Some(ops[0]));
     }
 
     #[test]

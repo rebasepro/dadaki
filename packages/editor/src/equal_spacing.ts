@@ -67,7 +67,9 @@ function artboardAt(
 /** Bounds of the candidate measurement peers: top-level objects (excluding the
  *  moving ones) whose centre lies in the SAME artboard as the moving selection —
  *  so spacing never snaps across artboards. Objects in no artboard peer with each
- *  other. */
+ *  other. Hidden and locked objects are not peers: measuring a gap to something
+ *  that isn't on screen (or that the user has explicitly parked) makes the
+ *  selection jump for no visible reason. */
 function peerBounds(scene: WasmScene, movingIds: number[], S: Bounds): Bounds[] {
     const moving = new Set(movingIds);
     const artboards = scene.getArtboards();
@@ -75,6 +77,8 @@ function peerBounds(scene: WasmScene, movingIds: number[], S: Bounds): Bounds[] 
     const out: Bounds[] = [];
     for (const id of scene.getRootNodes()) {
         if (moving.has(id)) continue;
+        if (scene.getNodeVisible && !scene.getNodeVisible(id)) continue;
+        if (scene.getNodeLocked?.(id)) continue;
         const b = scene.getNodeBounds(id);
         if (!b || b.length < 4) continue;
         if (artboardAt(artboards, (b[0] + b[2]) / 2, (b[1] + b[3]) / 2) !== targetAb) continue;
