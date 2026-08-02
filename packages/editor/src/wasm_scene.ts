@@ -883,14 +883,26 @@ export class WasmScene {
 
     // ─── Per-Node Getters (avoid full-scene JSON serialization) ─────────
 
-    /** Get a single node's style. Only serializes ~200 bytes instead of the whole scene. */
-    getNodeStyle(id: number): import('./types').NodeStyle {
-        return JSON.parse(this.engine!.get_node_style_json(id));
+    /**
+     * Get a single node's style. Only serializes ~200 bytes instead of the whole
+     * scene. Null when the node is gone — the engine answers a missing id with
+     * an empty string, which `JSON.parse` used to turn into a bare
+     * `SyntaxError: Unexpected end of JSON input` several frames from the real
+     * cause. An id can go stale for ordinary reasons (undo past a shape's
+     * creation, a collaborator's delete), so absence is a normal answer, not an
+     * exception. `getNode` already reports it this way.
+     */
+    getNodeStyle(id: number): import('./types').NodeStyle | null {
+        const json = this.engine!.get_node_style_json(id);
+        if (!json) return null;
+        return JSON.parse(json);
     }
 
-    /** Get a single node's geometry. */
-    getNodeGeometry(id: number): import('./types').NodeGeometry {
-        return JSON.parse(this.engine!.get_node_geometry_json(id));
+    /** Get a single node's geometry. Null when the node is gone — see getNodeStyle. */
+    getNodeGeometry(id: number): import('./types').NodeGeometry | null {
+        const json = this.engine!.get_node_geometry_json(id);
+        if (!json) return null;
+        return JSON.parse(json);
     }
 
     /**
@@ -1234,14 +1246,26 @@ export class WasmScene {
     /**
      * Group the given nodes (2+) into a non-destructive Boolean Group and cache
      * its resolved outline. The group carries the bottom operand's style. Returns
-     * the new group id, or -1 if the boolean produced no geometry. Undoable.
+     * the new group id, or -1 if the nodes can't be combined at all. Undoable.
+     *
+     * An *empty* result is not a failure: Intersect on shapes with no common
+     * region legitimately yields nothing. We still build the group — the op is
+     * non-destructive, so the operands stay alive inside it and the user can
+     * switch to Union, drag a child until the shapes do overlap, Release, or
+     * undo. Refusing to create it made the menu item look broken instead
+     * ("I click Intersect and nothing happens"), with nothing on screen to
+     * explain why. recomputeBooleanGroup already caches an empty outline for a
+     * live group whose op stops producing geometry; this makes creation agree.
+     *
+     * `null` (as opposed to empty) means an operand isn't path-convertible at
+     * all — e.g. text — and there is nothing to group, so that still returns -1.
      */
     makeBooleanGroup(ck: CanvasKit, ids: number[], op: BoolOp): number {
         if (ids.length < 2) return -1;
         // Compute the outline BEFORE grouping — operand world geometry is
         // unchanged by grouping, and we need the bottom node's style.
         const res = computeBooleanSubpaths(ck, this, ids, op);
-        if (!res) return -1;
+        if (!res) return -1; // not evaluable at all (e.g. a text operand)
         const styleData = this.getNodeStyle(ids[0]);
 
         this.saveHistory();
@@ -1293,7 +1317,9 @@ export class WasmScene {
         if (opIdx < 0) return -1;
         const childIds = Array.from(this.getNodeChildren(groupId));
         const res = computeBooleanSubpaths(ck, this, childIds, BOOL_OP_BY_INDEX[opIdx]);
-        if (!res) return -1;
+        // Baking drops the operands, so an empty outline would leave an empty
+        // path and nothing else — decline, same as the destructive ops.
+        if (!res || res.subpaths.length === 0) return -1;
         const styleData = this.getNodeStyle(groupId);
         const styleJson = styleData
             ? JSON.stringify({ ...styleData, fill_rule: res.fillRule })

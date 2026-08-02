@@ -59,7 +59,7 @@ function worldContour(ck: CanvasKit, scene: WasmScene, id: number, n: number): C
 
 /** The node's first solid fill color, or null (gradients/patterns aren't lerped). */
 function solidFill(scene: WasmScene, id: number): Color | null {
-    const f = scene.getNodeStyle(id).fills?.[0] as
+    const f = scene.getNodeStyle(id)?.fills?.[0] as
         | (Color & { gradient_type?: unknown; image_id?: unknown })
         | undefined;
     if (!f || typeof f.r !== 'number') return null;

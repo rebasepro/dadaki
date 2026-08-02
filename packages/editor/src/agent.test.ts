@@ -463,7 +463,7 @@ describe('agent API — gradients', () => {
      * endpoints actually straddle each shape's own box.
      */
     const gradientOf = (scene: WasmScene, id: number) => {
-        const paint = scene.getNodeStyle(id).fills?.[0] as {
+        const paint = scene.getNodeStyle(id)?.fills?.[0] as {
             start_x: number;
             start_y: number;
             end_x: number;

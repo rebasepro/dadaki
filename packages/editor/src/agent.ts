@@ -468,6 +468,7 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
     const applyStyle = (id: number, style: AgentStyle | undefined) => {
         if (!style) return;
         const current = scene.getNodeStyle(id);
+        if (!current) return; // node gone — nothing to restyle
         const next: NodeStyle = { ...current };
         if (style.fill !== undefined) {
             next.fills = style.fill === null ? [] : [requireColor(style.fill)];
@@ -491,10 +492,9 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
         const list = requireNodes(ids);
         scene.transaction(() => {
             for (const id of list) {
-                scene.setNodeStyleNoHistory(
-                    id,
-                    JSON.stringify(edit({ ...scene.getNodeStyle(id) })),
-                );
+                const current = scene.getNodeStyle(id);
+                if (!current) continue;
+                scene.setNodeStyleNoHistory(id, JSON.stringify(edit({ ...current })));
             }
         });
     };

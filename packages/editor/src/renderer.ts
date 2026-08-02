@@ -4286,6 +4286,10 @@ export class Renderer {
                 canvas.concat(transform);
 
                 const geo = this.scene.getNodeGeometry(id);
+                if (!geo) {
+                    canvas.restore();
+                    continue; // node went away between selection and paint
+                }
                 if (geo.Rect) {
                     canvas.drawRect(
                         this.ck.LTRBRect(0, 0, geo.Rect.width, geo.Rect.height),

@@ -52,10 +52,10 @@ export function applyWidthProfile(
     if (!open) return false;
 
     const style = scene.getNodeStyle(nodeId);
-    const stroke = style.strokes?.[0];
+    const stroke = style?.strokes?.[0];
     const baseWidth = stroke?.width && stroke.width > 0 ? stroke.width : 16;
     const color =
-        solid(stroke?.paint) ?? solid(style.fills?.[0]) ?? ({ r: 0, g: 0, b: 0, a: 1 } as Color);
+        solid(stroke?.paint) ?? solid(style?.fills?.[0]) ?? ({ r: 0, g: 0, b: 0, a: 1 } as Color);
 
     // Sample the open subpath's centerline (local space) by arc length.
     const path = new ck.Path();

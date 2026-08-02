@@ -26,9 +26,15 @@ const KAPPA = 0.5522847498;
 /**
  * Combine the given nodes (2+) with a boolean op and return the resulting
  * outline as engine subpaths in **world space**, plus the fill rule the result
- * expects. Returns null if any node is unsupported or the result is empty.
- * This is the shared core of both the destructive op and the non-destructive
- * Boolean Group's cached-outline recompute.
+ * expects. This is the shared core of both the destructive op and the
+ * non-destructive Boolean Group's cached-outline recompute.
+ *
+ * Returns null only when the op **cannot be evaluated** — fewer than two
+ * operands, a node with no path representation (text), or a CanvasKit failure.
+ * An op that evaluates to nothing (Intersect on shapes with no common region)
+ * is a *successful* empty result: `subpaths` is `[]`. Callers must tell the two
+ * apart — a non-destructive group is still worth creating around an empty
+ * result, but destroying the operands to produce nothing is not.
  */
 export function computeBooleanSubpaths(
     ck: CanvasKit,
@@ -71,10 +77,8 @@ export function computeBooleanSubpaths(
     // render and hit-test as filled.
     const fillRule = result.getFillType() === ck.FillType.EvenOdd ? 1 : 0;
     result.delete();
-    if (subpaths.length === 0) {
-        // Empty result (e.g. intersect of disjoint shapes) — treat as failure.
-        return null;
-    }
+    // subpaths may be empty (e.g. intersect of disjoint shapes). That's a real
+    // answer, not a failure — see the note on this function.
     return { subpaths, fillRule };
 }
 
@@ -91,7 +95,11 @@ export function applyBooleanOp(
     op: BoolOp,
 ): number | null {
     const res = computeBooleanSubpaths(ck, scene, ids, op);
-    if (!res) return null;
+    // An empty result would replace the operands with nothing — for a
+    // *destructive* op that's indistinguishable from deleting the selection, so
+    // decline. (The non-destructive Boolean Group keeps its operands and so is
+    // happy to hold an empty outline; see WasmScene.makeBooleanGroup.)
+    if (!res || res.subpaths.length === 0) return null;
 
     // Carry over the style of the first (bottom-most in selection order) node
     const styleData = scene.getNodeStyle(ids[0]);
@@ -216,10 +224,11 @@ export function nodeToWorldPath(ck: CanvasKit, scene: WasmScene, id: number): Pa
 
     const geometry = scene.getNodeGeometry(id);
     const style = scene.getNodeStyle(id);
+    if (!geometry) return null; // node gone (undo, or a collaborator's delete)
     const path = new ck.Path();
     if (geometry.Rect) {
         const { width, height } = geometry.Rect;
-        const r = style.corner_radius || 0;
+        const r = style?.corner_radius || 0;
         if (r > 0) {
             path.addRRect(ck.RRectXY(ck.LTRBRect(0, 0, width, height), r, r));
         } else {
