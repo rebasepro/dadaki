@@ -25,7 +25,7 @@ import type { WasmScene } from './wasm_scene';
 export function outlineStroke(ck: CanvasKit, scene: WasmScene, nodeId: number): void {
     const geometry = scene.getNodeGeometry(nodeId);
     const style = scene.getNodeStyle(nodeId);
-    if (!style || style.strokes.length === 0 || style.strokes[0].width <= 0) return;
+    if (!geometry || !style || style.strokes.length === 0 || style.strokes[0].width <= 0) return;
     const stroke = style.strokes[0];
 
     // Build a CanvasKit path from the node's geometry (world space is not needed
@@ -59,6 +59,11 @@ export function outlineStroke(ck: CanvasKit, scene: WasmScene, nodeId: number): 
         2: ck.StrokeJoin.Bevel,
     };
 
+    // CanvasKit's Path.stroke() replaces the path with its outline IN PLACE and
+    // hands back the *same* object (null on failure) — it does not allocate a
+    // new Path. Freeing ckPath here would therefore free the very path we are
+    // about to read, and the next call through it throws "Cannot pass deleted
+    // object as a pointer of type Path", aborting Flatten mid-transaction.
     const outlined = ckPath.stroke({
         width: stroke.width,
         miter_limit: stroke.miter_limit || 4,
@@ -66,12 +71,15 @@ export function outlineStroke(ck: CanvasKit, scene: WasmScene, nodeId: number): 
         join: joinMap[stroke.join] ?? ck.StrokeJoin.Miter,
     });
 
-    ckPath.delete();
-    if (!outlined) return;
+    if (!outlined) {
+        ckPath.delete();
+        return;
+    }
 
     // Parse the outlined path back to subpaths
     const subpaths = parseCkPathToSubpaths(ck, outlined);
     outlined.delete();
+    if (outlined !== ckPath) ckPath.delete(); // defensive: not aliased after all
     if (subpaths.length === 0) return;
 
     // Update the node: geometry = outlined path, fill = old stroke, stroke = none
