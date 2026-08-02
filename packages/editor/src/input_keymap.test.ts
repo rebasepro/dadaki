@@ -1,0 +1,209 @@
+/**
+ * Mode-specific key routing: the same key must mean exactly one thing in a
+ * given mode, and the pen's buffer must never outlive the pen.
+ */
+/// <reference types="node" />
+
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { beforeAll, describe, expect, it } from 'vitest';
+import init, { Engine, History } from '../engine/pkg/engine';
+import { InputManager } from './input';
+import type { Renderer } from './renderer';
+import type { UIEngine } from './ui';
+import { WasmScene } from './wasm_scene';
+
+let wasmModule: { memory: WebAssembly.Memory };
+
+beforeAll(async () => {
+    wasmModule = await init({
+        module_or_path: readFileSync(resolve('packages/editor/engine/pkg/engine_bg.wasm')),
+    });
+});
+
+function makeScene(): WasmScene {
+    const scene = new WasmScene({} as never);
+    scene.engine = new Engine();
+    scene.history = new History(50);
+    scene.wasm = wasmModule;
+    return scene;
+}
+
+/** Renderer stub that records zoom requests so we can assert they didn't happen. */
+function makeRenderer() {
+    const zoomCalls: number[] = [];
+    const renderer = {
+        zoom: 1,
+        pan: { x: 0, y: 0 },
+        dpr: 1,
+        setZoomCentered(z: number) {
+            zoomCalls.push(z);
+            (this as { zoom: number }).zoom = z;
+        },
+        requestRender() {},
+        notifyViewChange() {},
+        onViewChange() {},
+        clearImageCache() {},
+        beginDragLayerCache: () => false,
+        setDragMovingRoots() {},
+        endDragLayerCache() {},
+        invalidateGroupSpriteFor() {},
+        invalidateAllGroupSprites() {},
+        calculatePathBounds: () => ({ minX: 0, minY: 0, maxX: 0, maxY: 0 }),
+        hoverEdgeId: -1,
+        hoverFaceId: -1,
+        selectedArtboardId: null,
+        artboardHandleHitTest: () => null,
+        artboardLabelHitTest: () => null,
+    };
+    return { renderer: renderer as unknown as Renderer, zoomCalls };
+}
+
+function makeUI(): UIEngine {
+    return {
+        activeTool: 'selection',
+        setActiveTool(t: string) {
+            (this as { activeTool: string }).activeTool = t;
+        },
+        setZoom() {},
+        syncWithSelection() {},
+        updateLayerList() {},
+        hideContextMenu() {},
+        refreshArtboardPanel() {},
+        applyToolCursor() {},
+        collapseSubtreeByDefault() {},
+        getCurrentStyle: () => '{}',
+        contextBar: { refresh() {} },
+        gradientEdit: { isActive: () => false, hitTest: () => null },
+    } as unknown as UIEngine;
+}
+
+function key(k: string): KeyboardEvent {
+    return {
+        key: k,
+        metaKey: false,
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
+        target: document.createElement('canvas'),
+        preventDefault() {},
+        stopPropagation() {},
+    } as unknown as KeyboardEvent;
+}
+
+const TRIANGLE = JSON.stringify([
+    {
+        points: [
+            { x: 0, y: 0, cp1: [0, 0], cp2: [0, 0] },
+            { x: 100, y: 0, cp1: [100, 0], cp2: [100, 0] },
+            { x: 100, y: 100, cp1: [100, 100], cp2: [100, 100] },
+        ],
+        closed: false,
+    },
+]);
+
+describe('one key, one meaning per mode', () => {
+    function setup() {
+        const scene = makeScene();
+        const { renderer, zoomCalls } = makeRenderer();
+        const ui = makeUI();
+        const input = new InputManager(document.createElement('canvas'), scene, ui, renderer);
+        return { scene, input, ui, renderer, zoomCalls };
+    }
+
+    it('“+” zooms when no path is being edited', () => {
+        const { input, zoomCalls } = setup();
+        const before = input.addPointMode;
+
+        input.onKeyDown(key('+'));
+
+        expect(zoomCalls.length).toBe(1);
+        expect(input.addPointMode).toBe(before);
+    });
+
+    it('“+” toggles Add Point while editing a path, and does NOT also zoom', () => {
+        // It used to do both: the zoom handler didn't return, so one press
+        // fired two unrelated commands.
+        const { scene, input, zoomCalls } = setup();
+        const id = scene.addPath(TRIANGLE);
+        input.editingNodeId = id;
+        const before = input.addPointMode;
+
+        input.onKeyDown(key('+'));
+
+        expect(input.addPointMode).toBe(!before);
+        expect(zoomCalls).toEqual([]);
+    });
+
+    it('“-” still zooms out while editing a path', () => {
+        const { scene, input, zoomCalls } = setup();
+        input.editingNodeId = scene.addPath(TRIANGLE);
+
+        input.onKeyDown(key('-'));
+
+        expect(zoomCalls.length).toBe(1);
+    });
+});
+
+describe('the pen buffer never outlives the pen', () => {
+    function penWithAnchors(n: number) {
+        const scene = makeScene();
+        const { renderer } = makeRenderer();
+        const ui = makeUI();
+        const input = new InputManager(document.createElement('canvas'), scene, ui, renderer);
+        for (let i = 1; i <= n; i++) input.handlePenDown({ x: i * 50, y: i * 50 });
+        return { scene, input, ui };
+    }
+
+    it('committing turns the anchors into a path and empties the buffer', () => {
+        const { scene, input } = penWithAnchors(3);
+
+        input.finalizePenPath();
+
+        expect(input.currentPathPoints.length).toBe(0);
+        expect(scene.engine!.get_root_nodes().length).toBe(1);
+    });
+
+    it('committing twice does not produce two paths', () => {
+        // finalizePenPath flips the tool back to Selection, and setActiveTool
+        // commits an in-progress path — without the reentrancy guard the two
+        // call each other.
+        const { scene, input } = penWithAnchors(3);
+
+        input.finalizePenPath();
+        input.finalizePenPath();
+
+        expect(scene.engine!.get_root_nodes().length).toBe(1);
+    });
+
+    it('a lone anchor is dropped rather than committed as a degenerate path', () => {
+        const { scene, input } = penWithAnchors(1);
+
+        input.finalizePenPath();
+
+        expect(input.currentPathPoints.length).toBe(0);
+        expect(scene.engine!.get_root_nodes().length).toBe(0);
+    });
+});
+
+describe('a stale node id is reported, not thrown', () => {
+    it('getNodeStyle and getNodeGeometry return null for a node that is gone', () => {
+        const scene = makeScene();
+        const id = scene.engine!.add_rect(0, 0, 10, 10);
+        expect(scene.getNodeStyle(id)).not.toBeNull();
+        expect(scene.getNodeGeometry(id)).not.toBeNull();
+
+        scene.engine!.remove_node(id);
+
+        // Previously: SyntaxError: Unexpected end of JSON input, several frames
+        // from the real cause.
+        expect(scene.getNodeStyle(id)).toBeNull();
+        expect(scene.getNodeGeometry(id)).toBeNull();
+    });
+
+    it('reports the same for an id that never existed', () => {
+        const scene = makeScene();
+        expect(scene.getNodeStyle(9999)).toBeNull();
+        expect(scene.getNodeGeometry(9999)).toBeNull();
+    });
+});
