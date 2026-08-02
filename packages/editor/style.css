@@ -2938,3 +2938,128 @@ body.scrubbing * {
 }
 
 
+
+/* ── Keyboard shortcuts dialog ─────────────────────────────────────────── */
+.kb-card {
+    width: min(720px, 92vw);
+    max-width: 720px;
+    padding: 0;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    max-height: min(78vh, 760px);
+}
+.kb-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 20px 24px 16px;
+    border-bottom: 1px solid var(--border);
+}
+.kb-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-main);
+}
+.kb-sub {
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--text-dim);
+    margin-top: 5px;
+    max-width: 54ch;
+}
+.kb-close {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 4px;
+    border-radius: 4px;
+}
+.kb-close:hover { color: var(--text-main); }
+.kb-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.kb-body {
+    overflow-y: auto;
+    padding: 4px 24px 24px;
+    /* Grid, not CSS columns: columns flow the whole list down one side and back
+       up the other, so you read Tools, scroll to the bottom, then scroll back up
+       for the next section. A grid keeps each section whole and in reading
+       order, left to right. */
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 22px 32px;
+    align-items: start;
+}
+.kb-section {
+    min-width: 0;
+}
+.kb-section-title {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--text-label);
+    margin: 0 0 8px;
+}
+.kb-blurb {
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--text-dim);
+    margin: 0 0 10px;
+}
+.kb-rows { display: flex; flex-direction: column; }
+.kb-row {
+    display: grid;
+    /* Capped, not `auto`: a row listing four chords would otherwise take the
+       width and wrap its description one word per line. */
+    grid-template-columns: minmax(64px, 44%) 1fr;
+    gap: 12px;
+    align-items: baseline;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+}
+.kb-row:last-child { border-bottom: none; }
+.kb-keys { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+.kb-or {
+    font-size: 9.5px;
+    color: var(--text-dim);
+    margin: 0 3px;
+}
+.kb-card kbd {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    min-width: 20px;
+    text-align: center;
+    background: var(--bg-input, rgba(255, 255, 255, 0.06));
+    border: 1px solid var(--border-light);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: 2px 5px;
+    color: var(--text-main);
+    white-space: nowrap;
+}
+.kb-action-main { font-size: 12.5px; color: var(--text-main); line-height: 1.45; }
+.kb-note {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.5;
+    margin-top: 2px;
+}
+.kb-mode {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.5;
+    margin-top: 3px;
+    padding-left: 9px;
+    border-left: 2px solid var(--border-light);
+}
+.kb-mode-where {
+    display: block;
+    color: var(--text-label);
+    font-size: 10px;
+    letter-spacing: 0.03em;
+}

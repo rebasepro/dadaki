@@ -15,6 +15,7 @@ export interface AppMenuCallbacks {
     onExport: () => void;
     onAddArtboard: () => void;
     onBackups: () => void;
+    onShortcuts: () => void;
     onAbout: () => void;
 }
 
@@ -37,6 +38,7 @@ const ENTRIES: (MenuEntry | 'separator')[] = [
     { label: 'Import SVG…', action: 'onImportSVG' },
     { label: 'Export…', shortcut: '⇧⌘E', action: 'onExport' },
     'separator',
+    { label: 'Keyboard Shortcuts…', shortcut: '?', action: 'onShortcuts' },
     { label: 'About Dadaki…', action: 'onAbout' },
 ];
 

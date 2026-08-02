@@ -6,6 +6,7 @@ import { adoptEmbeddedFonts, FileIO } from './file_io';
 import type { FileService } from './file_service';
 import { DEFAULT_TEXT_FONT, ensureFontCSS, loadGoogleFontData } from './fonts';
 import type { GuideHit, GuidesController } from './guides';
+import { TOOL_BINDINGS } from './keybindings';
 import { parseLoadResult } from './load_status';
 import type { MeshEditController } from './mesh_edit';
 import { offsetPath } from './offset_path';
@@ -131,20 +132,11 @@ export class InputManager {
     /** Maps plain-letter shortcuts to tool ids. Double-tapping the same letter
      *  within {@link TOOL_LOCK_WINDOW_MS} locks the tool (keyboard equivalent of
      *  double-clicking the toolbar button). */
-    private static readonly TOOL_SHORTCUTS: Record<string, string> = {
-        v: 'selection',
-        a: 'artboard',
-        p: 'pen',
-        n: 'pencil',
-        l: 'line',
-        r: 'rect',
-        o: 'ellipse',
-        b: 'paint-bucket',
-        c: 'scissors',
-        t: 'text',
-        i: 'eyedropper',
-        u: 'mesh',
-    };
+    /** Built from the shared binding table so the Shortcuts dialog documents the
+     *  keys this actually listens for, rather than a copy that can drift. */
+    static readonly TOOL_SHORTCUTS: Record<string, string> = Object.fromEntries(
+        TOOL_BINDINGS.map((t) => [t.key, t.tool]),
+    );
     private static readonly TOOL_LOCK_WINDOW_MS = 400;
     /** Last tool-shortcut press, for double-tap-to-lock detection. */
     private lastToolKey: { tool: string; at: number } | null = null;

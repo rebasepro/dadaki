@@ -16,6 +16,7 @@
 
 import type { CanvasKit } from 'canvaskit-wasm';
 import { AboutDialog } from './about_dialog';
+import { KeybindingsDialog } from './keybindings_dialog';
 import { type AgentApi, createAgentApi } from './agent';
 import { type AnalyticsSink, logAppEvent, registerAnalyticsSink } from './analytics';
 import { AppMenu } from './app_menu';
@@ -57,6 +58,10 @@ export {
 export type { AnalyticsSink } from './analytics';
 export { logAppEvent, registerAnalyticsSink } from './analytics';
 export type { Document } from './document';
+// The keyboard reference, so a host (the web app's /shortcuts page) renders the
+// same descriptions the in-editor dialog does rather than a second copy.
+export type { Binding, BindingSection, ModeNote } from './keybindings';
+export { FIELD_RULES, KEYBINDINGS, TOOL_BINDINGS } from './keybindings';
 
 /** Largest site id the engine's id encoding can represent. */
 export const MAX_SITE_ID = 1023;
@@ -371,6 +376,21 @@ export async function createEditor(
 
     // About dialog
     const aboutDialog = new AboutDialog();
+    const keybindingsDialog = new KeybindingsDialog();
+
+    // `?` opens the shortcut list from anywhere on the canvas. Deliberately not
+    // routed through InputManager: this is chrome, not a canvas action, and it
+    // must stay silent while a panel field or the text overlay has focus —
+    // those own their keys, and there `?` is simply a character being typed.
+    window.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key !== '?' || e.metaKey || e.ctrlKey || e.altKey) return;
+        const t = e.target as HTMLElement | null;
+        const tag = t?.tagName;
+        if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || t?.isContentEditable)
+            return;
+        e.preventDefault();
+        keybindingsDialog.toggle();
+    });
 
     // App menu (top-left)
     new AppMenu(el<HTMLButtonElement>('app-menu-btn'), {
@@ -382,6 +402,7 @@ export async function createEditor(
         onExport: () => exportDialog.open(),
         onAddArtboard: () => ui.addArtboard(),
         onBackups: () => backupDialog.open().catch(console.error),
+        onShortcuts: () => keybindingsDialog.open(),
         onAbout: () => aboutDialog.open(),
     });
 
