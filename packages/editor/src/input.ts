@@ -731,10 +731,38 @@ export class InputManager {
     }
 
     onKeyDown(e: KeyboardEvent) {
-        // Don't handle shortcuts when typing in form elements or contenteditable
+        // Typing in a field belongs to the field: plain letters are text, not
+        // tool shortcuts, and Delete edits the value rather than the selection.
+        //
+        // ⌘/Ctrl chords are the exception. They are application commands, not
+        // text — and swallowing them meant that tweaking a stroke width and
+        // reflexively hitting ⌘Z did *nothing at all*, because focus was still
+        // in the field. The edit stayed, the user pressed again, still nothing;
+        // it only worked after clicking away. ⌘S, ⌘D and ⌘G were dead there too.
+        //
+        // The four chords a text field genuinely owns — select-all, copy, paste,
+        // cut — stay native.
         const tag = (e.target as HTMLElement)?.tagName;
-        if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-        if ((e.target as HTMLElement)?.isContentEditable) return;
+        const inField =
+            tag === 'INPUT' ||
+            tag === 'SELECT' ||
+            tag === 'TEXTAREA' ||
+            (e.target as HTMLElement)?.isContentEditable === true;
+        if (inField) {
+            // Escape hands the keyboard back to the canvas. Without it, focus
+            // sat in the field indefinitely and every tool shortcut went
+            // nowhere, with nothing on screen explaining why. The value is left
+            // committed rather than reverted — blur already commits it, and
+            // undo is the way back.
+            if (e.key === 'Escape') {
+                (e.target as HTMLElement)?.blur?.();
+                return;
+            }
+            const chord = e.metaKey || e.ctrlKey;
+            if (!chord || InputManager.FIELD_OWNED_CHORDS.has(e.key.toLowerCase())) return;
+            // Fall through: the panel repopulates from the model afterwards, and
+            // the focus-preserving rebuild keeps the caret in place.
+        }
 
         // ⌘/Ctrl toggles snapping: clear the hover snap-preview the instant it's
         // held, without needing a mouse move.
@@ -818,7 +846,12 @@ export class InputManager {
                     this.ui.setZoom(this.renderer.zoom);
                 }
             }
-            if (e.key === '+' || e.key === '=') {
+            // `+` is claimed by Add Point while a path is being edited (see the
+            // toggle further down, which returns). Without this guard the one
+            // press did both: the canvas zoomed in AND Add Point flipped on,
+            // two unrelated commands from one key. Zoom out, the wheel and the
+            // view shortcuts are all still available in edit mode.
+            if ((e.key === '+' || e.key === '=') && this.editingNodeId === null) {
                 this.renderer.setZoomCentered(this.renderer.zoom * 1.25);
                 this.ui.setZoom(this.renderer.zoom);
             }
@@ -831,7 +864,20 @@ export class InputManager {
         // Delete — in path editing mode, delete the selected anchor point(s);
         // with a gradient stop focused, delete the stop instead of the node.
         if (e.key === 'Backspace' || e.key === 'Delete') {
-            if (this.selectedGuide) {
+            if (this.penOwnsKeyboard()) {
+                // With the pen up, Delete takes back the anchor you just placed —
+                // the same thing ⌘Z does, and what Illustrator does. It used to
+                // fall through to deleteSelection() and destroy whatever was
+                // selected *before* you picked up the pen: you were drawing, and
+                // an unrelated shape vanished.
+                //
+                // Keyed on the tool, not merely on having anchors: peeling a
+                // 3-point path back with Delete meant the fourth press found an
+                // empty buffer and deleted the shape instead. Delete does
+                // nothing here once the path is empty, which is the safe answer
+                // — the destructive reading is never what someone drawing meant.
+                this.undoLastPenPoint();
+            } else if (this.selectedGuide) {
                 this.deleteSelectedGuide();
             } else if (this.editingNodeId !== null && this.selectedPoints.size > 0) {
                 this.deleteSelectedPoints();
@@ -878,9 +924,11 @@ export class InputManager {
             }
         }
 
-        // Undo: Cmd+Z / Ctrl+Z
+        // Undo: Cmd+Z / Ctrl+Z. While the pen is mid-path, undo peels back the
+        // anchor you just placed rather than reaching into document history.
         if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
             e.preventDefault();
+            if (this.undoLastPenPoint()) return;
             if (this.editingNodeId !== null) this.exitEditMode();
             this.scene.undo();
             this.ui.updateLayerList();
@@ -890,6 +938,7 @@ export class InputManager {
         // Redo: Cmd+Shift+Z / Ctrl+Shift+Z
         if ((e.metaKey || e.ctrlKey) && e.key === 'z' && e.shiftKey) {
             e.preventDefault();
+            if (this.redoLastPenPoint()) return;
             if (this.editingNodeId !== null) this.exitEditMode();
             this.scene.redo();
             this.ui.updateLayerList();
@@ -1095,6 +1144,25 @@ export class InputManager {
         // Arrow key nudging — consecutive presses within 500ms are grouped
         // into a single undo step so Ctrl+Z reverts the whole sequence at once.
         if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+            // With the pen up, arrows nudged whatever was selected before the
+            // pen was picked up — an unrelated shape drifting off while you
+            // draw, with no visible selection to explain it. The path isn't
+            // selectable geometry yet, so there is nothing here for an arrow to
+            // move; do nothing rather than move the wrong thing.
+            if (this.penOwnsKeyboard()) return;
+            // Path editing with vertices selected: nudge the vertices, not the
+            // whole node. Delete already targets the selected points here, and
+            // the mesh tool below already nudges its selected vertices — only
+            // the arrows disagreed, quietly sliding the entire shape while the
+            // points you had selected sat still.
+            if (this.editingNodeId !== null && this.selectedPoints.size > 0) {
+                e.preventDefault();
+                const step = e.shiftKey ? 10 : 1;
+                const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+                const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+                if (this.nudgeSelectedPoints(dx, dy)) this.ui.syncWithSelection();
+                return;
+            }
             // Mesh tool with selected vertices: nudge the mesh points
             // (node-local units, one undo step per press), not the node.
             if (this.ui.activeTool === 'mesh' && this.ui.meshEdit.selectedVertices.size > 0) {
@@ -2335,10 +2403,10 @@ export class InputManager {
         // The appearance keys the eyedropper transfers — geometry-specific style
         // (corner_radius, fill_rule) stays with the target.
         const appearance = {
-            fills: srcStyle.fills ?? [],
-            strokes: srcStyle.strokes ?? [],
-            opacity: srcStyle.opacity ?? 1,
-            blend_mode: srcStyle.blend_mode ?? 0,
+            fills: srcStyle?.fills ?? [],
+            strokes: srcStyle?.strokes ?? [],
+            opacity: srcStyle?.opacity ?? 1,
+            blend_mode: srcStyle?.blend_mode ?? 0,
         };
 
         const selection = Array.from(this.scene.engine!.get_selection());
@@ -2840,6 +2908,45 @@ export class InputManager {
     }
 
     /** Delete the currently selected anchor points in path editing mode. */
+    /**
+     * Move every selected vertex by a WORLD-space delta, handles included.
+     *
+     * The delta is mapped through the inverse of the node's linear transform —
+     * translation is irrelevant to a direction — so a 1px arrow press moves the
+     * point 1px on screen no matter how the node is scaled, rotated or skewed.
+     * One history step per call, matching the mesh tool's per-press undo.
+     */
+    private nudgeSelectedPoints(dx: number, dy: number): boolean {
+        if (this.editingNodeId === null || !this.editingPoints) return false;
+        if (this.selectedPoints.size === 0) return false;
+
+        const t = this.scene.getTransform(this.editingNodeId);
+        const det = t[0] * t[4] - t[1] * t[3];
+        if (Math.abs(det) < 1e-10) return false; // degenerate — nothing sensible to do
+
+        const ldx = (t[4] * dx - t[1] * dy) / det;
+        const ldy = (t[0] * dy - t[3] * dx) / det;
+
+        let moved = false;
+        for (const key of this.selectedPoints) {
+            const [si, pi] = key.split(':').map(Number);
+            const pt = this.editingPoints[si]?.points[pi];
+            if (!pt) continue;
+            pt.x += ldx;
+            pt.y += ldy;
+            pt.cp1[0] += ldx;
+            pt.cp1[1] += ldy;
+            pt.cp2[0] += ldx;
+            pt.cp2[1] += ldy;
+            moved = true;
+        }
+        if (!moved) return false;
+
+        this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(this.editingPoints));
+        this.renderer.requestRender();
+        return true;
+    }
+
     deleteSelectedPoints() {
         if (this.editingNodeId === null || !this.editingPoints) return;
         if (this.selectedPoints.size === 0) return;
@@ -3654,6 +3761,10 @@ export class InputManager {
 
                 // ── Step 4: Handle strokes ─────────────────────────────
                 const style = this.scene.getNodeStyle(id);
+                if (!style) {
+                    newSelection.push(id);
+                    continue;
+                }
                 const hasStroke =
                     style.strokes &&
                     style.strokes.length > 0 &&
@@ -3735,6 +3846,19 @@ export class InputManager {
     penSourceSubpaths: Subpath[] | null = null;
     /** Index (within penSourceSubpaths) of the open subpath being extended. */
     penSourceSubpathIndex: number = -1;
+    /** Number of anchors the adopted path already had at adoption time. Undo may
+     *  peel back the anchors *this* pen session added, but never the source
+     *  path's own points — dropping below the base abandons the session and
+     *  leaves the original node untouched. */
+    private penAdoptedBaseCount: number = 0;
+    /** Anchors removed by Cmd+Z while the path is still live, newest last, so
+     *  Cmd+Shift+Z can put them back. Cleared as soon as a new anchor is placed. */
+    private penUndonePoints: PenPathPoint[] = [];
+
+    /** ⌘/Ctrl chords that belong to a focused text field, not to the app:
+     *  select-all, copy, paste, cut. Everything else falls through to the
+     *  editor's own shortcuts even while a panel field has focus. */
+    static readonly FIELD_OWNED_CHORDS = new Set(['a', 'c', 'v', 'x']);
 
     /** Screen-space radius (px) for hitting the first anchor to close the path. */
     static readonly PEN_CLOSE_RADIUS = 10;
@@ -3771,6 +3895,10 @@ export class InputManager {
             }
         }
 
+        // A fresh anchor invalidates the undone-anchor stack (same rule as any
+        // undo history: new work discards the redo branch).
+        this.penUndonePoints.length = 0;
+
         // Add a new anchor point (control points default to the anchor position)
         this.currentPathPoints.push({
             x: pos.x,
@@ -3784,7 +3912,34 @@ export class InputManager {
         this.ui.contextBar?.refresh();
     }
 
+    /**
+     * Whether the pen — not the document — should receive a keystroke.
+     *
+     * True whenever the pen tool is up, or a path is still buffered (belt and
+     * braces: switching tools now commits, so a stranded path shouldn't outlive
+     * the tool). Keys that mutate the document consult this so that drawing
+     * never reaches behind the path and edits the selection you left behind.
+     */
+    private penOwnsKeyboard(): boolean {
+        return this.ui.activeTool === 'pen' || this.currentPathPoints.length > 0;
+    }
+
+    /** True while finalizePenPath runs. Committing flips the tool back to
+     *  Selection, and `setActiveTool` now commits an in-progress path — without
+     *  this the two would call each other forever. */
+    private penFinalizing = false;
+
     finalizePenPath() {
+        if (this.penFinalizing) return;
+        this.penFinalizing = true;
+        try {
+            this.finalizePenPathInner();
+        } finally {
+            this.penFinalizing = false;
+        }
+    }
+
+    private finalizePenPathInner() {
         if (this.penSourceNodeId !== null) {
             // Endpoint continuation: write the extended subpath back into the
             // source node, in its own local space, preserving its other subpaths.
@@ -3873,8 +4028,57 @@ export class InputManager {
         this.penSourceTransform = null;
         this.penSourceSubpaths = null;
         this.penSourceSubpathIndex = -1;
+        this.penAdoptedBaseCount = 0;
+        this.penUndonePoints.length = 0;
         this.ui.contextBar?.refresh();
         this.renderer.requestRender();
+    }
+
+    /** Cmd+Z while a pen path is still being drawn: take back the last anchor
+     *  instead of undoing the document. The in-progress path isn't in the scene
+     *  yet, so the global history has nothing to say about it — undoing the
+     *  previous document edit while the user is mid-path is never what they
+     *  meant. Returns true when the keystroke was consumed here.
+     *
+     *  Order of removal mirrors how the path was built: a closed path reopens
+     *  first (the close is the last thing that happened), then anchors pop off
+     *  the end. For an adopted path we stop at the source path's own anchors —
+     *  going past them abandons the session, leaving that node as it was. */
+    undoLastPenPoint(): boolean {
+        if (this.currentPathPoints.length === 0) return false;
+
+        if (this.penPathClosed) {
+            this.penPathClosed = false;
+            this.penClosingDrag = false;
+            this.ui.contextBar?.refresh();
+            this.renderer.requestRender();
+            return true;
+        }
+
+        // Anchors that belong to the adopted path, not to this pen session.
+        const base = this.penSourceNodeId !== null ? this.penAdoptedBaseCount : 0;
+        if (this.currentPathPoints.length <= base) {
+            this.abandonPenPath();
+            return true;
+        }
+
+        this.penUndonePoints.push(this.currentPathPoints.pop()!);
+        this.isDraggingHandle = false;
+        this.penHandleDragging = false;
+        this.ui.contextBar?.refresh();
+        this.renderer.requestRender();
+        return true;
+    }
+
+    /** Cmd+Shift+Z counterpart to undoLastPenPoint — put back the last anchor
+     *  taken away, handles and all. */
+    redoLastPenPoint(): boolean {
+        const p = this.penUndonePoints.pop();
+        if (!p) return false;
+        this.currentPathPoints.push(p);
+        this.ui.contextBar?.refresh();
+        this.renderer.requestRender();
+        return true;
     }
 
     /** Discard the in-progress pen path without committing. When a path was
@@ -3931,6 +4135,8 @@ export class InputManager {
         }
 
         this.currentPathPoints = pts;
+        this.penAdoptedBaseCount = pts.length;
+        this.penUndonePoints.length = 0;
         this.penSourceNodeId = hit.nodeId;
         this.penSourceTransform = t;
         this.penSourceSubpaths = subpaths;
@@ -5612,6 +5818,7 @@ export class InputManager {
             return minX === Infinity ? null : { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
         }
         const geo = this.scene.getNodeGeometry(id);
+        if (!geo) return null;
         if (geo.Rect) return { x: 0, y: 0, w: geo.Rect.width, h: geo.Rect.height };
         if (geo.Image) return { x: 0, y: 0, w: geo.Image.width, h: geo.Image.height };
         if (geo.Ellipse) {

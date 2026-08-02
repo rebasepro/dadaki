@@ -27,6 +27,7 @@ import {
 import { MeshEditController } from './mesh_edit';
 import { createMeshForNode, geometryBBox } from './mesh_fit';
 import { cloneMesh, meanColor, meshContentHash } from './mesh_geom';
+import { withPanelFocusPreserved } from './panel_focus';
 import type { CssDecl } from './svg_css';
 import { matchedCssStyles, parseSvgStylesheet } from './svg_css';
 import type { FilledFace, LivePaintRenderData, SVGExportInput } from './svg_export';
@@ -945,12 +946,16 @@ export class UIEngine {
         });
 
         // Undo / Redo (header — global actions, deliberately not in the context bar)
+        // Mid-path, these step through the pen's own anchors — same rule as
+        // Cmd+Z, so the button and the shortcut never disagree.
         document.getElementById('undo-btn')?.addEventListener('click', () => {
+            if (this.scene.renderer?.inputManager?.undoLastPenPoint()) return;
             this.scene.undo();
             this.syncWithSelection();
             this.updateLayerList();
         });
         document.getElementById('redo-btn')?.addEventListener('click', () => {
+            if (this.scene.renderer?.inputManager?.redoLastPenPoint()) return;
             this.scene.redo();
             this.syncWithSelection();
             this.updateLayerList();
@@ -1232,6 +1237,14 @@ export class UIEngine {
         const im = this.scene.renderer?.inputManager;
         if (im) {
             im.commitActiveTextEdit(); // close any open inline text overlay
+            // An in-progress pen path used to survive a tool switch: the anchors
+            // stayed in the buffer, nothing was committed, and returning to the
+            // pen later resumed the path — the next click drew a segment back to
+            // wherever you had been minutes ago. Text edits and node editing were
+            // already closed out here; the pen was simply left out. Commit it on
+            // the same terms Escape uses: placed points are real geometry, so
+            // they are finished, never silently dropped.
+            if (toolId !== 'pen' && im.currentPathPoints.length > 0) im.finalizePenPath();
             if (im.editingNodeId !== null) im.exitEditMode();
         }
 
@@ -1316,6 +1329,7 @@ export class UIEngine {
                 else if ((newFills[0] as Gradient).stops.length > 0)
                     (newFills[0] as Gradient).stops[0].color = c;
                 this.updateNodeStyle(node, { fills: newFills });
+                this.recordPaintDefault('fills', newFills);
             }
         } else {
             // Update default style if nothing selected
@@ -1365,6 +1379,7 @@ export class UIEngine {
                 else if ((newStrokes[0].paint as Gradient).stops.length > 0)
                     (newStrokes[0].paint as Gradient).stops[0].color = c;
                 this.updateNodeStyle(node, { strokes: newStrokes });
+                this.recordPaintDefault('strokes', newStrokes);
             }
         } else {
             try {
@@ -1528,6 +1543,14 @@ export class UIEngine {
         this.scene.invalidateCache();
     }
 
+    /** A stroke width the renderer can actually draw: finite and non-negative.
+     *  Blank or unparseable reads as 0 (no stroke), which is what clearing the
+     *  field visibly does. */
+    static clampStrokeWidth(raw: string | number): number {
+        const n = typeof raw === 'number' ? raw : parseFloat(raw);
+        return Number.isFinite(n) && n > 0 ? n : 0;
+    }
+
     /** Build a style JSON string from the current UI panel values. */
     private buildCurrentStyleJson(): string {
         return (
@@ -1565,6 +1588,30 @@ export class UIEngine {
      *  shapes. Used by the eyedropper when sampling with no selection. */
     setCurrentStyle(json: string): void {
         this._currentStyleJson = json;
+    }
+
+    /** Remember a paint edit as the default for the next shape you draw.
+     *
+     *  Illustrator-style "current appearance": recolouring a shape, changing its
+     *  stroke width, or removing its stroke sets what the *next* shape gets.
+     *  Without this, every new shape came back as the same grey-with-2px-black-
+     *  border default no matter how many times you'd just changed it.
+     *
+     *  Only fills and strokes travel this way. Opacity and blend mode stay
+     *  per-object on purpose (see applyStylePanelToSelection) — those read as
+     *  properties of *that* object, not as the tool you're painting with.
+     *
+     *  Mesh gradients are skipped: a mesh's vertex grid is tied to the shape it
+     *  was built on, so carrying one onto the next shape produces nonsense. */
+    private recordPaintDefault(kind: 'fills' | 'strokes', arr: any[]): void {
+        if (kind === 'fills' && arr.some((p) => isMeshGradient(p))) return;
+        try {
+            const s = JSON.parse(this.getCurrentStyle());
+            s[kind] = JSON.parse(JSON.stringify(arr));
+            this._currentStyleJson = JSON.stringify(s);
+        } catch {
+            /* leave the previous default in place */
+        }
     }
 
     /** Write a transform field and remember what was written, so change events
@@ -1797,8 +1844,11 @@ export class UIEngine {
             ).toFixed(0);
             if (this.blendMode) this.blendMode.value = (style.blend_mode || 0).toString();
 
-            // Effects list (single-selection only)
-            this.renderEffectsList(selection.length === 1 ? selection[0] : null);
+            // Effects list (single-selection only). Rebuilt wholesale like the
+            // paint lists, so its own fields keep focus across a commit too.
+            withPanelFocusPreserved([document.getElementById('effects-list')], () =>
+                this.renderEffectsList(selection.length === 1 ? selection[0] : null),
+            );
         } else if (this.cornerRadius && node.geometry.Rect) {
             // The one style value a gesture CAN change live: the corner-radius
             // drag handle on a rect. Cheap — no DOM rebuild, no subpath walk.
@@ -1910,8 +1960,13 @@ export class UIEngine {
         // fill or stroke anyway. Mouse-up issues the full sync that repopulates
         // them.
         if (!gesture) {
-            this.renderFillsList(node);
-            this.renderStrokesList(node);
+            // Both lists are rebuilt from scratch, so an edit committed from one
+            // of their own fields would otherwise drop focus — see
+            // withPanelFocusPreserved.
+            withPanelFocusPreserved([this.fillsList, this.strokesList], () => {
+                this.renderFillsList(node);
+                this.renderStrokesList(node);
+            });
         }
     }
 
@@ -2111,6 +2166,8 @@ export class UIEngine {
                 mutate(arr, n);
                 const newStyle = { ...n.style, [kind]: arr };
                 this.scene.setNodeStyleNoHistory(id, JSON.stringify(newStyle));
+                // The first target defines the "last used" paint for new shapes.
+                if (id === targets[0]) this.recordPaintDefault(kind, arr);
             }
         };
 
@@ -2187,6 +2244,45 @@ export class UIEngine {
         label.className = 'mixed-label';
         label.textContent = 'Mixed';
         row.appendChild(label);
+
+        // A mixed selection could already have its colour unified by picking one
+        // in the swatch, but not its width — the only thing offered was "remove
+        // the stroke entirely". Give width the same treatment: blank means
+        // "leave them as they are", typing a number sets it on every stroke.
+        if (kind === 'strokes') {
+            const wContainer = document.createElement('div');
+            wContainer.className = 'dim-input';
+            wContainer.style.width = '44px';
+            wContainer.style.flex = '0 0 44px';
+            wContainer.title = 'Stroke thickness — set one for every selected stroke';
+
+            const wLabel = document.createElement('span');
+            wLabel.className = 'dim-label';
+            wLabel.innerHTML = `<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><path d="M1.5 2h9" stroke-width="0.8"/><path d="M1.5 5.5h9" stroke-width="1.6"/><path d="M1.5 9h9" stroke-width="2.4"/></svg>`;
+
+            const wInput = document.createElement('input');
+            wInput.type = 'number';
+            wInput.value = '';
+            wInput.placeholder = 'Mixed';
+            wInput.step = '0.5';
+            wInput.min = '0';
+
+            const applyWidth = (live: boolean) => {
+                if (wInput.value.trim() === '') return; // still "mixed" — touch nothing
+                const w = UIEngine.clampStrokeWidth(wInput.value);
+                if (String(w) !== wInput.value) wInput.value = String(w);
+                commit((arr) => {
+                    if (slotIndex === undefined) for (const s of arr) s.width = w;
+                    else if (arr[slotIndex]) arr[slotIndex].width = w;
+                }, live);
+            };
+            wInput.addEventListener('input', () => applyWidth(true));
+            wInput.addEventListener('change', () => applyWidth(false));
+            this.makeScrubbable(wLabel, wInput, () => applyWidth(true));
+
+            wContainer.append(wLabel, wInput);
+            row.appendChild(wContainer);
+        }
 
         const spacer = document.createElement('div');
         spacer.style.flex = '1';
@@ -3054,7 +3150,13 @@ export class UIEngine {
             // keystrokes) inside one gesture; the 'change' (settle) closes it so
             // the edit is a single undo step.
             const updateStrokeWidth = (live = true) => {
-                const w = parseFloat(wInput.value) || 0;
+                // `min="0"` only constrains the spinner — a typed or pasted "-8"
+                // sails past it. A negative width renders as no stroke at all
+                // while the panel still shows a colour swatch, and (since the
+                // last-used style is remembered) every new shape inherited the
+                // broken value. Clamp, and show the clamp.
+                const w = UIEngine.clampStrokeWidth(wInput.value);
+                if (String(w) !== wInput.value) wInput.value = String(w);
                 commit((arr) => {
                     if (arr[index]) arr[index].width = w;
                 }, live);
@@ -4038,7 +4140,8 @@ export class UIEngine {
             this.scene.setNodeEffects(nodeId, JSON.stringify(effects));
             this.scene.renderer?.invalidateRenderCaches();
             this.scene.renderer?.requestRender();
-            if (structural) this.renderEffectsList(nodeId);
+            if (structural)
+                withPanelFocusPreserved([list], () => this.renderEffectsList(nodeId));
         };
 
         // Live edits (typing in a number field, dragging the colour picker) fire
