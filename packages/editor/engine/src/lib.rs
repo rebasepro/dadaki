@@ -849,6 +849,27 @@ fn path_hit(subpaths: &[Subpath], style: &Style, p: Vec2, tol: f32) -> bool {
 // keeps its rounding: a rectangle whose corner is dragged becomes a trapezoid
 // that is still rounded, exactly like Figma.
 
+/// The four corners of a `width`×`height` rect as one closed subpath, each
+/// vertex carrying `corner_radius`.
+///
+/// A Rect keeps its radius on `style.corner_radius` (one value for the shape)
+/// while a Path keeps one per vertex, so anything that wants to *resolve* a
+/// rect's rounding has to move it onto vertices first. Sharing this between
+/// `convert_to_path` and the bounds pass is what keeps a rounded rect measuring
+/// the same before and after conversion.
+fn rect_subpaths(width: f32, height: f32, corner_radius: f32) -> Vec<Subpath> {
+    let cr = corner_radius;
+    vec![Subpath {
+        points: vec![
+            PathPoint { x: 0.0,   y: 0.0,    cp1: Vec2::new(0.0, 0.0),      cp2: Vec2::new(0.0, 0.0),      corner_radius: cr },
+            PathPoint { x: width, y: 0.0,    cp1: Vec2::new(width, 0.0),    cp2: Vec2::new(width, 0.0),    corner_radius: cr },
+            PathPoint { x: width, y: height, cp1: Vec2::new(width, height), cp2: Vec2::new(width, height), corner_radius: cr },
+            PathPoint { x: 0.0,   y: height, cp1: Vec2::new(0.0, height),   cp2: Vec2::new(0.0, height),   corner_radius: cr },
+        ],
+        closed: true,
+    }]
+}
+
 /// Expand every straight-line corner that carries a `corner_radius` into an
 /// explicit fillet (two anchors + an arc-as-cubic). Vertices that already have
 /// Bézier handles, or sit on an open subpath's endpoint, are left untouched.
@@ -2517,9 +2538,20 @@ impl Engine {
 
     pub fn set_node_style(&mut self, id: u32, style_json: &str) {
         if let Ok(style) = serde_json::from_str::<Style>(style_json) {
+            // `corner_radius` is the one style field that changes a node's
+            // measured extent: on a rotated or skewed Rect the arcs cut the
+            // corner tips off, so the cached AABB has to be rebuilt. Every other
+            // field is paint-only and a render-dirty flag is enough.
+            let mut bounds_changed = false;
             if let Some(node) = self.scene.nodes.get_mut(&id) {
+                bounds_changed = matches!(node.geometry, Geometry::Rect { .. })
+                    && (node.style.corner_radius - style.corner_radius).abs() > 1e-6;
                 node.style = style;
                 self.mark_dirty(id);
+            }
+            if bounds_changed {
+                self.update_spatial_index_recursive(id);
+                self.update_ancestor_group_bounds(id);
             }
         }
     }
@@ -2771,17 +2803,46 @@ impl Engine {
         {
             let transform = Mat3::from_cols_array(transform_bytes);
             let aabb = match node.geometry {
+                // A rounded rect's corner arcs are tangent to its edges, so in
+                // LOCAL space the sharp corners and the rounded outline share a
+                // box — which is why the four corners were enough for years.
+                // They stop agreeing the moment the box is measured after a
+                // non-axis-aligned transform: rotate or skew the rect and the
+                // acute corner tips, which the arcs cut away, become the extreme
+                // points. Resolve the rounding exactly as the Path arm does so
+                // the selection frame hugs the border the renderer draws.
+                Geometry::Rect { width, height } if node.style.corner_radius > 1e-3 => {
+                    let resolved = round_subpaths(&rect_subpaths(width, height, node.style.corner_radius));
+                    let mut min_x = f32::MAX;
+                    let mut min_y = f32::MAX;
+                    let mut max_x = f32::MIN;
+                    let mut max_y = f32::MIN;
+                    for sp in &resolved {
+                        for lp in &flatten_subpath(sp) {
+                            let p = transform.transform_point2(*lp);
+                            min_x = min_x.min(p.x);
+                            min_y = min_y.min(p.y);
+                            max_x = max_x.max(p.x);
+                            max_y = max_y.max(p.y);
+                        }
+                    }
+                    if min_x > max_x {
+                        AABB::from_corners([0.0, 0.0], [0.0, 0.0])
+                    } else {
+                        AABB::from_corners([min_x, min_y], [max_x, max_y])
+                    }
+                }
                 Geometry::Rect { width, height } | Geometry::Image { width, height, .. } => {
                     let p1 = transform.transform_point2(Vec2::new(0.0, 0.0));
                     let p2 = transform.transform_point2(Vec2::new(width, 0.0));
                     let p3 = transform.transform_point2(Vec2::new(0.0, height));
                     let p4 = transform.transform_point2(Vec2::new(width, height));
-                    
+
                     let min_x = p1.x.min(p2.x).min(p3.x).min(p4.x);
                     let min_y = p1.y.min(p2.y).min(p3.y).min(p4.y);
                     let max_x = p1.x.max(p2.x).max(p3.x).max(p4.x);
                     let max_y = p1.y.max(p2.y).max(p3.y).max(p4.y);
-                    
+
                     AABB::from_corners([min_x, min_y], [max_x, max_y])
                 }
                 Geometry::Ellipse { radius_x, radius_y } => {
@@ -3923,25 +3984,13 @@ impl Engine {
         let new_geometry = if let Some(node) = self.scene.nodes.get(&id) {
             match &node.geometry {
                 Geometry::Rect { width, height } => {
-                    let w = *width;
-                    let h = *height;
                     // Transfer the parametric corner radius onto each vertex so
                     // rounding is preserved non-destructively after conversion.
-                    let cr = node.style.corner_radius;
-                    // 4 corners, closed subpath (no duplicate closing point)
-                    let points = vec![
-                        PathPoint { x: 0.0, y: 0.0, cp1: Vec2::new(0.0, 0.0), cp2: Vec2::new(0.0, 0.0), corner_radius: cr },
-                        PathPoint { x: w,   y: 0.0, cp1: Vec2::new(w, 0.0),   cp2: Vec2::new(w, 0.0),   corner_radius: cr },
-                        PathPoint { x: w,   y: h,   cp1: Vec2::new(w, h),     cp2: Vec2::new(w, h),     corner_radius: cr },
-                        PathPoint { x: 0.0, y: h,   cp1: Vec2::new(0.0, h),   cp2: Vec2::new(0.0, h),   corner_radius: cr },
-                    ];
-                    {
-                        let subpaths = vec![Subpath { points, closed: true }];
-                        Some(Geometry::Path {
-                            network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
-                            subpaths,
-                        })
-                    }
+                    let subpaths = rect_subpaths(*width, *height, node.style.corner_radius);
+                    Some(Geometry::Path {
+                        network: Some(NodeVectorNetwork::from_subpaths(&subpaths)),
+                        subpaths,
+                    })
                 }
                 Geometry::Ellipse { radius_x, radius_y } => {
                     let rx = *radius_x;
@@ -4519,6 +4568,21 @@ impl Engine {
 
     /// Apply a linear transform to a path node's geometry and reset to
     /// translation-only. Returns true on success.
+    ///
+    /// `corner_radius` is a scalar: it can only ever describe a *circular*
+    /// fillet in the node's own space. Transforming the anchors while leaving it
+    /// alone therefore re-resolves the rounding against the new geometry, and
+    /// the flattened shape stops matching what was on screen. How we keep them
+    /// equal depends on the linear part:
+    ///
+    ///   - **Similarity** (rotation / uniform scale / reflection): circles stay
+    ///     circles, so the parametric radius survives — just scale it. Rounding
+    ///     stays editable, which is what you want after a plain rotate or scale.
+    ///   - **Anything else** (skew, non-uniform scale): the corner arc becomes
+    ///     elliptical, which no scalar radius can express. Resolve the fillets
+    ///     into explicit cubics *first*, then transform those — the curve is
+    ///     baked exactly, at the cost of the parametric radius. Flatten is a
+    ///     bake, so that trade is the point.
     fn flatten_path_geometry(&mut self, id: u32, linear: Mat3, tx: f32, ty: f32) -> bool {
         let subpaths = match self.scene.nodes.get(&id) {
             Some(n) => match &n.geometry {
@@ -4528,7 +4592,30 @@ impl Engine {
             None => return false,
         };
 
-        let mut new_subpaths = subpaths;
+        // Columns of the 2×2 linear part.
+        let col_x = Vec2::new(linear.x_axis.x, linear.x_axis.y);
+        let col_y = Vec2::new(linear.y_axis.x, linear.y_axis.y);
+        let len_x = col_x.length();
+        let len_y = col_y.length();
+        // Orthogonal columns of equal length ⇒ similarity ⇒ circles stay circles.
+        // Scale-relative epsilons so the test doesn't drift with shape size.
+        let scale = (len_x + len_y) * 0.5;
+        let is_similarity = scale > 1e-6
+            && col_x.dot(col_y).abs() <= 1e-4 * scale * scale
+            && (len_x - len_y).abs() <= 1e-4 * scale;
+
+        let mut new_subpaths = if is_similarity {
+            let mut sps = subpaths;
+            for sp in &mut sps {
+                for pt in &mut sp.points {
+                    pt.corner_radius *= scale;
+                }
+            }
+            sps
+        } else {
+            round_subpaths(&subpaths)
+        };
+
         let mut min_x = f32::MAX;
         let mut min_y = f32::MAX;
 
@@ -8687,5 +8774,177 @@ mod tests {
         // Top col0 at -30° (matches right), top col1 at +30° (matches left)
         assert!((t_col0_angle - (-30.0)).abs() < 0.1, "top col0 angle {t_col0_angle}");
         assert!((t_col1_angle - 30.0).abs() < 0.1, "top col1 angle {t_col1_angle}");
+    }
+
+    // ─── Flatten preserves rounded corners ──────────────────────────────
+    //
+    // `corner_radius` is a scalar and can only describe a circular fillet in the
+    // node's own space. Baking a transform into the anchors without accounting
+    // for it re-resolves the rounding against the new geometry, so the flattened
+    // shape stops matching what was on screen.
+
+    /// The node's outline in WORLD space with rounding resolved — what the
+    /// canvas actually draws. Flatten must leave this untouched.
+    fn resolved_world_outline(engine: &Engine, id: u32) -> Vec<(f32, f32)> {
+        let node = engine.scene.nodes.get(&id).unwrap();
+        let subpaths = match &node.geometry {
+            Geometry::Path { subpaths, .. } => subpaths.clone(),
+            _ => panic!("expected a path node"),
+        };
+        let m = Mat3::from_cols_array(engine.global_transforms.get(&id).unwrap());
+        let mut out = Vec::new();
+        for sp in round_subpaths(&subpaths) {
+            for p in &sp.points {
+                for v in [Vec2::new(p.x, p.y), p.cp1, p.cp2] {
+                    let w = m.transform_point2(v);
+                    out.push((w.x, w.y));
+                }
+            }
+        }
+        out
+    }
+
+    fn assert_same_outline(before: &[(f32, f32)], after: &[(f32, f32)]) {
+        assert_eq!(before.len(), after.len(), "outline point count changed");
+        for (i, (b, a)) in before.iter().zip(after).enumerate() {
+            assert!(
+                (b.0 - a.0).abs() < 0.01 && (b.1 - a.1).abs() < 0.01,
+                "point {i} moved: {b:?} -> {a:?}"
+            );
+        }
+    }
+
+    /// A rounded rect under a skew: the corner arcs become elliptical, which no
+    /// scalar radius can express, so flatten must bake them into real cubics.
+    #[test]
+    fn flatten_preserves_a_skewed_rounded_rect() {
+        let mut engine = Engine::new();
+        let id = engine.add_rect(10.0, 20.0, 100.0, 60.0);
+        engine.scene.nodes.get_mut(&id).unwrap().style.corner_radius = 15.0;
+        engine.set_node_skew(id, 30.0, 0.0);
+        engine.convert_to_path(id); // radii move onto the vertices
+
+        let before = resolved_world_outline(&engine, id);
+        assert!(engine.flatten_transform(id));
+        assert_same_outline(&before, &resolved_world_outline(&engine, id));
+
+        // The rounding is baked, not carried as a radius that would re-resolve.
+        let node = engine.scene.nodes.get(&id).unwrap();
+        if let Geometry::Path { subpaths, .. } = &node.geometry {
+            assert!(subpaths.iter().all(|sp| sp.points.iter().all(|p| p.corner_radius == 0.0)));
+        }
+    }
+
+    /// Non-uniform scale is the other circle-breaking case.
+    #[test]
+    fn flatten_preserves_a_non_uniformly_scaled_rounded_rect() {
+        let mut engine = Engine::new();
+        let id = engine.add_rect(0.0, 0.0, 80.0, 80.0);
+        engine.scene.nodes.get_mut(&id).unwrap().style.corner_radius = 20.0;
+        engine.set_node_scale(id, 3.0, 1.0);
+        engine.convert_to_path(id);
+
+        let before = resolved_world_outline(&engine, id);
+        assert!(engine.flatten_transform(id));
+        assert_same_outline(&before, &resolved_world_outline(&engine, id));
+    }
+
+    /// A similarity keeps circles circular, so the radius stays editable — but
+    /// it has to be scaled with the geometry.
+    #[test]
+    fn flatten_scales_the_radius_under_rotate_plus_uniform_scale() {
+        let mut engine = Engine::new();
+        let id = engine.add_rect(0.0, 0.0, 100.0, 60.0);
+        engine.scene.nodes.get_mut(&id).unwrap().style.corner_radius = 10.0;
+        engine.set_node_scale(id, 2.0, 2.0);
+        engine.set_node_rotation(id, 35.0);
+        engine.convert_to_path(id);
+
+        let before = resolved_world_outline(&engine, id);
+        assert!(engine.flatten_transform(id));
+        assert_same_outline(&before, &resolved_world_outline(&engine, id));
+
+        // Still a parametric radius, doubled with the geometry.
+        let node = engine.scene.nodes.get(&id).unwrap();
+        if let Geometry::Path { subpaths, .. } = &node.geometry {
+            assert_eq!(subpaths[0].points.len(), 4, "corners should not be expanded");
+            for p in &subpaths[0].points {
+                assert!((p.corner_radius - 20.0).abs() < 0.01, "radius {}", p.corner_radius);
+            }
+        }
+    }
+
+    // ─── Rounded-rect bounds ────────────────────────────────────────────
+    //
+    // A rect's corner arcs are tangent to its edges, so in LOCAL space rounding
+    // never changes the box. Under a rotation or skew it does: the arcs cut away
+    // the acute corner tips, which is exactly where the extremes had been.
+
+    /// World AABB of a node, as the spatial index stores it.
+    fn world_box(engine: &Engine, id: u32) -> [f32; 4] {
+        let b = engine.get_node_bounds(id);
+        [b[0], b[1], b[2], b[3]]
+    }
+
+    /// Set the radius through the public style API — the path the app actually
+    /// takes. Going in through the field directly would skip the cache
+    /// invalidation and hide a stale-bounds bug.
+    fn set_radius(engine: &mut Engine, id: u32, r: f32) {
+        let mut style = engine.scene.nodes.get(&id).unwrap().style.clone();
+        style.corner_radius = r;
+        engine.set_node_style(id, &serde_json::to_string(&style).unwrap());
+    }
+
+    #[test]
+    fn rounded_rect_bounds_are_unchanged_when_axis_aligned() {
+        // The arcs stay tangent to the edges, so the box must NOT shrink here —
+        // guards against over-correcting and making plain rects measure small.
+        let mut engine = Engine::new();
+        let id = engine.add_rect(10.0, 20.0, 200.0, 120.0);
+        let sharp = world_box(&engine, id);
+        set_radius(&mut engine, id, 40.0);
+        let rounded = world_box(&engine, id);
+        for i in 0..4 {
+            assert!((sharp[i] - rounded[i]).abs() < 0.01, "axis-aligned box moved: {sharp:?} -> {rounded:?}");
+        }
+    }
+
+    #[test]
+    fn skewed_rounded_rect_bounds_hug_the_rounded_outline() {
+        let mut engine = Engine::new();
+        let id = engine.add_rect(0.0, 0.0, 240.0, 160.0);
+        engine.set_node_skew(id, 30.0, 0.0);
+
+        let sharp = world_box(&engine, id);
+        set_radius(&mut engine, id, 30.0);
+        let rounded = world_box(&engine, id);
+
+        // The skew makes two corners acute; rounding cuts their tips off, so the
+        // box must be strictly narrower and sit inside the sharp one.
+        assert!(rounded[0] > sharp[0] + 1.0, "left edge not pulled in: {sharp:?} -> {rounded:?}");
+        assert!(rounded[2] < sharp[2] - 1.0, "right edge not pulled in: {sharp:?} -> {rounded:?}");
+        assert!(rounded[1] >= sharp[1] - 0.01 && rounded[3] <= sharp[3] + 0.01,
+            "rounded box escaped the sharp box: {sharp:?} -> {rounded:?}");
+    }
+
+    #[test]
+    fn rounded_rect_bounds_match_the_same_shape_converted_to_a_path() {
+        // Path bounds already resolve rounding. A rect and its convert_to_path
+        // twin are the same shape, so they must measure identically — this is
+        // the invariant that was broken.
+        let mut engine = Engine::new();
+        let id = engine.add_rect(0.0, 0.0, 240.0, 160.0);
+        engine.set_node_skew(id, 25.0, 10.0);
+        engine.set_node_rotation(id, 15.0);
+        set_radius(&mut engine, id, 35.0);
+
+        let as_rect = world_box(&engine, id);
+        assert!(engine.convert_to_path(id)); // re-indexes on its own
+        let as_path = world_box(&engine, id);
+
+        for i in 0..4 {
+            assert!((as_rect[i] - as_path[i]).abs() < 0.5,
+                "rect vs path bounds disagree at {i}: {as_rect:?} vs {as_path:?}");
+        }
     }
 }
