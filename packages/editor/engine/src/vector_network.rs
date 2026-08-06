@@ -1519,6 +1519,13 @@ impl Engine {
                 Some(g) => g,
                 None => continue,
             };
+            // A mask inside the group is coverage, not a paintable contour. Left
+            // in, its outline carved regions out of the artwork and its interior
+            // became a face the bucket would happily fill — so the mask painted
+            // itself as artwork.
+            if self.is_within_mask(id) {
+                continue;
+            }
             let transform = self.global_transforms.get(&id)
                 .copied()
                 .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);

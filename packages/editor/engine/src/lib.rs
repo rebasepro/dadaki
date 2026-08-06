@@ -1668,12 +1668,66 @@ impl Engine {
         *total_nodes += 1;
     }
 
+    /// True when `id` is emitted as a mask rather than as artwork: it carries
+    /// the flag, it is visible, and something after it in its parent is left for
+    /// it to mask. A mask with nothing to mask renders as an ordinary node, so
+    /// it counts as artwork everywhere.
+    ///
+    /// Masks are group-scoped — only group children are walked for spans — so a
+    /// root-level flag is inert by design and answers false here too.
+    ///
+    /// The single definition of the question. Three places need it (the render
+    /// writer, the Live Paint network, and fill suppression) and when they each
+    /// answered it their own way, a masked Live Paint group came apart.
+    pub(crate) fn acts_as_mask(&self, id: u32) -> bool {
+        let node = match self.scene.nodes.get(&id) {
+            Some(n) => n,
+            None => return false,
+        };
+        if !node.is_mask || !node.visible {
+            return false;
+        }
+        let parent = match node.parent {
+            Some(p) => p,
+            None => return false,
+        };
+        let siblings = match self.scene.nodes.get(&parent) {
+            Some(p) => &p.children,
+            None => return false,
+        };
+        let idx = match siblings.iter().position(|&s| s == id) {
+            Some(i) => i,
+            None => return false,
+        };
+        siblings[idx + 1..]
+            .iter()
+            .any(|&s| self.scene.nodes.get(&s).map_or(false, |n| n.visible && !n.is_mask))
+    }
+
+    /// True when `id` is a mask or lives inside one. A mask is coverage, not
+    /// artwork: Live Paint must not carve regions out of its outline, and must
+    /// not strip the fill that gives an alpha mask its coverage in the first
+    /// place.
+    pub(crate) fn is_within_mask(&self, id: u32) -> bool {
+        let mut cur = Some(id);
+        while let Some(n) = cur {
+            if self.acts_as_mask(n) {
+                return true;
+            }
+            cur = self.scene.nodes.get(&n).and_then(|node| node.parent);
+        }
+        false
+    }
+
     /// Emit a group's children, bracketing any mask spans. A visible child with
     /// is_mask=true masks the following siblings (up to the next mask or the
-    /// end of the group), Figma-style: [mask, content...]. A mask with nothing
-    /// drawable after it renders as a normal node so the shape isn't silently
-    /// lost. Masks are group-scoped: this is only invoked for group children,
-    /// so a mask can never reach outside its parent group.
+    /// end of the group), Figma-style: [mask, content...].
+    ///
+    /// `lp_group` is set when the parent is a Live Paint group, and its faces
+    /// and painted edges are emitted HERE rather than around this call, so they
+    /// land INSIDE the mask span. Emitting them around it put everything the
+    /// user painted outside the mask — the faces were the one part of the group
+    /// the mask never reached.
     fn write_siblings_with_masks(
         &mut self,
         siblings: &[u32],
@@ -1681,17 +1735,22 @@ impl Engine {
         sprite_set: &HashSet<u32>,
         total_nodes: &mut u32,
         depth: u32,
+        lp_group: Option<u32>,
     ) {
         let mut open_mask = false;
-        for (i, &child_id) in siblings.iter().enumerate() {
-            let child_is_mask = self.scene.nodes.get(&child_id)
-                .map(|c| c.is_mask && c.visible)
-                .unwrap_or(false);
-            let masks_something = child_is_mask && siblings[i + 1..].iter().any(|&s| {
-                self.scene.nodes.get(&s).map(|n| n.visible && !n.is_mask).unwrap_or(false)
-            });
+        let mut faces_written = false;
+        // Faces sit at the bottom of the group, under the members' strokes.
+        let mut write_faces = |s: &mut Self, total: &mut u32, written: &mut bool| {
+            if let Some(g) = lp_group {
+                if !*written {
+                    s.write_lp_faces(g, total);
+                    *written = true;
+                }
+            }
+        };
 
-            if child_is_mask && masks_something {
+        for &child_id in siblings.iter() {
+            if self.acts_as_mask(child_id) {
                 let mt = self.scene.nodes.get(&child_id).map(|c| c.mask_type).unwrap_or(0);
                 if open_mask {
                     self.emit_mask_cmd(CMD_END_MASK, child_id, 0, total_nodes);
@@ -1700,9 +1759,17 @@ impl Engine {
                 self.write_node_recursive(child_id, visible_set, sprite_set, total_nodes, depth + 1);
                 self.emit_mask_cmd(CMD_BEGIN_MASKED_CONTENT, child_id, 0, total_nodes);
                 open_mask = true;
+                // Now inside the span: the faces belong here.
+                write_faces(self, total_nodes, &mut faces_written);
             } else {
+                write_faces(self, total_nodes, &mut faces_written);
                 self.write_node_recursive(child_id, visible_set, sprite_set, total_nodes, depth + 1);
             }
+        }
+
+        if let Some(g) = lp_group {
+            write_faces(self, total_nodes, &mut faces_written); // an empty group still has faces
+            self.write_lp_edges(g, total_nodes); // painted edges ride on top, still inside the span
         }
         if open_mask {
             self.emit_mask_cmd(CMD_END_MASK, 0, 0, total_nodes);
@@ -1823,15 +1890,16 @@ impl Engine {
             // Cloned up front so `node`'s borrow ends before the &mut self calls.
             let children = node.children.clone();
 
-            if is_lp {
-                self.write_lp_faces(id, total_nodes);
-            }
-
-            self.write_siblings_with_masks(&children, visible_set, sprite_set, total_nodes, depth);
-
-            if is_lp {
-                self.write_lp_edges(id, total_nodes);
-            }
+            // Faces and edges are emitted INSIDE write_siblings_with_masks, so a
+            // mask among the children contains them.
+            self.write_siblings_with_masks(
+                &children,
+                visible_set,
+                sprite_set,
+                total_nodes,
+                depth,
+                if is_lp { Some(id) } else { None },
+            );
 
             // CMD_END_GROUP
             let rec = begin_record(&mut self.render_buffer);
@@ -1876,7 +1944,11 @@ impl Engine {
             // Fills. A member of ANY Live Paint group writes ZERO fills — the
             // face pass provides its interior colour (so painted faces aren't
             // hidden behind the member's own fill), matching Illustrator.
-            let suppress_fills = self.is_in_any_live_paint(id);
+            //
+            // A mask is the exception, and it has to be: an alpha mask's coverage
+            // IS its painted alpha, so stripping its fill left it covering
+            // nothing and the whole masked group vanished.
+            let suppress_fills = self.is_in_any_live_paint(id) && !self.is_within_mask(id);
             let active_fills = if suppress_fills { Vec::new() } else { s.fills.clone() };
             self.render_buffer.extend_from_slice(&(active_fills.len() as u32).to_le_bytes());
             for fill in &active_fills {
@@ -6889,6 +6961,132 @@ mod identity_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── A masked Live Paint group ──────────────────────────────────────────
+    // Three separate mechanisms used to pull this apart, so there are three
+    // tests. The stream helper reads back what the renderer would actually be
+    // handed, which is the only place two of the bugs were visible at all.
+
+    /// Command names in emission order, e.g. ["START_GROUP", "LP_FACES", …].
+    fn render_stream(engine: &mut Engine) -> Vec<&'static str> {
+        let ids: Vec<u32> = engine.scene.nodes.keys().copied().collect();
+        engine.update_render_buffer(ids, vec![]);
+        let buf = engine.render_buffer.clone();
+        let u32_at = |o: usize| {
+            u32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]])
+        };
+        let mut out = Vec::new();
+        let mut off = 12; // magic + version + count
+        while off + 8 <= buf.len() {
+            let len = u32_at(off) as usize;
+            out.push(match u32_at(off + 4) {
+                1 => "START_GROUP",
+                2 => "DRAW_NODE",
+                3 => "END_GROUP",
+                4 => "BEGIN_MASK",
+                5 => "BEGIN_MASKED_CONTENT",
+                6 => "END_MASK",
+                7 => "LP_FACES",
+                8 => "LP_EDGES",
+                _ => "?",
+            });
+            if len == 0 {
+                break;
+            }
+            off += 4 + len;
+        }
+        out
+    }
+
+    /// Build [mask, contents] inside one Live Paint group, and paint a region.
+    fn masked_live_paint_group() -> (Engine, u32, u32) {
+        let mut engine = Engine::new();
+        let mask = engine.add_ellipse(220.0, 200.0, 150.0, 150.0);
+        let a = engine.add_rect(100.0, 100.0, 200.0, 200.0);
+        let b = engine.add_ellipse(280.0, 260.0, 120.0, 120.0);
+        let group = engine.group_nodes(&format!("[{mask},{a},{b}]"));
+        engine.set_node_is_mask(mask, true);
+        engine.set_node_live_paint(group, true);
+        (engine, group, mask)
+    }
+
+    /// The bug that made this worthless: faces were emitted before BEGIN_MASK,
+    /// so everything you painted fell outside the mask.
+    #[test]
+    fn live_paint_faces_render_inside_the_mask_span() {
+        let (mut engine, _group, _mask) = masked_live_paint_group();
+        let stream = render_stream(&mut engine);
+
+        let faces = stream.iter().position(|c| *c == "LP_FACES").expect("faces emitted");
+        let begin = stream.iter().position(|c| *c == "BEGIN_MASKED_CONTENT").expect("mask opened");
+        let end = stream.iter().position(|c| *c == "END_MASK").expect("mask closed");
+        assert!(
+            begin < faces && faces < end,
+            "faces must be inside the mask span, got {stream:?}"
+        );
+    }
+
+    /// A mask is coverage, not a paintable contour.
+    #[test]
+    fn the_mask_is_not_part_of_the_paint_network() {
+        let (mut engine, _group, mask) = masked_live_paint_group();
+        engine.ensure_network_clean();
+
+        let carves = engine
+            .scene
+            .vector_network
+            .faces
+            .values()
+            .any(|f| f.signature.contains(&mask));
+        assert!(!carves, "the mask must not bound any paintable face");
+    }
+
+    /// An alpha mask's coverage IS its painted alpha, so Live Paint's
+    /// fill-suppression must skip it — stripping it made the group vanish.
+    #[test]
+    fn the_mask_keeps_the_fill_that_gives_it_coverage() {
+        let (engine, _group, mask) = masked_live_paint_group();
+        let member = *engine.scene.nodes.get(&mask).unwrap().parent.as_ref().unwrap();
+        let content = engine.scene.nodes.get(&member).unwrap().children[1];
+
+        assert!(engine.acts_as_mask(mask));
+        assert!(engine.is_within_mask(mask), "the mask keeps its fill");
+        assert!(!engine.is_within_mask(content), "ordinary members still lose theirs");
+    }
+
+    /// A flag with nothing after it to mask is ordinary artwork, everywhere.
+    #[test]
+    fn a_mask_with_nothing_to_mask_is_just_a_shape() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 10.0, 10.0);
+        let last = engine.add_rect(20.0, 0.0, 10.0, 10.0);
+        let group = engine.group_nodes(&format!("[{a},{last}]"));
+        engine.set_node_is_mask(last, true); // nothing follows it
+
+        assert!(!engine.acts_as_mask(last));
+        assert!(!engine.is_within_mask(last));
+        let stream = render_stream(&mut engine);
+        assert!(!stream.contains(&"BEGIN_MASK"), "no span should open, got {stream:?}");
+        let _ = group;
+    }
+
+    /// The unmasked case must be untouched: faces still at the bottom of the
+    /// group, edges still on top, no stray mask commands.
+    #[test]
+    fn an_unmasked_live_paint_group_is_unchanged() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_ellipse(80.0, 80.0, 60.0, 60.0);
+        let group = engine.group_nodes(&format!("[{a},{b}]"));
+        engine.set_node_live_paint(group, true);
+
+        let stream = render_stream(&mut engine);
+        assert_eq!(
+            stream,
+            vec!["START_GROUP", "LP_FACES", "DRAW_NODE", "DRAW_NODE", "END_GROUP"],
+            "got {stream:?}"
+        );
+    }
 
     /// A cut leaves the document, but not existence — paste has to have
     /// something to copy from.
