@@ -1,5 +1,6 @@
+import { type AlignMode, alignSelection } from './align';
 import { blendNodes } from './blend';
-import { nodeToWorldPath, pathToSubpaths, transformSubpaths } from './boolean_ops';
+import { type BoolOp, nodeToWorldPath, pathToSubpaths, transformSubpaths } from './boolean_ops';
 import type { DocumentManager } from './document_manager';
 import { computeEqualSpacing } from './equal_spacing';
 import { adoptEmbeddedFonts, FileIO } from './file_io';
@@ -778,6 +779,82 @@ export class InputManager {
             return;
         }
 
+        // ─── ⌘/⌥ action chords ──────────────────────────────────────────────
+        // Grouped here so every modifier collision is visible at once. macOS
+        // turns ⌥+letter into a glyph (⌥a is "å"), so anything with ⌥ matches on
+        // e.code, never e.key.
+        if (e.metaKey || e.ctrlKey) {
+            const code = e.code;
+            // ⇧⌘A: Deselect. Must come before the ⌘A below.
+            if (e.shiftKey && !e.altKey && code === 'KeyA') {
+                e.preventDefault();
+                this.deselectAll();
+                return;
+            }
+            if (e.shiftKey && !e.altKey && code === 'KeyL') {
+                e.preventDefault();
+                this.toggleSelectionFlag('locked');
+                return;
+            }
+            if (e.shiftKey && !e.altKey && code === 'KeyH') {
+                e.preventDefault();
+                this.toggleSelectionFlag('hidden');
+                return;
+            }
+            // ⌥⌘C / ⌥⌘V: copy and paste appearance.
+            if (e.altKey && !e.shiftKey && code === 'KeyC') {
+                e.preventDefault();
+                this.copyAppearance();
+                return;
+            }
+            if (e.altKey && !e.shiftKey && code === 'KeyV') {
+                e.preventDefault();
+                this.pasteAppearance();
+                return;
+            }
+            // Booleans, Figma's chords. Exclude is the odd one out: Figma puts it
+            // on ⌥⌘X, which is already Make Live Paint here (Illustrator's), and
+            // a shipped headline feature outranks a fourth boolean.
+            if (
+                e.altKey &&
+                !e.shiftKey &&
+                (code === 'KeyU' || code === 'KeyS' || code === 'KeyI')
+            ) {
+                e.preventDefault();
+                this.booleanSelection(
+                    code === 'KeyU' ? 'union' : code === 'KeyS' ? 'subtract' : 'intersect',
+                );
+                return;
+            }
+            if (e.altKey && e.shiftKey && code === 'KeyX') {
+                e.preventDefault();
+                this.booleanSelection('exclude');
+                return;
+            }
+            // ⌘B / ⌘I: bold and italic, on selected text.
+            if (!e.altKey && !e.shiftKey && (code === 'KeyB' || code === 'KeyI')) {
+                if (this.selectedTextNodes().length > 0) {
+                    e.preventDefault();
+                    this.toggleTextStyle(code === 'KeyB' ? 'bold' : 'italic');
+                    return;
+                }
+            }
+            // ⇧⌘. / ⇧⌘, — the > and < keys — step the font size.
+            if (e.shiftKey && (code === 'Period' || code === 'Comma')) {
+                if (this.selectedTextNodes().length > 0) {
+                    e.preventDefault();
+                    this.adjustTextSize(code === 'Period' ? 1 : -1);
+                    return;
+                }
+            }
+            // ⌘\: full-bleed canvas.
+            if (code === 'Backslash') {
+                e.preventDefault();
+                this.ui.toggleChrome();
+                return;
+            }
+        }
+
         // Cmd+A: select all top-level nodes (skips locked/hidden)
         if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
             e.preventDefault();
@@ -797,6 +874,57 @@ export class InputManager {
 
         // Tool shortcuts — plain letters only; ⇧letter is reserved for actions (flip etc.)
         if (!e.metaKey && !e.ctrlKey) {
+            // ⌥ + letter aligns, as in Figma. On e.code: ⌥a is "å" in e.key.
+            if (e.altKey && !e.shiftKey) {
+                const ALIGN: Record<string, AlignMode> = {
+                    KeyA: 'left',
+                    KeyD: 'right',
+                    KeyW: 'top',
+                    KeyS: 'bottom',
+                    KeyH: 'hcenter',
+                    KeyV: 'vcenter',
+                };
+                const mode = ALIGN[e.code];
+                if (mode) {
+                    e.preventDefault();
+                    this.alignSelectionTo(mode);
+                    return;
+                }
+                // ⌥← / ⌥→ is tracking on text, and only on text — everywhere
+                // else it stays the plain 1px nudge below.
+                if (
+                    (e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
+                    this.selectedTextNodes().length > 0
+                ) {
+                    e.preventDefault();
+                    this.adjustTextTracking(e.key === 'ArrowRight' ? 1 : -1);
+                    return;
+                }
+            }
+
+            // Tab: full-bleed canvas, the other half of ⌘\. Guarded to the
+            // canvas — inside a panel, Tab has to stay Tab.
+            if (e.key === 'Tab' && !inField) {
+                e.preventDefault();
+                this.ui.toggleChrome();
+                return;
+            }
+
+            // F2: rename the selected layer without going to find its row.
+            if (e.key === 'F2') {
+                e.preventDefault();
+                this.ui.renameSelectedLayer();
+                return;
+            }
+
+            // Digits set the selection's opacity (Figma). Nothing else claims a
+            // bare digit, and ⇧-digits are the view shortcuts below.
+            if (!e.shiftKey && !e.altKey && e.key.length === 1 && e.key >= '0' && e.key <= '9') {
+                e.preventDefault();
+                this.typeOpacityDigit(e.key);
+                return;
+            }
+
             if (!e.shiftKey) {
                 const tool = InputManager.TOOL_SHORTCUTS[e.key.toLowerCase()];
                 if (tool) {
@@ -1215,26 +1343,42 @@ export class InputManager {
                 this.clipboardIds = [...this.scene.engine!.get_selection()];
                 this.artboardClipboard = null;
             }
+            this.cutPending = false;
         }
 
-        // Cmd+V: Paste (duplicate from clipboard)
-        if ((e.metaKey || e.ctrlKey) && e.key === 'v' && !e.shiftKey) {
-            if (this.artboardClipboard) {
+        // Cmd+X: Cut. The copy-clipboard is a list of live ids, so a cut that
+        // deleted the originals would leave paste with nothing to duplicate —
+        // the engine lifts the subtrees out of the document instead and keeps
+        // them (Engine::cut_nodes).
+        if ((e.metaKey || e.ctrlKey) && e.key === 'x' && !e.altKey) {
+            const sel = Array.from(this.scene.engine!.get_selection());
+            if (sel.length > 0) {
                 e.preventDefault();
-                this.pasteArtboard();
-            } else if (this.clipboardIds.length > 0) {
-                e.preventDefault();
-                this.scene.transaction(() => {
-                    this.scene.engine!.clear_selection();
-                    for (const id of this.clipboardIds) {
-                        const newId = this.scene.duplicateNode(id);
-                        // Pasted groups start collapsed to keep the panel tidy.
-                        this.ui.collapseSubtreeByDefault(newId);
-                        this.scene.selectNode(newId, true);
-                    }
-                });
+                this.scene.cutNodes(sel);
+                this.cutPending = true;
+                this.clipboardIds = [];
+                this.artboardClipboard = null;
+                this.exitEditMode();
                 this.ui.updateLayerList();
                 this.ui.syncWithSelection();
+            }
+        }
+
+        // Cmd+V: Paste, offset from the original so the copy is visible.
+        // Shift+Cmd+V: Paste in Place — exactly on top of what was copied, which
+        // is how you move something between documents without losing its
+        // position on the artwork.
+        if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) {
+            const inPlace = e.shiftKey;
+            if (this.cutPending && this.scene.hasClipboard()) {
+                e.preventDefault();
+                this.pasteCut(inPlace);
+            } else if (this.artboardClipboard) {
+                e.preventDefault();
+                this.pasteArtboard(inPlace);
+            } else if (this.clipboardIds.length > 0) {
+                e.preventDefault();
+                this.pasteNodes(inPlace);
             }
         }
 
@@ -1768,15 +1912,61 @@ export class InputManager {
         return newId;
     }
 
-    /** Paste the copied artwork (frame + contents) as a new frame beside the
-     *  original. */
-    private pasteArtboard() {
+    /** Paste the copied nodes. `inPlace` (⇧⌘V) lands them exactly over what was
+     *  copied; otherwise they arrive offset, the way ⌘D duplicates. */
+    /** True while the last clipboard operation was a Cut, so ⌘V should pull from
+     *  the engine's clipboard rather than duplicating the copied ids. */
+    private cutPending = false;
+
+    /** Paste what was cut. The clipboard isn't consumed, so ⌘X ⌘V ⌘V gives two
+     *  copies, the same as a copy would. */
+    private pasteCut(inPlace: boolean) {
+        const off = inPlace ? 0 : 20;
+        const ids = this.scene.pasteClipboard(off, off);
+        if (ids.length === 0) return;
+        this.scene.engine!.clear_selection();
+        for (const id of ids) {
+            this.ui.collapseSubtreeByDefault(id);
+            this.scene.selectNode(id, true);
+        }
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+    }
+
+    private pasteNodes(inPlace: boolean) {
+        const eng = this.scene.engine!;
+        // The clipboard holds live node ids, so anything deleted since the copy
+        // is no longer there to duplicate. `duplicate_node` answers a missing id
+        // with a freshly allocated EMPTY node rather than nothing, which paste
+        // then adds to the document — an invisible row in the layer list. Drop
+        // the dead ids instead.
+        const live = this.clipboardIds.filter((id) => this.scene.getNodeType(id) !== undefined);
+        this.clipboardIds = live;
+        if (live.length === 0) return;
+        this.scene.transaction(() => {
+            eng.clear_selection();
+            for (const id of live) {
+                const newId = this.scene.duplicateNode(id);
+                // duplicate_node builds in a +20,+20 offset; take it back off.
+                if (inPlace) eng.move_node(newId, -20, -20);
+                // Pasted groups start collapsed to keep the panel tidy.
+                this.ui.collapseSubtreeByDefault(newId);
+                this.scene.selectNode(newId, true);
+            }
+        });
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+    }
+
+    /** Paste the copied artwork (frame + contents) — beside the original, or
+     *  squarely on top of it for ⇧⌘V. */
+    private pasteArtboard(inPlace: boolean) {
         const clip = this.artboardClipboard;
         if (!clip) return;
         let newId = -1;
         this.scene.transaction(() => {
             this.scene.engine!.clear_selection();
-            newId = this.cloneArtboard(clip.ab, clip.nodeIds, clip.ab.w + 40, 0);
+            newId = this.cloneArtboard(clip.ab, clip.nodeIds, inPlace ? 0 : clip.ab.w + 40, 0);
         });
         this.selectArtboard(newId);
         this.ui.updateLayerList();
@@ -2237,7 +2427,13 @@ export class InputManager {
         } else if (this.ui.activeTool === 'pencil') {
             this.pencilPoints = [{ x: this.startPos.x, y: this.startPos.y }];
         } else if (this.ui.activeTool === 'paint-bucket') {
-            this.handlePaintBucketClick(this.startPos, e.altKey);
+            // ⌥ is the eyedropper, as in Illustrator — it samples rather than
+            // paints, so it never reaches handlePaintBucketClick.
+            if (e.altKey) {
+                this.sampleLivePaintColor(this.startPos, e.shiftKey ? 'stroke' : 'fill');
+            } else {
+                this.handlePaintBucketClick(this.startPos, e.shiftKey);
+            }
         } else if (this.ui.activeTool === 'scissors') {
             this.handleScissorsDown(this.startPos);
         } else if (this.ui.activeTool === 'eyedropper') {
@@ -2435,8 +2631,9 @@ export class InputManager {
             return true;
         };
         // Filling a region is the primary action. Only paint an edge when the
-        // user explicitly Alt-clicks — otherwise a click a few px from a boundary
+        // user explicitly Shift-clicks — otherwise a click a few px from a boundary
         // would paint a near-invisible line instead of filling the region.
+        // (⇧, not ⌥: ⌥ is the eyedropper here, as in Illustrator.)
         if (wantEdge && paintEdge()) return;
 
         const faceId = this.scene.engine.query_face_at(pos.x, pos.y);
@@ -2448,6 +2645,212 @@ export class InputManager {
         // Clicked outside every region (e.g. on the outline itself) → the nearest
         // edge is the sensible target so clicking a lone outline still paints.
         paintEdge();
+    }
+
+    /**
+     * Live Paint eyedropper — ⌥-click (⇧⌥-click for the edge colour), the way
+     * Illustrator's Live Paint Bucket works. Adopts the colour under the cursor
+     * as what the bucket paints with, without leaving paint mode.
+     *
+     * It reads the rendered pixel, so the thing you point at is the thing you
+     * get: a region you already painted, a stop halfway along a gradient, a
+     * colour inside a placed image. A node's declared fill answers none of those.
+     */
+    sampleLivePaintColor(pos: { x: number; y: number }, target: 'fill' | 'stroke') {
+        const c = this.renderer.sampleScreenColor(pos.x, pos.y);
+        if (!c) return;
+        const hex = this.ui.rgbToHex(c);
+        if (target === 'stroke') this.ui.setLivePaintStroke(hex);
+        else this.ui.setLivePaintFill(hex);
+        // The bar carries the only visible record of the paint colour — an
+        // action with no feedback is a keypress the user can't trust.
+        this.ui.contextBar?.refresh();
+    }
+
+    // ─── Keyboard actions for things that previously had none ──────────────
+    // Everything below is reachable from the bar or a panel too; these are the
+    // chords, kept next to each other so the collisions are visible in one place.
+
+    /** Deselect everything (⇧⌘A). Esc does this eventually, but only after it
+     *  has finished a path edit and disarmed the tool — this is the direct one. */
+    deselectAll() {
+        this.scene.engine!.clear_selection();
+        this.renderer.selectedArtboardId = null;
+        this.selectedPoints.clear();
+        this.ui.syncWithSelection();
+        this.ui.updateLayerList();
+    }
+
+    /** Lock/unlock (⇧⌘L) or show/hide (⇧⌘H) the selection. Mixed selections
+     *  resolve one way — if anything is still unlocked, lock everything — so a
+     *  second press is always the exact undo of the first. */
+    toggleSelectionFlag(flag: 'locked' | 'hidden') {
+        const sel = Array.from(this.scene.engine!.get_selection());
+        if (sel.length === 0) return;
+        if (flag === 'locked') {
+            const next = sel.some((id) => !this.scene.getNodeLocked(id));
+            this.scene.transaction(() => {
+                for (const id of sel) this.scene.setNodeLocked(id, next);
+            });
+        } else {
+            const next = sel.some((id) => this.scene.getNodeVisible(id));
+            this.scene.transaction(() => {
+                for (const id of sel) this.scene.setNodeVisible(id, !next);
+            });
+        }
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+    }
+
+    /** Appearance clipboard for ⌥⌘C / ⌥⌘V — the same set of keys the eyedropper
+     *  transfers, so the two can't disagree about what "appearance" means. */
+    private appearanceClipboard: {
+        fills: unknown[];
+        strokes: unknown[];
+        opacity: number;
+        blend_mode: number;
+        effects: string;
+    } | null = null;
+
+    /** ⌥⌘C: remember the selection's appearance. */
+    copyAppearance() {
+        const sel = this.scene.engine!.get_selection();
+        if (sel.length === 0) return;
+        const style = this.scene.getNodeStyle(sel[0]);
+        this.appearanceClipboard = {
+            fills: style?.fills ?? [],
+            strokes: style?.strokes ?? [],
+            opacity: style?.opacity ?? 1,
+            blend_mode: style?.blend_mode ?? 0,
+            effects: this.scene.getNodeEffects(sel[0]),
+        };
+    }
+
+    /** ⌥⌘V: apply the remembered appearance to the selection. Geometry-specific
+     *  style (corner radius, fill rule) stays with the target. */
+    pasteAppearance() {
+        const clip = this.appearanceClipboard;
+        const sel = Array.from(this.scene.engine!.get_selection());
+        if (!clip || sel.length === 0) return;
+        const { effects, ...appearance } = clip;
+        this.scene.pushHistorySnapshot();
+        for (const id of sel) {
+            const target = this.scene.getNodeStyle(id);
+            this.scene.setNodeStyleNoHistory(id, JSON.stringify({ ...target, ...appearance }));
+            this.scene.setNodeEffectsNoHistory(id, effects);
+        }
+        this.scene.invalidateCache();
+        this.renderer.requestRender();
+        this.ui.syncWithSelection();
+    }
+
+    /** Align the selection (⌥A/D/W/S/H/V, as in Figma). */
+    alignSelectionTo(mode: AlignMode) {
+        const sel = Array.from(this.scene.engine!.get_selection());
+        if (sel.length < 2) return;
+        alignSelection(this.scene, sel, mode);
+        this.ui.syncWithSelection();
+        this.renderer.requestRender();
+    }
+
+    /** Combine the selection into a non-destructive Boolean Group — the same
+     *  thing the Boolean dropdown makes, so the operands stay editable. */
+    booleanSelection(op: BoolOp) {
+        const sel = Array.from(this.scene.engine!.get_selection());
+        if (sel.length < 2) return;
+        const gid = this.scene.makeBooleanGroup(this.ui.ck, sel, op);
+        if (gid < 0) return;
+        this.ui.syncWithSelection();
+        this.ui.updateLayerList();
+    }
+
+    /** The selected Text nodes, or an empty list — the text chords are no-ops
+     *  on anything else rather than silently doing something to a shape. */
+    private selectedTextNodes(): number[] {
+        return Array.from(this.scene.engine!.get_selection()).filter(
+            (id) => this.scene.getNode(id)?.node_type === 'Text',
+        );
+    }
+
+    /** ⇧⌘. / ⇧⌘, — step the font size. Multiplicative, so a step feels the same
+     *  at 8pt and at 96pt. */
+    adjustTextSize(direction: 1 | -1) {
+        const ids = this.selectedTextNodes();
+        if (ids.length === 0) return;
+        this.scene.transaction(() => {
+            for (const id of ids) {
+                const t = this.scene.getNode(id)?.geometry?.Text;
+                if (!t) continue;
+                const size = t.font_size || 16;
+                const next = Math.max(1, Math.round(direction > 0 ? size * 1.1 + 1 : size / 1.1));
+                this.scene.setTextContent(id, t.content, next);
+            }
+        });
+        this.ui.syncWithSelection();
+    }
+
+    /** ⌥← / ⌥→ — tracking (letter-spacing), in world units per press. */
+    adjustTextTracking(delta: number) {
+        const ids = this.selectedTextNodes();
+        if (ids.length === 0) return;
+        this.scene.transaction(() => {
+            for (const id of ids) {
+                const t = this.scene.getNode(id)?.geometry?.Text;
+                if (!t) continue;
+                this.scene.setTextStyle(
+                    id,
+                    t.font_weight ?? 400,
+                    t.italic ?? false,
+                    (t.letter_spacing ?? 0) + delta,
+                );
+            }
+        });
+        this.ui.syncWithSelection();
+    }
+
+    /** ⌘B / ⌘I — bold and italic. Bold toggles 400↔700 off the FIRST selected
+     *  node, so a mixed selection lands on one shared answer rather than each
+     *  node flipping to its own opposite. */
+    toggleTextStyle(which: 'bold' | 'italic') {
+        const ids = this.selectedTextNodes();
+        if (ids.length === 0) return;
+        const first = this.scene.getNode(ids[0])?.geometry?.Text;
+        const bold = (first?.font_weight ?? 400) >= 700;
+        const italic = first?.italic ?? false;
+        this.scene.transaction(() => {
+            for (const id of ids) {
+                const t = this.scene.getNode(id)?.geometry?.Text;
+                if (!t) continue;
+                this.scene.setTextStyle(
+                    id,
+                    which === 'bold' ? (bold ? 400 : 700) : (t.font_weight ?? 400),
+                    which === 'italic' ? !italic : (t.italic ?? false),
+                    t.letter_spacing ?? 0,
+                );
+            }
+        });
+        this.ui.syncWithSelection();
+    }
+
+    /** Digits set opacity, Figma-style: 1–9 is 10–90%, 0 is 100%. Two digits
+     *  typed in quick succession read as one number, so "45" is 45% and not
+     *  "40% then 50%". */
+    private opacityDigits: { text: string; at: number } | null = null;
+    static readonly OPACITY_DIGIT_WINDOW_MS = 600;
+
+    typeOpacityDigit(digit: string) {
+        if (this.scene.engine!.get_selection().length === 0) return;
+        const now = performance.now();
+        const prev = this.opacityDigits;
+        const chained =
+            prev !== null &&
+            prev.text.length === 1 &&
+            now - prev.at <= InputManager.OPACITY_DIGIT_WINDOW_MS;
+        const text = chained ? prev.text + digit : digit;
+        this.opacityDigits = { text, at: now };
+        // "0" alone is 100%; "05" chains to 5%.
+        const pct = text.length === 1 ? (digit === '0' ? 100 : Number(digit) * 10) : Number(text);
+        this.ui.setSelectionOpacity(pct / 100);
     }
 
     /** Current default stroke width from the active style (fallback 2). */

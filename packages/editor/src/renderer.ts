@@ -193,6 +193,9 @@ export class Renderer {
     /** Face ID currently being hovered by the paint bucket tool (or -1). */
     hoverFaceId: number = -1;
     hoverEdgeId: number = -1;
+    /** True only for the read-back frame of `sampleScreenColor`, which must not
+     *  include the paint bucket's own hover tint. */
+    private _sampling = false;
     /** UI-level selected artboard (drawn highlighted with resize handles). */
     selectedArtboardId: number | null = null;
 
@@ -1873,6 +1876,51 @@ export class Renderer {
             this.zoomToFit(b.w, b.h, b.x, b.y);
         }
         this.render();
+    }
+
+    /**
+     * Read the colour actually on screen at a world point — a true eyedropper.
+     * It samples the rendered frame, so it sees what the user sees: a Live Paint
+     * face, a gradient stop, a pixel of an image, the result of a mask. Reading a
+     * node's declared fill can't answer any of those.
+     *
+     * Returns straight (un-premultiplied) 0..1 RGBA, or null off-canvas.
+     */
+    sampleScreenColor(
+        worldX: number,
+        worldY: number,
+    ): { r: number; g: number; b: number; a: number } | null {
+        if (!this.surface || !this.ck) return null;
+        const dpr = window.devicePixelRatio || 1;
+        const px = Math.round((worldX * this.zoom + this.pan.x) * dpr);
+        const py = Math.round((worldY * this.zoom + this.pan.y) * dpr);
+        if (px < 0 || py < 0 || px >= this.canvas.width || py >= this.canvas.height) return null;
+        // Read back the frame as it stands, minus the hover feedback of the tool
+        // doing the sampling. A pending render would change what is under the
+        // cursor, so draw first rather than sampling a stale buffer.
+        let bytes: Uint8Array | null = null;
+        this._sampling = true;
+        try {
+            this.render();
+            const snap = this.surface.makeImageSnapshot([px, py, px + 1, py + 1]);
+            if (!snap) return null;
+            try {
+                bytes = snap.readPixels(0, 0, {
+                    width: 1,
+                    height: 1,
+                    colorType: this.ck.ColorType.RGBA_8888,
+                    alphaType: this.ck.AlphaType.Unpremul,
+                    colorSpace: this.ck.ColorSpace.SRGB,
+                }) as Uint8Array | null;
+            } finally {
+                snap.delete();
+            }
+        } finally {
+            this._sampling = false;
+            this.requestRender(); // put the hover highlight back
+        }
+        if (!bytes || bytes.length < 4) return null;
+        return { r: bytes[0] / 255, g: bytes[1] / 255, b: bytes[2] / 255, a: bytes[3] / 255 };
     }
 
     render() {
@@ -5888,6 +5936,9 @@ export class Renderer {
         // Only while the Live Paint tool is armed — avoids a stale highlight
         // lingering after the user switches tools.
         if (this.inputManager?.ui?.activeTool !== 'paint-bucket') return;
+        // The eyedropper reads the frame under the cursor, and this highlight is
+        // painted over exactly that spot — sampling it would pick the hover blue.
+        if (this._sampling) return;
         // Edge hover takes precedence — the cursor is over a line, not a region.
         if (this.hoverEdgeId >= 0 && this.scene.engine) {
             this.drawEdgeHover(canvas);

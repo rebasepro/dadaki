@@ -586,6 +586,17 @@ body, html {
     position: relative;
 }
 
+/* Full-bleed canvas (⌘\ or Tab): everything but the canvas steps out of the
+   way. `display: none` rather than opacity, so the canvas actually reclaims the
+   space and the renderer's ResizeObserver re-fits it. */
+body.chrome-hidden #layers-panel,
+body.chrome-hidden #layers-panel-resizer,
+body.chrome-hidden #toolbar,
+body.chrome-hidden #side-panel,
+body.chrome-hidden #context-bar {
+    display: none;
+}
+
 /* ─── Layers Panel (Left) ─── */
 
 #layers-panel {

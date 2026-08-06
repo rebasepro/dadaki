@@ -1353,6 +1353,15 @@ pub struct Engine {
     /// set (a descendant was edited, or the op changed). JS reads it via
     /// `take_dirty_boolean_groups`, recomputes each, and pushes back `bool_cache`.
     dirty_boolean_groups: HashSet<u32>,
+    /// Subtrees lifted out of the document by Cut, keyed by their original id.
+    ///
+    /// These live OUTSIDE `self.scene` on purpose, and that is the whole design:
+    /// serialization writes only the scene, and undo *replaces* only the scene,
+    /// so a clipboard kept inside it would either be saved into the user's file
+    /// or silently dropped by the first ⌘Z after a cut. Cleared by the next cut.
+    clipboard: HashMap<u32, Node>,
+    /// The cut roots, in cut order — `clipboard` also holds their descendants.
+    clipboard_roots: Vec<u32>,
     render_buffer: Vec<u8>,
 }
 
@@ -1559,6 +1568,8 @@ impl Engine {
             live_paint_groups: HashSet::new(),
             boolean_groups: HashSet::new(),
             dirty_boolean_groups: HashSet::new(),
+            clipboard: HashMap::new(),
+            clipboard_roots: Vec::new(),
             render_buffer: Vec::new(),
         }
     }
@@ -4660,6 +4671,137 @@ impl Engine {
         true
     }
 
+    /// Cut: lift whole subtrees out of the document and into the clipboard.
+    ///
+    /// As far as the document is concerned the nodes are gone — they don't
+    /// render, hit-test, list or save. But unlike `remove_node`, they still
+    /// exist, so `paste_clipboard` can put them back. That distinction is the
+    /// entire reason this exists: an id-keyed clipboard plus a destructive cut
+    /// leaves paste with nothing to copy from.
+    ///
+    /// Replaces any previous clipboard contents. Returns the number of roots cut.
+    pub fn cut_nodes(&mut self, ids_json: &str) -> u32 {
+        let ids: Vec<u32> = serde_json::from_str(ids_json).unwrap_or_default();
+        self.clipboard.clear();
+        self.clipboard_roots.clear();
+        for id in ids {
+            if !self.scene.nodes.contains_key(&id) {
+                continue;
+            }
+            self.lift_subtree(id);
+            if let Some(node) = self.clipboard.get_mut(&id) {
+                node.parent = None;
+            }
+            self.clipboard_roots.push(id);
+        }
+        self.clipboard_roots.len() as u32
+    }
+
+    /// Move one subtree out of the scene and into `clipboard`. Does exactly the
+    /// bookkeeping `remove_node` does — unlink from the parent or root list,
+    /// drop the spatial entry, transforms, dirty flags and cache membership,
+    /// invalidate any Live Paint network or boolean group that depended on it —
+    /// and then keeps the node instead of dropping it.
+    fn lift_subtree(&mut self, id: u32) {
+        if self.is_in_any_live_paint(id) {
+            self.scene.vector_network.dirty = true;
+        }
+        self.mark_enclosing_boolean_groups_dirty(id);
+        self.live_paint_groups.remove(&id);
+        self.boolean_groups.remove(&id);
+        self.dirty_boolean_groups.remove(&id);
+        if let Some(node) = self.scene.nodes.remove(&id) {
+            if let Some(parent_id) = node.parent {
+                if let Some(parent) = self.scene.nodes.get_mut(&parent_id) {
+                    parent.children.retain(|&c| c != id);
+                }
+            } else {
+                self.scene.root_nodes.retain(|&r| r != id);
+            }
+            self.scene.selection.retain(|&s| s != id);
+            self.global_transforms.remove(&id);
+            self.dirty_flags.remove(&id);
+            if let Some(old_node) = self.node_to_spatial.remove(&id) {
+                self.spatial_index.remove(&old_node);
+            }
+            let children = node.children.clone();
+            self.clipboard.insert(id, node);
+            for child_id in children {
+                self.lift_subtree(child_id);
+            }
+        }
+    }
+
+    /// Paste every clipboard root back into the document at the top level,
+    /// offset by (dx, dy). The clipboard is NOT consumed — pasting twice gives
+    /// two copies, the way it does everywhere else. Returns the new ids.
+    pub fn paste_clipboard(&mut self, dx: f32, dy: f32) -> Vec<u32> {
+        let roots = self.clipboard_roots.clone();
+        let mut out = Vec::with_capacity(roots.len());
+        for root in roots {
+            let mut id_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+            let new_id = self.clone_from_clipboard(root, &mut id_map);
+            if let Some(node) = self.scene.nodes.get_mut(&new_id) {
+                node.transform.x += dx;
+                node.transform.y += dy;
+                node.parent = None;
+            }
+            self.scene.root_nodes.retain(|&r| r != new_id);
+            self.scene.root_nodes.push(new_id);
+            self.update_node_global_transform(new_id);
+            self.update_spatial_index_recursive(new_id);
+            // A cut Live Paint group carries its face fills the same way a
+            // duplicate does — by signature, remapped onto the clone's new ids.
+            self.clone_live_paint_fills(&id_map, dx, dy);
+            self.mark_dirty(new_id);
+            out.push(new_id);
+        }
+        out
+    }
+
+    /// True when a cut is waiting to be pasted.
+    pub fn has_clipboard(&self) -> bool {
+        !self.clipboard_roots.is_empty()
+    }
+
+    /// Recursive clone that reads from `clipboard` rather than the scene.
+    /// Mirrors `deep_clone_subtree_inner`, minus the " copy" suffix — a cut
+    /// object pasted back is the same object, not a copy of it.
+    fn clone_from_clipboard(
+        &mut self,
+        id: u32,
+        id_map: &mut std::collections::HashMap<u32, u32>,
+    ) -> u32 {
+        let new_id = self.alloc_id();
+        id_map.insert(id, new_id);
+
+        if let Some(node) = self.clipboard.get(&id).cloned() {
+            let old_children = node.children.clone();
+            let mut new_node = node;
+            new_node.id = new_id;
+            new_node.children = Vec::new();
+            new_node.parent = None;
+            if new_node.live_paint {
+                self.live_paint_groups.insert(new_id);
+            }
+            if new_node.boolean_op.is_some() {
+                self.boolean_groups.insert(new_id);
+            }
+            self.scene.nodes.insert(new_id, new_node);
+
+            for child_id in old_children {
+                let new_child_id = self.clone_from_clipboard(child_id, id_map);
+                if let Some(child_node) = self.scene.nodes.get_mut(&new_child_id) {
+                    child_node.parent = Some(new_id);
+                }
+                if let Some(parent_node) = self.scene.nodes.get_mut(&new_id) {
+                    parent_node.children.push(new_child_id);
+                }
+            }
+        }
+        new_id
+    }
+
     /// Duplicate a node (and its entire subtree if a group) and return the new id.
     pub fn duplicate_node(&mut self, id: u32) -> u32 {
         // Track old->new ids so any Live Paint fills the subtree carries can be
@@ -6747,6 +6889,68 @@ mod identity_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cut leaves the document, but not existence — paste has to have
+    /// something to copy from.
+    #[test]
+    fn cut_removes_from_the_document_and_paste_brings_it_back() {
+        let mut engine = Engine::new();
+        let id = engine.add_rect(40.0, 60.0, 100.0, 50.0);
+
+        assert_eq!(engine.cut_nodes(&format!("[{id}]")), 1);
+        assert!(engine.scene.nodes.get(&id).is_none(), "cut must leave the document");
+        assert!(engine.scene.root_nodes.is_empty());
+        assert!(engine.has_clipboard());
+
+        let pasted = engine.paste_clipboard(0.0, 0.0);
+        assert_eq!(pasted.len(), 1);
+        assert_eq!(engine.scene.root_nodes, pasted);
+        let node = engine.scene.nodes.get(&pasted[0]).unwrap();
+        assert_eq!(node.transform.x, 40.0, "paste in place keeps the position");
+        assert_eq!(node.transform.y, 60.0);
+        assert_ne!(pasted[0], id, "the pasted node gets a fresh id");
+    }
+
+    /// The reason the clipboard lives outside `Scene`: undo swaps the whole
+    /// scene out, and a clipboard stored inside it would go with it. Cut, undo,
+    /// then paste is an ordinary thing to do.
+    #[test]
+    fn the_clipboard_survives_undo_and_is_never_serialized() {
+        let mut engine = Engine::new();
+        let id = engine.add_rect(10.0, 10.0, 20.0, 20.0);
+        engine.cut_nodes(&format!("[{id}]"));
+
+        // A save must not carry the cut nodes into the user's file...
+        let saved = engine.serialize_scene();
+        let mut reloaded = Engine::new();
+        assert!(reloaded.deserialize_scene(&saved));
+        assert!(reloaded.scene.nodes.is_empty(), "the clipboard must not be saved");
+
+        // ...and a round trip through undo must not lose them.
+        assert!(engine.deserialize_scene(&saved));
+        assert!(engine.has_clipboard(), "undo must not take the clipboard with it");
+        assert_eq!(engine.paste_clipboard(0.0, 0.0).len(), 1);
+    }
+
+    /// Cutting a group takes its children along, and paste rebuilds the tree.
+    #[test]
+    fn cut_carries_the_whole_subtree() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 10.0, 10.0);
+        let b = engine.add_rect(20.0, 0.0, 10.0, 10.0);
+        let group = engine.group_nodes(&format!("[{a},{b}]"));
+
+        engine.cut_nodes(&format!("[{group}]"));
+        assert!(engine.scene.nodes.is_empty(), "children go with the group");
+
+        let pasted = engine.paste_clipboard(0.0, 0.0);
+        assert_eq!(pasted.len(), 1);
+        let kids = &engine.scene.nodes.get(&pasted[0]).unwrap().children;
+        assert_eq!(kids.len(), 2);
+        for k in kids {
+            assert_eq!(engine.scene.nodes.get(k).unwrap().parent, Some(pasted[0]));
+        }
+    }
 
     #[test]
     fn test_add_rect() {

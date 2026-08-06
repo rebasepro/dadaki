@@ -84,23 +84,62 @@ export const KEYBINDINGS: ReadonlyArray<BindingSection> = [
                 note: 'Hold ⇧ for 10px.',
                 modes: [
                     { mode: 'Editing a path', does: 'Moves the selected points, handles and all' },
-                    { mode: 'While drawing with the pen', does: 'Nothing — the path is not geometry yet' },
+                    {
+                        mode: 'While drawing with the pen',
+                        does: 'Nothing — the path is not geometry yet',
+                    },
                 ],
             },
             { keys: [`${MOD}D`], action: 'Duplicate' },
             { keys: [`${MOD}C`, `${MOD}V`], action: 'Copy and paste' },
+            {
+                keys: [`⇧${MOD}V`],
+                action: 'Paste in place',
+                note: 'Lands the copy squarely on the original, instead of offset beside it.',
+            },
+            {
+                keys: [`${MOD}X`],
+                action: 'Cut',
+                note: 'The cut objects wait in the clipboard until you paste them — a save never writes them and an undo never drops them.',
+            },
+            {
+                keys: [`⌥${MOD}C`, `⌥${MOD}V`],
+                action: 'Copy and paste appearance',
+                note: 'Fills, strokes, opacity, blend mode and effects — not geometry. What the eyedropper transfers.',
+            },
+            {
+                keys: ['1…9', '0'],
+                action: 'Set opacity: 10–90%, or 100%',
+                note: 'Type two digits quickly for an exact value — 45 is 45%.',
+            },
+            { keys: [`⇧${MOD}L`], action: 'Lock / unlock' },
+            { keys: [`⇧${MOD}H`], action: 'Hide / show' },
+            { keys: ['F2'], action: 'Rename the selected layer' },
             { keys: [`${MOD}G`], action: 'Group' },
             { keys: [`⇧${MOD}G`], action: 'Ungroup' },
             { keys: [`${MOD}A`], action: 'Select everything' },
+            { keys: [`⇧${MOD}A`], action: 'Deselect' },
             { keys: [`${MOD}E`], action: 'Flatten to a single path' },
             {
                 keys: [`${MOD}J`],
                 action: 'Join two open paths',
-                modes: [
-                    { mode: 'Editing a path', does: 'Merges the selected points into one' },
-                ],
+                modes: [{ mode: 'Editing a path', does: 'Merges the selected points into one' }],
             },
             { keys: [`⇧${MOD}O`], action: 'Convert text to outlines' },
+        ],
+    },
+    {
+        title: 'Live Paint',
+        blurb: 'B picks up the bucket; double-click a Live Paint group to get back into it. While the bucket is armed, these keys belong to painting.',
+        bindings: [
+            { keys: ['Click'], action: 'Fill the region under the cursor' },
+            { keys: ['⇧Click'], action: 'Paint the line under the cursor instead' },
+            {
+                keys: ['⌥Click', '⇧⌥Click'],
+                action: 'Pick up the colour under the cursor, as fill / as edge colour',
+                note: 'Reads what is actually on screen — a region you already painted, a point along a gradient, a pixel of an image.',
+            },
+            { keys: ['Enter'], action: 'Done painting' },
         ],
     },
     {
@@ -125,6 +164,36 @@ export const KEYBINDINGS: ReadonlyArray<BindingSection> = [
             { keys: [']', '['], action: 'Bring forward / send backward' },
             { keys: [`${MOD}]`, `${MOD}[`], action: 'Bring to front / send to back' },
             { keys: ['⇧H', '⇧V'], action: 'Flip horizontally / vertically' },
+            {
+                keys: ['⌥A', '⌥H', '⌥D'],
+                action: 'Align left / centre / right',
+                note: 'Needs two or more objects — alignment is to the selection’s own bounds.',
+            },
+            { keys: ['⌥W', '⌥V', '⌥S'], action: 'Align top / middle / bottom' },
+        ],
+    },
+    {
+        title: 'Combining',
+        blurb: 'Boolean groups are non-destructive: the operands stay inside, still editable.',
+        bindings: [
+            { keys: [`⌥${MOD}U`], action: 'Union' },
+            { keys: [`⌥${MOD}S`], action: 'Subtract' },
+            { keys: [`⌥${MOD}I`], action: 'Intersect' },
+            {
+                keys: [`⇧⌥${MOD}X`],
+                action: 'Exclude',
+                note: `Figma puts Exclude on ⌥${MOD}X, which is Make Live Paint here.`,
+            },
+            { keys: [`⌥${MOD}X`], action: 'Make Live Paint group' },
+        ],
+    },
+    {
+        title: 'Text',
+        blurb: 'These only act on selected text — everywhere else the same keys keep their usual meaning.',
+        bindings: [
+            { keys: [`${MOD}B`, `${MOD}I`], action: 'Bold / italic' },
+            { keys: [`⇧${MOD}.`, `⇧${MOD},`], action: 'Bigger / smaller' },
+            { keys: ['⌥→', '⌥←'], action: 'Loosen / tighten tracking' },
         ],
     },
     {
@@ -153,6 +222,11 @@ export const KEYBINDINGS: ReadonlyArray<BindingSection> = [
             { keys: ['⇧2'], action: 'Zoom to the selection' },
             { keys: ['⇧0'], action: 'Zoom to 100%' },
             { keys: ['⇧R'], action: 'Toggle rulers', note: `${MOD}R stays your browser's reload.` },
+            {
+                keys: [`${MOD}\\`, 'Tab'],
+                action: 'Hide the panels',
+                note: 'Full-bleed canvas. Every tool has a letter, so a hidden toolbar costs you nothing.',
+            },
         ],
     },
     {

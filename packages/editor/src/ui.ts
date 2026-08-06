@@ -3779,6 +3779,64 @@ export class UIEngine {
         }
     }
 
+    /**
+     * Rename the selected layer from the canvas (F2), without hunting for its
+     * row first. Scrolls the row into view — renaming a layer you can't see
+     * would put the caret somewhere off screen. No-op when the selection isn't
+     * exactly one thing to name.
+     */
+    renameSelectedLayer(): boolean {
+        const sel = this.scene.engine!.get_selection();
+        const abId = this.scene.renderer?.selectedArtboardId ?? null;
+        const target: { node: number } | { artboard: number } | null =
+            sel.length === 1 ? { node: sel[0] } : abId !== null ? { artboard: abId } : null;
+        if (!target) return false;
+        const key = 'node' in target ? target.node : target.artboard;
+        const attr = 'node' in target ? 'data-node-id' : 'data-ab-id';
+        const nameEl = this.layerList?.querySelector(
+            `.layer-name[${attr}="${key}"]`,
+        ) as HTMLElement | null;
+        if (!nameEl) return false;
+        nameEl.closest('.layer-item')?.scrollIntoView({ block: 'nearest' });
+        this.startLayerRename(nameEl, target);
+        return true;
+    }
+
+    /**
+     * Show/hide the editor chrome (⌘\ or Tab) — the panels either side and the
+     * toolbar — leaving the canvas full-bleed. Figma's ⌘\. The canvas resizes
+     * itself: the renderer watches its own box with a ResizeObserver.
+     *
+     * Every tool has a letter, so a hidden toolbar costs nothing you can't reach
+     * from the keyboard.
+     */
+    toggleChrome(): boolean {
+        const hidden = document.body.classList.toggle('chrome-hidden');
+        return hidden;
+    }
+
+    /**
+     * Set opacity on the selection from the keyboard (Figma's digit keys).
+     * Goes through each node's OWN style so paints survive — the same rule the
+     * Opacity panel follows.
+     */
+    setSelectionOpacity(opacity: number) {
+        const selection = this.scene.engine!.get_selection();
+        if (selection.length === 0) return;
+        const clamped = Math.max(0, Math.min(1, opacity));
+        this.scene.transaction(() => {
+            for (const id of selection) {
+                const node = this.scene.getNode(id);
+                if (!node) continue;
+                this.scene.setNodeStyleNoHistory(
+                    id,
+                    JSON.stringify({ ...node.style, opacity: clamped }),
+                );
+            }
+        });
+        this.syncWithSelection();
+    }
+
     /** Start inline renaming of a layer row (node OR artboard). */
     private startLayerRename(nameEl: HTMLElement, target: { node: number } | { artboard: number }) {
         const currentName = nameEl.textContent || '';
@@ -4140,8 +4198,7 @@ export class UIEngine {
             this.scene.setNodeEffects(nodeId, JSON.stringify(effects));
             this.scene.renderer?.invalidateRenderCaches();
             this.scene.renderer?.requestRender();
-            if (structural)
-                withPanelFocusPreserved([list], () => this.renderEffectsList(nodeId));
+            if (structural) withPanelFocusPreserved([list], () => this.renderEffectsList(nodeId));
         };
 
         // Live edits (typing in a number field, dragging the colour picker) fire
@@ -4823,20 +4880,24 @@ export class UIEngine {
         // file fired 4000), and each one reaches the backend's cookie/dataLayer
         // path. Collapsed into a single `svg_imported` carrying the counts.
         let importedRoots = 0;
-        withBulkAnalytics('svg_imported', () => ({ roots: importedRoots }), () => {
-            this.scene.transaction(() => {
-                const before = new Set(this.scene.getRootNodes());
-                this.parseSVGInternal(svgText, patternImages, doc);
-                const newRoots = Array.from(this.scene.getRootNodes()).filter(
-                    (id) => !before.has(id),
-                );
-                importedRoots = newRoots.length;
-                // Imported artwork starts collapsed so a deep SVG tree doesn't flood
-                // the Objects panel; the user expands the parts they care about.
-                for (const rootId of newRoots) this.collapseSubtreeByDefault(rootId);
-                if (afterImport) afterImport(newRoots);
-            });
-        });
+        withBulkAnalytics(
+            'svg_imported',
+            () => ({ roots: importedRoots }),
+            () => {
+                this.scene.transaction(() => {
+                    const before = new Set(this.scene.getRootNodes());
+                    this.parseSVGInternal(svgText, patternImages, doc);
+                    const newRoots = Array.from(this.scene.getRootNodes()).filter(
+                        (id) => !before.has(id),
+                    );
+                    importedRoots = newRoots.length;
+                    // Imported artwork starts collapsed so a deep SVG tree doesn't flood
+                    // the Objects panel; the user expands the parts they care about.
+                    for (const rootId of newRoots) this.collapseSubtreeByDefault(rootId);
+                    if (afterImport) afterImport(newRoots);
+                });
+            },
+        );
     }
 
     /** Gather all referenced definitions (for a standalone rasterize tile) as an
@@ -6736,13 +6797,7 @@ export class UIEngine {
                 // it may be declared on an ancestor rather than the element —
                 // `resolveAttr` walks the merged inherited styles for us.
                 const rendering = (
-                    resolveAttr(
-                        el,
-                        'image-rendering',
-                        parseInlineStyle(el),
-                        mergedStyles,
-                        '',
-                    ) || ''
+                    resolveAttr(el, 'image-rendering', parseInlineStyle(el), mergedStyles, '') || ''
                 ).trim();
                 const wantsPixelated =
                     rendering === 'optimizeSpeed' ||

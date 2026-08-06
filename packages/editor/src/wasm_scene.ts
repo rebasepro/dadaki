@@ -1070,6 +1070,30 @@ export class WasmScene {
         return newId;
     }
 
+    /** Cut: lift the nodes out of the document into the engine's clipboard,
+     *  where paste can still reach them. See `Engine::cut_nodes`. */
+    cutNodes(ids: number[] | Uint32Array): number {
+        this.saveHistory();
+        const n = this.engine!.cut_nodes(JSON.stringify(Array.from(ids)));
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return n;
+    }
+
+    /** Paste the cut nodes back at the top level, offset by (dx, dy). Does not
+     *  consume the clipboard — pasting twice gives two copies. */
+    pasteClipboard(dx: number, dy: number): number[] {
+        this.saveHistory();
+        const ids = Array.from(this.engine!.paste_clipboard(dx, dy));
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return ids;
+    }
+
+    hasClipboard(): boolean {
+        return this.engine?.has_clipboard() ?? false;
+    }
+
     removeNode(id: number) {
         this.saveHistory();
         this.engine!.remove_node(id);

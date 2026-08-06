@@ -605,7 +605,9 @@ export class ContextBar {
         if (group >= 0) {
             this.el.appendChild(this.createBadge('Editing Live Paint'));
             this.el.appendChild(
-                this.createHint('Click a region to fill · ⌥-click a line to paint its edge'),
+                this.createHint(
+                    'Click a region to fill · ⇧-click a line to paint its edge · ⌥-click to pick up a colour',
+                ),
             );
             this.el.appendChild(this.createSeparator());
             this.el.appendChild(

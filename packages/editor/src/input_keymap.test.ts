@@ -75,16 +75,41 @@ function makeUI(): UIEngine {
         getCurrentStyle: () => '{}',
         contextBar: { refresh() {} },
         gradientEdit: { isActive: () => false, hitTest: () => null },
+        // Recorded rather than performed — the interesting logic is on the input
+        // side (which digits mean what), not in the panel write-through.
+        opacityCalls: [] as number[],
+        setSelectionOpacity(v: number) {
+            (this as { opacityCalls: number[] }).opacityCalls.push(v);
+        },
+        chromeToggles: 0,
+        toggleChrome() {
+            (this as { chromeToggles: number }).chromeToggles++;
+            return true;
+        },
+        renameCalls: 0,
+        renameSelectedLayer() {
+            (this as { renameCalls: number }).renameCalls++;
+            return true;
+        },
     } as unknown as UIEngine;
 }
 
-function key(k: string): KeyboardEvent {
+/** `code` defaults to the physical key that produces `k` on a US layout, which
+ *  is what the ⌥-chords match on — macOS turns ⌥a into "å" in `key`. */
+function key(
+    k: string,
+    mods: { meta?: boolean; shift?: boolean; alt?: boolean; code?: string } = {},
+): KeyboardEvent {
+    const code =
+        mods.code ??
+        (/^[a-zA-Z]$/.test(k) ? `Key${k.toUpperCase()}` : /^[0-9]$/.test(k) ? `Digit${k}` : k);
     return {
         key: k,
-        metaKey: false,
+        code,
+        metaKey: mods.meta ?? false,
         ctrlKey: false,
-        shiftKey: false,
-        altKey: false,
+        shiftKey: mods.shift ?? false,
+        altKey: mods.alt ?? false,
         target: document.createElement('canvas'),
         preventDefault() {},
         stopPropagation() {},
@@ -205,5 +230,211 @@ describe('a stale node id is reported, not thrown', () => {
         const scene = makeScene();
         expect(scene.getNodeStyle(9999)).toBeNull();
         expect(scene.getNodeGeometry(9999)).toBeNull();
+    });
+});
+
+describe('paste puts the copy where you asked for it', () => {
+    /** A rect at (40,60), copied and ready to paste. */
+    function copiedRect() {
+        const scene = makeScene();
+        const { renderer } = makeRenderer();
+        const input = new InputManager(document.createElement('canvas'), scene, makeUI(), renderer);
+        const id = scene.engine!.add_rect(40, 60, 10, 10);
+        scene.selectNode(id, false);
+        input.onKeyDown(key('c', { meta: true }));
+        return { scene, input, id };
+    }
+
+    /** Top-left of the one node that isn't the original. */
+    function pastedOrigin(scene: WasmScene, originalId: number) {
+        const pasted = scene.engine!.get_root_nodes().filter((n) => n !== originalId);
+        expect(pasted.length).toBe(1);
+        const b = scene.getNodeBounds(pasted[0]);
+        return { x: b[0], y: b[1] };
+    }
+
+    it('⌘V offsets the copy so it is visible beside the original', () => {
+        const { scene, input, id } = copiedRect();
+
+        input.onKeyDown(key('v', { meta: true }));
+
+        expect(pastedOrigin(scene, id)).toEqual({ x: 60, y: 80 });
+    });
+
+    it('⇧⌘V pastes in place — exactly on top of what was copied', () => {
+        const { scene, input, id } = copiedRect();
+
+        // macOS reports the shifted letter, so the handler must accept 'V' too.
+        input.onKeyDown(key('V', { meta: true, shift: true }));
+
+        expect(pastedOrigin(scene, id)).toEqual({ x: 40, y: 60 });
+    });
+
+    it('⇧⌘V does not also flip the selection', () => {
+        // ⇧V alone is Flip Vertical; with ⌘ held it must be paste and nothing else.
+        const { scene, input, id } = copiedRect();
+
+        input.onKeyDown(key('V', { meta: true, shift: true }));
+
+        const b = scene.getNodeBounds(id);
+        expect({ x: b[0], y: b[1] }).toEqual({ x: 40, y: 60 });
+    });
+
+    it('pasting after the original is deleted adds nothing', () => {
+        // The clipboard is a list of live ids. `duplicate_node` answers a missing
+        // one with a fresh EMPTY node, so paste used to leave an invisible row
+        // in the layer list.
+        const { scene, input, id } = copiedRect();
+        scene.engine!.remove_node(id);
+
+        input.onKeyDown(key('v', { meta: true }));
+
+        expect(Array.from(scene.engine!.get_root_nodes())).toEqual([]);
+    });
+});
+
+describe('cut keeps what it removes', () => {
+    function setup() {
+        const scene = makeScene();
+        const { renderer } = makeRenderer();
+        const ui = makeUI();
+        const input = new InputManager(document.createElement('canvas'), scene, ui, renderer);
+        return { scene, input, ui };
+    }
+
+    it('⌘X takes it out of the document, ⇧⌘V puts it back where it was', () => {
+        const { scene, input } = setup();
+        const id = scene.engine!.add_rect(40, 60, 10, 10);
+        scene.selectNode(id, false);
+
+        input.onKeyDown(key('x', { meta: true }));
+        expect(Array.from(scene.engine!.get_root_nodes())).toEqual([]);
+
+        input.onKeyDown(key('V', { meta: true, shift: true }));
+        const roots = Array.from(scene.engine!.get_root_nodes());
+        expect(roots.length).toBe(1);
+        const b = scene.getNodeBounds(roots[0]);
+        expect({ x: b[0], y: b[1] }).toEqual({ x: 40, y: 60 });
+    });
+
+    it('the clipboard is not consumed — a second paste gives a second copy', () => {
+        const { scene, input } = setup();
+        scene.selectNode(scene.engine!.add_rect(0, 0, 10, 10), false);
+
+        input.onKeyDown(key('x', { meta: true }));
+        input.onKeyDown(key('v', { meta: true }));
+        input.onKeyDown(key('v', { meta: true }));
+
+        expect(scene.engine!.get_root_nodes().length).toBe(2);
+    });
+
+    it('a plain ⌘C after a cut goes back to copying', () => {
+        const { scene, input } = setup();
+        scene.selectNode(scene.engine!.add_rect(0, 0, 10, 10), false);
+        input.onKeyDown(key('x', { meta: true }));
+        input.onKeyDown(key('v', { meta: true }));
+
+        const pasted = Array.from(scene.engine!.get_root_nodes());
+        scene.selectNode(pasted[0], false);
+        input.onKeyDown(key('c', { meta: true }));
+        input.onKeyDown(key('v', { meta: true }));
+
+        expect(scene.engine!.get_root_nodes().length).toBe(2);
+    });
+});
+
+describe('the keys that had no keys', () => {
+    function setup(n = 1) {
+        const scene = makeScene();
+        const { renderer } = makeRenderer();
+        const ui = makeUI();
+        const input = new InputManager(document.createElement('canvas'), scene, ui, renderer);
+        const ids: number[] = [];
+        for (let i = 0; i < n; i++) {
+            const id = scene.engine!.add_rect(i * 100, i * 50, 40, 40);
+            ids.push(id);
+            scene.selectNode(id, i > 0);
+        }
+        return { scene, input, ui: ui as unknown as Record<string, unknown>, ids };
+    }
+
+    it('a digit sets opacity, and two digits in a row read as one number', () => {
+        const { input, ui } = setup();
+
+        input.onKeyDown(key('4'));
+        input.onKeyDown(key('5'));
+
+        // 4 → 40%, then "45" replaces it rather than reading as a second key.
+        expect(ui.opacityCalls).toEqual([0.4, 0.45]);
+    });
+
+    it('0 alone is 100%, not 0%', () => {
+        const { input, ui } = setup();
+        input.onKeyDown(key('0'));
+        expect(ui.opacityCalls).toEqual([1]);
+    });
+
+    it('⇧⌘L locks, and pressing it again unlocks', () => {
+        const { scene, input, ids } = setup();
+
+        input.onKeyDown(key('L', { meta: true, shift: true }));
+        expect(scene.getNodeLocked(ids[0])).toBe(true);
+
+        input.onKeyDown(key('L', { meta: true, shift: true }));
+        expect(scene.getNodeLocked(ids[0])).toBe(false);
+    });
+
+    it('⇧⌘H hides, and pressing it again shows', () => {
+        const { scene, input, ids } = setup();
+
+        input.onKeyDown(key('H', { meta: true, shift: true }));
+        expect(scene.getNodeVisible(ids[0])).toBe(false);
+
+        input.onKeyDown(key('H', { meta: true, shift: true }));
+        expect(scene.getNodeVisible(ids[0])).toBe(true);
+    });
+
+    it('⇧⌘A deselects', () => {
+        const { scene, input } = setup(2);
+        expect(scene.engine!.get_selection().length).toBe(2);
+
+        input.onKeyDown(key('A', { meta: true, shift: true }));
+
+        expect(scene.engine!.get_selection().length).toBe(0);
+    });
+
+    it('⌥A aligns left, matching on the physical key rather than "å"', () => {
+        const { scene, input, ids } = setup(2);
+
+        // macOS reports ⌥a as "å"; the handler must still see KeyA.
+        input.onKeyDown(key('å', { alt: true, code: 'KeyA' }));
+
+        const a = scene.getNodeBounds(ids[0]);
+        const b = scene.getNodeBounds(ids[1]);
+        expect(b[0]).toBeCloseTo(a[0]);
+    });
+
+    it('⌥← stays a nudge when the selection is not text', () => {
+        const { scene, input, ids } = setup();
+        const before = scene.getNodeBounds(ids[0])[0];
+
+        input.onKeyDown(key('ArrowLeft', { alt: true }));
+
+        expect(scene.getNodeBounds(ids[0])[0]).toBeCloseTo(before - 1);
+    });
+
+    it('⌘\\ and Tab both hide the panels', () => {
+        const { input, ui } = setup();
+
+        input.onKeyDown(key('\\', { meta: true, code: 'Backslash' }));
+        input.onKeyDown(key('Tab'));
+
+        expect(ui.chromeToggles).toBe(2);
+    });
+
+    it('F2 renames the selected layer', () => {
+        const { input, ui } = setup();
+        input.onKeyDown(key('F2'));
+        expect(ui.renameCalls).toBe(1);
     });
 });
