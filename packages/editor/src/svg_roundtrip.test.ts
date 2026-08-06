@@ -1791,3 +1791,74 @@ describe('SVG Export — Live Paint compositing', () => {
         expect(rectFills.every((f) => f === 'none')).toBe(true);
     });
 });
+
+// ─── Export: a mask over a Live Paint group ─────────────────────────────────
+
+describe('SVG Export — a mask over a Live Paint group', () => {
+    /** Live Paint group (1) whose children are [mask ellipse (2), rect (3)]. */
+    const maskedLpScene = (): SVGExportInput => ({
+        docWidth: 400,
+        docHeight: 400,
+        nodes: {
+            1: makeNode({ node_type: 'Group', children: [2, 3] }),
+            2: makeNode({
+                node_type: 'Ellipse',
+                geometry: { Ellipse: { radius_x: 80, radius_y: 80 } },
+                style: defaultStyle({ fills: [{ r: 0, g: 0, b: 0, a: 1 }] }),
+                is_mask: true,
+            }),
+            3: makeNode({
+                geometry: { Rect: { width: 100, height: 100 } },
+                style: defaultStyle({ fills: [{ r: 1, g: 0, b: 0, a: 1 }] }),
+            }),
+        },
+        rootNodeIds: [1],
+        localTransforms: { 1: IDENTITY, 2: IDENTITY, 3: IDENTITY },
+        livePaint: {
+            groups: [1],
+            faces: [
+                {
+                    group: 1,
+                    boundary: [
+                        [0, 0],
+                        [100, 0],
+                        [100, 100],
+                        [0, 100],
+                    ],
+                    fill: { r: 0, g: 1, b: 0, a: 1 },
+                },
+            ],
+            edges: [],
+        },
+    });
+
+    it('puts the painted faces INSIDE the mask group', () => {
+        // Emitted outside the wrapper, the mask never reaches them and the file
+        // disagrees with what the canvas showed.
+        const doc = parseSVG(buildSVGFromData(maskedLpScene()));
+
+        const masked = queryTag(doc, 'g[mask]');
+        expect(masked).toBeTruthy();
+        const faceInside = masked!.querySelector('path[fill="#00ff00"]');
+        expect(faceInside).toBeTruthy();
+        // ...and nowhere else.
+        const allFaces = doc.querySelectorAll('path[fill="#00ff00"]');
+        expect(allFaces.length).toBe(1);
+    });
+
+    it('keeps the mask shape its fill — that fill IS the coverage', () => {
+        const doc = parseSVG(buildSVGFromData(maskedLpScene()));
+
+        const mask = queryTag(doc, 'mask');
+        expect(mask).toBeTruthy();
+        const shape = mask!.querySelector('ellipse');
+        expect(shape).toBeTruthy();
+        expect(shape!.getAttribute('fill')).toBe('#000000');
+    });
+
+    it('still suppresses fills on ordinary members', () => {
+        const doc = parseSVG(buildSVGFromData(maskedLpScene()));
+        const rect = queryTag(doc, 'rect');
+        expect(rect!.getAttribute('fill')).toBe('none');
+    });
+});

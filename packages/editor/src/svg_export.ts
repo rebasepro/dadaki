@@ -492,8 +492,19 @@ export function buildSVGFromData(input: SVGExportInput): string {
         siblings: number[],
         suppressFill: boolean,
         parentWorld: number[],
+        lp?: { id: number; world: number[] },
     ): string => {
-        let out = '';
+        // Chunks rather than a running string, because the Live Paint faces and
+        // edges have to end up INSIDE a `<g mask>` wrapper — emitted around this
+        // call (as they used to be) the mask never reaches them, and the export
+        // disagrees with the canvas.
+        const chunks: { maskId?: string; body: string }[] = [];
+        let facesPending = !!lp;
+        const takeFaces = () => {
+            if (!facesPending || !lp) return '';
+            facesPending = false;
+            return lpFacesSvg(lp.id, lp.world);
+        };
         let ci = 0;
         while (ci < siblings.length) {
             const childId = siblings[ci];
@@ -516,24 +527,36 @@ export function buildSVGFromData(input: SVGExportInput): string {
                 const maskTypeVal = mt === 1 ? 'luminance' : 'alpha';
                 maskDefs.push(
                     `<mask id="${maskId}" mask-type="${maskTypeVal}" style="mask-type:${maskTypeVal}">` +
-                        `${renderNodeToSVG(childId, suppressFill, parentWorld)}</mask>`,
+                        // Never suppressed: an alpha mask's coverage IS its fill.
+                        `${renderNodeToSVG(childId, false, parentWorld)}</mask>`,
                 );
                 // Gather content siblings up to the next mask.
-                let contentSvg = '';
+                let contentSvg = takeFaces();
                 let j = ci + 1;
                 for (; j < siblings.length; j++) {
                     const c = nodes[siblings[j]];
                     if (c?.is_mask && c.visible) break;
                     contentSvg += renderNodeToSVG(siblings[j], suppressFill, parentWorld);
                 }
-                out += `<g mask="url(#${maskId})">${contentSvg}</g>`;
+                chunks.push({ maskId, body: contentSvg });
                 ci = j;
             } else {
-                out += renderNodeToSVG(childId, suppressFill, parentWorld);
+                chunks.push({
+                    body: takeFaces() + renderNodeToSVG(childId, suppressFill, parentWorld),
+                });
                 ci++;
             }
         }
-        return out;
+        // Trailing faces (an empty group still has them) and the painted edges
+        // join the last chunk, so they stay inside the mask too.
+        const tail = takeFaces() + (lp ? lpEdgesSvg(lp.id, lp.world) : '');
+        if (tail) {
+            if (chunks.length > 0) chunks[chunks.length - 1].body += tail;
+            else chunks.push({ body: tail });
+        }
+        return chunks
+            .map((c) => (c.maskId ? `<g mask="url(#${c.maskId})">${c.body}</g>` : c.body))
+            .join('');
     };
 
     /** Recursively render a node and its children to SVG elements.
@@ -603,10 +626,15 @@ export function buildSVGFromData(input: SVGExportInput): string {
             // strokes) and painted edges (top) — and suppresses member fills.
             const isLP = useLivePaintCompositing && lpGroupSet.has(id);
             const childSuppress = suppressFill || isLP;
-            if (isLP) nodeSvg += lpFacesSvg(id, world);
             // Children are a sibling list — same mask-span semantics as roots.
-            nodeSvg += renderSiblingsWithMasks(node.children || [], childSuppress, world);
-            if (isLP) nodeSvg += lpEdgesSvg(id, world);
+            // Faces and edges are emitted in there, so a mask among the children
+            // contains them (matching the renderer).
+            nodeSvg += renderSiblingsWithMasks(
+                node.children || [],
+                childSuppress,
+                world,
+                isLP ? { id, world } : undefined,
+            );
         } else {
             // Leaf shape: carry any effect filter on the shape element itself.
             const attrs = buildStyleAttrs(node.style, suppressFill) + filterAttr;
