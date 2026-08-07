@@ -438,3 +438,71 @@ describe('the keys that had no keys', () => {
         expect(ui.renameCalls).toBe(1);
     });
 });
+
+describe('the Live Paint bucket shows what ⌥ is about to do', () => {
+    /** A Live Paint group with one fillable region, bucket armed. */
+    function painting() {
+        const scene = makeScene();
+        const { renderer } = makeRenderer();
+        const ui = makeUI();
+        const canvas = document.createElement('canvas');
+        const input = new InputManager(canvas, scene, ui, renderer);
+        const a = scene.engine!.add_rect(0, 0, 200, 200);
+        const b = scene.engine!.add_ellipse(200, 200, 80, 80);
+        const group = scene.groupNodes([a, b]);
+        scene.setNodeLivePaint(group, true);
+        scene.setLivePaintGroup(group);
+        ui.activeTool = 'paint-bucket';
+        input.currentPos = { x: 60, y: 60 }; // inside the rect's region
+        return { scene, input, ui, renderer, canvas };
+    }
+
+    const isEyedropper = (canvas: HTMLCanvasElement) => canvas.style.cursor.startsWith('url(');
+
+    it('⌥ turns the cursor into an eyedropper', () => {
+        const { input, canvas } = painting();
+
+        input.updatePaintBucketHover(false, false);
+        expect(isEyedropper(canvas)).toBe(false);
+
+        input.updatePaintBucketHover(true, false);
+        expect(isEyedropper(canvas)).toBe(true);
+    });
+
+    it('⌥ clears the fill highlight — it is not about to fill anything', () => {
+        // The blue region tint promises a fill. Leaving it up under ⌥ was the
+        // whole reason the eyedropper was invisible: the hover still described
+        // the old meaning of ⌥ (edge mode).
+        const { input, renderer } = painting();
+
+        input.updatePaintBucketHover(false, false);
+        expect(renderer.hoverFaceId).toBeGreaterThanOrEqual(0);
+
+        input.updatePaintBucketHover(true, false);
+        expect(renderer.hoverFaceId).toBe(-1);
+        expect(renderer.hoverEdgeId).toBe(-1);
+    });
+
+    it('⇧ — not ⌥ — is what previews an edge now', () => {
+        const { input, renderer } = painting();
+
+        input.updatePaintBucketHover(false, true);
+        expect(renderer.hoverFaceId).toBe(-1); // shift means edge, not fill
+
+        input.updatePaintBucketHover(true, false);
+        expect(renderer.hoverEdgeId).toBe(-1); // alt means neither
+    });
+
+    it('pressing ⌥ with the mouse still updates the cursor immediately', () => {
+        // The user holds ⌥ without moving. A hover that only refreshes on
+        // mousemove leaves the cursor lying about what a click will do.
+        const { input, canvas } = painting();
+        input.updatePaintBucketHover(false, false);
+
+        input.onKeyDown(key('Alt', { alt: true }));
+        expect(isEyedropper(canvas)).toBe(true);
+
+        input.onKeyUp(key('Alt'));
+        expect(isEyedropper(canvas)).toBe(false);
+    });
+});

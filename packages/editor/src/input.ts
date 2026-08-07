@@ -769,6 +769,18 @@ export class InputManager {
         // Alt/Shift pressed mid-drag must reapply the transform immediately.
         this.reapplyDragForModifiers(e);
 
+        // ⌥ turns the bucket into an eyedropper, and you hold it with the mouse
+        // STILL — so the cursor has to change on the keypress, not on the next
+        // mouse move. Same for ⇧ (edge mode).
+        if (
+            (e.key === 'Alt' || e.key === 'Shift') &&
+            !this.isMouseDown &&
+            this.ui.activeTool === 'paint-bucket'
+        ) {
+            this.updatePaintBucketHover(e.altKey, e.shiftKey);
+            this.renderer.requestRender();
+        }
+
         // Space: hold for hand tool (pan-drag)
         if (e.key === ' ') {
             e.preventDefault(); // stop page scroll
@@ -1662,6 +1674,15 @@ export class InputManager {
             this.ctrlKey = e.ctrlKey;
             this.updateHoverSnapPreview(e.metaKey || e.ctrlKey);
             this.updatePenHover();
+        }
+        // Releasing ⌥/⇧ puts the bucket back, cursor and highlight both.
+        if (
+            (e.key === 'Alt' || e.key === 'Shift') &&
+            !this.isMouseDown &&
+            this.ui.activeTool === 'paint-bucket'
+        ) {
+            this.updatePaintBucketHover(e.altKey, e.shiftKey);
+            this.renderer.requestRender();
         }
         this.reapplyDragForModifiers(e);
     }
@@ -2851,6 +2872,55 @@ export class InputManager {
         // "0" alone is 100%; "05" chains to 5%.
         const pct = text.length === 1 ? (digit === '0' ? 100 : Number(digit) * 10) : Number(text);
         this.ui.setSelectionOpacity(pct / 100);
+    }
+
+    /**
+     * An eyedropper drawn as a cursor. There is no CSS keyword for one, and the
+     * whole point of ⌥ here is that you can SEE it has become a picker before
+     * you commit to a click — a modifier with no visible effect is a modifier
+     * nobody finds. Hotspot at the tip (bottom-left), like Illustrator's.
+     */
+    private static readonly EYEDROPPER_CURSOR = `url("data:image/svg+xml;utf8,${encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
+            // White casing under a dark stroke, so it reads on any artwork.
+            '<g fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round">' +
+            '<path d="M17.5 3.5a2.8 2.8 0 0 1 4 4l-1.6 1.6-4-4z"/>' +
+            '<path d="M15 6.5 4.6 16.9 3.2 21.3l4.4-1.4L18 9.5z"/></g>' +
+            '<g fill="none" stroke="#111" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+            '<path d="M17.5 3.5a2.8 2.8 0 0 1 4 4l-1.6 1.6-4-4z"/>' +
+            '<path d="M15 6.5 4.6 16.9 3.2 21.3l4.4-1.4L18 9.5z"/></g></svg>',
+    )}") 2 22, crosshair`;
+
+    /**
+     * Hover feedback for the Live Paint bucket, and the one place that decides
+     * what a click is about to do. Split out of `onMouseMove` because ⌥ has to
+     * change the cursor the moment it is PRESSED — the user holds it with the
+     * mouse still, and a hover that only updates on movement looks broken.
+     *
+     * Mirrors the click exactly: ⌥ samples, ⇧ paints the edge, otherwise fill.
+     */
+    updatePaintBucketHover(alt: boolean, shift: boolean) {
+        if (alt) {
+            // About to sample, not paint — drop both highlights. Leaving the
+            // blue region tint up would promise a fill that isn't coming.
+            this.renderer.hoverEdgeId = -1;
+            this.renderer.hoverFaceId = -1;
+            this.canvas.style.cursor = InputManager.EYEDROPPER_CURSOR;
+            return;
+        }
+        const edgeTol = 6 / this.renderer.zoom;
+        const faceId = this.scene.engine!.query_face_at(this.currentPos.x, this.currentPos.y);
+        if (shift || faceId < 0) {
+            // Edge mode (⇧), or outside any region → preview the edge.
+            const edgeId = this.scene.queryEdgeAt(this.currentPos.x, this.currentPos.y, edgeTol);
+            this.renderer.hoverEdgeId = edgeId;
+            this.renderer.hoverFaceId = shift ? -1 : faceId;
+            this.canvas.style.cursor = edgeId >= 0 ? 'crosshair' : 'default';
+        } else {
+            this.renderer.hoverEdgeId = -1;
+            this.renderer.hoverFaceId = faceId;
+            this.canvas.style.cursor = 'crosshair';
+        }
     }
 
     /** Current default stroke width from the active style (fallback 2). */
@@ -4718,27 +4788,9 @@ export class InputManager {
             this.updateMeshHover(e);
         }
 
-        // Paint bucket hover preview. Filling is primary, so we highlight the
-        // region under the cursor; only when Alt is held (edge mode) do we
-        // highlight the nearest edge — matching what a click will do.
+        // Paint bucket hover preview.
         if (!this.isMouseDown && this.ui.activeTool === 'paint-bucket') {
-            const edgeTol = 6 / this.renderer.zoom;
-            const faceId = this.scene.engine!.query_face_at(this.currentPos.x, this.currentPos.y);
-            if (e.altKey || faceId < 0) {
-                // Edge mode (Alt), or outside any region → preview the edge.
-                const edgeId = this.scene.queryEdgeAt(
-                    this.currentPos.x,
-                    this.currentPos.y,
-                    edgeTol,
-                );
-                this.renderer.hoverEdgeId = edgeId;
-                this.renderer.hoverFaceId = e.altKey ? -1 : faceId;
-                this.canvas.style.cursor = edgeId >= 0 ? 'crosshair' : 'default';
-            } else {
-                this.renderer.hoverEdgeId = -1;
-                this.renderer.hoverFaceId = faceId;
-                this.canvas.style.cursor = 'crosshair';
-            }
+            this.updatePaintBucketHover(e.altKey, e.shiftKey);
         }
 
         // Scissors / Add-Point / Segment hover preview
