@@ -1304,9 +1304,40 @@ export class UIEngine {
     }
     setLivePaintFill(hex: string) {
         this._livePaintFill = hexToRgb(hex);
+        // Picking a colour is also how you leave None — otherwise the swatch
+        // would show a colour the next click wouldn't paint.
+        this._livePaintFillNone = false;
     }
     setLivePaintStroke(hex: string) {
         this._livePaintStroke = hexToRgb(hex);
+        this._livePaintStrokeNone = false;
+    }
+
+    /**
+     * Whether the bucket paints None — which is how a region gets *un*-painted.
+     *
+     * Kept as a flag beside the colour rather than encoded as a transparent one:
+     * a region painted with alpha 0 is still painted (it keeps a fill, and Expand
+     * would bake an invisible shape), whereas None removes the fill outright and
+     * the artwork underneath shows through as it did before the bucket touched
+     * it. The remembered colour survives the round trip to None and back.
+     */
+    private _livePaintFillNone = false;
+    private _livePaintStrokeNone = false;
+
+    isLivePaintFillNone(): boolean {
+        return this._livePaintFillNone;
+    }
+    isLivePaintStrokeNone(): boolean {
+        return this._livePaintStrokeNone;
+    }
+    setLivePaintFillNone(none: boolean) {
+        this._livePaintFillNone = none;
+        // None and a gradient are contradictory instructions for the same click.
+        if (none) this.setLivePaintGradient(null);
+    }
+    setLivePaintStrokeNone(none: boolean) {
+        this._livePaintStrokeNone = none;
     }
 
     /**
@@ -2104,17 +2135,24 @@ export class UIEngine {
     /**
      * Expand the current selection into the set of paintable LEAF node ids
      * (Figma-style): descend into groups so editing fill/stroke on a group
-     * targets its shapes. Live Paint groups are treated as opaque single
-     * targets — their child colors come from painting, not `style.fills`.
+     * targets its shapes.
+     *
+     * A Live Paint group descends for STROKES but not for FILLS, which is
+     * exactly what the renderer does with them: it suppresses a member's own
+     * fill (the painted face supplies the interior) and keeps the member's
+     * stroke (that outline IS the artwork). Treating the group as opaque for
+     * both meant a stroke edit landed on the group node's own style, which
+     * nothing renders — the control looked live and did nothing.
      */
-    private getPaintTargets(): number[] {
+    private getPaintTargets(kind: 'fills' | 'strokes' = 'fills'): number[] {
         const out: number[] = [];
         const seen = new Set<number>();
         const visit = (id: number) => {
             if (seen.has(id)) return;
             const typeNum = this.scene.getNodeType(id);
             const isGroup = typeNum !== undefined && UIEngine.NODE_TYPE_KEY[typeNum] === 'Group';
-            if (isGroup && !this.scene.getNodeLivePaint(id)) {
+            const opaque = isGroup && kind === 'fills' && this.scene.getNodeLivePaint(id);
+            if (isGroup && !opaque) {
                 const children = this.scene.getNodeChildren(id);
                 if (children) for (const c of children) visit(c);
                 return;
@@ -2124,6 +2162,13 @@ export class UIEngine {
         };
         for (const id of this.scene.getSelection()) visit(id);
         return out;
+    }
+
+    /** True when the selection is a single Live Paint group — whose region
+     *  colours come from the bucket, not from `style.fills`. */
+    private selectionIsLivePaintGroup(): boolean {
+        const sel = this.scene.getSelection();
+        return sel.length === 1 && this.scene.getNodeLivePaint(sel[0]);
     }
 
     /** Structural equality for a Paint/Stroke (engine objects have stable key order). */
@@ -2153,7 +2198,7 @@ export class UIEngine {
         | { mode: 'uniform'; rows: { slotIndex: number; mixed: boolean; value: any }[] }
         | { mode: 'mixedCount'; rep: any } {
         const arrays: any[][] = [];
-        for (const id of this.getPaintTargets()) {
+        for (const id of this.getPaintTargets(kind)) {
             const n = this.scene.getNode(id);
             if (n) arrays.push(((n.style as any)[kind] as any[]) || []);
         }
@@ -2195,7 +2240,7 @@ export class UIEngine {
         mutate: (arr: any[], node: SceneNode) => void,
         live = false,
     ) {
-        const targets = this.getPaintTargets();
+        const targets = this.getPaintTargets(kind);
         if (targets.length === 0) return;
 
         const doMutations = () => {
@@ -2467,6 +2512,17 @@ export class UIEngine {
     renderFillsList(_node: SceneNode) {
         if (!this.fillsList) return;
         this.fillsList.innerHTML = '';
+        // A Live Paint group's interior colour comes from the bucket, and the
+        // renderer suppresses its members' own fills — so any control here would
+        // be inert. Say where the colour actually lives instead of offering a
+        // row that silently does nothing.
+        if (this.selectionIsLivePaintGroup()) {
+            const note = document.createElement('div');
+            note.className = 'panel-empty-note';
+            note.textContent = 'Region colours come from the Live Paint bucket (K).';
+            this.fillsList.appendChild(note);
+            return;
+        }
         const ge = this.gradientEdit;
         const targets = this.getPaintTargets();
         const agg = this.aggregatePaints('fills');

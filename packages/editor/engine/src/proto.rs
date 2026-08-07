@@ -558,6 +558,11 @@ pub struct ProtoNode {
     /// 4 = exclude. The cached outline is not serialized (recomputed on load).
     #[prost(uint32, tag = "15")]
     pub boolean_op: u32,
+    /// Per-group Live Paint gap-closing distance (world units). Absent means the
+    /// group inherits the document default, which is not the same as 0 ("never
+    /// bridge") — hence `optional` rather than a bare float.
+    #[prost(float, optional, tag = "16")]
+    pub gap_bridge_distance: Option<f32>,
 }
 
 /// A preserved face fill from the vector network.
@@ -1263,6 +1268,7 @@ fn node_to_proto(node: &Node) -> ProtoNode {
         clip_content: node.clip_content,
         live_paint: node.live_paint,
         boolean_op: node.boolean_op.map(|op| op as u32 + 1).unwrap_or(0),
+        gap_bridge_distance: node.gap_bridge_distance,
     }
 }
 
@@ -1295,6 +1301,9 @@ fn proto_to_node(pn: &ProtoNode) -> Node {
         clip_content: pn.clip_content,
         live_paint: pn.live_paint,
         boolean_op: if pn.boolean_op == 0 { None } else { Some((pn.boolean_op - 1) as u8) },
+        // Negative values would mean "closer than not at all"; clamp rather than
+        // trust a hand-edited file.
+        gap_bridge_distance: pn.gap_bridge_distance.map(|d| d.max(0.0)),
         bool_cache: Vec::new(),
     }
 }
@@ -1800,6 +1809,7 @@ mod tests {
             clip_content: false,
             live_paint: false,
             boolean_op: None,
+            gap_bridge_distance: None,
             bool_cache: Vec::new(),
         });
 

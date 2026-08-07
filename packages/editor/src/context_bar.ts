@@ -241,8 +241,21 @@ export class ContextBar {
                 : info.context === 'live-paint'
                   ? `|${this.ui.rgbToHex(this.ui.getLivePaintFill())}|${this.ui.rgbToHex(this.ui.getLivePaintStroke())}`
                   : '';
-        // Live Paint bar depends on whether a group is active.
-        const lpSig = info.context === 'live-paint' ? `|lp${this.scene.getLivePaintGroup()}` : '';
+        // Live Paint bar depends on whether a group is active, on whether the
+        // bucket is loaded with None (the swatch renders differently and the
+        // hint changes), and on the gap distance in force — which is now a
+        // property of the group, so switching groups can change it.
+        const lpGroup = this.scene.getLivePaintGroup();
+        const lpSig =
+            info.context === 'live-paint' || info.context === 'tool'
+                ? `|lp${lpGroup}|gap${
+                      lpGroup >= 0
+                          ? this.scene.getEffectiveGapBridgeDistance(lpGroup)
+                          : this.scene.getGapBridgeDistance()
+                  }|none${this.ui.isLivePaintFillNone() ? 1 : 0}${
+                      this.ui.isLivePaintStrokeNone() ? 1 : 0
+                  }`
+                : '';
         // A selected Boolean Group's controls show its current op, so it's part
         // of the signature (switching the op must re-render the bar).
         const boolSig =
@@ -530,30 +543,64 @@ export class ContextBar {
         );
     }
 
-    /** Gap-closing preset selector for the Live Paint tool. */
+    /**
+     * Gap-closing control for the Live Paint tool: how far apart two open ends
+     * may be and still count as a closed region.
+     *
+     * The value belongs to the GROUP being painted, not the document — one
+     * sketch can need a wide tolerance without loosening every other group in
+     * the file. With no group targeted the control edits the document default,
+     * which is what a newly made group inherits.
+     *
+     * Presets cover the common cases; the number beside them is there because
+     * "how big is the gap in my drawing" is a measurement, not a menu choice.
+     */
     private createGapControl(): HTMLElement {
         const presets: Array<[string, number]> = [
             ['No gaps', 0],
             ['Small gaps', 4],
             ['Medium gaps', 12],
             ['Large gaps', 32],
+            ['Huge gaps', 80],
+            ['Enormous gaps', 200],
         ];
+        // The group being painted, if any — otherwise this edits the default.
+        const group = this.scene.getLivePaintGroup();
+        const target = group >= 0 ? group : null;
+        const read = () =>
+            target === null
+                ? this.scene.getGapBridgeDistance()
+                : this.scene.getEffectiveGapBridgeDistance(target);
+        const write = (d: number) => {
+            if (target === null) this.scene.setGapBridgeDistance(d);
+            else this.scene.setNodeGapBridgeDistance(target, d);
+            this.input.renderer.requestRender();
+        };
+
         const wrapper = document.createElement('div');
         wrapper.className = 'cb-swatch-wrapper';
-        wrapper.setAttribute('data-tooltip', 'Close gaps up to this size before filling');
+        wrapper.setAttribute(
+            'data-tooltip',
+            target === null
+                ? 'Close gaps up to this size — the default for new Live Paint groups'
+                : 'Close gaps up to this size in this Live Paint group',
+        );
+
+        const row = document.createElement('div');
+        row.className = 'cb-inline-row';
 
         const select = document.createElement('select');
         select.className = 'cb-select';
-        const current = this.scene.getGapBridgeDistance();
+        const current = read();
         for (const [label, px] of presets) {
             const opt = document.createElement('option');
             opt.value = String(px);
             opt.textContent = label;
-            // Nearest preset reflects the stored distance.
             if (px === current) opt.selected = true;
             select.appendChild(opt);
         }
-        // If the stored value matches no preset, prepend a custom entry.
+        // A value between presets is legitimate (it came from the number field),
+        // so name it rather than silently snapping the menu to a neighbour.
         if (!presets.some(([, px]) => px === current)) {
             const opt = document.createElement('option');
             opt.value = String(current);
@@ -561,16 +608,104 @@ export class ContextBar {
             opt.selected = true;
             select.insertBefore(opt, select.firstChild);
         }
+
+        const num = document.createElement('input');
+        num.type = 'number';
+        num.className = 'cb-number';
+        num.min = '0';
+        num.step = '1';
+        num.value = String(current);
+        num.title = 'Gap size in document units';
+
         select.addEventListener('change', () => {
-            this.scene.setGapBridgeDistance(parseFloat(select.value));
-            this.input.renderer.requestRender();
+            const d = parseFloat(select.value);
+            num.value = String(d);
+            write(d);
         });
+        // Commit on change/blur, not on every keystroke: each write is an undo
+        // step and forces a graph rebuild, and typing "120" would cost three.
+        num.addEventListener('change', () => {
+            const d = Math.max(0, parseFloat(num.value) || 0);
+            num.value = String(d);
+            write(d);
+            this.refresh();
+        });
+
+        row.appendChild(select);
+        row.appendChild(num);
 
         const labelSpan = document.createElement('span');
         labelSpan.className = 'cb-swatch-label';
-        labelSpan.textContent = 'Gaps';
+        labelSpan.textContent = target === null ? 'Gaps (default)' : 'Gaps';
 
-        wrapper.appendChild(select);
+        wrapper.appendChild(row);
+        wrapper.appendChild(labelSpan);
+        return wrapper;
+    }
+
+    /**
+     * The bucket's fill/stroke swatch with a None state next to it.
+     *
+     * None is what un-paints a region: with it selected the bucket removes the
+     * fill (or the edge's stroke) instead of replacing it. Modelled as a value
+     * of the colour rather than a separate eraser tool, so there is no mode to
+     * get stuck in and the swatch always shows what the next click will do.
+     */
+    private createLivePaintSwatch(
+        kind: 'fill' | 'stroke',
+        hex: string,
+        onColor: (color: string) => void,
+    ): HTMLElement {
+        const isNone =
+            kind === 'fill' ? this.ui.isLivePaintFillNone() : this.ui.isLivePaintStrokeNone();
+        const setNone = (v: boolean) => {
+            if (kind === 'fill') this.ui.setLivePaintFillNone(v);
+            else this.ui.setLivePaintStrokeNone(v);
+        };
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'cb-swatch-wrapper';
+        wrapper.setAttribute('data-tooltip', `Live Paint ${kind}`);
+
+        const row = document.createElement('div');
+        row.className = 'cb-inline-row';
+
+        const { el: swatch } = createColorSwatch({
+            color: parseHex(hex) ?? { r: 0, g: 0, b: 0, a: 1 },
+            alpha: false,
+            title: `Live Paint ${kind}`,
+            className: `cb-swatch${isNone ? ' cb-swatch-none' : ''}`,
+            onInput: (c) => {
+                onColor(colorToHex(c, false));
+                // Choosing a colour is the way back from None. Restyled in
+                // place rather than through refresh(): rebuilding the bar mid-
+                // drag would tear out the very swatch the picker is anchored to.
+                setNone(false);
+                swatch.classList.remove('cb-swatch-none');
+                none.classList.remove('active');
+            },
+        });
+        row.appendChild(swatch);
+
+        const none = document.createElement('button');
+        none.type = 'button';
+        none.className = `cb-none-toggle${isNone ? ' active' : ''}`;
+        none.textContent = 'None';
+        none.title =
+            kind === 'fill'
+                ? 'Paint nothing — click a region to clear its fill'
+                : 'Paint nothing — ⇧-click a line to clear its stroke';
+        none.addEventListener('click', (e) => {
+            e.preventDefault();
+            setNone(!isNone);
+            this.refresh();
+        });
+        row.appendChild(none);
+        wrapper.appendChild(row);
+
+        const labelSpan = document.createElement('span');
+        labelSpan.className = 'cb-swatch-label';
+        labelSpan.textContent = kind === 'fill' ? 'Fill' : 'Stroke';
         wrapper.appendChild(labelSpan);
         return wrapper;
     }
@@ -604,7 +739,7 @@ export class ContextBar {
             this.el.appendChild(this.createGradientTypeControl(grad.gradient_type));
         } else {
             this.el.appendChild(
-                this.createColorSwatch(
+                this.createLivePaintSwatch(
                     'fill',
                     this.ui.rgbToHex(this.ui.getLivePaintFill()),
                     (color) => {
@@ -630,7 +765,7 @@ export class ContextBar {
             ),
         );
         this.el.appendChild(
-            this.createColorSwatch(
+            this.createLivePaintSwatch(
                 'stroke',
                 this.ui.rgbToHex(this.ui.getLivePaintStroke()),
                 (color) => {
@@ -647,7 +782,7 @@ export class ContextBar {
             this.el.appendChild(this.createBadge('Editing Live Paint'));
             this.el.appendChild(
                 this.createHint(
-                    'Click a region to fill · ⇧-click a line to paint its edge · ⌥-click to pick up a colour',
+                    'Click a region to fill · ⇧-click a line to paint its edge · ⌥-click to pick up a colour · ⌘-click to clear',
                 ),
             );
             this.el.appendChild(this.createSeparator());

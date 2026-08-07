@@ -1209,6 +1209,23 @@ export class WasmScene {
         return ok;
     }
 
+    /** Un-paint a Live Paint region, leaving it transparent again. Undoable —
+     *  it is a mutation like any other fill. */
+    clearFaceFill(faceId: number) {
+        this.saveHistory();
+        this.engine!.clear_face_fill(faceId);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** Un-paint a Live Paint edge, so only the member shapes' own strokes show. */
+    clearEdgePaint(edgeId: number) {
+        this.saveHistory();
+        this.engine!.clear_edge_paint(edgeId);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
     /** The Live Paint region at a world point, or -1 when there is none. */
     queryFaceAt(x: number, y: number): number {
         return this.engine?.query_face_at(x, y) ?? -1;
@@ -1259,6 +1276,28 @@ export class WasmScene {
 
     getGapBridgeDistance(): number {
         return this.engine?.get_gap_bridge_distance() ?? 0;
+    }
+
+    /** Set one Live Paint group's own gap-closing distance, or pass a negative
+     *  value to clear it so the group inherits the document default. Undoable
+     *  for the same reason the document-wide one is: it changes which regions
+     *  exist, so fills can appear or disappear. */
+    setNodeGapBridgeDistance(id: number, distance: number) {
+        this.saveHistory();
+        this.engine!.set_node_gap_bridge_distance(id, distance);
+        this.invalidateCache();
+        this.autosave?.trigger();
+    }
+
+    /** A group's own gap distance, or -1 when it inherits the document default. */
+    getNodeGapBridgeDistance(id: number): number {
+        return this.engine?.get_node_gap_bridge_distance(id) ?? -1;
+    }
+
+    /** The gap distance actually in force for a group — its own, or the
+     *  inherited default. This is what the bucket obeys. */
+    getEffectiveGapBridgeDistance(id: number): number {
+        return this.engine?.get_effective_gap_bridge_distance(id) ?? 0;
     }
 
     /** Nearest paintable Live Paint edge to a point, or -1. */

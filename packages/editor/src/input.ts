@@ -2450,8 +2450,11 @@ export class InputManager {
         } else if (this.ui.activeTool === 'paint-bucket') {
             // A gradient handle under the cursor is what the press is for —
             // otherwise the click would repaint the region out from under the
-            // handles the user was reaching for.
-            if (!e.altKey && this.ui.gradientEdit.isActive()) {
+            // handles the user was reaching for. ⌘ is excluded too: the handles
+            // sit on top of the region they belong to, so an eraser that let
+            // them win could not reach the very region it is aimed at.
+            const eraseChord = e.metaKey || e.ctrlKey;
+            if (!e.altKey && !eraseChord && this.ui.gradientEdit.isActive()) {
                 const gHit = this.ui.gradientEdit.hitTest(this.startPos, this.renderer.zoom);
                 if (gHit) {
                     if (gHit.type === 'insert') {
@@ -2470,7 +2473,9 @@ export class InputManager {
             if (e.altKey) {
                 this.sampleLivePaintColor(this.startPos, e.shiftKey ? 'stroke' : 'fill');
             } else {
-                this.handlePaintBucketClick(this.startPos, e.shiftKey);
+                // ⌘/Ctrl is the one-off eraser: un-paint what's under the
+                // cursor without disturbing the colour the bucket is loaded with.
+                this.handlePaintBucketClick(this.startPos, e.shiftKey, eraseChord);
             }
         } else if (this.ui.activeTool === 'scissors') {
             this.handleScissorsDown(this.startPos);
@@ -2658,12 +2663,26 @@ export class InputManager {
         this.maybeRevertTool();
     }
 
-    handlePaintBucketClick(pos: { x: number; y: number }, wantEdge = false) {
+    /**
+     * @param wantEdge  ⇧-click: target the edge rather than the region.
+     * @param erase     Paint nothing — remove what is there. Reached two ways:
+     *                  the bucket's colour is set to None (a property, so every
+     *                  click erases until it is changed back), or ⌘-click (a
+     *                  one-off, leaving the colour alone). Both matter: the
+     *                  first is discoverable in the bar, the second is what you
+     *                  want when you spot one wrong region mid-paint.
+     */
+    handlePaintBucketClick(pos: { x: number; y: number }, wantEdge = false, erase = false) {
         if (!this.scene.engine) return;
         const edgeTol = 6 / this.renderer.zoom;
+        const eraseEdge = erase || this.ui.isLivePaintStrokeNone();
         const paintEdge = () => {
             const id = this.scene.queryEdgeAt(pos.x, pos.y, edgeTol);
             if (id < 0) return false;
+            if (eraseEdge) {
+                this.scene.clearEdgePaint(id);
+                return true;
+            }
             const c = this.ui.getLivePaintStroke();
             this.scene.setEdgePaint(id, c.r, c.g, c.b, c.a, this.activeStrokeWidth());
             return true;
@@ -2676,6 +2695,14 @@ export class InputManager {
 
         const faceId = this.scene.engine.query_face_at(pos.x, pos.y);
         if (faceId >= 0) {
+            if (erase || this.ui.isLivePaintFillNone()) {
+                this.scene.clearFaceFill(faceId);
+                // Handles left over from a gradient that no longer exists would
+                // be aimable at nothing.
+                this.ui.gradientEdit.clear();
+                this.renderer.requestRender();
+                return;
+            }
             const grad = this.ui.getLivePaintGradient();
             if (grad && this.paintFaceWithGradient(faceId, grad)) {
                 // Handles land on the region you just painted, so the gradient

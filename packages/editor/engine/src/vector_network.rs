@@ -239,6 +239,11 @@ pub struct VectorNetwork {
     /// region becomes fillable. 0 = off (only coincident endpoints merge).
     #[serde(default)]
     pub gap_bridge_distance: f32,
+    /// Per-group override of `gap_bridge_distance`, keyed by Live Paint group
+    /// node id. The value lives on the group node (`Node::gap_bridge_distance`);
+    /// this is the copy the graph rebuild reads, so it is derived, not saved.
+    #[serde(skip)]
+    pub group_gap: HashMap<u32, f32>,
     /// Pending face fills from file load/undo — applied on first rebuild.
     #[serde(default)]
     pub pending_fills: Vec<PendingFill>,
@@ -265,6 +270,7 @@ impl Default for VectorNetwork {
             gap_tolerance: 2.0,
             dirty: true,
             gap_bridge_distance: 0.0,
+            group_gap: HashMap::new(),
             pending_fills: Vec::new(),
             painted_edges: Vec::new(),
             logical_edges: HashMap::new(),
@@ -496,7 +502,7 @@ fn transform_point(p: Vec2, t: &[f32; 9]) -> Vec2 {
 
 /// Find the intersection point of two line segments, if any.
 /// Returns the parameter t for seg1 (0..1) and the intersection point.
-fn segment_intersection(
+pub(crate) fn segment_intersection(
     a1: Vec2, a2: Vec2,
     b1: Vec2, b2: Vec2,
 ) -> Option<(f32, f32, Vec2)> {
@@ -570,7 +576,9 @@ impl VectorNetwork {
 
         // Step 4: Close gaps — bridge dangling open ends within tolerance so
         // not-quite-closed regions become fillable (Illustrator "Gap Options").
-        if self.gap_bridge_distance > 0.0 {
+        // The tolerance is per Live Paint group, so one group can be painted
+        // with a wide tolerance without loosening every other group.
+        if self.gap_bridge_distance > 0.0 || self.group_gap.values().any(|&d| d > 0.0) {
             self.bridge_gaps();
         }
 
@@ -1018,14 +1026,48 @@ impl VectorNetwork {
         nv
     }
 
-    /// Close gaps by bridging dangling open ends (degree-1 vertices) to the
-    /// nearest vertex or edge within `gap_bridge_distance`, via synthetic edges.
-    /// Greedy: once a vertex is bridged it is no longer dangling, so a facing
-    /// pair of open ends is joined by exactly one bridge.
-    fn bridge_gaps(&mut self) {
-        let max_d = self.gap_bridge_distance;
-        let max_d2 = max_d * max_d;
+    /// The gap-closing distance in force for a Live Paint group: the group's own
+    /// setting when it has one, otherwise the document default.
+    fn gap_distance_for(&self, group: u32) -> f32 {
+        self.group_gap.get(&group).copied().unwrap_or(self.gap_bridge_distance)
+    }
 
+    /// Would a bridge from `a` to `b` cross existing geometry in `group`?
+    ///
+    /// At the small tolerances this feature launched with the answer was almost
+    /// always no, so the question went unasked. It stops being rhetorical once
+    /// the tolerance is wide enough to reach past a neighbouring contour: a
+    /// bridge laid across an existing edge breaks planarity, and the face walk
+    /// downstream then carves regions that do not match what is on screen.
+    /// Rejecting those candidates is what lets the tolerance go up safely.
+    /// `ignore_v` are the bridge's own attachment vertices — an edge that ends
+    /// where the bridge ends is touched, not crossed. `ignore_e` is the edge the
+    /// bridge lands *on* (and its twin), when it lands mid-edge.
+    fn bridge_crosses(
+        &self, a: Vec2, b: Vec2, group: u32, ignore_v: &[u32], ignore_e: Option<u32>,
+    ) -> bool {
+        let (lo, hi) = (a.min(b), a.max(b));
+        for (&eid, e) in &self.edges {
+            if e.twin < eid || e.group != group { continue; }
+            if ignore_e.is_some_and(|x| x == eid || x == e.twin) { continue; }
+            if ignore_v.contains(&e.from_vertex) || ignore_v.contains(&e.to_vertex) { continue; }
+            let p = self.vertices[&e.from_vertex].position;
+            let q = self.vertices[&e.to_vertex].position;
+            // Cheap bounding-box reject first — most edges are nowhere near.
+            if p.x.min(q.x) > hi.x || p.x.max(q.x) < lo.x { continue; }
+            if p.y.min(q.y) > hi.y || p.y.max(q.y) < lo.y { continue; }
+            if segment_intersection(a, b, p, q).is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Close gaps by bridging dangling open ends (degree-1 vertices) to the
+    /// nearest vertex or edge within the group's gap distance, via synthetic
+    /// edges. Greedy: once a vertex is bridged it is no longer dangling, so a
+    /// facing pair of open ends is joined by exactly one bridge.
+    fn bridge_gaps(&mut self) {
         // Deterministic processing order (HashMap iteration is not stable).
         let mut dangling: Vec<u32> = self.vertices.values()
             .filter(|v| v.outgoing_edges.len() == 1)
@@ -1041,49 +1083,73 @@ impl VectorNetwork {
             };
             let vpos = self.vertices[&vid].position;
             let vgrp = self.vertices[&vid].group;
+            let max_d = self.gap_distance_for(vgrp);
+            if max_d <= 0.0 { continue; }
+            let max_d2 = max_d * max_d;
             let neighbor = self.edges[&out].to_vertex;
 
-            // Nearest non-adjacent vertex (lower id wins ties for determinism).
-            // Bridges only join open ends within the same Live Paint group.
-            let mut best_vertex: Option<(u32, f32)> = None;
-            for (&uid, u) in &self.vertices {
-                if uid == vid || uid == neighbor || u.group != vgrp { continue; }
-                let d2 = (u.position - vpos).length_squared();
-                if d2 > max_d2 || d2 < 1e-6 { continue; }
-                match best_vertex {
-                    Some((bid, bd)) if d2 > bd || (d2 == bd && uid >= bid) => {}
-                    _ => best_vertex = Some((uid, d2)),
-                }
-            }
+            // Candidate vertices, nearest first (lower id wins ties for
+            // determinism). Sorted rather than reduced to a single best because
+            // the nearest one may be rejected for crossing something.
+            let mut cand_v: Vec<(u32, f32)> = self.vertices.iter()
+                .filter(|(&uid, u)| uid != vid && uid != neighbor && u.group == vgrp)
+                .filter_map(|(&uid, u)| {
+                    let d2 = (u.position - vpos).length_squared();
+                    (d2 <= max_d2 && d2 >= 1e-6).then_some((uid, d2))
+                })
+                .collect();
+            cand_v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0)));
 
-            // Nearest interior point on a non-incident edge (one per twin pair).
-            let mut best_edge: Option<(u32, f32, Vec2)> = None;
-            for (&eid, e) in &self.edges {
-                if e.twin < eid { continue; }
-                if e.group != vgrp { continue; }
-                if e.from_vertex == vid || e.to_vertex == vid { continue; }
-                let a = self.vertices[&e.from_vertex].position;
-                let b = self.vertices[&e.to_vertex].position;
-                let (proj, t) = project_point_to_segment(vpos, a, b);
-                if t <= 1e-3 || t >= 1.0 - 1e-3 { continue; } // endpoint → vertex case
-                let d2 = (proj - vpos).length_squared();
-                if d2 > max_d2 || d2 < 1e-6 { continue; }
-                match best_edge {
-                    Some((bid, bd, _)) if d2 > bd || (d2 == bd && eid >= bid) => {}
-                    _ => best_edge = Some((eid, d2, proj)),
-                }
-            }
+            // Candidate interior points on non-incident edges (one per twin pair).
+            let mut cand_e: Vec<(u32, f32, Vec2)> = self.edges.iter()
+                .filter(|(&eid, e)| e.twin >= eid && e.group == vgrp
+                    && e.from_vertex != vid && e.to_vertex != vid)
+                .filter_map(|(&eid, e)| {
+                    let a = self.vertices[&e.from_vertex].position;
+                    let b = self.vertices[&e.to_vertex].position;
+                    let (proj, t) = project_point_to_segment(vpos, a, b);
+                    if t <= 1e-3 || t >= 1.0 - 1e-3 { return None; } // endpoint → vertex case
+                    let d2 = (proj - vpos).length_squared();
+                    (d2 <= max_d2 && d2 >= 1e-6).then_some((eid, d2, proj))
+                })
+                .collect();
+            cand_e.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0)));
 
-            // Bridge to whichever candidate is closer.
-            match (best_vertex, best_edge) {
-                (Some((uid, vd)), edge_opt) if edge_opt.map_or(true, |(_, ed, _)| vd <= ed) => {
-                    self.add_half_edge_pair(vid, uid, SYNTHETIC_SOURCE, true);
+            // Merge the two candidate lists by distance and take the first that
+            // can be reached without crossing anything.
+            let (mut iv, mut ie) = (0usize, 0usize);
+            loop {
+                let dv = cand_v.get(iv).map(|c| c.1);
+                let de = cand_e.get(ie).map(|c| c.1);
+                match (dv, de) {
+                    (None, None) => break,
+                    (Some(d), other) if other.map_or(true, |o| d <= o) => {
+                        let (uid, _) = cand_v[iv];
+                        iv += 1;
+                        // The two endpoints are the bridge's own attachment
+                        // points — touching them is not a crossing.
+                        if self.bridge_crosses(vpos, self.vertices[&uid].position, vgrp, &[vid, uid], None) {
+                            continue;
+                        }
+                        self.add_half_edge_pair(vid, uid, SYNTHETIC_SOURCE, true);
+                        break;
+                    }
+                    _ => {
+                        let (eid, _, proj) = cand_e[ie];
+                        ie += 1;
+                        // Only the landing edge is exempt: ignoring everything
+                        // incident to it let bridges through that crossed real
+                        // geometry on the way there.
+                        if self.bridge_crosses(vpos, proj, vgrp, &[vid], Some(eid)) {
+                            continue;
+                        }
+                        let nv = self.split_edge_at(eid, proj);
+                        self.add_half_edge_pair(vid, nv, SYNTHETIC_SOURCE, true);
+                        break;
+                    }
                 }
-                (_, Some((eid, _, proj))) => {
-                    let nv = self.split_edge_at(eid, proj);
-                    self.add_half_edge_pair(vid, nv, SYNTHETIC_SOURCE, true);
-                }
-                _ => {}
             }
         }
     }
@@ -1601,10 +1667,21 @@ impl Engine {
         false
     }
 
+    /// Per-group gap-closing distances, read off the Live Paint group nodes.
+    /// Groups that have never been given one are absent, and fall back to the
+    /// document default inside the rebuild.
+    pub(crate) fn gap_overrides(&self) -> HashMap<u32, f32> {
+        self.scene.nodes.values()
+            .filter(|n| n.live_paint)
+            .filter_map(|n| n.gap_bridge_distance.map(|d| (n.id, d.max(0.0))))
+            .collect()
+    }
+
     /// Ensure the vector network is up to date.
     pub(crate) fn ensure_network_clean(&mut self) {
         if self.scene.vector_network.dirty {
             let (segments, curves) = self.collect_segments();
+            self.scene.vector_network.group_gap = self.gap_overrides();
             self.scene.vector_network.rebuild(segments, curves);
             self.resolve_painted_edges();
         }

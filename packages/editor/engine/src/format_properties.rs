@@ -329,6 +329,7 @@ fn rich_scene(seed: u64) -> (Scene, u32) {
             clip_content: i % 9 == 0,
             live_paint: false,
             boolean_op: if i % 11 == 0 { Some((i % 5) as u8) } else { None },
+            gap_bridge_distance: None,
             bool_cache: Vec::new(),
         });
         roots.push(id);
@@ -362,6 +363,7 @@ fn rich_scene(seed: u64) -> (Scene, u32) {
         clip_content: true,
         live_paint: true,
         boolean_op: Some(2),
+        gap_bridge_distance: None,
         bool_cache: Vec::new(),
     });
     roots.push(group_id);

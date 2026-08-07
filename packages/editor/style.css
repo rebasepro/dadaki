@@ -1403,6 +1403,15 @@ body.scrubbing * {
     cursor: ew-resize !important;
 }
 
+/* Stands in for a panel list whose controls would be inert — says where the
+   property actually lives instead of showing a row that does nothing. */
+.panel-empty-note {
+    padding: 4px 6px;
+    font-size: 10px;
+    line-height: 1.4;
+    color: var(--text-dim);
+}
+
 /* ─── Fill / Stroke compact row ─── */
 
 .fill-stroke-row {
@@ -2460,6 +2469,74 @@ body.scrubbing * {
     border-radius: 4px;
     padding: 0;
     cursor: pointer;
+}
+
+/* Two controls sharing one labelled slot in the bar (swatch + None, gap preset
+   + gap number). Keeps them under a single caption instead of repeating it. */
+.cb-inline-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+/* The Live Paint bucket loaded with None: the swatch still shows the remembered
+   colour underneath, struck through, so switching back is one click and it is
+   obvious what you are switching back TO. */
+.cp-swatch.cb-swatch-none {
+    position: relative;
+    opacity: 0.5;
+}
+
+.cp-swatch.cb-swatch-none::after {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    background: linear-gradient(
+        to top right,
+        transparent calc(50% - 1px),
+        #e5484d calc(50% - 1px),
+        #e5484d calc(50% + 1px),
+        transparent calc(50% + 1px)
+    );
+    border-radius: 3px;
+    pointer-events: none;
+}
+
+.cb-none-toggle {
+    height: 20px;
+    padding: 0 6px;
+    font-size: 10px;
+    font-family: inherit;
+    color: var(--text-dim);
+    background: transparent;
+    border: 1.5px solid var(--border-light);
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.cb-none-toggle:hover {
+    color: var(--text-main);
+    background: var(--bg-hover);
+}
+
+.cb-none-toggle.active {
+    color: #fff;
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+/* Plain numeric entry beside a preset menu (gap size). */
+.cb-number {
+    width: 48px;
+    height: 22px;
+    border: 1.5px solid var(--border-light);
+    border-radius: 4px;
+    background: var(--bg-input, #1a1a1a);
+    color: var(--text-main, #eee);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 0 4px;
+    text-align: right;
 }
 
 .cb-select {

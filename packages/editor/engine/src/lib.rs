@@ -1074,6 +1074,12 @@ pub struct Node {
     /// Group). Only meaningful on `NodeType::Group`. See `Scene::live_paint_group`.
     #[serde(default)]
     pub live_paint: bool,
+    /// Per-group Live Paint gap-closing distance, in world units. `None` means
+    /// "inherit the document default" (`VectorNetwork::gap_bridge_distance`), so
+    /// a group only carries a value once the user has set one on it. Only
+    /// meaningful on a `live_paint` Group.
+    #[serde(default)]
+    pub gap_bridge_distance: Option<f32>,
     /// When set, this Group is a non-destructive **Boolean Group** (Figma-style):
     /// its children are the editable operands, and the group renders/hit-tests a
     /// single cached outline computed (in JS via CanvasKit) from the boolean of
@@ -2363,6 +2369,7 @@ impl Engine {
             clip_content: false,
             live_paint: false,
             boolean_op: None,
+            gap_bridge_distance: None,
             bool_cache: Vec::new(),
             };
 
@@ -2400,6 +2407,7 @@ impl Engine {
             clip_content: false,
             live_paint: false,
             boolean_op: None,
+            gap_bridge_distance: None,
             bool_cache: Vec::new(),
             };
 
@@ -2473,6 +2481,7 @@ impl Engine {
             clip_content: false,
             live_paint: false,
             boolean_op: None,
+            gap_bridge_distance: None,
             bool_cache: Vec::new(),
             };
 
@@ -2532,6 +2541,7 @@ impl Engine {
             clip_content: false,
             live_paint: false,
             boolean_op: None,
+            gap_bridge_distance: None,
             bool_cache: Vec::new(),
             };
 
@@ -2593,6 +2603,7 @@ impl Engine {
             clip_content: false,
             live_paint: false,
             boolean_op: None,
+            gap_bridge_distance: None,
             bool_cache: Vec::new(),
             };
 
@@ -5098,6 +5109,7 @@ impl Engine {
             clip_content: false,
             live_paint: false,
             boolean_op: None,
+            gap_bridge_distance: None,
             bool_cache: Vec::new(),
             };
         self.scene.nodes.insert(group_id, group_node);
@@ -5273,6 +5285,7 @@ impl Engine {
             clip_content: false,
             live_paint: false,
             boolean_op: None,
+            gap_bridge_distance: None,
             bool_cache: Vec::new(),
             };
 
@@ -5377,6 +5390,7 @@ impl Engine {
             clip_content: false,
             live_paint: false,
             boolean_op: None,
+            gap_bridge_distance: None,
             bool_cache: Vec::new(),
         };
 
@@ -5665,6 +5679,7 @@ impl Engine {
     /// Rebuild the planar graph from all visible paths.
     pub fn rebuild_vector_network(&mut self) {
         let (segments, curves) = self.collect_segments();
+        self.scene.vector_network.group_gap = self.gap_overrides();
         self.scene.vector_network.rebuild(segments, curves);
     }
 
@@ -6109,13 +6124,17 @@ impl Engine {
     /// Remove the paint from a logical edge.
     pub fn clear_edge_paint(&mut self, edge_id: u32) {
         self.ensure_network_clean();
-        let (src, world_mid) = match self.scene.vector_network.logical_edges.get(&edge_id) {
-            Some(le) => (le.source_node, vector_network::polyline_midpoint(&le.polyline)),
+        let (src, world_mid, seg, t) = match self.scene.vector_network.logical_edges.get(&edge_id) {
+            Some(le) => (le.source_node, vector_network::polyline_midpoint(&le.polyline), le.anchor_seg, le.anchor_t),
             None => return,
         };
         let local = self.world_to_local(src, world_mid);
-        self.scene.vector_network.painted_edges
-            .retain(|pe| !(pe.source_node == src && (pe.local - local).length() < 2.0));
+        // Same predicate `set_edge_paint` uses to replace an entry — matching on
+        // proximity alone missed paints anchored by segment identity, and the
+        // survivor was re-applied by the next rebuild as if nothing happened.
+        self.scene.vector_network.painted_edges.retain(|pe| !(pe.source_node == src
+            && ((seg >= 0 && pe.seg == seg && (pe.t - t).abs() < 0.02)
+                || (pe.local - local).length() < 2.0)));
         if let Some(le) = self.scene.vector_network.logical_edges.get_mut(&edge_id) {
             le.paint = None;
             le.width = 0.0;
@@ -6235,6 +6254,42 @@ impl Engine {
     /// Get the current Live Paint gap-closing distance.
     pub fn get_gap_bridge_distance(&self) -> f32 {
         self.scene.vector_network.gap_bridge_distance
+    }
+
+    /// Set one Live Paint group's own gap-closing distance (world units), or
+    /// clear it with a negative value so the group goes back to inheriting the
+    /// document default. No-op on a node that isn't a Live Paint group.
+    pub fn set_node_gap_bridge_distance(&mut self, id: u32, distance: f32) {
+        let mut changed = false;
+        if let Some(node) = self.scene.nodes.get_mut(&id) {
+            if node.live_paint {
+                node.gap_bridge_distance =
+                    if distance < 0.0 { None } else { Some(distance) };
+                changed = true;
+            }
+        }
+        if changed {
+            // Which regions exist changes, so the graph has to be rebuilt.
+            self.dirty_flags.insert(id, true);
+            self.scene.vector_network.dirty = true;
+        }
+    }
+
+    /// A Live Paint group's own gap-closing distance, or -1 when it has none of
+    /// its own (it inherits the document default).
+    pub fn get_node_gap_bridge_distance(&self, id: u32) -> f32 {
+        self.scene.nodes.get(&id)
+            .and_then(|n| n.gap_bridge_distance)
+            .unwrap_or(-1.0)
+    }
+
+    /// The gap-closing distance actually in force for a group — its own setting
+    /// if it has one, otherwise the document default. This is the number the UI
+    /// shows, so what the control reads is what the bucket obeys.
+    pub fn get_effective_gap_bridge_distance(&self, id: u32) -> f32 {
+        self.scene.nodes.get(&id)
+            .and_then(|n| n.gap_bridge_distance)
+            .unwrap_or(self.scene.vector_network.gap_bridge_distance)
     }
 
     /// Check if the vector network is dirty.
@@ -8231,6 +8286,121 @@ mod tests {
         assert!(engine.query_face_at(200.0, 200.0) >= 0,
             "gap closing must bridge the 10px opening and make the region fillable");
     }
+
+    /// The open square from the test above, with a `gap`-sized opening.
+
+    #[test]
+    fn test_a_wide_gap_tolerance_never_bridges_across_geometry() {
+        // A gap bridge is a synthetic edge in a PLANAR graph, so it must not
+        // cross anything — including another bridge. At the small tolerances
+        // this feature launched with, greedy nearest-first picking made that
+        // true by accident. It stops being true once the tolerance is wide
+        // enough to reach past a neighbouring contour, and the faces carved
+        // from a non-planar graph match nothing on screen.
+        //
+        // Random open polylines at a 150-unit tolerance: 400 scenes produced
+        // ~150 crossings before the check went in.
+        let mut crossings = 0;
+        for seed in 0u64..400 {
+            let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let mut rnd = || {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((s >> 33) as f32 / (u32::MAX as f32 / 2.0)) * 300.0
+            };
+            let mut engine = Engine::new();
+            for _ in 0..4 {
+                let pts: Vec<String> = (0..3).map(|_| {
+                    let (x, y) = (rnd(), rnd());
+                    format!("{{\"x\":{x},\"y\":{y},\"cp1\":[{x},{y}],\"cp2\":[{x},{y}]}}")
+                }).collect();
+                engine.add_path(&format!("[{{\"closed\":false,\"points\":[{}]}}]", pts.join(",")));
+            }
+            let g = flag_scene_lp(&mut engine);
+            engine.set_node_gap_bridge_distance(g, 150.0);
+            engine.query_face_at(1.0e9, 1.0e9); // force the rebuild
+
+            let vn = &engine.scene.vector_network;
+            for e in vn.edges.values().filter(|e| e.synthetic && e.id < e.twin) {
+                let a = vn.vertices[&e.from_vertex].position;
+                let b = vn.vertices[&e.to_vertex].position;
+                for o in vn.edges.values().filter(|o| o.id < o.twin && o.id != e.id) {
+                    // Sharing a vertex is touching, not crossing.
+                    if [o.from_vertex, o.to_vertex].iter()
+                        .any(|v| *v == e.from_vertex || *v == e.to_vertex) { continue; }
+                    let p = vn.vertices[&o.from_vertex].position;
+                    let q = vn.vertices[&o.to_vertex].position;
+                    if vector_network::segment_intersection(a, b, p, q).is_some() {
+                        crossings += 1;
+                        eprintln!("seed {seed}: bridge {a:?}->{b:?} crosses {p:?}->{q:?}");
+                    }
+                }
+            }
+        }
+        assert_eq!(crossings, 0, "gap bridges crossed existing geometry");
+    }
+
+
+    fn open_square(engine: &mut Engine, gap: f32) {
+        engine.add_path(&format!(
+            r#"[{{"closed":false,"points":[
+                {{"x":100.0,"y":100.0,"cp1":[100.0,100.0],"cp2":[100.0,100.0]}},
+                {{"x":300.0,"y":100.0,"cp1":[300.0,100.0],"cp2":[300.0,100.0]}},
+                {{"x":300.0,"y":300.0,"cp1":[300.0,300.0],"cp2":[300.0,300.0]}},
+                {{"x":100.0,"y":300.0,"cp1":[100.0,300.0],"cp2":[100.0,300.0]}},
+                {{"x":100.0,"y":{gap},"cp1":[100.0,{gap}],"cp2":[100.0,{gap}]}}
+            ]}}]"#,
+            gap = 100.0 + gap,
+        ));
+    }
+
+    #[test]
+    fn test_gap_distance_is_per_group() {
+        // Two identical open squares, each in its own Live Paint group. Widening
+        // the tolerance on one must not make the other's gap close: the setting
+        // belongs to the group, not the document.
+        let mut engine = Engine::new();
+        open_square(&mut engine, 40.0);
+        let wide = flag_scene_lp(&mut engine);
+
+        let before = engine.scene.root_nodes.clone();
+        open_square(&mut engine, 40.0);
+        let fresh: Vec<u32> = engine.scene.root_nodes.iter()
+            .filter(|id| !before.contains(id)).copied().collect();
+        engine.move_node(fresh[0], 500.0, 0.0);
+        let narrow = engine.group_nodes(&format!("[{}]", fresh[0]));
+        engine.set_node_live_paint(narrow, true);
+
+        // Neither closes at the document default of 0.
+        assert_eq!(engine.query_face_at(200.0, 200.0), -1);
+        assert_eq!(engine.query_face_at(700.0, 200.0), -1);
+
+        engine.set_node_gap_bridge_distance(wide, 60.0);
+        assert!(engine.query_face_at(200.0, 200.0) >= 0,
+            "the group with the wide tolerance must close its 40px gap");
+        assert_eq!(engine.query_face_at(700.0, 200.0), -1,
+            "the other group keeps the document default and stays open");
+
+        // Clearing the override drops the group back to the default.
+        engine.set_node_gap_bridge_distance(wide, -1.0);
+        assert_eq!(engine.get_node_gap_bridge_distance(wide), -1.0);
+        assert_eq!(engine.query_face_at(200.0, 200.0), -1);
+    }
+
+    #[test]
+    fn test_per_group_gap_distance_survives_a_save_load_round_trip() {
+        let mut engine = Engine::new();
+        open_square(&mut engine, 40.0);
+        let g = flag_scene_lp(&mut engine);
+        engine.set_node_gap_bridge_distance(g, 60.0);
+
+        let bytes = engine.serialize_proto();
+        let mut reloaded = Engine::new();
+        assert!(reloaded.deserialize_proto(&bytes), "document must reload");
+        assert_eq!(reloaded.get_node_gap_bridge_distance(g), 60.0);
+        assert!(reloaded.query_face_at(200.0, 200.0) >= 0,
+            "the reloaded group must still close its gap");
+    }
+
 
     // ─── Live Paint: systematic coverage ────────────────────────────────────
     // Deterministic geometry/group-model tests (the browser was only ever a

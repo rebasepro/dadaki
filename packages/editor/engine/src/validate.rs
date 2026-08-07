@@ -384,6 +384,7 @@ mod tests {
             clip_content: false,
             live_paint: false,
             boolean_op: None,
+            gap_bridge_distance: None,
             bool_cache: Vec::new(),
         }
     }
