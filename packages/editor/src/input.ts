@@ -26,7 +26,7 @@ import type { ArtboardHandle, Renderer } from './renderer';
 import { pathPointCount, simplifyPath } from './simplify_path';
 import { SnapEngine, type SnapGuide } from './snapping';
 import { textNodeToSubpaths } from './text_outlines';
-import type { Artboard, PathPoint, PenPathPoint, Subpath } from './types';
+import type { Artboard, Gradient, PathPoint, PenPathPoint, Subpath } from './types';
 import { isMeshGradient } from './types';
 import type { UIEngine } from './ui';
 import type { WasmScene } from './wasm_scene';
@@ -2659,6 +2659,8 @@ export class InputManager {
 
         const faceId = this.scene.engine.query_face_at(pos.x, pos.y);
         if (faceId >= 0) {
+            const grad = this.ui.getLivePaintGradient();
+            if (grad && this.paintFaceWithGradient(faceId, grad)) return;
             const c = this.ui.getLivePaintFill();
             this.scene.setFaceFill(faceId, c.r, c.g, c.b, c.a);
             return;
@@ -2921,6 +2923,50 @@ export class InputManager {
             this.renderer.hoverFaceId = faceId;
             this.canvas.style.cursor = 'crosshair';
         }
+    }
+
+    /**
+     * Paint one region with a gradient, fitted to that region.
+     *
+     * The bucket's gradient is stored in UNIT space (0..1 across the region) and
+     * mapped onto each face's bounding box as it is painted. That is what makes
+     * one gradient usable as a *tool*: click five differently-sized regions and
+     * each gets the gradient across its own extent, instead of one gradient
+     * anchored to whichever region happened to be painted first.
+     *
+     * Returns false if the face has no measurable box, so the caller can fall
+     * back to a solid rather than paint nothing.
+     */
+    private paintFaceWithGradient(faceId: number, grad: Gradient): boolean {
+        const outline = this.scene.getFaceOutline(faceId);
+        if (!outline || outline.length < 3) return false;
+        let minX = Infinity,
+            minY = Infinity,
+            maxX = -Infinity,
+            maxY = -Infinity;
+        // Control points too: a region bounded by outward curves reaches past
+        // its anchors, and a box drawn from anchors alone would crop the
+        // gradient short of the edge.
+        for (const p of outline) {
+            for (const [x, y] of [[p.x, p.y], p.cp1, p.cp2] as [number, number][]) {
+                if (x < minX) minX = x;
+                if (y < minY) minY = y;
+                if (x > maxX) maxX = x;
+                if (y > maxY) maxY = y;
+            }
+        }
+        const w = maxX - minX;
+        const h = maxY - minY;
+        if (!(w > 0) || !(h > 0)) return false;
+        // Unit → world. Face outlines carry no transform, so this is final.
+        const placed: Gradient = {
+            ...structuredClone(grad),
+            start_x: minX + grad.start_x * w,
+            start_y: minY + grad.start_y * h,
+            end_x: minX + grad.end_x * w,
+            end_y: minY + grad.end_y * h,
+        };
+        return this.scene.setFacePaint(faceId, placed);
     }
 
     /** Current default stroke width from the active style (fallback 2). */
@@ -3963,6 +4009,9 @@ export class InputManager {
         const faces = JSON.parse(e.get_live_paint_faces()) as Array<{
             outline: Pt[];
             fill: { r: number; g: number; b: number; a: number };
+            /** The region's real paint — a gradient survives Expand through this;
+             *  `fill` is only the flat fallback. */
+            paint?: unknown;
         }>;
         // Every edge with an EFFECTIVE stroke — painted, or the source shape's
         // own. The originals are deleted below, so an edge the user drew but
@@ -3993,7 +4042,7 @@ export class InputManager {
                 e.set_node_style(
                     id,
                     JSON.stringify({
-                        fills: [f.fill],
+                        fills: [f.paint ?? f.fill],
                         strokes: [],
                         opacity: 1,
                         blend_mode: 0,

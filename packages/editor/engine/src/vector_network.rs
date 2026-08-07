@@ -3,7 +3,7 @@ use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-use crate::{Color, Engine, Geometry, PathPoint, Subpath};
+use crate::{Color, Engine, Geometry, Paint, PathPoint, Subpath};
 
 /// Compute the centroid of a face's boundary polygon.
 pub fn face_centroid(face: &PlanarFace) -> Vec2 {
@@ -29,7 +29,7 @@ pub struct PendingFill {
     /// Sorted set of source-node ids that bounded the face (primary matching).
     #[serde(default)]
     pub signature: Vec<u32>,
-    pub color: Color,
+    pub color: Paint,
 }
 
 // ─── Data Structures ───────────────────────────────────────────────────────────
@@ -154,8 +154,11 @@ pub struct PlanarFace {
     pub id: u32,
     /// Ordered list of half-edge IDs forming this face's boundary.
     pub boundary_edges: Vec<u32>,
-    /// Fill color assigned by the user.
-    pub fill: Option<Color>,
+    /// Paint assigned by the user. A full `Paint`, not a colour: a face can be
+    /// filled with a gradient, and an UNPAINTED face inherits the paint of the
+    /// shape showing through — which for a gradient-filled shape has to stay a
+    /// gradient (it used to collapse to the first stop).
+    pub fill: Option<Paint>,
     /// Cached boundary polygon vertices for hit-testing and rendering.
     pub boundary_polygon: Vec<[f32; 2]>,
     /// Signed area (negative = clockwise = outer face).
@@ -524,7 +527,7 @@ impl VectorNetwork {
         // Snapshot old filled faces as (signature, centroid, color) for re-mapping.
         // The signature (which closed shapes contain the face) lets a fill
         // re-attach to the same region even after shapes move (see remap_fills).
-        let old_filled: Vec<(Vec<u32>, Vec2, Color)> = self.faces.values()
+        let old_filled: Vec<(Vec<u32>, Vec2, Paint)> = self.faces.values()
             .filter(|f| f.fill.is_some() && !f.is_outer)
             .map(|f| (
                 f.signature.clone(),
@@ -1221,8 +1224,8 @@ impl VectorNetwork {
     ///
     /// `old_filled` are the fills from before this rebuild; `pending_fills` are
     /// fills loaded from a file/undo snapshot. Both are placed here.
-    fn remap_fills(&mut self, old_filled: Vec<(Vec<u32>, Vec2, Color)>) {
-        let to_place: Vec<(Vec<u32>, Vec2, Color)> = old_filled.into_iter()
+    fn remap_fills(&mut self, old_filled: Vec<(Vec<u32>, Vec2, Paint)>) {
+        let to_place: Vec<(Vec<u32>, Vec2, Paint)> = old_filled.into_iter()
             .chain(self.pending_fills.drain(..)
                 .map(|pf| (pf.signature, pf.centroid, pf.color)))
             .collect();

@@ -62,7 +62,10 @@ export interface LivePaintFace {
     group: number;
     outline?: OutlinePt[];
     boundary?: [number, number][];
+    /** Flat fallback colour — always present, even when `paint` is a gradient. */
     fill: RGBA;
+    /** The region's actual paint. Absent on data from an older engine. */
+    paint?: Paint;
 }
 
 /** A painted Live Paint edge, drawn ON TOP of its group's members. */
@@ -229,11 +232,19 @@ export function buildSVGFromData(input: SVGExportInput): string {
         return wrapWorld(
             world,
             faces
-                .map(
-                    (f) =>
-                        `<path d="${faceToPathD(f.outline, f.boundary)}" fill="${rgbToHex(f.fill)}" ` +
-                        `fill-opacity="${f.fill.a}" stroke="none" />`,
-                )
+                .map((f) => {
+                    // `paint` (a gradient, say) wins; `fill` is the flat
+                    // fallback older engines and simple consumers provide.
+                    const value = f.paint ? paintToSvgValue(f.paint) : escapeXml(rgbToHex(f.fill));
+                    // A gradient carries its own per-stop alpha; only a solid
+                    // needs fill-opacity.
+                    const opacity =
+                        f.paint && !isSolid(f.paint) ? '' : ` fill-opacity="${f.fill.a}"`;
+                    return (
+                        `<path d="${faceToPathD(f.outline, f.boundary)}" fill="${value}"` +
+                        `${opacity} stroke="none" />`
+                    );
+                })
                 .join(''),
         );
     };

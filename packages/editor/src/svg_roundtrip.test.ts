@@ -1862,3 +1862,71 @@ describe('SVG Export — a mask over a Live Paint group', () => {
         expect(rect!.getAttribute('fill')).toBe('none');
     });
 });
+
+// ─── Export: a Live Paint region filled with a gradient ─────────────────────
+
+describe('SVG Export — a gradient in a Live Paint region', () => {
+    const gradientFaceScene = (): SVGExportInput => ({
+        docWidth: 400,
+        docHeight: 400,
+        nodes: {
+            1: makeNode({ node_type: 'Group', children: [2] }),
+            2: makeNode({
+                geometry: { Rect: { width: 100, height: 100 } },
+                style: defaultStyle({ fills: [{ r: 1, g: 0, b: 0, a: 1 }] }),
+            }),
+        },
+        rootNodeIds: [1],
+        localTransforms: { 1: IDENTITY, 2: IDENTITY },
+        livePaint: {
+            groups: [1],
+            faces: [
+                {
+                    group: 1,
+                    boundary: [
+                        [0, 0],
+                        [100, 0],
+                        [100, 100],
+                        [0, 100],
+                    ],
+                    fill: { r: 1, g: 0, b: 0, a: 1 },
+                    paint: {
+                        gradient_type: 'Linear',
+                        stops: [
+                            { offset: 0, color: { r: 1, g: 0, b: 0, a: 1 } },
+                            { offset: 1, color: { r: 0, g: 1, b: 0, a: 1 } },
+                        ],
+                        start_x: 0,
+                        start_y: 0,
+                        end_x: 100,
+                        end_y: 0,
+                    },
+                } as never,
+            ],
+            edges: [],
+        },
+    });
+
+    it('emits a gradient def and points the region at it', () => {
+        const doc = parseSVG(buildSVGFromData(gradientFaceScene()));
+
+        const grad = queryTag(doc, 'linearGradient');
+        expect(grad).toBeTruthy();
+        expect(
+            [...grad!.querySelectorAll('stop')].map((s) => s.getAttribute('stop-color')),
+        ).toEqual(['#ff0000', '#00ff00']);
+        const face = doc.querySelector(`path[fill="url(#${grad!.getAttribute('id')})"]`);
+        expect(face).toBeTruthy();
+    });
+
+    it('falls back to the flat colour when there is no paint', () => {
+        // Data from an older engine carries `fill` only.
+        const input = gradientFaceScene();
+        (input.livePaint!.faces[0] as { paint?: unknown }).paint = undefined;
+
+        const doc = parseSVG(buildSVGFromData(input));
+
+        expect(queryTag(doc, 'linearGradient')).toBeNull();
+        expect(doc.querySelector('path[fill="#ff0000"]')).toBeTruthy();
+    });
+});

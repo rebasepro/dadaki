@@ -128,7 +128,7 @@ export type ArtboardHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 12; // v12: paint type 5 = mesh gradient
+const EXPECTED_RENDER_PROTOCOL_VERSION = 13; // v13: LP faces carry a full paint
 
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {
@@ -2437,14 +2437,36 @@ export class Renderer {
                 p.setShader(null);
                 p.setAntiAlias(contentAA);
                 for (let fi = 0; fi < faceCount; fi++) {
-                    const r = reader.f32(),
-                        gg = reader.f32(),
-                        bb = reader.f32(),
-                        aa = reader.f32();
+                    // v13: a full paint block, so a region can hold a gradient —
+                    // either painted with the bucket, or inherited from a
+                    // gradient-filled member showing through.
+                    const paint = this.readPaint(reader);
                     const path = this.readOutlinePath(reader, true);
                     if (!lpSkip) {
-                        p.setColor(this.ck.Color4f(r, gg, bb, aa));
-                        canvas.drawPath(path, p);
+                        if (paint.type === 2 || paint.type === 3) {
+                            // Face outlines are WORLD space and carry no
+                            // transform, so the gradient's coords are too.
+                            p.setAlphaf(1);
+                            p.setShader(
+                                this.getOrCreateGradientShader(
+                                    paint.type,
+                                    paint.stops,
+                                    paint.start,
+                                    paint.end,
+                                    1,
+                                    paint.spread,
+                                    paint.focal,
+                                    paint.transform,
+                                ),
+                            );
+                            canvas.drawPath(path, p);
+                            p.setShader(null);
+                        } else if (paint.type === 1) {
+                            p.setColor(this.ck.Color4f(paint.r, paint.g, paint.b, paint.a));
+                            canvas.drawPath(path, p);
+                        }
+                        // type 0 (and anything the engine declines to emit for a
+                        // face) draws nothing, same as an unpainted region.
                     }
                     path.delete();
                 }
@@ -2495,72 +2517,7 @@ export class Renderer {
                 // ─── Read Fills ─────────────────
                 const fillCount = reader.u32();
                 const fills: any[] = [];
-                for (let i = 0; i < fillCount; i++) {
-                    const fillType = reader.u32();
-                    if (fillType === 1) {
-                        // Solid
-                        fills.push({
-                            type: 1,
-                            r: reader.f32(),
-                            g: reader.f32(),
-                            b: reader.f32(),
-                            a: reader.f32(),
-                        });
-                    } else if (fillType === 2 || fillType === 3) {
-                        // Gradient
-                        const stopCount = reader.u32();
-                        const stops = [];
-                        for (let s = 0; s < stopCount; s++) {
-                            stops.push({
-                                offset: reader.f32(),
-                                r: reader.f32(),
-                                g: reader.f32(),
-                                b: reader.f32(),
-                                a: reader.f32(),
-                            });
-                        }
-                        fills.push({
-                            type: fillType,
-                            stops,
-                            start: [reader.f32(), reader.f32()],
-                            end: [reader.f32(), reader.f32()],
-                            spread: reader.u32(),
-                            focal: [reader.f32(), reader.f32(), reader.f32()], // fx, fy, fr
-                            // v11: optional gradient→local affine (elliptical radial).
-                            transform: reader.u32()
-                                ? [
-                                      reader.f32(),
-                                      reader.f32(),
-                                      reader.f32(),
-                                      reader.f32(),
-                                      reader.f32(),
-                                      reader.f32(),
-                                  ]
-                                : null,
-                        });
-                    } else if (fillType === 4) {
-                        // Pattern
-                        fills.push({
-                            type: 4,
-                            imageId: reader.u32(),
-                            width: reader.f32(),
-                            height: reader.f32(),
-                            transform: [
-                                reader.f32(),
-                                reader.f32(),
-                                reader.f32(),
-                                reader.f32(),
-                                reader.f32(),
-                                reader.f32(),
-                            ],
-                        });
-                    } else if (fillType === 5) {
-                        // Mesh gradient (v12)
-                        fills.push({ type: 5, mesh: this.readMeshPaint(reader) });
-                    } else {
-                        fills.push({ type: 0 });
-                    }
-                }
+                for (let i = 0; i < fillCount; i++) fills.push(this.readPaint(reader));
 
                 // ─── Read Strokes ───────────────
                 const strokeCount = reader.u32();
@@ -3550,6 +3507,72 @@ export class Renderer {
     }
 
     /** Build a cache key for a gradient and return a cached or newly created shader. */
+    /**
+     * Read one paint block — the encoding shared by node fills, node strokes,
+     * and (since protocol v13) Live Paint faces.
+     *
+     * Extracted so the face reader cannot drift from the node reader: this must
+     * consume EXACTLY what the engine's `write_paint` wrote for every type, and
+     * a reader that handles only the types it cares about desyncs the rest of
+     * the frame rather than just missing a colour.
+     */
+    private readPaint(reader: BinaryReader): any {
+        const type = reader.u32();
+        if (type === 1) {
+            return { type: 1, r: reader.f32(), g: reader.f32(), b: reader.f32(), a: reader.f32() };
+        }
+        if (type === 2 || type === 3) {
+            const stopCount = reader.u32();
+            const stops = [];
+            for (let s = 0; s < stopCount; s++) {
+                stops.push({
+                    offset: reader.f32(),
+                    r: reader.f32(),
+                    g: reader.f32(),
+                    b: reader.f32(),
+                    a: reader.f32(),
+                });
+            }
+            return {
+                type,
+                stops,
+                start: [reader.f32(), reader.f32()],
+                end: [reader.f32(), reader.f32()],
+                spread: reader.u32(),
+                focal: [reader.f32(), reader.f32(), reader.f32()], // fx, fy, fr
+                // v11: optional gradient→local affine (elliptical radial).
+                transform: reader.u32()
+                    ? [
+                          reader.f32(),
+                          reader.f32(),
+                          reader.f32(),
+                          reader.f32(),
+                          reader.f32(),
+                          reader.f32(),
+                      ]
+                    : null,
+            };
+        }
+        if (type === 4) {
+            return {
+                type: 4,
+                imageId: reader.u32(),
+                width: reader.f32(),
+                height: reader.f32(),
+                transform: [
+                    reader.f32(),
+                    reader.f32(),
+                    reader.f32(),
+                    reader.f32(),
+                    reader.f32(),
+                    reader.f32(),
+                ],
+            };
+        }
+        if (type === 5) return { type: 5, mesh: this.readMeshPaint(reader) }; // v12
+        return { type: 0 };
+    }
+
     private getOrCreateGradientShader(
         gradType: number,
         stops: { offset: number; r: number; g: number; b: number; a: number }[],

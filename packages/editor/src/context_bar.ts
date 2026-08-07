@@ -579,13 +579,54 @@ export class ContextBar {
     private renderLivePaint(info: ContextInfo) {
         // Fill (regions) and Stroke (edges) colors. These set only the Live Paint
         // paint color — they do NOT modify the selected shapes.
+        const grad = this.ui.getLivePaintGradient();
+        if (grad) {
+            // Gradient mode: one swatch per stop, plus the type. The gradient is
+            // held in unit space and fitted to each region as it's painted, so
+            // there are no endpoints to edit here — only what it is made of.
+            grad.stops.forEach((stop, i) => {
+                this.el.appendChild(
+                    this.createColorSwatch(
+                        i === 0 ? 'fill' : 'stroke',
+                        colorToHex(stop.color),
+                        (color) => {
+                            const next = this.ui.getLivePaintGradient();
+                            if (!next) return;
+                            const parsed = parseHex(color);
+                            if (!parsed) return;
+                            next.stops[i].color = parsed;
+                            this.ui.setLivePaintGradient(next);
+                        },
+                        i === 0 ? 'From' : 'To',
+                    ),
+                );
+            });
+            this.el.appendChild(this.createGradientTypeControl(grad.gradient_type));
+        } else {
+            this.el.appendChild(
+                this.createColorSwatch(
+                    'fill',
+                    this.ui.rgbToHex(this.ui.getLivePaintFill()),
+                    (color) => {
+                        this.ui.setLivePaintFill(color);
+                    },
+                ),
+            );
+        }
+        // Solid ⇄ Gradient. Switching to gradient seeds it from the current
+        // solid, so the first click paints something recognisably related to
+        // what the swatch was already showing.
         this.el.appendChild(
-            this.createColorSwatch(
-                'fill',
-                this.ui.rgbToHex(this.ui.getLivePaintFill()),
-                (color) => {
-                    this.ui.setLivePaintFill(color);
+            this.createButton(
+                grad ? 'Solid' : 'Gradient',
+                iconBoolUnion(14),
+                () => {
+                    this.ui.setLivePaintGradient(grad ? null : this.ui.defaultLivePaintGradient());
+                    this.refresh();
                 },
+                false,
+                undefined,
+                grad ? 'Paint flat colour again' : 'Paint regions with a gradient',
             ),
         );
         this.el.appendChild(
@@ -1507,6 +1548,9 @@ export class ContextBar {
         label: string,
         currentValue: string,
         onChange: (color: string) => void,
+        /** Shown under the swatch; defaults to `label`. Gradient stops want
+         *  "From"/"To" while still styling as the fill/stroke swatch. */
+        displayLabel?: string,
     ): HTMLElement {
         const wrapper = document.createElement('div');
         wrapper.className = 'cb-swatch-wrapper';
@@ -1525,9 +1569,42 @@ export class ContextBar {
 
         const labelSpan = document.createElement('span');
         labelSpan.className = 'cb-swatch-label';
-        labelSpan.textContent = label.charAt(0).toUpperCase() + label.slice(1);
+        const text = displayLabel ?? label;
+        labelSpan.textContent = text.charAt(0).toUpperCase() + text.slice(1);
         wrapper.appendChild(labelSpan);
 
+        return wrapper;
+    }
+
+    /** Linear ⇄ Radial for the bucket's gradient. Styled like the Gaps control
+     *  so the Live Paint bar keeps one visual language. */
+    private createGradientTypeControl(current: 'Linear' | 'Radial'): HTMLElement {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'cb-swatch-wrapper';
+        wrapper.setAttribute('data-tooltip', 'Gradient type');
+
+        const select = document.createElement('select');
+        select.className = 'cb-select';
+        for (const value of ['Linear', 'Radial'] as const) {
+            const opt = document.createElement('option');
+            opt.value = value;
+            opt.textContent = value;
+            opt.selected = value === current;
+            select.appendChild(opt);
+        }
+        select.addEventListener('change', () => {
+            const next = this.ui.getLivePaintGradient();
+            if (!next) return;
+            next.gradient_type = select.value as 'Linear' | 'Radial';
+            this.ui.setLivePaintGradient(next);
+        });
+
+        const labelSpan = document.createElement('span');
+        labelSpan.className = 'cb-swatch-label';
+        labelSpan.textContent = 'Type';
+
+        wrapper.appendChild(select);
+        wrapper.appendChild(labelSpan);
         return wrapper;
     }
 

@@ -1198,6 +1198,33 @@ export class WasmScene {
         this.autosave?.trigger();
     }
 
+    /** Paint a face with any paint — the gradient path. `paint` is the same
+     *  shape a node's `style.fills[0]` takes, in WORLD coordinates: a face is a
+     *  world-space outline with no transform of its own. */
+    setFacePaint(faceId: number, paint: unknown): boolean {
+        this.saveHistory();
+        const ok = this.engine!.set_face_paint(faceId, JSON.stringify(paint));
+        this.invalidateCache();
+        this.autosave?.trigger();
+        return ok;
+    }
+
+    /** A face's world-space outline as bézier points ({x, y, cp1, cp2}), or
+     *  null. Anchors alone under-state a bulging curve's extent, so callers
+     *  measuring a box should include the control points. */
+    getFaceOutline(
+        faceId: number,
+    ): { x: number; y: number; cp1: number[]; cp2: number[] }[] | null {
+        try {
+            const json = this.engine!.get_face_boundary(faceId);
+            if (!json) return null;
+            const pts = JSON.parse(json);
+            return Array.isArray(pts) && pts.length > 0 ? pts : null;
+        } catch {
+            return null;
+        }
+    }
+
     /** Set the Live Paint gap-closing distance (world units, 0 = off). Undoable:
      *  it changes which regions exist, so it can gain/lose fills. */
     setGapBridgeDistance(distance: number) {

@@ -568,6 +568,9 @@ pub struct ProtoFaceFill {
     pub centroid_x: f32,
     #[prost(float, tag = "2")]
     pub centroid_y: f32,
+    /// Representative colour. Kept for files written before faces could hold a
+    /// gradient, and still written (as the paint's first stop / mean) so an
+    /// older reader gets a sane flat colour rather than nothing.
     #[prost(message, optional, tag = "3")]
     pub fill: Option<ProtoColor>,
     /// Sorted set of source-node ids bounding this face (the "signature").
@@ -575,6 +578,9 @@ pub struct ProtoFaceFill {
     /// independent of centroid drift. Empty in pre-v5 files (centroid-only).
     #[prost(uint32, repeated, tag = "4")]
     pub source_nodes: Vec<u32>,
+    /// The face's actual paint. Preferred over `fill` when present.
+    #[prost(message, optional, tag = "5")]
+    pub paint: Option<ProtoPaint>,
 }
 
 /// A preserved painted edge from the vector network. Anchor is in the source
@@ -1319,8 +1325,9 @@ impl ProtoDocument {
                 ProtoFaceFill {
                     centroid_x: centroid.x,
                     centroid_y: centroid.y,
-                    fill: Some(fill.into()),
+                    fill: crate::paint_color(fill).as_ref().map(Into::into),
                     source_nodes: f.signature.clone(),
+                    paint: Some(fill.into()),
                 }
             })
             .collect();
@@ -1328,8 +1335,9 @@ impl ProtoDocument {
             face_fills.push(ProtoFaceFill {
                 centroid_x: pf.centroid.x,
                 centroid_y: pf.centroid.y,
-                fill: Some((&pf.color).into()),
+                fill: crate::paint_color(&pf.color).as_ref().map(Into::into),
                 source_nodes: pf.signature.clone(),
+                paint: Some((&pf.color).into()),
             });
         }
         // Deterministic fill ordering for byte-exact snapshots.
@@ -1467,10 +1475,16 @@ impl ProtoDocument {
         // pending on the network; signature (source_nodes) lets them re-attach to
         // the right region even if shapes moved between save and load.
         vn.pending_fills = self.face_fills.iter().filter_map(|ff| {
-            ff.fill.as_ref().map(|c| crate::vector_network::PendingFill {
+            // Files written before faces could hold a gradient carry only `fill`.
+            let paint = match (&ff.paint, &ff.fill) {
+                (Some(p), _) => Some(Paint::from(p)),
+                (None, Some(c)) => Some(Paint::Solid(Color::from(c))),
+                (None, None) => None,
+            };
+            paint.map(|paint| crate::vector_network::PendingFill {
                 centroid: Vec2::new(ff.centroid_x, ff.centroid_y),
                 signature: ff.source_nodes.clone(),
-                color: Color::from(c),
+                color: paint,
             })
         }).collect();
         vn.painted_edges = self.painted_edges.iter().filter_map(|pe| {

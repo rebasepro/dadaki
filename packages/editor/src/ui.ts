@@ -1309,6 +1309,46 @@ export class UIEngine {
         this._livePaintStroke = hexToRgb(hex);
     }
 
+    /**
+     * The gradient the bucket paints with, or null when it is painting a solid.
+     *
+     * Kept beside `_livePaintFill` rather than replacing it: edges are always
+     * solid, the eyedropper samples a solid, and `getLivePaintFill()` is what
+     * both read. This holds the extra state only the fill can have.
+     *
+     * Coordinates are UNIT space (0..1 across the face's bounding box) — the
+     * gradient is fitted to each region as it is painted, so one gradient can
+     * paint many differently-sized regions and look right in each.
+     */
+    private _livePaintGradient: Gradient | null = null;
+
+    getLivePaintGradient(): Gradient | null {
+        return this._livePaintGradient ? structuredClone(this._livePaintGradient) : null;
+    }
+
+    /** Switch the bucket between solid and gradient. Passing null goes back to
+     *  the solid in `_livePaintFill`, which is left untouched throughout. */
+    setLivePaintGradient(g: Gradient | null) {
+        this._livePaintGradient = g ? structuredClone(g) : null;
+    }
+
+    /** A two-stop linear gradient from the current solid to transparent — the
+     *  starting point when the user first switches the bucket to Gradient. */
+    defaultLivePaintGradient(): Gradient {
+        const c = this._livePaintFill;
+        return {
+            gradient_type: 'Linear',
+            stops: [
+                { offset: 0, color: { ...c } },
+                { offset: 1, color: { r: c.r, g: c.g, b: c.b, a: 0 } },
+            ],
+            start_x: 0,
+            start_y: 0,
+            end_x: 1,
+            end_y: 1,
+        };
+    }
+
     /** Get the current fill color from the UI as {r, g, b, a} in 0-1 range. */
 
     updateActiveFillColor(hex: string) {

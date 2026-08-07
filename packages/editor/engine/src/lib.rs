@@ -1142,7 +1142,7 @@ pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// v12: paint type 5 = mesh gradient: [rows u32][cols u32] then per vertex
 ///      (row-major, (rows+1)*(cols+1)) [x,y f32][r,g,b,a f32][e,w,s,n handles
 ///      as 8 f32, effective/materialized — the reader never sees "auto"].
-pub const RENDER_PROTOCOL_VERSION: u32 = 12;
+pub const RENDER_PROTOCOL_VERSION: u32 = 13;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -1785,8 +1785,11 @@ impl Engine {
         self.render_buffer.extend_from_slice(&CMD_LP_FACES.to_le_bytes());
         self.render_buffer.extend_from_slice(&0u32.to_le_bytes()); // advisory nodeId
         self.render_buffer.extend_from_slice(&(faces.len() as u32).to_le_bytes());
-        for (c, outline) in &faces {
-            for v in [c.r, c.g, c.b, c.a] { self.render_buffer.extend_from_slice(&v.to_le_bytes()); }
+        for (paint, outline) in &faces {
+            // v13: a full paint block (same encoding as a node's fill), not the
+            // four floats a face used to be limited to. This is what lets a
+            // region hold a gradient.
+            write_paint(&mut self.render_buffer, &Some(paint.clone()), 1.0);
             write_outline_points(&mut self.render_buffer, outline);
         }
         end_record(&mut self.render_buffer, rec);
@@ -5690,10 +5693,30 @@ impl Engine {
         }
     }
 
-    /// Assign a fill color to a face.
+    /// Assign a solid fill colour to a face.
     pub fn set_face_fill(&mut self, face_id: u32, r: f32, g: f32, b: f32, a: f32) {
         if let Some(face) = self.scene.vector_network.faces.get_mut(&face_id) {
-            face.fill = Some(Color { r, g, b, a });
+            face.fill = Some(Paint::Solid(Color { r, g, b, a }));
+        }
+    }
+
+    /// Assign any paint to a face — the gradient path. `paint_json` is the same
+    /// shape a node's `style.fills[0]` uses. Returns false if it doesn't parse,
+    /// rather than silently leaving the face unpainted.
+    ///
+    /// Gradient coordinates are WORLD space here: a face is a world-space
+    /// outline with no transform of its own, unlike a node's fill.
+    pub fn set_face_paint(&mut self, face_id: u32, paint_json: &str) -> bool {
+        let paint: Paint = match serde_json::from_str(paint_json) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        match self.scene.vector_network.faces.get_mut(&face_id) {
+            Some(face) => {
+                face.fill = Some(paint);
+                true
+            }
+            None => false,
         }
     }
 
@@ -5714,11 +5737,15 @@ impl Engine {
             .filter(|f| f.fill.is_some() && !f.is_outer)
             .map(|f| {
                 let fill = f.fill.as_ref().unwrap();
+                let c = paint_color(fill).unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
                 serde_json::json!({
                     "id": f.id,
                     "boundary": f.boundary_polygon,
                     "outline": pathpoints_to_json(&vn.face_outline(f)),
-                    "fill": { "r": fill.r, "g": fill.g, "b": fill.b, "a": fill.a }
+                    // `fill` stays a flat colour for callers that only need one
+                    // (Expand's stroke pass); `paint` carries the real thing.
+                    "fill": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
+                    "paint": fill,
                 })
             })
             .collect();
@@ -5738,12 +5765,16 @@ impl Engine {
         let faces: Vec<serde_json::Value> = vn.faces.values()
             .filter(|f| !f.is_outer)
             .filter_map(|f| {
-                let color = f.fill.or_else(|| self.inherited_face_color(f, &rank));
-                color.map(|c| serde_json::json!({
-                    "group": f.group,
-                    "outline": pathpoints_to_json(&vn.face_outline(f)),
-                    "fill": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
-                }))
+                let paint = f.fill.clone().or_else(|| self.inherited_face_paint(f, &rank));
+                paint.map(|p| {
+                    let c = paint_color(&p).unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
+                    serde_json::json!({
+                        "group": f.group,
+                        "outline": pathpoints_to_json(&vn.face_outline(f)),
+                        "fill": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
+                        "paint": p,
+                    })
+                })
             })
             .collect();
         let edges: Vec<serde_json::Value> = vn.logical_edges.values()
@@ -5767,10 +5798,14 @@ impl Engine {
     pub fn get_live_paint_faces(&mut self) -> String {
         self.ensure_network_clean();
         let items: Vec<serde_json::Value> = self.live_paint_faces_effective(self.scene.live_paint_group).into_iter()
-            .map(|(c, outline)| serde_json::json!({
-                "outline": pathpoints_to_json(&outline),
-                "fill": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
-            }))
+            .map(|(paint, outline)| {
+                let c = paint_color(&paint).unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
+                serde_json::json!({
+                    "outline": pathpoints_to_json(&outline),
+                    "fill": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
+                    "paint": paint,
+                })
+            })
             .collect();
         serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
     }
@@ -5798,7 +5833,7 @@ impl Engine {
     /// Every colored face as (effective color, exact-bézier outline). Effective
     /// color = painted override, else the topmost covering source fill. Shared by
     /// Expand (JSON) and the render writer (in-stream faces). Pure reads.
-    fn live_paint_faces_effective(&self, group: Option<u32>) -> Vec<(Color, Vec<PathPoint>)> {
+    fn live_paint_faces_effective(&self, group: Option<u32>) -> Vec<(Paint, Vec<PathPoint>)> {
         let order = self.draw_order();
         let rank: std::collections::HashMap<u32, usize> =
             order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
@@ -5807,8 +5842,8 @@ impl Engine {
             .filter(|f| !f.is_outer)
             .filter(|f| group.map_or(true, |g| f.group == g))
             .filter_map(|f| {
-                let color = f.fill.or_else(|| self.inherited_face_color(f, &rank));
-                color.map(|c| (c, vn.face_outline(f)))
+                let paint = f.fill.clone().or_else(|| self.inherited_face_paint(f, &rank));
+                paint.map(|p| (p, vn.face_outline(f)))
             })
             .collect()
     }
@@ -5942,18 +5977,48 @@ impl Engine {
 
     /// The fill of the topmost source shape whose interior contains `face`
     /// (its containment signature), or None if none of them has a fill color.
-    fn inherited_face_color(&self, face: &vector_network::PlanarFace, rank: &std::collections::HashMap<u32, usize>) -> Option<Color> {
-        let mut best: Option<(usize, Color)> = None;
+    fn inherited_face_paint(&self, face: &vector_network::PlanarFace, rank: &std::collections::HashMap<u32, usize>) -> Option<Paint> {
+        let mut best: Option<(usize, Paint)> = None;
         for &nid in &face.signature {
             let node = match self.scene.nodes.get(&nid) { Some(n) => n, None => continue };
-            if let Some(c) = node.style.fills.first().and_then(paint_color) {
+            if let Some(p) = node.style.fills.first() {
                 let r = rank.get(&nid).copied().unwrap_or(0);
-                if best.map_or(true, |(br, _)| r >= br) {
-                    best = Some((r, c));
+                if best.as_ref().map_or(true, |(br, _)| r >= *br) {
+                    best = Some((r, self.paint_to_world(nid, p)));
                 }
             }
         }
-        best.map(|(_, c)| c)
+        best.map(|(_, p)| p)
+    }
+
+    /// Re-express a node's paint in WORLD space.
+    ///
+    /// A node's gradient coordinates are node-LOCAL — the renderer draws the
+    /// node with its global transform applied, so the gradient rides along. A
+    /// Live Paint face has no transform of its own: its outline is already
+    /// world-space. Handing the local gradient over unchanged would park it at
+    /// the origin, so fold the node's global transform into the gradient's own
+    /// local matrix, which the renderer applies as the shader matrix.
+    ///
+    /// Solids, patterns and meshes are returned untouched.
+    fn paint_to_world(&self, node_id: u32, paint: &Paint) -> Paint {
+        let g = match paint {
+            Paint::Gradient(g) => g,
+            other => return other.clone(),
+        };
+        let m = match self.global_transforms.get(&node_id) {
+            Some(m) => *m,
+            None => return paint.clone(),
+        };
+        // Column-major glam [a,b,_, c,d,_, e,f,_] -> SVG affine [a,b,c,d,e,f].
+        let node = [m[0], m[1], m[3], m[4], m[6], m[7]];
+        let mut out = g.clone();
+        out.transform = Some(match &g.transform {
+            // Already has one: the node transform composes on the outside.
+            Some(t) => compose_affine(&node, t),
+            None => node,
+        });
+        Paint::Gradient(out)
     }
 
     /// Node ids in paint order (root list, depth-first; later = drawn on top).
@@ -6764,6 +6829,20 @@ fn adapt_mesh_fills_to_bbox(node: &mut Node, old_bb: Option<[f32; 4]>) {
 /// A representative solid color for a paint: solids as-is, gradients → first
 /// stop, meshes → mean vertex color (documented approximations for Live
 /// Paint), patterns → none.
+/// Compose two SVG affines `[a,b,c,d,e,f]` (x' = a·x + c·y + e), outer ∘ inner.
+fn compose_affine(outer: &[f32; 6], inner: &[f32; 6]) -> [f32; 6] {
+    let (a1, b1, c1, d1, e1, f1) = (outer[0], outer[1], outer[2], outer[3], outer[4], outer[5]);
+    let (a2, b2, c2, d2, e2, f2) = (inner[0], inner[1], inner[2], inner[3], inner[4], inner[5]);
+    [
+        a1 * a2 + c1 * b2,
+        b1 * a2 + d1 * b2,
+        a1 * c2 + c1 * d2,
+        b1 * c2 + d1 * d2,
+        a1 * e2 + c1 * f2 + e1,
+        b1 * e2 + d1 * f2 + f1,
+    ]
+}
+
 fn paint_color(p: &Paint) -> Option<Color> {
     match p {
         Paint::Solid(c) => Some(*c),
@@ -6961,6 +7040,146 @@ mod identity_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A red→blue linear gradient over (0,0)-(100,100) in the node's LOCAL space.
+    fn local_gradient() -> Paint {
+        Paint::Gradient(Gradient {
+            gradient_type: GradientType::Linear,
+            stops: vec![
+                GradientStop { offset: 0.0, color: Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 } },
+                GradientStop { offset: 1.0, color: Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 } },
+            ],
+            start_x: 0.0,
+            start_y: 0.0,
+            end_x: 100.0,
+            end_y: 100.0,
+            spread: 0,
+            focal: None,
+            transform: None,
+        })
+    }
+
+    // ─── Gradients in Live Paint ────────────────────────────────────────────
+
+    /// A face can hold a gradient, not just a colour.
+    #[test]
+    fn a_face_can_be_painted_with_a_gradient() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let group = engine.group_nodes(&format!("[{a}]"));
+        engine.set_node_live_paint(group, true);
+        engine.ensure_network_clean();
+
+        let face = engine.query_face_at(50.0, 50.0);
+        assert!(face >= 0, "the rect should make one region");
+
+        let ok = engine.set_face_paint(
+            face as u32,
+            r#"{"gradient_type":"Linear","stops":[
+                 {"offset":0.0,"color":{"r":1.0,"g":0.0,"b":0.0,"a":1.0}},
+                 {"offset":1.0,"color":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}],
+               "start_x":0.0,"start_y":0.0,"end_x":100.0,"end_y":100.0}"#,
+        );
+        assert!(ok);
+
+        match engine.scene.vector_network.faces.get(&(face as u32)).unwrap().fill.as_ref() {
+            Some(Paint::Gradient(g)) => assert_eq!(g.stops.len(), 2),
+            other => panic!("expected a gradient, got {other:?}"),
+        }
+    }
+
+    /// Malformed paint leaves the face alone rather than clearing it.
+    #[test]
+    fn a_paint_that_does_not_parse_changes_nothing() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let group = engine.group_nodes(&format!("[{a}]"));
+        engine.set_node_live_paint(group, true);
+        engine.ensure_network_clean();
+        let face = engine.query_face_at(50.0, 50.0) as u32;
+        engine.set_face_fill(face, 1.0, 0.0, 0.0, 1.0);
+
+        assert!(!engine.set_face_paint(face, "{ not json"));
+
+        match engine.scene.vector_network.faces.get(&face).unwrap().fill.as_ref() {
+            Some(Paint::Solid(c)) => assert_eq!(c.r, 1.0),
+            other => panic!("the previous fill should survive, got {other:?}"),
+        }
+    }
+
+    /// The bug this whole change started from: an UNPAINTED region shows the
+    /// paint of the shape beneath, and for a gradient-filled shape that has to
+    /// stay a gradient. It used to collapse to the gradient's first stop.
+    #[test]
+    fn an_unpainted_region_inherits_a_gradient_whole() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        engine.scene.nodes.get_mut(&a).unwrap().style.fills = vec![local_gradient()];
+        let group = engine.group_nodes(&format!("[{a}]"));
+        engine.set_node_live_paint(group, true);
+        engine.ensure_network_clean();
+
+        let faces = engine.live_paint_faces_effective(Some(group));
+        assert_eq!(faces.len(), 1);
+        match &faces[0].0 {
+            Paint::Gradient(g) => {
+                assert_eq!(g.stops.len(), 2, "both stops, not just the first");
+                assert_eq!(g.stops[1].color.b, 1.0);
+            }
+            other => panic!("expected the gradient to survive, got {other:?}"),
+        }
+    }
+
+    /// An inherited gradient is re-expressed in world space — a face outline has
+    /// no transform of its own to carry the node's placement.
+    #[test]
+    fn an_inherited_gradient_is_moved_into_world_space() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(300.0, 200.0, 100.0, 100.0);
+        engine.scene.nodes.get_mut(&a).unwrap().style.fills = vec![local_gradient()];
+        let group = engine.group_nodes(&format!("[{a}]"));
+        engine.set_node_live_paint(group, true);
+        engine.ensure_network_clean();
+
+        let faces = engine.live_paint_faces_effective(Some(group));
+        match &faces[0].0 {
+            Paint::Gradient(g) => {
+                let t = g.transform.expect("the node transform must ride along");
+                assert_eq!((t[4], t[5]), (300.0, 200.0), "translation folded in");
+            }
+            other => panic!("expected a gradient, got {other:?}"),
+        }
+    }
+
+    /// A gradient face survives a save/load round trip.
+    #[test]
+    fn a_gradient_face_survives_serialization() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let group = engine.group_nodes(&format!("[{a}]"));
+        engine.set_node_live_paint(group, true);
+        engine.ensure_network_clean();
+        let face = engine.query_face_at(50.0, 50.0) as u32;
+        engine.set_face_paint(
+            face,
+            r#"{"gradient_type":"Radial","stops":[
+                 {"offset":0.0,"color":{"r":0.0,"g":1.0,"b":0.0,"a":1.0}},
+                 {"offset":1.0,"color":{"r":0.0,"g":0.0,"b":0.0,"a":0.0}}],
+               "start_x":50.0,"start_y":50.0,"end_x":100.0,"end_y":50.0}"#,
+        );
+
+        let bytes = engine.serialize_scene();
+        let mut reloaded = Engine::new();
+        assert!(reloaded.deserialize_scene(&bytes));
+        reloaded.ensure_network_clean();
+
+        let faces = reloaded.live_paint_faces_effective(None);
+        assert_eq!(faces.len(), 1);
+        match &faces[0].0 {
+            Paint::Gradient(g) => assert_eq!(g.stops.len(), 2),
+            other => panic!("expected the gradient back, got {other:?}"),
+        }
+    }
 
     // ─── A masked Live Paint group ──────────────────────────────────────────
     // Three separate mechanisms used to pull this apart, so there are three
