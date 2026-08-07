@@ -246,6 +246,18 @@ export class ContextBar {
         // hint changes), and on the gap distance in force — which is now a
         // property of the group, so switching groups can change it.
         const lpGroup = this.scene.getLivePaintGroup();
+        // The bucket's gradient has to be in here, and was not: the bar renders
+        // ENTIRELY different controls for solid vs gradient (stop swatches and a
+        // type selector instead of one swatch), and `refresh()` returns early on
+        // an unchanged signature. So Solid⇄Gradient set the mode and left the bar
+        // showing the other mode's controls — the stop swatches were unreachable,
+        // and the button looked dead.
+        const grad = this.ui.getLivePaintGradient();
+        const gradSig = grad
+            ? `|grad${grad.gradient_type}:${grad.stops
+                  .map((s) => `${colorToHex(s.color)}@${s.offset.toFixed(3)}`)
+                  .join(',')}`
+            : '|nograd';
         const lpSig =
             info.context === 'live-paint' || info.context === 'tool'
                 ? `|lp${lpGroup}|gap${
@@ -254,7 +266,7 @@ export class ContextBar {
                           : this.scene.getGapBridgeDistance()
                   }|none${this.ui.isLivePaintFillNone() ? 1 : 0}${
                       this.ui.isLivePaintStrokeNone() ? 1 : 0
-                  }`
+                  }|w${this.ui.getLivePaintStrokeWidth()}${gradSig}`
                 : '';
         // A selected Boolean Group's controls show its current op, so it's part
         // of the signature (switching the op must re-render the bar).
@@ -705,7 +717,40 @@ export class ContextBar {
 
         const labelSpan = document.createElement('span');
         labelSpan.className = 'cb-swatch-label';
-        labelSpan.textContent = kind === 'fill' ? 'Fill' : 'Stroke';
+        // "Line", not "Stroke": in this bar it is not the selected shape's stroke
+        // (nothing is selected) — it is the colour a ⇧-click puts on one of the
+        // group's lines. "Stroke" beside a Fill swatch reads as the usual pair
+        // and gave no clue that it needed a modifier, or what it applied to.
+        labelSpan.textContent = kind === 'fill' ? 'Fill' : 'Line (⇧-click)';
+        wrapper.appendChild(labelSpan);
+        return wrapper;
+    }
+
+    /** Thickness the bucket paints a line with. In the bar because that is where
+     *  it is used — it used to be read off the default style set in another
+     *  tool's bar, so the width you got was invisible from here. */
+    private createLineWidthControl(): HTMLElement {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'cb-swatch-wrapper';
+        wrapper.setAttribute('data-tooltip', 'Thickness for ⇧-click line painting');
+
+        const num = document.createElement('input');
+        num.type = 'number';
+        num.className = 'cb-number';
+        num.min = '0.1';
+        num.step = '0.5';
+        num.value = String(this.ui.getLivePaintStrokeWidth());
+        num.addEventListener('change', () => {
+            this.ui.setLivePaintStrokeWidth(parseFloat(num.value) || 1);
+            num.value = String(this.ui.getLivePaintStrokeWidth());
+            this.refresh();
+        });
+
+        const labelSpan = document.createElement('span');
+        labelSpan.className = 'cb-swatch-label';
+        labelSpan.textContent = 'Width';
+
+        wrapper.appendChild(num);
         wrapper.appendChild(labelSpan);
         return wrapper;
     }
@@ -773,6 +818,7 @@ export class ContextBar {
                 },
             ),
         );
+        this.el.appendChild(this.createLineWidthControl());
         this.el.appendChild(this.createSeparator());
         this.el.appendChild(this.createGapControl());
         this.el.appendChild(this.createSeparator());

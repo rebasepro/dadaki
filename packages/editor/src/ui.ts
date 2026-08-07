@@ -1325,6 +1325,45 @@ export class UIEngine {
     private _livePaintFillNone = false;
     private _livePaintStrokeNone = false;
 
+    /**
+     * Thickness the bucket paints a line with.
+     *
+     * Owned by the bucket rather than read off `getCurrentStyle()`, which is
+     * where it used to come from: that is the style a newly DRAWN shape gets,
+     * set in a different tool's bar, invisible from here. So the width you got
+     * was inherited from somewhere you weren't looking and could not change
+     * without leaving Live Paint.
+     */
+    private _livePaintStrokeWidth = 2;
+
+    getLivePaintStrokeWidth(): number {
+        return this._livePaintStrokeWidth;
+    }
+    setLivePaintStrokeWidth(w: number) {
+        this._livePaintStrokeWidth = Math.max(0.1, Math.min(1000, w));
+    }
+
+    /**
+     * The Live Paint region the panel is editing — the one you last clicked.
+     *
+     * Stored as a world POINT, never a face id: ids are regenerated on every
+     * network rebuild and painting triggers one, so an id captured at click time
+     * is stale before the panel first draws. The point also survives edits to
+     * the surrounding shapes, and resolves to nothing once the region stops
+     * existing — which is exactly when the panel should stop offering to edit it.
+     */
+    private _activeRegion: { x: number; y: number } | null = null;
+
+    setActiveRegion(p: { x: number; y: number } | null) {
+        this._activeRegion = p ? { x: p.x, y: p.y } : null;
+    }
+
+    /** The live face id of the active region, or -1 if there is none. */
+    activeRegionFaceId(): number {
+        if (!this._activeRegion) return -1;
+        return this.scene.queryFaceAt(this._activeRegion.x, this._activeRegion.y);
+    }
+
     isLivePaintFillNone(): boolean {
         return this._livePaintFillNone;
     }
@@ -1891,6 +1930,13 @@ export class UIEngine {
         this.refreshArtboardPanel();
         if (selection.length === 0) {
             this.clearPropertyPanel();
+            // Painting deliberately leaves the selection empty, so the panel
+            // used to go blank exactly when the user was doing the most work.
+            // Fill it with what Live Paint IS editing: the region under the last
+            // click, or the bucket itself.
+            if (this.activeTool === 'paint-bucket' && !gesture) {
+                withPanelFocusPreserved([this.fillsList], () => this.renderLivePaintPaintPanel());
+            }
             if (!interactive) {
                 this.updateLayerSelection();
                 this.contextBar?.refresh();
@@ -2507,6 +2553,99 @@ export class UIEngine {
         return grad.gradient_type === 'Radial'
             ? `radial-gradient(circle, ${stops})`
             : `linear-gradient(90deg, ${stops})`;
+    }
+
+    /**
+     * The Fill panel while the bucket is armed and nothing is selected.
+     *
+     * Two targets, and saying WHICH one is the point of the header: the region
+     * you last clicked (edits land on it immediately), or the bucket itself
+     * (edits change what the next click paints). Before this, the bar's swatches
+     * were the only colour controls on screen and they always meant the bucket
+     * — so after painting a gradient you were looking at handles on a region
+     * you had no way to recolour, and adjusting the swatches appeared to do
+     * nothing. Same ramp editor as a node's gradient, deliberately: a region is
+     * a different target, not a different kind of gradient.
+     */
+    private renderLivePaintPaintPanel() {
+        if (!this.fillsList) return;
+        this.fillsList.innerHTML = '';
+
+        const faceId = this.activeRegionFaceId();
+        const editingRegion = faceId >= 0;
+
+        const header = document.createElement('div');
+        header.className = 'panel-empty-note';
+        header.textContent = editingRegion
+            ? 'Editing the region you clicked.'
+            : 'What the next click paints. Click a region to edit that region.';
+        this.fillsList.appendChild(header);
+
+        // Read the current paint of whichever target is live.
+        const bucketGradient = this.getLivePaintGradient();
+        const paint: Paint | null = editingRegion
+            ? this.scene.getFacePaint(faceId)
+            : ((bucketGradient ?? this.getLivePaintFill()) as Paint);
+        if (!paint) {
+            const empty = document.createElement('div');
+            empty.className = 'panel-empty-note';
+            empty.textContent = 'This region has no fill.';
+            this.fillsList.appendChild(empty);
+            return;
+        }
+
+        // `buildGradientEditor` only ever mutates the fills ARRAY it is handed
+        // (never the node), so a one-element array is a complete adapter — no
+        // parallel ramp implementation, and the two stay in step by construction.
+        const commit = (mutate: (f: Paint[], n: SceneNode) => void, live = false) => {
+            const arr: Paint[] = [JSON.parse(JSON.stringify(paint))];
+            mutate(arr, null as unknown as SceneNode);
+            const next = arr[0];
+            if (!next) return;
+            if (editingRegion) {
+                // A drag is one undo step, like every other live edit here.
+                if (live) {
+                    this.scene.setFacePaintNoHistory(faceId, next);
+                } else {
+                    this.scene.setFacePaint(faceId, next);
+                }
+                this.scene.renderer?.requestRender();
+            } else if (isGradient(next)) {
+                this.setLivePaintGradient(next as unknown as Gradient);
+            } else {
+                this.setLivePaintFill(this.rgbToHex(next as Color));
+            }
+            if (!live) {
+                this.contextBar?.refresh();
+                withPanelFocusPreserved([this.fillsList], () => this.renderLivePaintPaintPanel());
+            }
+        };
+
+        if (isGradient(paint)) {
+            this.fillsList.appendChild(this.buildGradientEditor(paint as Gradient, 0, commit));
+        } else {
+            // Solid: one swatch, same control the bar shows, so the two agree.
+            const row = document.createElement('div');
+            row.className = 'fill-stroke-row';
+            const { el } = createColorSwatch({
+                color: paint as Color,
+                title: editingRegion ? 'Region colour' : 'Bucket colour',
+                onInput: (c) =>
+                    commit((f) => {
+                        f[0] = c as Paint;
+                    }, true),
+                onChange: (c) =>
+                    commit((f) => {
+                        f[0] = c as Paint;
+                    }),
+            });
+            row.appendChild(el);
+            const label = document.createElement('span');
+            label.className = 'mixed-label';
+            label.textContent = editingRegion ? 'Region' : 'Bucket';
+            row.appendChild(label);
+            this.fillsList.appendChild(row);
+        }
     }
 
     renderFillsList(_node: SceneNode) {

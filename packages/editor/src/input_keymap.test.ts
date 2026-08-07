@@ -74,7 +74,12 @@ function makeUI(): UIEngine {
         collapseSubtreeByDefault() {},
         getCurrentStyle: () => '{}',
         contextBar: { refresh() {} },
-        gradientEdit: { isActive: () => false, hitTest: () => null },
+        gradientEdit: { isActive: () => false, hitTest: () => null, clear() {} },
+        // The bucket asks whether it is loaded with None on every hover, so a
+        // stub that lacks these throws inside the hover path.
+        isLivePaintFillNone: () => false,
+        isLivePaintStrokeNone: () => false,
+        getLivePaintStrokeWidth: () => 2,
         // Recorded rather than performed — the interesting logic is on the input
         // side (which digits mean what), not in the panel write-through.
         opacityCalls: [] as number[],
@@ -504,5 +509,99 @@ describe('the Live Paint bucket shows what ⌥ is about to do', () => {
 
         input.onKeyUp(key('Alt'));
         expect(isEyedropper(canvas)).toBe(false);
+    });
+
+    /** The erase cursor is the only one carrying the strike-through red. */
+    const isErase = (canvas: HTMLCanvasElement) => canvas.style.cursor.includes('e5484d');
+
+    it('⌘ shows that the click will erase, not paint', () => {
+        const { input, canvas } = painting();
+
+        input.updatePaintBucketHover(false, false);
+        expect(isErase(canvas)).toBe(false);
+
+        input.updatePaintBucketHover(false, false, true);
+        expect(isErase(canvas)).toBe(true);
+    });
+
+    it('⌘ keeps the region highlighted — you still need to see WHICH one empties', () => {
+        // Unlike ⌥ (which targets nothing), the eraser acts on the region under
+        // the cursor, so dropping the highlight would hide the target.
+        const { input, renderer } = painting();
+
+        input.updatePaintBucketHover(false, false, true);
+        expect(renderer.hoverFaceId).toBeGreaterThanOrEqual(0);
+    });
+
+    it('pressing ⌘ with the mouse still updates the cursor immediately', () => {
+        const { input, canvas } = painting();
+        input.updatePaintBucketHover(false, false);
+
+        input.onKeyDown(key('Meta', { meta: true }));
+        expect(isErase(canvas)).toBe(true);
+
+        input.onKeyUp(key('Meta'));
+        expect(isErase(canvas)).toBe(false);
+    });
+
+    it('a bucket loaded with None reads as erasing without any modifier', () => {
+        // None is a property, ⌘ a one-off; both remove, so both must look like
+        // it. Otherwise the swatch says one thing and the cursor another.
+        const { input, ui, canvas } = painting();
+        (ui as { isLivePaintFillNone: () => boolean }).isLivePaintFillNone = () => true;
+
+        input.updatePaintBucketHover(false, false);
+        expect(isErase(canvas)).toBe(true);
+    });
+});
+
+describe('the Selection tool shows which node a modifier will take', () => {
+    /** Two shapes inside a group, Selection tool armed, cursor over one shape. */
+    function selecting() {
+        const scene = makeScene();
+        const { renderer } = makeRenderer();
+        const ui = makeUI();
+        const canvas = document.createElement('canvas');
+        const input = new InputManager(canvas, scene, ui, renderer);
+        const a = scene.engine!.add_rect(0, 0, 200, 200);
+        const b = scene.engine!.add_rect(400, 0, 100, 100);
+        const group = scene.groupNodes([a, b]);
+        ui.activeTool = 'selection';
+        input.currentPos = { x: 60, y: 60 }; // inside shape `a`
+        return { scene, input, canvas, a, group };
+    }
+
+    it('⌘ highlights the shape a ⌘-click would actually select, not the group', () => {
+        // The hover used to hit-test WITHOUT the deep flag while the click used
+        // it, so the highlight named the group and the click took the child.
+        const { input, a, group } = selecting();
+
+        input.updateSelectionHover(false, false);
+        expect(input.hoverNodeId).toBe(group);
+
+        input.updateSelectionHover(false, true);
+        expect(input.hoverNodeId).toBe(a);
+    });
+
+    it('each modifier gets its own cursor, because each does something different', () => {
+        const { input, canvas } = selecting();
+
+        input.updateSelectionHover(false, false);
+        expect(canvas.style.cursor).toBe('move');
+
+        input.updateSelectionHover(true, false); // ⌥ duplicates
+        expect(canvas.style.cursor).toBe('copy');
+
+        input.updateSelectionHover(false, true); // ⌘ reaches inside
+        expect(canvas.style.cursor).toBe('pointer');
+    });
+
+    it('over empty space no modifier promises anything', () => {
+        const { input, canvas } = selecting();
+        input.currentPos = { x: 9000, y: 9000 };
+
+        input.updateSelectionHover(true, true);
+        expect(canvas.style.cursor).toBe('default');
+        expect(input.hoverNodeId).toBe(null);
     });
 });
