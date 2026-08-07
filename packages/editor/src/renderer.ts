@@ -1891,9 +1891,18 @@ export class Renderer {
         worldY: number,
     ): { r: number; g: number; b: number; a: number } | null {
         if (!this.surface || !this.ck) return null;
-        const dpr = window.devicePixelRatio || 1;
-        const px = Math.round((worldX * this.zoom + this.pan.x) * dpr);
-        const py = Math.round((worldY * this.zoom + this.pan.y) * dpr);
+        // Scale from the canvas ITSELF, not devicePixelRatio. World → CSS pixels
+        // is `world * zoom + pan` (the inverse of InputManager.getPos), and CSS →
+        // backing store is whatever ratio the canvas actually has. Those two are
+        // usually both `dpr`, but they come apart under browser page zoom, on a
+        // window dragged between displays, and for the frame after a resize — and
+        // when they do, this reads a pixel somewhere else entirely and returns a
+        // confidently wrong colour.
+        const rect = this.canvas.getBoundingClientRect();
+        const sx = rect.width > 0 ? this.canvas.width / rect.width : window.devicePixelRatio || 1;
+        const sy = rect.height > 0 ? this.canvas.height / rect.height : sx;
+        const px = Math.round((worldX * this.zoom + this.pan.x) * sx);
+        const py = Math.round((worldY * this.zoom + this.pan.y) * sy);
         if (px < 0 || py < 0 || px >= this.canvas.width || py >= this.canvas.height) return null;
         // Read back the frame as it stands, minus the hover feedback of the tool
         // doing the sampling. A pending render would change what is under the
