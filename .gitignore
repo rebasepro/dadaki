@@ -18,3 +18,6 @@ firebase-debug.log
 
 # Nested online app — its own separate git repo
 /cloud/
+
+# Second worktree of the same online app repo — also its own checkout
+/cloud-main/
