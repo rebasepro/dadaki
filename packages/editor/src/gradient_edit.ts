@@ -9,6 +9,13 @@
  * Gradient coordinates (start_x/start_y/end_x/end_y) live in NODE-LOCAL space;
  * all hit-testing converts through the node's world transform, so handles
  * follow the shape under move/rotate/skew.
+ *
+ * A Live Paint FACE is the second kind of target. Only three things differ —
+ * where the gradient is read from, what transform relates it to the world, and
+ * where it is written back — so the handles, dragging, stop insert/delete and
+ * angle snapping are shared verbatim rather than reimplemented. A face carries
+ * no transform of its own (its outline is already world space), so the
+ * local↔world conversion is the identity for one.
  */
 
 import type { Color, Gradient, GradientStop } from './types';
@@ -50,8 +57,26 @@ export function sampleGradientColor(grad: Gradient, t: number): Color {
 export class GradientEditController {
     private scene: WasmScene;
 
-    /** Node whose gradient fill is being edited (null = inactive). */
+    /** Node whose gradient fill is being edited (null = inactive, or a face). */
     nodeId: number | null = null;
+    /**
+     * A point inside the Live Paint region being edited, when the target is a
+     * region rather than a node. Exactly one of `nodeId` / `faceAnchor` is set.
+     *
+     * An ANCHOR, not a face id, because face ids are regenerated on every
+     * network rebuild — painting a region rebuilds it, so a stored id is stale
+     * by the time the handles are first drawn. The region is re-resolved from
+     * this point on every access instead.
+     */
+    faceAnchor: { x: number; y: number } | null = null;
+
+    /** The region currently under `faceAnchor`, or null if it no longer exists
+     *  (its bounding shapes were moved or deleted). */
+    get faceId(): number | null {
+        if (!this.faceAnchor) return null;
+        const id = this.scene.queryFaceAt(this.faceAnchor.x, this.faceAnchor.y);
+        return id >= 0 ? id : null;
+    }
     /** Index into the node's fills array. */
     fillIndex = 0;
     /** Selected stop (index into the stops array, not sorted order). */
@@ -75,19 +100,36 @@ export class GradientEditController {
     // ─── Activation / lifecycle ──────────────────────────────────────────
 
     isActive(): boolean {
-        return this.nodeId !== null && this.gradient() !== null;
+        return (this.nodeId !== null || this.faceId !== null) && this.gradient() !== null;
     }
 
     activate(nodeId: number, fillIndex: number, stopIndex = 0) {
         if (this.nodeId !== nodeId || this.fillIndex !== fillIndex) this.stopFocused = false;
         this.nodeId = nodeId;
+        this.faceAnchor = null;
         this.fillIndex = fillIndex;
         this.stopIndex = stopIndex;
         this.scene.renderer?.requestRender();
     }
 
+    /** Edit the gradient of the Live Paint region containing `world`. No-op
+     *  unless that region exists and has a gradient. */
+    activateFace(world: { x: number; y: number }) {
+        this.nodeId = null;
+        this.faceAnchor = { x: world.x, y: world.y };
+        this.fillIndex = 0;
+        this.stopIndex = 0;
+        this.stopFocused = false;
+        if (!this.gradient()) {
+            this.faceAnchor = null;
+            return;
+        }
+        this.scene.renderer?.requestRender();
+    }
+
     clear() {
         this.nodeId = null;
+        this.faceAnchor = null;
         this.fillIndex = 0;
         this.stopIndex = 0;
         this.stopFocused = false;
@@ -100,6 +142,14 @@ export class GradientEditController {
      * target the node's first gradient fill, or deactivate.
      */
     syncSelection() {
+        // A face target has nothing to do with the selection — a Live Paint
+        // region is not a node and painting deliberately leaves the selection
+        // empty. Reconciling one against the selection cleared the handles the
+        // moment anything called syncWithSelection, which is to say instantly.
+        if (this.faceAnchor) {
+            if (!this.gradient()) this.clear();
+            return;
+        }
         const sel = this.scene.getSelection();
         if (sel.length !== 1) {
             this.clear();
@@ -130,6 +180,12 @@ export class GradientEditController {
 
     /** Fresh read of the edited gradient (or null when state went stale). */
     gradient(): Gradient | null {
+        if (this.faceAnchor) {
+            const id = this.faceId;
+            if (id === null) return null;
+            const paint = this.scene.getFacePaint(id);
+            return paint && isGradient(paint) ? paint : null;
+        }
         if (this.nodeId === null) return null;
         const node = this.scene.getNode(this.nodeId);
         const fill = node?.style.fills?.[this.fillIndex];
@@ -140,6 +196,8 @@ export class GradientEditController {
 
     /** Node world transform in Skia row-major layout (see WasmScene.getTransform). */
     private transform(): Float32Array {
+        // A face outline is already world space — nothing to convert through.
+        if (this.faceAnchor) return new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
         return this.scene.getTransform(this.nodeId!);
     }
 
@@ -258,7 +316,9 @@ export class GradientEditController {
     }
 
     moveDrag(world: { x: number; y: number }, shiftKey: boolean) {
-        if (!this.drag || this.nodeId === null) return;
+        // A face target has no nodeId — the guard is "is anything targeted",
+        // not "is a node targeted".
+        if (!this.drag || (this.nodeId === null && !this.faceAnchor)) return;
         const { hit, orig, startLocal } = this.drag;
         const local = this.worldToLocal(world.x, world.y);
 
@@ -365,6 +425,15 @@ export class GradientEditController {
     /** Mutate the edited gradient on a fresh style read and write it back
      *  without pushing history (callers bracket with gesture/transaction). */
     private writeLive(mutate: (g: Gradient) => void) {
+        if (this.faceAnchor) {
+            const id = this.faceId;
+            const current = this.gradient();
+            if (id === null || !current) return;
+            const next = cloneGradient(current);
+            mutate(next);
+            this.scene.setFacePaintNoHistory(id, next);
+            return;
+        }
         if (this.nodeId === null) return;
         const node = this.scene.getNode(this.nodeId);
         if (!node) return;

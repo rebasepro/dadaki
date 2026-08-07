@@ -1209,6 +1209,29 @@ export class WasmScene {
         return ok;
     }
 
+    /** The Live Paint region at a world point, or -1 when there is none. */
+    queryFaceAt(x: number, y: number): number {
+        return this.engine?.query_face_at(x, y) ?? -1;
+    }
+
+    /** A face's paint, or null when it has none. */
+    getFacePaint(faceId: number): import('./types').Paint | null {
+        try {
+            const json = this.engine!.get_face_paint(faceId);
+            return json ? JSON.parse(json) : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /** Write a face's paint WITHOUT a history entry — for live handle drags,
+     *  which the caller brackets with a gesture so the whole drag is one undo. */
+    setFacePaintNoHistory(faceId: number, paint: unknown): boolean {
+        const ok = this.engine!.set_face_paint(faceId, JSON.stringify(paint));
+        this.invalidateCache();
+        return ok;
+    }
+
     /** A face's world-space outline as bézier points ({x, y, cp1, cp2}), or
      *  null. Anchors alone under-state a bulging curve's extent, so callers
      *  measuring a box should include the control points. */

@@ -4528,11 +4528,17 @@ export class Renderer {
      */
     private drawGradientOverlay(canvas: Canvas, dpr: number) {
         const im = this.inputManager;
-        if (im?.ui.activeTool !== 'selection' || im.editingNodeId !== null) return;
-        const ge = im.ui.gradientEdit;
-        if (!ge?.isActive()) return;
-        const selection = this.scene.getSelection();
-        if (selection.length !== 1 || selection[0] !== ge.nodeId) return;
+        const ge = im?.ui.gradientEdit;
+        if (!ge?.isActive() || im?.editingNodeId !== null) return;
+        if (ge.faceId !== null) {
+            // A Live Paint region's handles belong to the bucket, and a face is
+            // not selectable, so the selection check below cannot apply.
+            if (im.ui.activeTool !== 'paint-bucket') return;
+        } else {
+            if (im.ui.activeTool !== 'selection') return;
+            const selection = this.scene.getSelection();
+            if (selection.length !== 1 || selection[0] !== ge.nodeId) return;
+        }
         const grad = ge.gradient();
         if (!grad) return;
 

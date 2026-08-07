@@ -5720,6 +5720,18 @@ impl Engine {
         }
     }
 
+    /// A face's paint as JSON, or "" when it has none. The gradient handles
+    /// read through this: a face is not a node, so there is no style to query.
+    pub fn get_face_paint(&self, face_id: u32) -> String {
+        self.scene
+            .vector_network
+            .faces
+            .get(&face_id)
+            .and_then(|f| f.fill.as_ref())
+            .and_then(|p| serde_json::to_string(p).ok())
+            .unwrap_or_default()
+    }
+
     /// Clear a face's fill.
     pub fn clear_face_fill(&mut self, face_id: u32) {
         if let Some(face) = self.scene.vector_network.faces.get_mut(&face_id) {
