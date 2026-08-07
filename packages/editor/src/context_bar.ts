@@ -20,7 +20,7 @@ import type { AlignMode } from './align';
 import { alignSelection, distributeSelection } from './align';
 import { computeBlendSubpaths } from './blend';
 import type { BoolOp } from './boolean_ops';
-import { applyPathfinder, BOOL_OP_BY_INDEX, transformSubpaths } from './boolean_ops';
+import { applyCrop, applyPathfinder, BOOL_OP_BY_INDEX, transformSubpaths } from './boolean_ops';
 import { colorToHex, createColorSwatch, parseHex } from './color_picker';
 import type { ContextInfo } from './context';
 import { getEditorContext } from './context';
@@ -1181,9 +1181,7 @@ export class ContextBar {
                 onSelect: () => this.input.makeCompoundPath(),
             });
             // Minus Back = front shape minus everything behind it (the opposite
-            // direction from Boolean › Subtract). Crop was dropped — for two shapes
-            // it's identical to Boolean › Intersect, and this build doesn't do
-            // Illustrator's real Crop (clip lower objects, keep their own fills).
+            // direction from Boolean › Subtract).
             items.push({
                 label: 'Minus Back',
                 icon: iconBoolSubtract(14),
@@ -1194,6 +1192,23 @@ export class ContextBar {
                     }
                 },
             });
+            // Crop = every shape clipped to the front one, each keeping its own
+            // fill. Distinct from Boolean › Intersect, which answers the shared
+            // area as ONE shape with one style. Only offered for 3+ because with
+            // two shapes the two really are the same thing.
+            if (info.selectedIds.length > 2) {
+                items.push({
+                    label: 'Crop to front shape',
+                    icon: iconBoolIntersect(14),
+                    onSelect: () => {
+                        // null = nothing overlapped, and the document was left
+                        // alone — the visible feedback is that nothing happened.
+                        if (applyCrop(this.ui.ck, this.scene, ids) === null) return;
+                        this.ui.syncWithSelection();
+                        this.ui.updateLayerList();
+                    },
+                });
+            }
         }
 
         const twoPaths =

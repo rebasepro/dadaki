@@ -192,6 +192,77 @@ export function applyPathfinder(
     return resultId;
 }
 
+/**
+ * Crop (Illustrator's Pathfinder Crop): clip every selected shape to the
+ * frontmost one, **each result keeping its own appearance**.
+ *
+ * This is the one thing Boolean › Intersect cannot do. Intersect answers "what
+ * area do all of these share" — one shape, one style. Crop answers "cut all of
+ * these by that one": N shapes in, up to N out, each still its own object with
+ * its own fill and stroke. Shapes that fall entirely outside the cutter come
+ * back as nothing and are dropped.
+ *
+ * The front shape is the cookie cutter and is consumed, as in Illustrator.
+ * Duplicate it first (⌘D) to keep a copy.
+ *
+ * Returns the new ids, front-most last. Returns `null` — leaving the document
+ * untouched — when nothing overlapped the cutter: an op whose whole result is
+ * "your selection is gone" is a mistake far more often than an intention.
+ */
+export function applyCrop(ck: CanvasKit, scene: WasmScene, ids: number[]): number[] | null {
+    if (ids.length < 2) return null;
+
+    // Order by z: front (topmost, drawn last) first — same rule as the other
+    // pathfinders, so "the front one" means the same thing everywhere.
+    const order = Array.from(scene.getRootNodes());
+    const rank = (id: number) => order.indexOf(id);
+    const sorted = [...ids].sort((a, b) => rank(b) - rank(a));
+    const front = sorted[0];
+    // Back-to-front, so re-adding them in order preserves their relative z.
+    const rest = sorted.slice(1).reverse();
+
+    const frontPath = nodeToWorldPath(ck, scene, front);
+    if (!frontPath) return null;
+
+    // Compute every piece BEFORE touching the document. A failure half-way
+    // through would otherwise leave half the selection cropped and half not,
+    // with no single thing to undo.
+    const pieces: { subpaths: string; styleJson: string }[] = [];
+    for (const id of rest) {
+        const shape = nodeToWorldPath(ck, scene, id);
+        if (!shape) continue;
+        const clipped = ck.Path.MakeFromOp(shape, frontPath, ck.PathOp.Intersect);
+        shape.delete();
+        if (!clipped) continue;
+        const subpaths = pathToSubpaths(ck, clipped);
+        const fillRule = clipped.getFillType() === ck.FillType.EvenOdd ? 1 : 0;
+        clipped.delete();
+        if (subpaths.length === 0) continue; // wholly outside the cutter
+        const style = scene.getNodeStyle(id);
+        pieces.push({
+            subpaths: JSON.stringify(subpaths),
+            styleJson: JSON.stringify({ ...style, fill_rule: fillRule }),
+        });
+    }
+    frontPath.delete();
+    if (pieces.length === 0) return null; // nothing overlapped — decline, don't empty the canvas
+
+    const out: number[] = [];
+    scene.transaction(() => {
+        const eng = scene.engine!;
+        eng.clear_selection();
+        for (const id of ids) eng.remove_node(id); // the originals AND the cutter
+        for (const piece of pieces) {
+            const newId = eng.add_path(piece.subpaths);
+            eng.set_node_style(newId, piece.styleJson);
+            eng.select_node(newId, true);
+            out.push(newId);
+        }
+    });
+    logAppEvent('boolean_operation', { op: 'crop', count: ids.length, type: 'pathfinder' });
+    return out;
+}
+
 /** Build a world-space CanvasKit path for a node (recursing into groups). */
 export function nodeToWorldPath(ck: CanvasKit, scene: WasmScene, id: number): Path | null {
     const node = scene.getNode(id);
