@@ -4612,10 +4612,15 @@ export class Renderer {
         accent.setStyle(ck.PaintStyle.Stroke);
         accent.setAntiAlias(true);
 
-        // Radius circle for radial gradients — drawn in node space so it
-        // follows the node's rotation/scale.
+        // Radius circle for radial gradients — drawn in GRADIENT space, under
+        // the same matrix that maps the gradient into the world. That makes it
+        // follow the node's rotation/scale, land on the handles for a gradient
+        // carrying its own transform, and come out as the ellipse an elliptical
+        // radial actually paints rather than a circle beside it. Reading the
+        // node transform directly also had nothing to offer a Live Paint face,
+        // which has no node at all.
         if (grad.gradient_type === 'Radial') {
-            const t = this.scene.getTransform(ge.nodeId!);
+            const t = ge.gradientToWorld();
             const r = Math.hypot(grad.end_x - grad.start_x, grad.end_y - grad.start_y);
             if (r > 1e-6) {
                 canvas.save();

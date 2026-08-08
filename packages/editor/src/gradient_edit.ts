@@ -6,9 +6,12 @@
  * Owned by UIEngine (`ui.gradientEdit`). The InputManager routes canvas mouse
  * events here, and the Renderer reads the state to draw the overlay.
  *
- * Gradient coordinates (start_x/start_y/end_x/end_y) live in NODE-LOCAL space;
+ * Gradient coordinates (start_x/start_y/end_x/end_y) are usually NODE-LOCAL;
  * all hit-testing converts through the node's world transform, so handles
- * follow the shape under move/rotate/skew.
+ * follow the shape under move/rotate/skew. A rotated or elliptical radial is
+ * the exception — it keeps raw gradient-space coordinates and a `transform`
+ * mapping them into the node — so the conversion composes that in as well
+ * (see `gradientToWorld()`).
  *
  * A Live Paint FACE is the second kind of target. Only three things differ —
  * where the gradient is read from, what transform relates it to the world, and
@@ -194,20 +197,50 @@ export class GradientEditController {
 
     // ─── Coordinate transforms (node-local ↔ world) ─────────────────────
 
-    /** Node world transform in Skia row-major layout (see WasmScene.getTransform). */
-    private transform(): Float32Array {
+    /**
+     * Gradient space → world, in Skia row-major layout (see
+     * WasmScene.getTransform).
+     *
+     * Usually a gradient's coordinates already ARE node-local, so this is just
+     * the node's world transform. A rotated or elliptical radial is the
+     * exception: it stores raw gradient-space coordinates plus the affine that
+     * maps them into the node — the same matrix the renderer hands Skia as the
+     * shader's local matrix. Leaving it out draws the handles for a gradient
+     * nobody can see; a `gradientTransform="scale(2,1)"` off an SVG import puts
+     * them a hundred units from the paint they belong to, and dragging one
+     * writes that error back into the document.
+     */
+    gradientToWorld(): Float32Array {
         // A face outline is already world space — nothing to convert through.
-        if (this.faceAnchor) return new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
-        return this.scene.getTransform(this.nodeId!);
+        const world = this.faceAnchor
+            ? new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1])
+            : this.scene.getTransform(this.nodeId!);
+
+        const g = this.gradient()?.transform;
+        if (!g || g.length < 6) return world;
+        // SVG affine [a,b,c,d,e,f] (x' = a·x + c·y + e) as a row-major 3×3.
+        const [a, b, c, d, e, f] = g;
+        // world ∘ gradientToLocal — gradient space first, then out to the world.
+        return new Float32Array([
+            world[0] * a + world[1] * b,
+            world[0] * c + world[1] * d,
+            world[0] * e + world[1] * f + world[2],
+            world[3] * a + world[4] * b,
+            world[3] * c + world[4] * d,
+            world[3] * e + world[4] * f + world[5],
+            0,
+            0,
+            1,
+        ]);
     }
 
     localToWorld(x: number, y: number): { x: number; y: number } {
-        const t = this.transform();
+        const t = this.gradientToWorld();
         return { x: t[0] * x + t[1] * y + t[2], y: t[3] * x + t[4] * y + t[5] };
     }
 
     worldToLocal(wx: number, wy: number): { x: number; y: number } {
-        const t = this.transform();
+        const t = this.gradientToWorld();
         const a = t[0],
             b = t[1],
             c = t[2];
