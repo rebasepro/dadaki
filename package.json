@@ -12,7 +12,7 @@
         "dev:cloud": "test -d cloud || { echo 'cloud/ is a separate repo and is not part of the open-source editor — nothing to run here.'; exit 1; }; cd cloud && ./node_modules/.bin/rebase dev",
         "build:cloud": "test -d cloud || { echo 'cloud/ is a separate repo and is not part of the open-source editor — nothing to run here.'; exit 1; }; cd cloud && ./node_modules/.bin/rebase build",
         "test": "vitest run",
-        "check": "tsc --noEmit",
+        "check": "tsc --noEmit -p packages/editor && tsc --noEmit -p packages/app && tsc --noEmit -p packages/mcp",
         "lint": "biome check",
         "format": "biome format --write"
     },
