@@ -47,13 +47,23 @@ function makeNode(overrides: Partial<SceneNode>): SceneNode {
         style: defaultStyle(),
         visible: true,
         locked: false,
-        transform: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+        // A node's own transform is decomposed components. The export reads
+        // matrices from `localTransforms`, not from here.
+        transform: {
+            x: 0,
+            y: 0,
+            rotation_deg: 0,
+            skew_x_deg: 0,
+            skew_y_deg: 0,
+            scale_x: 1,
+            scale_y: 1,
+        },
 
         ...overrides,
     };
 }
 
-/** Identity matrix (column-major [f32; 9]). */
+/** Identity matrix (column-major [f32; 9]) for `localTransforms`. */
 const IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
 /** Parse an SVG string and return the document. */

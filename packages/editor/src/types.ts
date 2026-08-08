@@ -304,8 +304,15 @@ export interface SceneNode {
     /** Reserved: clip descendants to this node's bounds (frames — not yet wired). */
     clip_content?: boolean;
     children?: number[];
-    /** Local transform as column-major [f32; 9] (matches glam Mat3). */
-    transform: number[];
+    /**
+     * Local transform, in decomposed components — the engine's `Transform2D`,
+     * which is what `get_scene_json` actually serializes.
+     *
+     * NOT a matrix: indexing it gives `undefined`. For the row-major 3×3 the
+     * geometry code wants, ask the scene (`getTransform` for world,
+     * `getNodeLocalTransform` for local).
+     */
+    transform: Transform2D;
 }
 
 /** Top-level scene data returned by Engine.get_scene_json(). */
