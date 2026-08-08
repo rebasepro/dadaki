@@ -64,10 +64,14 @@ describe('withBulkAnalytics', () => {
     it('evaluates a params thunk after fn, so post-hoc values can be reported', () => {
         const seen = capture();
         let roots = 0;
-        withBulkAnalytics('svg_imported', () => ({ roots }), () => {
-            roots = 7;
-            logAppEvent('object_created');
-        });
+        withBulkAnalytics(
+            'svg_imported',
+            () => ({ roots }),
+            () => {
+                roots = 7;
+                logAppEvent('object_created');
+            },
+        );
         expect(seen[0].params).toMatchObject({ roots: 7 });
     });
 

@@ -5,7 +5,7 @@
  * here, so the dialog and the web app's /shortcuts page always say the same
  * thing and the tool letters are the ones the editor really listens for.
  */
-import { FIELD_RULES, KEYBINDINGS, type Binding } from './keybindings';
+import { type Binding, FIELD_RULES, KEYBINDINGS } from './keybindings';
 
 function esc(s: string): string {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

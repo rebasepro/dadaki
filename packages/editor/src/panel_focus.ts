@@ -85,7 +85,8 @@ export function restorePanelFocus(snap: PanelFocusSnapshot | null): boolean {
     const el = cur as HTMLElement;
     // Same slot — but the same kind of control? Removing a row shifts the rest
     // up, and focusing whatever now sits at that index is worse than not.
-    if (el.tagName !== snap.tag || ((el as HTMLInputElement).type ?? '') !== snap.type) return false;
+    if (el.tagName !== snap.tag || ((el as HTMLInputElement).type ?? '') !== snap.type)
+        return false;
 
     el.focus();
     if (snap.start !== null) {

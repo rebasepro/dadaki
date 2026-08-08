@@ -16,8 +16,8 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import init, { Engine, History } from '../engine/pkg/engine';
 import { beforeAll, describe, expect, it } from 'vitest';
+import init, { Engine, History } from '../engine/pkg/engine';
 import { InputManager } from './input';
 import type { Renderer } from './renderer';
 import type { UIEngine } from './ui';
@@ -26,7 +26,9 @@ import { WasmScene } from './wasm_scene';
 let wasmModule: { memory: WebAssembly.Memory };
 
 beforeAll(async () => {
-    wasmModule = await init({ module_or_path: readFileSync(resolve('packages/editor/engine/pkg/engine_bg.wasm')) });
+    wasmModule = await init({
+        module_or_path: readFileSync(resolve('packages/editor/engine/pkg/engine_bg.wasm')),
+    });
 });
 
 function makeScene(): WasmScene {

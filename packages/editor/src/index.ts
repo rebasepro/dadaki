@@ -16,7 +16,6 @@
 
 import type { CanvasKit } from 'canvaskit-wasm';
 import { AboutDialog } from './about_dialog';
-import { KeybindingsDialog } from './keybindings_dialog';
 import { type AgentApi, createAgentApi } from './agent';
 import { type AnalyticsSink, logAppEvent, registerAnalyticsSink } from './analytics';
 import { AppMenu } from './app_menu';
@@ -31,6 +30,7 @@ import { FileService } from './file_service';
 import { ensureFontCSS, fontsSettled, loadGoogleFontData } from './fonts';
 import { GuidesController } from './guides';
 import { InputManager } from './input';
+import { KeybindingsDialog } from './keybindings_dialog';
 import { PersistenceManager } from './persistence';
 import { PresenceController } from './presence';
 import { Renderer } from './renderer';
