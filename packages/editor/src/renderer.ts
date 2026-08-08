@@ -129,7 +129,7 @@ export type ArtboardHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 14; // v14: strokes carry the whole dash array
+const EXPECTED_RENDER_PROTOCOL_VERSION = 1; // must match the engine's RENDER_PROTOCOL_VERSION
 
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {

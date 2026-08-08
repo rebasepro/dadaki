@@ -1132,27 +1132,29 @@ const CMD_LP_EDGES: u32 = 8;
 /// Magic marker: ASCII "VEC1" as a little-endian u32.
 pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// Render-buffer layout version. Writer and renderer.ts reader must agree.
-/// v2: added mask commands (CMD_BEGIN_MASK/BEGIN_MASKED_CONTENT/END_MASK).
-/// v3: added Image node type (5) with a {width, height, image_id} geometry.
-/// v4: added a per-node effects block (blur / drop shadow) after style_flags.
-/// v5: text geometry gained font_weight + italic + letter_spacing.
-/// v6: paint type 4 = pattern (image_id + tile w/h + 6-float transform).
-/// v7: effects records are self-describing per kind; added kind 2 = ColorMatrix.
-/// v8: ColorMatrix gains a linear_rgb u32 flag; CMD_BEGIN_MASK gains mask_type u32.
-/// v9: gradients gain spread (u32) + focal point (fx, fy, fr) after end_x/end_y.
-/// v10: Live Paint faces/edges drawn in-stream at group z (CMD_LP_FACES/EDGES);
-///      members of a Live Paint group write zero fills (faces provide the fill).
-/// v11: Blur effect gains a second f32 (y-axis sigma, anisotropic); gradients
-///      gain a trailing [has_transform u32][a,b,c,d,e,f f32] block for rotated /
-///      elliptical radials (local matrix + raw gradient-space coords).
-/// v12: paint type 5 = mesh gradient: [rows u32][cols u32] then per vertex
-///      (row-major, (rows+1)*(cols+1)) [x,y f32][r,g,b,a f32][e,w,s,n handles
-///      as 8 f32, effective/materialized — the reader never sees "auto"].
-/// v13: Live Paint faces carry a full paint rather than a solid colour.
-/// v14: a stroke writes its whole dash array as [count u32][count x f32]
-///      instead of a fixed on/off pair, so an imported multi-interval
-///      stroke-dasharray draws as the file says.
-pub const RENDER_PROTOCOL_VERSION: u32 = 14;
+///
+/// The render buffer is a per-frame handshake between this engine and the
+/// renderer, which ship in the same bundle — it is never written to a file, so
+/// this number has nothing to say about any saved document. (`.dadaki` carries
+/// its own, independent `container_version` / `min_reader_version`.)
+///
+/// It exists so writer/reader skew fails loudly instead of garbling a frame.
+/// Bump it — and EXPECTED_RENDER_PROTOCOL_VERSION in renderer.ts — whenever the
+/// layout below changes, in the same commit.
+///
+/// The pre-release version history (a long march to 14 as masks, images,
+/// effects, patterns, mesh gradients and Live Paint each landed) has been
+/// collapsed: none of those shapes was ever released, none is readable, and no
+/// reader needs to know they existed. v1 is what the format is now:
+///
+///   header  [magic u32][version u32][record_count u32]
+///   records [record_len u32][cmd u32][node_id u32][payload...]
+///
+/// with commands CMD_START_GROUP(1), CMD_DRAW_NODE(2), CMD_END_GROUP(3), the
+/// mask trio CMD_BEGIN_MASK(4) / CMD_BEGIN_MASKED_CONTENT(5) / CMD_END_MASK(6),
+/// and the Live Paint pair CMD_LP_FACES(7) / CMD_LP_EDGES(8) — each documented
+/// at its constant above.
+pub const RENDER_PROTOCOL_VERSION: u32 = 1;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
