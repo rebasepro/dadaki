@@ -4,11 +4,27 @@
  * Leverages CanvasKit's Path.stroke() to compute the offset outline, then
  * replaces the node's geometry with the outlined path and swaps the style:
  * fill = old stroke color, stroke = none.
+ *
+ * The job is to produce the shape the user was already looking at. That means
+ * honouring everything the renderer honours — corner radii, dash pattern and
+ * stroke alignment — because a Flatten that quietly squares off a rounded
+ * corner or re-centres an inside stroke has changed the drawing, not expanded
+ * it.
  */
 
 import type { CanvasKit, Path } from 'canvaskit-wasm';
-import type { PathPoint, Subpath } from './types';
+import { appendSubpathsToPath, pathToSubpaths } from './boolean_ops';
+import {
+    type NodeGeometry,
+    type NodeStyle,
+    type Stroke,
+    StrokeAlignment,
+    type Subpath,
+} from './types';
 import type { WasmScene } from './wasm_scene';
+
+/** Bezier circle constant: 4·(√2−1)/3 */
+const KAPPA = 0.5522847498;
 
 /**
  * Convert a path node's stroke into a filled outline shape.
@@ -28,66 +44,20 @@ export function outlineStroke(ck: CanvasKit, scene: WasmScene, nodeId: number): 
     if (!geometry || !style || style.strokes.length === 0 || style.strokes[0].width <= 0) return;
     const stroke = style.strokes[0];
 
-    // Build a CanvasKit path from the node's geometry (world space is not needed
-    // here — we work in local space and keep the node's transform as-is).
-    const ckPath = new ck.Path();
-    if (!ckPath) return;
+    // Work in local space — the node keeps its own transform.
+    const base = buildBasePath(ck, scene, nodeId, geometry, style);
+    if (!base) return;
 
-    if (geometry.Path) {
-        buildCkPathFromSubpaths(ck, ckPath, geometry.Path.subpaths);
-    } else if (geometry.Rect) {
-        ckPath.addRect(ck.LTRBRect(0, 0, geometry.Rect.width, geometry.Rect.height));
-    } else if (geometry.Ellipse) {
-        const rx = geometry.Ellipse.radius_x;
-        const ry = geometry.Ellipse.radius_y;
-        ckPath.addOval(ck.LTRBRect(-rx, -ry, rx, ry));
-    } else {
-        ckPath.delete();
-        return; // text or unsupported geometry
-    }
-
-    // Map stroke cap: 0 = Butt, 1 = Round, 2 = Square
-    const capMap: Record<number, any> = {
-        0: ck.StrokeCap.Butt,
-        1: ck.StrokeCap.Round,
-        2: ck.StrokeCap.Square,
-    };
-    // Map stroke join: 0 = Miter, 1 = Round, 2 = Bevel
-    const joinMap: Record<number, any> = {
-        0: ck.StrokeJoin.Miter,
-        1: ck.StrokeJoin.Round,
-        2: ck.StrokeJoin.Bevel,
-    };
-
-    // CanvasKit's Path.stroke() replaces the path with its outline IN PLACE and
-    // hands back the *same* object (null on failure) — it does not allocate a
-    // new Path. Freeing ckPath here would therefore free the very path we are
-    // about to read, and the next call through it throws "Cannot pass deleted
-    // object as a pointer of type Path", aborting Flatten mid-transaction.
-    const outlined = ckPath.stroke({
-        width: stroke.width,
-        miter_limit: stroke.miter_limit || 4,
-        cap: capMap[stroke.cap] ?? ck.StrokeCap.Butt,
-        join: joinMap[stroke.join] ?? ck.StrokeJoin.Miter,
-    });
-
-    if (!outlined) {
-        ckPath.delete();
-        return;
-    }
-
-    // Parse the outlined path back to subpaths
-    const subpaths = parseCkPathToSubpaths(ck, outlined);
-    outlined.delete();
-    if (outlined !== ckPath) ckPath.delete(); // defensive: not aliased after all
-    if (subpaths.length === 0) return;
+    const subpaths = strokeToSubpaths(ck, base, stroke);
+    base.delete();
+    if (!subpaths || subpaths.length === 0) return;
 
     // Update the node: geometry = outlined path, fill = old stroke, stroke = none
     scene.updatePathPoints(nodeId, JSON.stringify(subpaths));
 
     const newStyle = {
         ...style,
-        fills: [stroke.paint],
+        fills: stroke.paint ? [stroke.paint] : [],
         strokes: [],
     };
     scene.setNodeStyleNoHistory(nodeId, JSON.stringify(newStyle));
@@ -95,109 +65,163 @@ export function outlineStroke(ck: CanvasKit, scene: WasmScene, nodeId: number): 
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
-function buildCkPathFromSubpaths(_ck: CanvasKit, ckPath: Path, subpaths: Subpath[]): void {
-    for (const sp of subpaths) {
-        if (sp.points.length < 2) continue;
-        const first = sp.points[0];
-        ckPath.moveTo(first.x, first.y);
+/**
+ * The node's fill outline in local space — the shape the stroke runs along.
+ *
+ * For paths this is the **resolved** outline, so per-vertex corner radii are
+ * part of the geometry being stroked. Reading the raw subpaths instead would
+ * outline the polygon the radii were rounding off, which is how a rounded
+ * rectangle used to come back from Flatten with four sharp corners.
+ */
+function buildBasePath(
+    ck: CanvasKit,
+    scene: WasmScene,
+    nodeId: number,
+    geometry: NodeGeometry,
+    style: NodeStyle,
+): Path | null {
+    const path = new ck.Path();
 
-        for (let i = 1; i < sp.points.length; i++) {
-            const prev = sp.points[i - 1];
-            const pt = sp.points[i];
-            ckPath.cubicTo(prev.cp2[0], prev.cp2[1], pt.cp1[0], pt.cp1[1], pt.x, pt.y);
+    if (geometry.Path) {
+        const resolved = scene.getResolvedSubpaths(nodeId);
+        appendSubpathsToPath(path, resolved.length ? resolved : geometry.Path.subpaths);
+    } else if (geometry.Rect) {
+        const { width, height } = geometry.Rect;
+        const r = style.corner_radius || 0;
+        if (r > 0) {
+            path.addRRect(ck.RRectXY(ck.LTRBRect(0, 0, width, height), r, r));
+        } else {
+            path.addRect(ck.LTRBRect(0, 0, width, height));
         }
-
-        if (sp.closed) {
-            const last = sp.points[sp.points.length - 1];
-            const first = sp.points[0];
-            ckPath.cubicTo(last.cp2[0], last.cp2[1], first.cp1[0], first.cp1[1], first.x, first.y);
-            ckPath.close();
-        }
+    } else if (geometry.Ellipse) {
+        // Cubics rather than addOval: the four cardinal anchors match what
+        // Convert to Path produces, so outlining an ellipse and outlining the
+        // same ellipse after converting it give the same anchors.
+        const { radius_x: rx, radius_y: ry } = geometry.Ellipse;
+        const kx = rx * KAPPA,
+            ky = ry * KAPPA;
+        path.moveTo(0, -ry);
+        path.cubicTo(kx, -ry, rx, -ky, rx, 0);
+        path.cubicTo(rx, ky, kx, ry, 0, ry);
+        path.cubicTo(-kx, ry, -rx, ky, -rx, 0);
+        path.cubicTo(-rx, -ky, -kx, -ry, 0, -ry);
+        path.close();
+    } else {
+        path.delete();
+        return null; // text, image or unsupported geometry
     }
+
+    if (path.isEmpty()) {
+        path.delete();
+        return null;
+    }
+    return path;
 }
 
-/** Parse a CanvasKit path back into engine subpaths via toCmds(). */
-function parseCkPathToSubpaths(ck: CanvasKit, path: Path): Subpath[] {
-    const cmds = path.toCmds();
+/** Outline one stroke of `base`, applying its dash pattern and alignment. */
+function strokeToSubpaths(ck: CanvasKit, base: Path, stroke: Stroke): Subpath[] | null {
+    // Map stroke cap: 0 = Butt, 1 = Round, 2 = Square
+    const capMap = [ck.StrokeCap.Butt, ck.StrokeCap.Round, ck.StrokeCap.Square];
+    // Map stroke join: 0 = Miter, 1 = Round, 2 = Bevel
+    const joinMap = [ck.StrokeJoin.Miter, ck.StrokeJoin.Round, ck.StrokeJoin.Bevel];
 
-    const ckVerbs = ck as unknown as Record<string, number>;
-    const MOVE = ckVerbs.MOVE_VERB ?? 0;
-    const LINE = ckVerbs.LINE_VERB ?? 1;
-    const QUAD = ckVerbs.QUAD_VERB ?? 2;
-    const CONIC = ckVerbs.CONIC_VERB ?? 3;
-    const CUBIC = ckVerbs.CUBIC_VERB ?? 4;
-    const CLOSE = ckVerbs.CLOSE_VERB ?? 5;
-    const ARG_COUNT: Record<number, number> = {
-        [MOVE]: 2,
-        [LINE]: 2,
-        [QUAD]: 4,
-        [CONIC]: 5,
-        [CUBIC]: 6,
-        [CLOSE]: 0,
-    };
+    // Dashes first — the outline of a dashed stroke is the outline of its
+    // dashes, so the gaps have to be cut before the width is applied.
+    const dashed = dashPath(ck, base, stroke);
 
-    const subpaths: Subpath[] = [];
-    let current: PathPoint[] = [];
-    let closed = false;
+    const inner = stroke.alignment === StrokeAlignment.Inner;
+    const outer = stroke.alignment === StrokeAlignment.Outer;
+    // Inner/Outer draw a double-width stroke and throw away the half that falls
+    // on the wrong side of the fill — exactly what the renderer does, so the
+    // outline lands where the stroke was drawn instead of straddling the edge.
+    const width = inner || outer ? stroke.width * 2 : stroke.width;
 
-    const flush = () => {
-        if (current.length >= 2) {
-            subpaths.push({ points: current, closed });
-        }
-        current = [];
-        closed = false;
-    };
-    const pt = (x: number, y: number): PathPoint => ({ x, y, cp1: [x, y], cp2: [x, y] });
+    // stroke() rewrites its receiver in place, so work on a copy: `base` is
+    // still needed as the clip for Inner/Outer.
+    const outlined = (dashed ?? base).copy();
+    dashed?.delete();
+    const ok = outlined.stroke({
+        width,
+        miter_limit: stroke.miter_limit || 4,
+        cap: capMap[stroke.cap] ?? ck.StrokeCap.Butt,
+        join: joinMap[stroke.join] ?? ck.StrokeJoin.Miter,
+    });
+    if (!ok) {
+        outlined.delete();
+        return null;
+    }
 
-    let i = 0;
-    const n = cmds.length;
-    while (i < n) {
-        const verb = cmds[i++];
-        const argc = ARG_COUNT[verb];
-        if (argc === undefined) break;
-        const args: number[] = [];
-        for (let a = 0; a < argc; a++) args.push(cmds[i++]);
+    let result = outlined;
+    if (inner || outer) {
+        const clipped = ck.Path.MakeFromOp(
+            outlined,
+            base,
+            inner ? ck.PathOp.Intersect : ck.PathOp.Difference,
+        );
+        outlined.delete();
+        if (!clipped) return null;
+        result = clipped;
+    }
 
-        if (verb === MOVE) {
-            flush();
-            current.push(pt(args[0], args[1]));
-        } else if (verb === LINE) {
-            current.push(pt(args[0], args[1]));
-        } else if (verb === CUBIC) {
-            const prev = current[current.length - 1];
-            if (prev) prev.cp2 = [args[0], args[1]];
-            const p = pt(args[4], args[5]);
-            p.cp1 = [args[2], args[3]];
-            current.push(p);
-        } else if (verb === QUAD || verb === CONIC) {
-            const prev = current[current.length - 1];
-            const p0x = prev ? prev.x : args[0];
-            const p0y = prev ? prev.y : args[1];
-            const qx = args[0],
-                qy = args[1];
-            const ex = args[2],
-                ey = args[3];
-            const c1x = p0x + (2 / 3) * (qx - p0x);
-            const c1y = p0y + (2 / 3) * (qy - p0y);
-            const c2x = ex + (2 / 3) * (qx - ex);
-            const c2y = ey + (2 / 3) * (qy - ey);
-            if (prev) prev.cp2 = [c1x, c1y];
-            const p = pt(ex, ey);
-            p.cp1 = [c2x, c2y];
-            current.push(p);
-        } else if (verb === CLOSE) {
-            if (current.length >= 2) {
-                const first = current[0];
-                const last = current[current.length - 1];
-                if (Math.abs(first.x - last.x) < 1e-3 && Math.abs(first.y - last.y) < 1e-3) {
-                    first.cp1 = last.cp1;
-                    current.pop();
+    const subpaths = pathToSubpaths(ck, result);
+    result.delete();
+    return subpaths;
+}
+
+/**
+ * The "on" runs of a dashed stroke, as a new path — or null when the stroke
+ * isn't dashed.
+ *
+ * CanvasKit's `Path.stroke()` takes no path effect, so the dashing has to
+ * happen up front. Walking the contours with ContourMeasure and keeping the
+ * lit intervals is what `SkDashPathEffect` does internally, and it follows
+ * curves exactly rather than approximating along the control polygon.
+ */
+function dashPath(ck: CanvasKit, path: Path, stroke: Stroke): Path | null {
+    const raw = stroke.dash_array ?? [];
+    // SVG's rule, which the engine inherits: a dasharray with a negative entry
+    // or summing to zero is not a dash at all.
+    if (raw.length === 0 || raw.some((n) => !Number.isFinite(n) || n < 0)) return null;
+    const sum = raw.reduce((a, b) => a + b, 0);
+    if (sum <= 0) return null;
+
+    // An odd number of intervals repeats doubled, so "5" means 5 on, 5 off.
+    const pattern = raw.length % 2 === 1 ? [...raw, ...raw] : raw;
+    const period = raw.length % 2 === 1 ? sum * 2 : sum;
+
+    // dash_offset shifts the pattern backwards along the contour; normalise it
+    // into one period so a large offset doesn't cost a long spin-up.
+    const phase = (((stroke.dash_offset ?? 0) % period) + period) % period;
+
+    const out = new ck.Path();
+    const iter = new ck.ContourMeasureIter(path, false, 1);
+    for (let measure = iter.next(); measure; measure = iter.next()) {
+        const total = measure.length();
+        let distance = -phase;
+        let i = 0;
+        let on = true;
+        // Every full pass through the pattern advances by `period` > 0, so this
+        // terminates; the bound is only a guard against a pathological path.
+        const maxSteps = Math.ceil((total + period) / period) * pattern.length + 4;
+        for (let step = 0; distance < total && step < maxSteps; step++) {
+            const end = distance + pattern[i % pattern.length];
+            if (on) {
+                const s = Math.max(0, distance);
+                const e = Math.min(total, end);
+                if (e > s) {
+                    const piece = measure.getSegment(s, e, true);
+                    out.addPath(piece);
+                    piece.delete();
                 }
             }
-            closed = true;
-            flush();
+            distance = end;
+            on = !on;
+            i++;
         }
+        measure.delete();
     }
-    flush();
-    return subpaths;
+    iter.delete();
+    // May be empty if every lit run fell outside the contour; the caller then
+    // finds nothing to outline and leaves the node alone.
+    return out;
 }

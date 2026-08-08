@@ -405,6 +405,34 @@ export function transformSubpaths(subpaths: Subpath[], t: ArrayLike<number>): Su
     }));
 }
 
+/**
+ * How far along its control polygon a cubic's handles sit when approximating a
+ * conic of weight **w** — the one number that turns Skia's rational arcs back
+ * into the cubics this engine stores.
+ *
+ * A conic of weight w is an affine image of a circular arc sweeping
+ * θ = 2·acos(w), whose control point sits where the two endpoint tangents meet,
+ * at r·tan(θ/2) from each end. The classic single-cubic arc approximation puts
+ * each handle at (4/3)·r·tan(θ/4), so a handle lands this fraction of the way
+ * from its endpoint toward the control point:
+ *
+ *     k = (4/3)·tan(θ/4) / tan(θ/2)
+ *
+ * At w = 1 the conic *is* a quadratic and k → 2/3, exactly the quad→cubic
+ * degree elevation — so one formula covers both verbs. On the 90° arcs Skia
+ * emits for round joins, caps, ovals and rounded rects this is accurate to
+ * 0.03% of the radius; treating the conic as a plain quadratic (k = 2/3, which
+ * is what this used to do) is off by 6%, enough to visibly fatten every
+ * rounded corner that survives a boolean op, Crop, Offset Path or Flatten.
+ */
+export function conicHandleRatio(w: number): number {
+    // w ≥ 1 is a parabola or hyperbola, not an arc; w ≤ 0 would be a ≥180° sweep
+    // that Skia never emits. Both fall back to the quadratic elevation.
+    if (!Number.isFinite(w) || w >= 1 - 1e-6 || w <= 0) return 2 / 3;
+    const theta = 2 * Math.acos(w);
+    return ((4 / 3) * Math.tan(theta / 4)) / Math.tan(theta / 2);
+}
+
 /** Parse a CanvasKit path back into engine subpaths via toCmds(). */
 export function pathToSubpaths(ck: CanvasKit, path: Path): Subpath[] {
     const cmds = path.toCmds();
@@ -459,7 +487,9 @@ export function pathToSubpaths(ck: CanvasKit, path: Path): Subpath[] {
             p.cp1 = [args[2], args[3]];
             current.push(p);
         } else if (verb === QUAD || verb === CONIC) {
-            // Elevate quad (or approximate conic) to cubic
+            // Elevate quad — or approximate conic — to cubic. Both share the
+            // control polygon P0→Q→E; only how far along it the handles sit
+            // differs, and that is what the weight decides.
             const prev = current[current.length - 1];
             const p0x = prev ? prev.x : args[0];
             const p0y = prev ? prev.y : args[1];
@@ -467,10 +497,11 @@ export function pathToSubpaths(ck: CanvasKit, path: Path): Subpath[] {
                 qy = args[1];
             const ex = args[2],
                 ey = args[3];
-            const c1x = p0x + (2 / 3) * (qx - p0x);
-            const c1y = p0y + (2 / 3) * (qy - p0y);
-            const c2x = ex + (2 / 3) * (qx - ex);
-            const c2y = ey + (2 / 3) * (qy - ey);
+            const k = verb === CONIC ? conicHandleRatio(args[4]) : 2 / 3;
+            const c1x = p0x + k * (qx - p0x);
+            const c1y = p0y + k * (qy - p0y);
+            const c2x = ex + k * (qx - ex);
+            const c2y = ey + k * (qy - ey);
             if (prev) prev.cp2 = [c1x, c1y];
             const p = pt(ex, ey);
             p.cp1 = [c2x, c2y];
