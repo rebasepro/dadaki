@@ -147,9 +147,26 @@ interface EffectRecord {
 }
 
 export class Renderer {
-    /** Local-space bounding box of a text node's rendered glyphs, used for the
-     *  selection frame. Measures with the Font glyph-width API (getGlyphPaths
-     *  isn't available in this build). Falls back to an em-based estimate. */
+    /** Memo for {@link getTextLocalBounds} — laying a paragraph out per selected
+     *  text node per frame is not free, and the answer only moves when the text
+     *  or its styling does. */
+    private _textWidthMemo = new Map<string, number>();
+
+    /**
+     * Local-space bounding box of a text node's rendered glyphs, used for the
+     * selection frame.
+     *
+     * The width is measured the way the glyphs are actually drawn — same font
+     * provider, family, weight, slant and letter spacing the renderer hands the
+     * Paragraph API. Measuring with a default typeface and no letter spacing
+     * (which is what this used to do) draws the frame around a string nobody is
+     * looking at: set a display face or any letter spacing and the text visibly
+     * runs out past its own selection box.
+     *
+     * The vertical extent stays the documented convention — the origin IS the
+     * baseline, so local y spans -font_size…0 — because the engine's hit-test
+     * assumes exactly that.
+     */
     getTextLocalBounds(id: number): { x: number; y: number; w: number; h: number } | null {
         const node = this.scene.getNode(id);
         if (!node?.geometry.Text) return null;
@@ -157,21 +174,32 @@ export class Renderer {
         const fontSize = geo.font_size;
         const lineHeight = geo.line_height || 1.2;
         const lines = (geo.content || '').split('\n');
-        let width = 0;
-        try {
-            const font = new this.ck.Font(null, fontSize);
-            for (const line of lines) {
-                if (!line) continue;
-                const widths = font.getGlyphWidths(font.getGlyphIDs(line));
-                let w = 0;
-                for (let k = 0; k < widths.length; k++) w += widths[k];
-                if (w > width) width = w;
+
+        // JSON, not a delimiter join: the content can contain anything,
+        // including whatever separator seemed safe.
+        const key = JSON.stringify([
+            geo.content,
+            fontSize,
+            geo.font_family ?? '',
+            lineHeight,
+            geo.font_weight ?? 400,
+            geo.italic ?? false,
+            geo.letter_spacing ?? 0,
+        ]);
+        let width = this._textWidthMemo.get(key) ?? 0;
+        if (!width) {
+            // measureText returns null until a font provider exists; fall back
+            // to the em estimate rather than reporting a zero-width frame.
+            width = this.measureText(geo)?.width ?? 0;
+            if (width > 0) {
+                // Bounded: a document can hold a lot of text, and this only
+                // needs to cover what is on screen right now.
+                if (this._textWidthMemo.size > 512) this._textWidthMemo.clear();
+                this._textWidthMemo.set(key, width);
             }
-            font.delete();
-        } catch {
-            width = 0;
         }
         if (width <= 0) width = Math.max(1, geo.content.length) * fontSize * 0.6;
+
         const h = fontSize + (lines.length - 1) * fontSize * lineHeight;
         // Alignment anchors the text around the origin (center → -w/2, right → -w).
         const offsetX = geo.text_align === 1 ? -width / 2 : geo.text_align === 2 ? -width : 0;
@@ -855,6 +883,9 @@ export class Renderer {
             // The cached provider doesn't know the new face — rebuild lazily.
             this._fontProvider?.delete();
             this._fontProvider = null;
+            // Any width measured before this point was measured against a
+            // fallback face, so the selection frames drawn from it are stale.
+            this._textWidthMemo.clear();
             this.scene.invalidateCache();
             this._needsRender = true;
         });
@@ -4404,11 +4435,18 @@ export class Renderer {
                         op.selOutline,
                     );
                 } else if (geo.Text) {
-                    const approxW = geo.Text.content.length * geo.Text.font_size * 0.6;
-                    canvas.drawRect(
-                        this.ck.LTRBRect(0, -geo.Text.font_size, approxW, 0),
-                        op.selOutline,
-                    );
+                    // Measured the same way the resize handles are, so the
+                    // outline sits on the glyphs. A character count times 0.6em
+                    // — which is what this drew — is neither the text nor the
+                    // handles, so a display face or any letter spacing left the
+                    // box and its own handles in two different places.
+                    const tb = this.getTextLocalBounds(id);
+                    if (tb) {
+                        canvas.drawRect(
+                            this.ck.LTRBRect(tb.x, tb.y, tb.x + tb.w, tb.y + tb.h),
+                            op.selOutline,
+                        );
+                    }
                 }
                 canvas.restore();
             }
