@@ -17,7 +17,7 @@
             "args": [
                 "/Users/francesco/rebase/packages/mcp/bin/rebase-mcp.js"
             ],
-            "cwd": "/Users/francesco/vector-editor/cloud",
+            "cwd": "/Users/francesco/dadaki-vector-editor/cloud",
             "env": {
                 "IS_REBASE_MCP": "true"
             }

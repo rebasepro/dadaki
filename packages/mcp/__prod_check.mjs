@@ -4,7 +4,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import puppeteer from 'puppeteer';
 
 const SITE = 'https://dadaki.rebase.website/edit/new/blank';
-const SERVER = '/Users/francesco/vector-editor/packages/mcp/src/index.ts';
+const SERVER = '/Users/francesco/dadaki-vector-editor/packages/mcp/src/index.ts';
 const TOKEN = 'prod-verify-token';
 const freePort = async () => { const s=netServer(); await new Promise(r=>s.listen(0,'127.0.0.1',r)); const p=s.address().port; await new Promise(r=>s.close(()=>r())); return p; };
 const bridgePort = await freePort();          // never 7331

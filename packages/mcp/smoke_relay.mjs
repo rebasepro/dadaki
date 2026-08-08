@@ -22,7 +22,7 @@ import puppeteer from 'puppeteer';
 
 const FRONTEND = process.env.RELAY_FRONTEND ?? 'http://localhost:5200';
 const BACKEND = process.env.RELAY_BACKEND ?? 'http://localhost:3001';
-const SERVER   = '/Users/francesco/vector-editor/packages/mcp/src/index.ts';
+const SERVER   = '/Users/francesco/dadaki-vector-editor/packages/mcp/src/index.ts';
 const TOKEN    = randomBytes(24).toString('hex');
 
 let fail = 0;

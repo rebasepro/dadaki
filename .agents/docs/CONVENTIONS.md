@@ -136,14 +136,14 @@ Then call `saveMoveHistory()` on mouseUp to commit.
 
 | What | Path |
 |---|---|
-| Entry point | [src/main.ts](file:///Users/francesco/vector-editor/src/main.ts) |
-| All type definitions | [src/types.ts](file:///Users/francesco/vector-editor/src/types.ts) |
-| Engine facade | [src/wasm_scene.ts](file:///Users/francesco/vector-editor/src/wasm_scene.ts) |
-| Core engine | [engine/src/lib.rs](file:///Users/francesco/vector-editor/engine/src/lib.rs) |
-| Protobuf schema | [engine/src/proto.rs](file:///Users/francesco/vector-editor/engine/src/proto.rs) |
-| Vector network | [engine/src/vector_network.rs](file:///Users/francesco/vector-editor/engine/src/vector_network.rs) |
-| Renderer | [src/renderer.ts](file:///Users/francesco/vector-editor/src/renderer.ts) |
-| Input & tools | [src/input.ts](file:///Users/francesco/vector-editor/src/input.ts) |
-| UI panels | [src/ui.ts](file:///Users/francesco/vector-editor/src/ui.ts) |
-| SVG utils | [src/svg_utils.ts](file:///Users/francesco/vector-editor/src/svg_utils.ts) |
-| Global styles | [style.css](file:///Users/francesco/vector-editor/style.css) |
+| Entry point | [src/main.ts](file:///Users/francesco/dadaki-vector-editor/src/main.ts) |
+| All type definitions | [src/types.ts](file:///Users/francesco/dadaki-vector-editor/src/types.ts) |
+| Engine facade | [src/wasm_scene.ts](file:///Users/francesco/dadaki-vector-editor/src/wasm_scene.ts) |
+| Core engine | [engine/src/lib.rs](file:///Users/francesco/dadaki-vector-editor/engine/src/lib.rs) |
+| Protobuf schema | [engine/src/proto.rs](file:///Users/francesco/dadaki-vector-editor/engine/src/proto.rs) |
+| Vector network | [engine/src/vector_network.rs](file:///Users/francesco/dadaki-vector-editor/engine/src/vector_network.rs) |
+| Renderer | [src/renderer.ts](file:///Users/francesco/dadaki-vector-editor/src/renderer.ts) |
+| Input & tools | [src/input.ts](file:///Users/francesco/dadaki-vector-editor/src/input.ts) |
+| UI panels | [src/ui.ts](file:///Users/francesco/dadaki-vector-editor/src/ui.ts) |
+| SVG utils | [src/svg_utils.ts](file:///Users/francesco/dadaki-vector-editor/src/svg_utils.ts) |
+| Global styles | [style.css](file:///Users/francesco/dadaki-vector-editor/style.css) |
