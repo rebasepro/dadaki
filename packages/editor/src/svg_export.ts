@@ -19,6 +19,17 @@ import { isGradient, isMeshGradient, isPattern, isSolid } from './types';
 
 // ─── Lookup Tables ──────────────────────────────────────────────────────────
 
+/**
+ * `data-dadaki-role` value marking the canvas background rect an export paints
+ * behind the artwork.
+ *
+ * It exists so import can tell "this is the page" from "this is a shape the
+ * user drew". Without it, opening our own SVG turns the background into a real
+ * full-canvas rectangle in the layer list — and doing it twice gives two.
+ * Plain `data-*`, so every other SVG renderer simply ignores it.
+ */
+export const CANVAS_BACKGROUND_ROLE = 'canvas-background';
+
 const CAP_MAP = ['butt', 'round', 'square'] as const;
 const JOIN_MAP = ['miter', 'round', 'bevel'] as const;
 const FILL_RULE_MAP = ['nonzero', 'evenodd'] as const;
@@ -271,10 +282,13 @@ export function buildSVGFromData(input: SVGExportInput): string {
     const vb = viewBox ?? { x: 0, y: 0, w: docWidth, h: docHeight };
     let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${vb.w}" height="${vb.h}" viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}">`;
 
-    // Optional solid background rect (covers the viewBox).
+    // Optional solid background rect (covers the viewBox). It is the canvas,
+    // not artwork — tagged so that re-importing our own export doesn't turn the
+    // background into a real full-page rectangle, one more on every round trip.
+    // Other renderers ignore the attribute and still paint the background.
     if (background && background.a > 0) {
         const c = `rgba(${Math.round(background.r * 255)},${Math.round(background.g * 255)},${Math.round(background.b * 255)},${background.a})`;
-        svg += `<rect x="${vb.x}" y="${vb.y}" width="${vb.w}" height="${vb.h}" fill="${c}"/>`;
+        svg += `<rect data-dadaki-role="${CANVAS_BACKGROUND_ROLE}" x="${vb.x}" y="${vb.y}" width="${vb.w}" height="${vb.h}" fill="${c}"/>`;
     }
 
     // Collect gradient <defs> during rendering

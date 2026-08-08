@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { FilledFace, SVGExportInput } from './svg_export';
-import { BLEND_MODE_MAP, buildSVGFromData } from './svg_export';
+import { BLEND_MODE_MAP, buildSVGFromData, CANVAS_BACKGROUND_ROLE } from './svg_export';
 import type { NodeStyle, SceneNode } from './types';
 import { StrokeAlignment } from './types';
 
@@ -1555,6 +1555,25 @@ describe('SVG Export — viewBox and background', () => {
         expect(bg.getAttribute('width')).toBe('400');
         expect(bg.getAttribute('height')).toBe('300');
         expect(bg.getAttribute('fill')).toContain('rgba(255,255,255');
+    });
+
+    it('marks the background rect as the canvas, not artwork', () => {
+        // Import skips this rect on the way back in. Without the marker,
+        // opening our own export adds a real full-canvas rectangle to the
+        // layer list — and a second round trip adds another one.
+        const svg = buildSVGFromData({
+            docWidth: 400,
+            docHeight: 300,
+            nodes: baseNode(),
+            rootNodeIds: [1],
+            localTransforms: { 1: IDENTITY },
+            viewBox: { x: 0, y: 0, w: 400, h: 300 },
+            background: { r: 1, g: 1, b: 1, a: 1 },
+        });
+        const rects = queryAllTags(parseSVG(svg), 'rect');
+        expect(rects[0].getAttribute('data-dadaki-role')).toBe(CANVAS_BACKGROUND_ROLE);
+        // The artwork itself must NOT be marked — only the background is.
+        expect(rects[1].getAttribute('data-dadaki-role')).toBeNull();
     });
 
     it('omits the background rect when none is given', () => {

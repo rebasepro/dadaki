@@ -31,7 +31,7 @@ import { withPanelFocusPreserved } from './panel_focus';
 import type { CssDecl } from './svg_css';
 import { matchedCssStyles, parseSvgStylesheet } from './svg_css';
 import type { FilledFace, LivePaintRenderData, SVGExportInput } from './svg_export';
-import { BLEND_MODE_MAP, buildSVGFromData } from './svg_export';
+import { BLEND_MODE_MAP, buildSVGFromData, CANVAS_BACKGROUND_ROLE } from './svg_export';
 import type { GradientGeo, SVGGradientData, SVGSubpath } from './svg_utils';
 import {
     composeMatrices,
@@ -6461,6 +6461,12 @@ export class UIEngine {
 
             // <symbol> is only renderable when referenced by <use>, not as a top-level element
             if (tag === 'symbol') return;
+
+            // The canvas background one of our own exports painted behind the
+            // artwork is the page, not a shape. Importing it would add a real
+            // full-canvas rectangle to the layer list — and another one every
+            // time the file went out and came back.
+            if (el.getAttribute('data-dadaki-role') === CANVAS_BACKGROUND_ROLE) return;
 
             // display:none removes the element AND its subtree (unlike
             // visibility, display is not inherited, so groups must be handled

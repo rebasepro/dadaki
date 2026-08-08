@@ -196,7 +196,7 @@ describe('a saved document comes back the same', () => {
         e.add_rect(0, 0, 50, 50);
         const abA = e.add_artboard(0, 0, 800, 600);
         e.set_artboard_name(abA, 'Board A');
-        e.set_artboard_background(abA, JSON.stringify({ r: 0.9, g: 0.9, b: 1, a: 1 }));
+        e.set_artboard_background(abA, 0.9, 0.9, 1, 1);
         e.add_artboard(900, 0, 400, 400);
         e.add_guide('x', 120);
         e.add_guide('y', 250);
