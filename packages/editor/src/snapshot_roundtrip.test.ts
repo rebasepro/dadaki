@@ -232,7 +232,10 @@ describe('a saved document comes back the same', () => {
         // A deterministic shuffle of the feature surface, so a field that only
         // goes missing in combination still shows up.
         let state = 20260808;
-        const rnd = () => ((state = (state * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+        const rnd = () => {
+            state = (state * 1664525 + 1013904223) >>> 0;
+            return state / 2 ** 32;
+        };
 
         const e = new Engine();
         const ids: number[] = [];
