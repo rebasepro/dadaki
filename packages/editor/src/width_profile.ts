@@ -63,6 +63,7 @@ export function applyWidthProfile(
     const iter = new ck.ContourMeasureIter(path, false, 1);
     const measure = iter.next();
     if (!measure) {
+        iter.delete();
         path.delete();
         return false;
     }
@@ -81,6 +82,7 @@ export function applyWidthProfile(
         right.push([px - nx * w, py - ny * w]);
     }
     measure.delete();
+    iter.delete();
     path.delete();
 
     // Closed ribbon: down the left side, back up the right side.

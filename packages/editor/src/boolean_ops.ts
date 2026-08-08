@@ -67,7 +67,11 @@ export function computeBooleanSubpaths(
         const combined = ck.Path.MakeFromOp(result, paths[i], opMap[op]);
         result.delete();
         paths[i].delete();
-        if (!combined) return null;
+        if (!combined) {
+            // Bailing here still owns every operand we haven't folded in yet.
+            for (let j = i + 1; j < paths.length; j++) paths[j].delete();
+            return null;
+        }
         result = combined;
     }
 

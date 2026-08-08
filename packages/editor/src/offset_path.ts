@@ -27,8 +27,13 @@ export function computeOffsetSubpaths(
 ): { subpaths: Subpath[]; fillRule: number } | null {
     if (!distance || !Number.isFinite(distance)) return null;
     const geom = scene.getNodeGeometry(nodeId);
-    const subpaths = geom?.Path?.subpaths;
-    if (!subpaths || subpaths.length === 0) return null;
+    const raw = geom?.Path?.subpaths;
+    if (!raw || raw.length === 0) return null;
+    // Offset the outline that is on screen, not the polygon its per-vertex
+    // corner radii were rounding off — otherwise a rounded rectangle offsets
+    // as a sharp one and the copy no longer matches the original.
+    const resolved = scene.getResolvedSubpaths(nodeId);
+    const subpaths = resolved.length === raw.length ? resolved : raw;
 
     const base = new ck.Path();
     appendSubpathsToPath(base, subpaths);
