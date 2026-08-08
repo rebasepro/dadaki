@@ -41,6 +41,7 @@ function worldContour(ck: CanvasKit, scene: WasmScene, id: number, n: number): C
     const iter = new ck.ContourMeasureIter(path, false, 1);
     const measure = iter.next();
     if (!measure) {
+        iter.delete();
         path.delete();
         return null;
     }
@@ -53,6 +54,7 @@ function worldContour(ck: CanvasKit, scene: WasmScene, id: number, n: number): C
         pts.push([posTan[0], posTan[1]]);
     }
     measure.delete();
+    iter.delete();
     path.delete();
     return { pts, closed };
 }

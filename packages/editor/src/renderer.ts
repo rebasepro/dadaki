@@ -5059,6 +5059,7 @@ export class Renderer {
         const measure = iter.next();
         if (!measure) {
             canvas.restore();
+            iter.delete();
             worldPath.delete();
             return;
         }
@@ -5096,6 +5097,10 @@ export class Renderer {
         canvas.restore();
         font.delete();
         measure.delete();
+        // This runs once per frame for as long as a text-on-path node is on
+        // screen, so an undeleted iterator here is an unbounded leak, not a
+        // one-off one.
+        iter.delete();
         worldPath.delete();
     }
 
@@ -5394,6 +5399,7 @@ export class Renderer {
         linePaint.delete();
         anchorFill.delete();
         anchorStroke.delete();
+        selectedFill.delete();
         handleFill.delete();
         canvas.restore();
     }
