@@ -14,6 +14,7 @@
 
 import type { CanvasKit, Path } from 'canvaskit-wasm';
 import { appendSubpathsToPath, pathToSubpaths } from './boolean_ops';
+import { dashIntervals } from './dash';
 import {
     type NodeGeometry,
     type NodeStyle,
@@ -178,16 +179,11 @@ function strokeToSubpaths(ck: CanvasKit, base: Path, stroke: Stroke): Subpath[] 
  * curves exactly rather than approximating along the control polygon.
  */
 function dashPath(ck: CanvasKit, path: Path, stroke: Stroke): Path | null {
-    const raw = stroke.dash_array ?? [];
-    // SVG's rule, which the engine inherits: a dasharray with a negative entry
-    // or summing to zero is not a dash at all.
-    if (raw.length === 0 || raw.some((n) => !Number.isFinite(n) || n < 0)) return null;
-    const sum = raw.reduce((a, b) => a + b, 0);
-    if (sum <= 0) return null;
-
-    // An odd number of intervals repeats doubled, so "5" means 5 on, 5 off.
-    const pattern = raw.length % 2 === 1 ? [...raw, ...raw] : raw;
-    const period = raw.length % 2 === 1 ? sum * 2 : sum;
+    // The same rule the renderer draws by — shared so an outline can't disagree
+    // with the dashes it is supposed to be replacing.
+    const pattern = dashIntervals(stroke.dash_array);
+    if (!pattern) return null;
+    const period = pattern.reduce((a, b) => a + b, 0);
 
     // dash_offset shifts the pattern backwards along the contour; normalise it
     // into one period so a large offset doesn't cost a long spin-up.

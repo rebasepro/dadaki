@@ -1148,7 +1148,11 @@ pub const RENDER_PROTOCOL_MAGIC: u32 = 0x3143_4556;
 /// v12: paint type 5 = mesh gradient: [rows u32][cols u32] then per vertex
 ///      (row-major, (rows+1)*(cols+1)) [x,y f32][r,g,b,a f32][e,w,s,n handles
 ///      as 8 f32, effective/materialized — the reader never sees "auto"].
-pub const RENDER_PROTOCOL_VERSION: u32 = 13;
+/// v13: Live Paint faces carry a full paint rather than a solid colour.
+/// v14: a stroke writes its whole dash array as [count u32][count x f32]
+///      instead of a fixed on/off pair, so an imported multi-interval
+///      stroke-dasharray draws as the file says.
+pub const RENDER_PROTOCOL_VERSION: u32 = 14;
 
 /// Begin a framed record: reserve a u32 length placeholder, return its offset.
 fn begin_record(buf: &mut Vec<u8>) -> usize {
@@ -1972,10 +1976,15 @@ impl Engine {
                 self.render_buffer.extend_from_slice(&st.width.to_le_bytes());
                 self.render_buffer.extend_from_slice(&(st.cap as u32).to_le_bytes());
                 self.render_buffer.extend_from_slice(&(st.join as u32).to_le_bytes());
-                let dash_on = st.dash_array.first().copied().unwrap_or(0.0);
-                let dash_off = st.dash_array.get(1).copied().unwrap_or(dash_on);
-                self.render_buffer.extend_from_slice(&dash_on.to_le_bytes());
-                self.render_buffer.extend_from_slice(&dash_off.to_le_bytes());
+                // The whole dash pattern, not its first two intervals: an SVG
+                // may carry any number, and the file round-trips them all, so
+                // truncating here made the canvas disagree with what a save
+                // would produce.
+                self.render_buffer
+                    .extend_from_slice(&(st.dash_array.len() as u32).to_le_bytes());
+                for d in &st.dash_array {
+                    self.render_buffer.extend_from_slice(&d.to_le_bytes());
+                }
                 self.render_buffer.extend_from_slice(&st.dash_offset.to_le_bytes());
                 self.render_buffer.extend_from_slice(&st.miter_limit.to_le_bytes());
                 let align = match st.alignment {
@@ -2152,10 +2161,12 @@ impl Engine {
             self.render_buffer.extend_from_slice(&st.width.to_le_bytes());
             self.render_buffer.extend_from_slice(&(st.cap as u32).to_le_bytes());
             self.render_buffer.extend_from_slice(&(st.join as u32).to_le_bytes());
-            let dash_on = st.dash_array.first().copied().unwrap_or(0.0);
-            let dash_off = st.dash_array.get(1).copied().unwrap_or(dash_on);
-            self.render_buffer.extend_from_slice(&dash_on.to_le_bytes());
-            self.render_buffer.extend_from_slice(&dash_off.to_le_bytes());
+            // See the note on the other stroke writer: the full dash array.
+            self.render_buffer
+                .extend_from_slice(&(st.dash_array.len() as u32).to_le_bytes());
+            for d in &st.dash_array {
+                self.render_buffer.extend_from_slice(&d.to_le_bytes());
+            }
             self.render_buffer.extend_from_slice(&st.dash_offset.to_le_bytes());
             self.render_buffer.extend_from_slice(&st.miter_limit.to_le_bytes());
             let align = match st.alignment {
@@ -9138,6 +9149,35 @@ mod tests {
         assert!(engine.deserialize_scene(&a), "snapshot must decode");
         let c = engine.serialize_scene();
         assert_eq!(a, c, "serialize→deserialize→serialize must be a byte-exact fixed point");
+    }
+
+    #[test]
+    fn test_render_buffer_carries_the_whole_dash_array() {
+        // A stroke's dash pattern goes onto the wire in full. It used to be
+        // truncated to an on/off pair, so an SVG imported with
+        // stroke-dasharray="10 5 2 5" drew as "10 5" while still saving back as
+        // all four — the canvas and the file disagreeing about the same stroke.
+        let mut engine = Engine::new();
+        let r = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        engine.set_node_style(
+            r,
+            r#"{"fills":[],"strokes":[{"paint":{"r":0.0,"g":0.0,"b":0.0,"a":1.0},
+                "width":3.0,"cap":0,"join":0,"dash_array":[10.0,5.0,2.0,5.0],
+                "dash_offset":3.0,"miter_limit":4.0,"alignment":"Center"}],
+                "opacity":1.0,"blend_mode":0,"fill_rule":0,"corner_radius":0.0,"effects":[]}"#,
+        );
+        engine.update_render_buffer(vec![r], vec![]);
+
+        // [count = 4][10.0][5.0][2.0][5.0][dash_offset = 3.0]
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&4u32.to_le_bytes());
+        for v in [10.0f32, 5.0, 2.0, 5.0, 3.0] {
+            expected.extend_from_slice(&v.to_le_bytes());
+        }
+        assert!(
+            engine.render_buffer.windows(expected.len()).any(|w| w == expected),
+            "render buffer does not contain the full dash array"
+        );
     }
 
     #[test]

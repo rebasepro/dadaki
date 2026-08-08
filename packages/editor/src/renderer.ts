@@ -14,6 +14,7 @@ type OutlinePt = { x: number; y: number; cp1: number[]; cp2: number[] };
 
 import { adaptiveTileSources, maxTileScale, rasterizeAdaptiveTile } from './adaptive_tiles';
 import { appendSubpathsToPath, invertAffine, nodeToWorldPath } from './boolean_ops';
+import { dashIntervals } from './dash';
 import { neighborGaps } from './equal_spacing';
 import {
     buildFontProvider,
@@ -128,7 +129,7 @@ export type ArtboardHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 // render-buffer layout on either side; a mismatch means engine/pkg is stale
 // (rebuild wasm) or renderer.ts is out of date.
 const RENDER_PROTOCOL_MAGIC = 0x31434556; // ASCII "VEC1", little-endian
-const EXPECTED_RENDER_PROTOCOL_VERSION = 13; // v13: LP faces carry a full paint
+const EXPECTED_RENDER_PROTOCOL_VERSION = 14; // v14: strokes carry the whole dash array
 
 /** One decoded effect record from the render buffer. */
 interface EffectRecord {
@@ -2590,13 +2591,18 @@ export class Renderer {
                         const mean = meanColor(mesh);
                         paint = { type: 1, r: mean.r, g: mean.g, b: mean.b, a: mean.a };
                     }
+                    const width = reader.f32();
+                    const cap = reader.u32();
+                    const join = reader.u32();
+                    const dashCount = reader.u32();
+                    const dashArray: number[] = [];
+                    for (let d = 0; d < dashCount; d++) dashArray.push(reader.f32());
                     strokes.push({
                         paint,
-                        width: reader.f32(),
-                        cap: reader.u32(),
-                        join: reader.u32(),
-                        dashOn: reader.f32(),
-                        dashOff: reader.f32(),
+                        width,
+                        cap,
+                        join,
+                        dashArray,
                         dashPhase: reader.f32(),
                         miterLimit: reader.f32(),
                         alignment: reader.u32(),
@@ -2994,11 +3000,9 @@ export class Renderer {
                         p.setStrokeMiter(st.miterLimit);
 
                         let dashEffect = null;
-                        if (st.dashOn > 0) {
-                            dashEffect = this.ck.PathEffect.MakeDash(
-                                [st.dashOn, st.dashOff],
-                                st.dashPhase,
-                            );
+                        const intervals = dashIntervals(st.dashArray);
+                        if (intervals) {
+                            dashEffect = this.ck.PathEffect.MakeDash(intervals, st.dashPhase);
                             p.setPathEffect(dashEffect);
                         }
 
