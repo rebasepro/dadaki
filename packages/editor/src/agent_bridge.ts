@@ -298,7 +298,11 @@ function connectRelay(
     opts: BridgeOptions,
 ): BridgeHandle {
     const { onStatus, maxRetryMs = 10_000 } = opts;
-    const base = `${(opts.relayOrigin ?? window.location.origin).replace(/\/+$/, '')}/api/agent-bridge`;
+    // The relay is a Rebase custom function, so it is mounted under
+    // /api/functions — not at the top level. It has to be: the managed runtime
+    // only ships config/, backend/functions/ and the generated schema, so a
+    // route mounted anywhere else exists in dev and 404s in production.
+    const base = `${(opts.relayOrigin ?? window.location.origin).replace(/\/+$/, '')}/api/functions/agent-bridge`;
     const qs = `token=${encodeURIComponent(creds.token)}`;
     let source: EventSource | null = null;
     let stopped = false;

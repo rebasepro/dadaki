@@ -49,7 +49,7 @@ try {
   check('token stripped from the address bar', !String(st.url).includes(TOKEN), st.url);
   check('"Agent connected" badge visible', st.badge === 1, st);
 
-  const relayStatus = await (await fetch(`${BACKEND}/api/agent-bridge/status?token=${TOKEN}`)).json();
+  const relayStatus = await (await fetch(`${BACKEND}/api/functions/agent-bridge/status?token=${TOKEN}`)).json();
   check('backend sees an attached editor', relayStatus.attached === true, relayStatus);
 
   const rect = await call('create_rect', { x: 40, y: 40, width: 200, height: 120, style: { fill: '#00a2ff' } });

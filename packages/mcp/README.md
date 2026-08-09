@@ -99,7 +99,7 @@ node --experimental-strip-types packages/mcp/src/index.ts \
 It prints a URL; open the hosted editor with it once and the tab attaches. From
 there it behaves exactly like bridge mode — same tools, same badge, same
 one-call-one-undo — except the calls travel through the app's backend
-(`/api/agent-bridge`) instead of a loopback socket.
+(`/api/functions/agent-bridge`) instead of a loopback socket.
 
 Sessions live in the backend process's memory, so a horizontally scaled
 deployment would need sticky routing or a shared store.

@@ -33,7 +33,9 @@ export class RelayTransport implements EditorTransport {
 
     constructor(opts: RelayTransportOptions) {
         this.opts = opts;
-        this.base = `${opts.origin.replace(/\/+$/, '')}/api/agent-bridge`;
+        // /api/functions/… because the relay ships as a Rebase custom function
+        // — the only backend code the managed runtime's bundle carries.
+        this.base = `${opts.origin.replace(/\/+$/, '')}/api/functions/agent-bridge`;
     }
 
     /** Is an editor currently holding this token? */

@@ -30,6 +30,13 @@
       "autoPort": true
     },
     {
+      "name": "dadaki-cloud-main-dev",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd cloud-main && ./node_modules/.bin/rebase dev"],
+      "port": 3001,
+      "autoPort": false
+    },
+    {
       "name": "dadaki-cloud-main-frontend",
       "runtimeExecutable": "sh",
       "runtimeArgs": ["-c", "cd cloud-main/frontend && ./node_modules/.bin/vite --mode development --port 5204 --strictPort"],
