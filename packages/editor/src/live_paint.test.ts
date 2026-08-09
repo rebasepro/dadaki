@@ -301,6 +301,125 @@ describe('Live Paint — gap tolerance', () => {
     });
 });
 
+// ─── A2. Face boundaries must land on the real intersections ────────────────
+
+/** A closed quad from four corners, straight segments (cp == anchor). */
+function addQuad(e: Engine, pts: [number, number][]): number {
+    return e.add_path(
+        JSON.stringify([
+            { closed: true, points: pts.map(([x, y]) => ({ x, y, cp1: [x, y], cp2: [x, y] })) },
+        ]),
+    );
+}
+
+function cornersOf(scene: WasmScene, faceId: number): [number, number][] {
+    return (scene.getFaceOutline(faceId) ?? []).map((p) => [p.x, p.y]);
+}
+
+/** Boundary walks start anywhere, so compare as a set rather than a sequence. */
+function hasCorner(corners: [number, number][], x: number, y: number, tol = 0.5): boolean {
+    return corners.some(([cx, cy]) => Math.abs(cx - x) <= tol && Math.abs(cy - y) <= tol);
+}
+
+describe('Live Paint — a face boundary sits on the true intersections', () => {
+    it('axis-aligned: a square split by a rectangle is exact', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const a = addQuad(e, [
+            [0, 0],
+            [200, 0],
+            [200, 200],
+            [0, 200],
+        ]);
+        const b = addQuad(e, [
+            [0, 0],
+            [200, 0],
+            [200, 100],
+            [0, 100],
+        ]);
+        makeLP(e, [a, b]);
+        const corners = cornersOf(scene, e.query_face_at(100, 50));
+        expect(corners.length).toBe(4);
+        for (const [x, y] of [
+            [0, 0],
+            [200, 0],
+            [200, 100],
+            [0, 100],
+        ]) {
+            expect(hasCorner(corners, x, y)).toBe(true);
+        }
+    });
+
+    /** P(u,v) on an isometric face: u along (s,-200), v along (s,200). */
+    const S = 200 * Math.sqrt(3);
+    const iso =
+        (ox = 0, oy = 0) =>
+        (u: number, v: number): [number, number] => [ox + u * S + v * S, oy - 200 * u + 200 * v];
+
+    it('isometric: the same split, rotated, is exact', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const at = iso();
+        const a = addQuad(e, [at(0, 0), at(1, 0), at(1, 1), at(0, 1)]);
+        const b = addQuad(e, [at(0, 0), at(1, 0), at(1, 0.5), at(0, 0.5)]);
+        makeLP(e, [a, b]);
+        const probe = at(0.5, 0.25);
+        const corners = cornersOf(scene, e.query_face_at(probe[0], probe[1]));
+        expect(corners.length).toBe(4);
+        for (const [x, y] of [at(0, 0), at(1, 0), at(1, 0.5), at(0, 0.5)]) {
+            expect(hasCorner(corners, x, y)).toBe(true);
+        }
+    });
+
+    /**
+     * KNOWN BUG. The arrangement a faceted isometric drawing actually produces:
+     * a face tiled by several bands, then one more quad laid across all of them
+     * to cut a row. Every shape is closed with straight edges, and both tests
+     * above show that any *pair* of these resolves exactly — but together the
+     * region comes out inflated:
+     *
+     *   want (132,-76) (194,-112) (395,  4) (333, 40)
+     *   got  (132,-76) (204,-118) (408, 12) (346, 48)
+     *
+     * One corner is right; the u=0.56 edge lands at ~0.59 and the v=0.58 edge
+     * at ~0.62, each pushed outward by ~11-16 units. Because neighbouring
+     * regions are each inflated over their shared edges, a painted drawing
+     * renders with overlapping, wandering bands and white gaps rather than a
+     * clean tiling — which is what Live Paint on an isometric cube looks like
+     * today. Axis-aligned arrangements are unaffected, which is why the simple
+     * cases all pass.
+     *
+     * Marked `fails` so the suite stays green while the bug is on record. When
+     * the engine is fixed this starts failing — that is the signal to drop the
+     * marker, not the test.
+     */
+    it.fails('isometric: a face tiled by bands, then cut by a row quad', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const at = iso();
+        const edges = [0, 0.2, 0.38, 0.56, 0.76, 1];
+        const ids: number[] = [];
+        for (let i = 0; i < edges.length - 1; i++) {
+            ids.push(
+                addQuad(e, [
+                    at(edges[i], 0),
+                    at(edges[i + 1], 0),
+                    at(edges[i + 1], 1),
+                    at(edges[i], 1),
+                ]),
+            );
+        }
+        ids.push(addQuad(e, [at(0, 0), at(1, 0), at(1, 0.58), at(0, 0.58)]));
+        makeLP(e, ids);
+
+        const probe = at(0.47, 0.29);
+        const corners = cornersOf(scene, e.query_face_at(probe[0], probe[1]));
+        const want: [number, number][] = [at(0.38, 0), at(0.56, 0), at(0.56, 0.58), at(0.38, 0.58)];
+        expect(corners.length).toBe(4);
+        for (const [x, y] of want) expect(hasCorner(corners, x, y)).toBe(true);
+    });
+});
+
 // ─── B. getEditorContext classification (the reported UI bugs) ──────────────
 
 describe('Live Paint — editor context classification', () => {
