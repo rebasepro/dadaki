@@ -29,7 +29,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { createTransport, readConfig } from './config.ts';
+import { createTransport, readConfig, rememberToken } from './config.ts';
 
 const config = readConfig();
 const { transport: session, notice } = await createTransport(config);
@@ -139,6 +139,34 @@ async function created(method: string, args: unknown[]) {
     const id = await session.call<number>(method, args);
     return { id, node: await session.call('describeNode', [id]) };
 }
+
+// ─── Connecting ─────────────────────────────────────────────────────────
+
+tool(
+    'connect',
+    'Attach to the document someone has open in dadaki. Ask them to click "Connect agent" in the editor header and read you the 8-character code, then pass it here. Use this whenever a tool reports that no editor is attached. You never need a URL or a token — only the code.',
+    {
+        code: z
+            .string()
+            .min(6)
+            .describe('The 8-character code from the editor, e.g. "K7F2-QD9M" (dashes optional)'),
+    },
+    async (a) => {
+        const relay = session as { claim?: (code: string) => Promise<string>; mode: string };
+        if (typeof relay.claim !== 'function') {
+            throw new Error(
+                `this server is running in ${relay.mode} mode, which attaches directly and has no ` +
+                    'pairing step — connect is only for relay mode (the hosted app).',
+            );
+        }
+        const token = await relay.claim(a.code);
+        rememberToken(token);
+        // Prove it end to end rather than reporting a paired token that turns
+        // out to drive nothing: if the tab is really there, describe answers.
+        const scene = await session.call('describe');
+        return { connected: true, scene };
+    },
+);
 
 // ─── Seeing ─────────────────────────────────────────────────────────────
 

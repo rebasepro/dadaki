@@ -147,6 +147,29 @@ export function readBridgeCredentials(): BridgeCredentials | null {
     }
 }
 
+/**
+ * A fresh relay token, minted in the page.
+ *
+ * The token is a bearer capability for editing this document, so it is 192 bits
+ * from the platform CSPRNG — the same shape the MCP server generates, because
+ * the backend accepts exactly one format and neither side should be able to
+ * weaken it.
+ */
+export function newBridgeToken(): string {
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Remember credentials so a reload stays attached. */
+export function saveBridgeCredentials(creds: BridgeCredentials) {
+    try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(creds));
+    } catch {
+        // Private mode / storage disabled: this session still works.
+    }
+}
+
 /** Forget any stored bridge, so the tab stops attaching on reload. */
 export function clearBridgeCredentials() {
     try {
@@ -166,6 +189,14 @@ export interface BridgeHandle {
 export interface BridgeOptions {
     /** Called on connect/disconnect so a host can show status. */
     onStatus?: (connected: boolean) => void;
+    /**
+     * Called when an agent actually joins this session — distinct from the
+     * channel being up. With the pairing-code flow the tab connects first and
+     * the agent arrives later, so "my stream is open" no longer implies "an
+     * agent is here", and a host that conflates the two tells the user an agent
+     * is driving their document before one exists.
+     */
+    onAgentPresent?: (present: boolean) => void;
     /** Reconnect backoff ceiling. */
     maxRetryMs?: number;
     /**
@@ -342,7 +373,16 @@ function connectRelay(
             console.info('[dadaki] agent bridge attached (relay)');
         });
 
+        // An agent redeemed the pairing code for this session.
+        es.addEventListener('agent', () => {
+            opts.onAgentPresent?.(true);
+            console.info('[dadaki] an agent joined this session');
+        });
+
         es.addEventListener('call', async (event) => {
+            // A call is proof of an agent, whichever way it attached — this also
+            // covers a reconnect that missed the `agent` announcement.
+            opts.onAgentPresent?.(true);
             let msg: CallFrame;
             try {
                 msg = JSON.parse((event as MessageEvent).data);

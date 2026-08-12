@@ -53,7 +53,9 @@ export type { BridgeCredentials, BridgeHandle, BridgeOptions } from './agent_bri
 export {
     clearBridgeCredentials,
     connectAgentBridge,
+    newBridgeToken,
     readBridgeCredentials,
+    saveBridgeCredentials,
 } from './agent_bridge';
 export type { AnalyticsSink } from './analytics';
 export { logAppEvent, registerAnalyticsSink } from './analytics';

@@ -28,8 +28,54 @@ export interface RelayTransportOptions {
 
 export class RelayTransport implements EditorTransport {
     readonly mode = 'relay';
-    private readonly opts: RelayTransportOptions;
+    private opts: RelayTransportOptions;
     private readonly base: string;
+    /** Has an editor ever held this session? Decides how patient `call` is. */
+    private seenEditor = false;
+
+    /** The token currently in use, so a caller can persist it. */
+    get token(): string {
+        return this.opts.token;
+    }
+
+    /**
+     * Redeem a pairing code shown by the editor's "Connect agent" button.
+     *
+     * This is what lets an agent attach knowing nothing but a short code the
+     * human read to it — no URL, no 48-hex token, nothing to paste into a
+     * config. The code is single-use, so a successful claim is also the last
+     * time that code works.
+     */
+    async claim(code: string): Promise<string> {
+        const cleaned = code.toUpperCase().replace(/[^0-9A-Z]/g, '');
+        let res: Response;
+        try {
+            res = await fetch(`${this.base}/claim`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: cleaned }),
+                signal: AbortSignal.timeout(10_000),
+            });
+        } catch (err) {
+            throw new AgentCallError(
+                `could not reach the relay at ${this.base} (${(err as Error).message})`,
+            );
+        }
+        if (res.status === 404) {
+            throw new AgentCallError(
+                'that code is not valid (it may have expired, or already been used). Ask for a ' +
+                    'fresh one from "Connect agent" in the editor.',
+            );
+        }
+        if (res.status === 429) {
+            throw new AgentCallError('too many attempts — wait a minute and try again.');
+        }
+        if (!res.ok) throw new AgentCallError(`relay returned ${res.status} for claim`);
+        const { token } = (await res.json()) as { token?: string };
+        if (!token) throw new AgentCallError('relay returned no token for that code');
+        this.opts = { ...this.opts, token };
+        return token;
+    }
 
     constructor(opts: RelayTransportOptions) {
         this.opts = opts;
@@ -48,7 +94,9 @@ export class RelayTransport implements EditorTransport {
                 },
             );
             if (!res.ok) return false;
-            return Boolean(((await res.json()) as { attached?: boolean })?.attached);
+            const ok = Boolean(((await res.json()) as { attached?: boolean })?.attached);
+            if (ok) this.seenEditor = true;
+            return ok;
         } catch {
             return false;
         }
@@ -60,13 +108,22 @@ export class RelayTransport implements EditorTransport {
      * make the tool look broken rather than merely early.
      */
     private async waitForEditor(): Promise<void> {
-        const deadline = Date.now() + (this.opts.attachTimeoutMs ?? 120_000);
+        // Fail FAST when we have never seen this editor: the agent's next move
+        // is to ask a human for a pairing code, and it cannot do that while
+        // blocked. Waiting two minutes here just meant the MCP client's own
+        // timeout fired first and the agent got "Request timed out" instead of
+        // the instructions. Once a tab HAS been attached, a drop is usually a
+        // reload, so wait long enough for it to come back.
+        const deadline =
+            Date.now() + (this.opts.attachTimeoutMs ?? (this.seenEditor ? 45_000 : 4_000));
         for (;;) {
             if (await this.attached()) return;
             if (Date.now() > deadline) {
                 throw new AgentCallError(
-                    'no editor is attached. Open the hosted editor with the URL printed at ' +
-                        'startup, then retry.',
+                    'no editor is attached. Ask the person you are working with to open their ' +
+                        'dadaki document, click "Connect agent" in the header, and read you the ' +
+                        '8-character code — then call `connect` with it. (They do not need to ' +
+                        'paste a URL or a token; the code is all you need.)',
                 );
             }
             await new Promise((r) => setTimeout(r, 1_000));

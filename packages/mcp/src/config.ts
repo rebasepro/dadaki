@@ -33,6 +33,26 @@ const DEFAULT_BRIDGE_PORT = 7331;
  */
 const TOKEN_FILE = join(homedir(), '.dadaki', 'agent-bridge.json');
 
+/**
+ * Remember a token that came from somewhere else — a claimed pairing code.
+ *
+ * Without this, `connect` would work for one session and the next restart would
+ * silently go back to the old token and report "no editor attached", which is
+ * the confusing failure the pairing flow exists to remove.
+ */
+export function rememberToken(token: string) {
+    try {
+        mkdirSync(dirname(TOKEN_FILE), { recursive: true });
+        writeFileSync(TOKEN_FILE, JSON.stringify({ token }, null, 2));
+        chmodSync(TOKEN_FILE, 0o600);
+    } catch (err) {
+        console.error(
+            `[dadaki-mcp] connected, but could not save the token to ${TOKEN_FILE} ` +
+                `(${(err as Error).message}). You will need a fresh code after a restart.`,
+        );
+    }
+}
+
 function persistentToken(): string {
     try {
         const saved = JSON.parse(readFileSync(TOKEN_FILE, 'utf8')) as { token?: string };
@@ -152,7 +172,6 @@ export async function createTransport(
         const origin = cfg.url ?? 'https://dadaki.rebase.website';
         const transport = new RelayTransport({ origin, token: cfg.token });
         const base = origin.replace(/\/+$/, '');
-        const connectUrl = `${base}/edit/new/blank?agentBridge=cloud&token=${cfg.token}`;
         const live = await transport.attached();
         return {
             transport,
@@ -160,8 +179,9 @@ export async function createTransport(
                 `[dadaki-mcp] relay mode — ${base}\n` +
                 (live
                     ? '[dadaki-mcp] an editor is already attached to this session.\n'
-                    : '[dadaki-mcp] open the hosted editor with this URL to attach it:\n' +
-                      `\n    ${connectUrl}\n\n`) +
+                    : `[dadaki-mcp] to attach: open a document at ${base}, click "Connect agent"\n` +
+                      '[dadaki-mcp] in the header, and give the agent the 8-character code (it\n' +
+                      '[dadaki-mcp] calls the `connect` tool with it). No URL or token needed.\n') +
                 '[dadaki-mcp] the tab stays attached across reloads until you clear it.',
         };
     }

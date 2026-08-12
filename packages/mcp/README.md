@@ -96,10 +96,19 @@ node --experimental-strip-types packages/mcp/src/index.ts \
   --mode relay --url https://your-app/
 ```
 
-It prints a URL; open the hosted editor with it once and the tab attaches. From
-there it behaves exactly like bridge mode — same tools, same badge, same
-one-call-one-undo — except the calls travel through the app's backend
-(`/api/functions/agent-bridge`) instead of a loopback socket.
+Then, in the app: open a document, click **Connect agent**, and give the agent
+the 8-character code. The agent calls the `connect` tool with it and is attached
+— no URL, no token, nothing to paste into a config. Codes are single-use and
+expire in ten minutes.
+
+`?agentBridge=cloud&token=…` still works for scripted setups, but nothing needs
+it any more. From either route it behaves exactly like bridge mode — same tools,
+same badge, same one-call-one-undo — except the calls travel through the app's
+backend (`/api/functions/agent-bridge`) instead of a loopback socket.
+
+If a tool reports that no editor is attached, that is the message to act on: it
+names the button and the code, and it comes back in a few seconds rather than
+blocking until the client's own timeout fires.
 
 Sessions live in the backend process's memory, so a horizontally scaled
 deployment would need sticky routing or a shared store.
