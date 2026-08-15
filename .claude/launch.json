@@ -37,6 +37,20 @@
       "autoPort": false
     },
     {
+      "name": "cloud-main-backend-abs",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd /Users/francesco/dadaki-vector-editor/cloud-main/backend && ./node_modules/.bin/tsx src/index.ts"],
+      "port": 3001,
+      "autoPort": false
+    },
+    {
+      "name": "cloud-main-frontend-abs",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd /Users/francesco/dadaki-vector-editor/cloud-main/frontend && ./node_modules/.bin/vite --mode development --port 5205 --strictPort"],
+      "port": 5205,
+      "autoPort": false
+    },
+    {
       "name": "dadaki-cloud-main-frontend",
       "runtimeExecutable": "sh",
       "runtimeArgs": ["-c", "cd cloud-main/frontend && ./node_modules/.bin/vite --mode development --port 5204 --strictPort"],
