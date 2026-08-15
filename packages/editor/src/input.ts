@@ -589,6 +589,21 @@ export class InputManager {
     }
 
     onDoubleClick(e: MouseEvent) {
+        // The pen owns the double-click: it finishes the path being drawn, and
+        // never drills into whatever artwork happens to sit under the cursor.
+        if (this.ui.activeTool === 'pen' || this.currentPathPoints.length > 0) {
+            this.finishPenPathOnDoubleClick();
+            return;
+        }
+        // The click that closed a path also delivers this dblclick, by which
+        // time the pen has already committed and handed the tool back to
+        // Selection. Swallow it, or finishing a shape on top of another one
+        // would drop straight into node-editing that shape.
+        if (this.penSuppressDoubleClick) {
+            this.penSuppressDoubleClick = false;
+            return;
+        }
+
         const pos = this.getPos(e);
         const hitId = this.scene.hitTest(pos.x, pos.y); // raw hit (deepest leaf)
         if (hitId === undefined) {
@@ -2159,6 +2174,15 @@ export class InputManager {
     onMouseDown(e: MouseEvent) {
         // Ignore right-click — handled by onContextMenu
         if (e.button === 2) return;
+        if (this.penSuppressDoubleClick) {
+            // Tail of the click pair whose first click closed a pen path: the
+            // pen is done and Selection is back, so this press would re-target
+            // the selection at whatever lies under the cursor. Swallow it and
+            // keep the flag for the dblclick still to come. A press that starts
+            // a fresh sequence (detail 1) means no dblclick is coming after all.
+            if (e.detail >= 2) return;
+            this.penSuppressDoubleClick = false;
+        }
         this.ui.hideContextMenu();
         this.isMouseDown = true;
         this.didMove = false;
@@ -4484,6 +4508,12 @@ export class InputManager {
     /** True when the hover cursor is close enough to the first anchor that a
      *  click would close the path (drives the close-indicator ring). */
     penHoverClosing: boolean = false;
+    /** Set when a pen *click* finished the path (closing it on the first anchor).
+     *  The browser still delivers the `dblclick` for that click pair afterwards,
+     *  and the pen has already handed the tool back to Selection by then — so
+     *  the stray dblclick is swallowed rather than entering edit mode on the
+     *  shape underneath. Cleared by that dblclick, or by the next fresh press. */
+    private penSuppressDoubleClick = false;
     /** World position of an existing open-path endpoint the idle pen is hovering
      *  (a click there would continue that path); null when none. Drives the
      *  continuation-indicator ring. */
@@ -4570,6 +4600,35 @@ export class InputManager {
     }
 
     /**
+     * Double-click with the pen: end the open path here, the way Figma and
+     * Sketch do (⏎ and Esc still work, as in Illustrator).
+     *
+     * Both clicks of the pair went through handlePenDown, so the second one
+     * placed a duplicate anchor on top of the first — pop it, otherwise every
+     * double-click finish leaves a coincident point behind. Only a plain,
+     * coincident corner is dropped: if the press pulled a bezier handle it is
+     * real geometry the user asked for.
+     */
+    private finishPenPathOnDoubleClick() {
+        this.penSuppressDoubleClick = false;
+        const pts = this.currentPathPoints;
+        if (pts.length >= 2 && !this.penPathClosed) {
+            const last = pts[pts.length - 1];
+            const prev = pts[pts.length - 2];
+            const isCorner =
+                last.cp1x === last.x &&
+                last.cp1y === last.y &&
+                last.cp2x === last.x &&
+                last.cp2y === last.y;
+            const coincident =
+                Math.hypot(last.x - prev.x, last.y - prev.y) <
+                InputManager.PEN_CLOSE_RADIUS / this.renderer.zoom;
+            if (isCorner && coincident) pts.pop();
+        }
+        this.finalizePenPath();
+    }
+
+    /**
      * Whether the pen — not the document — should receive a keystroke.
      *
      * True whenever the pen tool is up, or a path is still buffered (belt and
@@ -4606,8 +4665,9 @@ export class InputManager {
             const subpaths = [{ points: rustPoints, closed: this.penPathClosed }];
             const newId = this.scene.addPath(JSON.stringify(subpaths));
 
-            // Apply the current UI style and select the new path
-            this.scene.setNodeStyleNoHistory(newId, this.ui.getCurrentStyle());
+            // Apply the current UI style and select the new path. An open pen
+            // path is stroke-only, like a line or a pencil stroke.
+            this.scene.setNodeStyleNoHistory(newId, this.drawnPathStyle(this.penPathClosed));
             this.scene.engine!.clear_selection();
             this.scene.selectNode(newId, false);
             this.ui.syncWithSelection();
@@ -5952,6 +6012,10 @@ export class InputManager {
         // Finish a path that was just closed on the first anchor. Deferred to
         // mouse-up so the click could pull a bezier handle off the closing point.
         if (this.penClosingDrag) {
+            // Closing on the second click of a double-click hands the tool back
+            // to Selection before the dblclick lands; flag it so that event
+            // doesn't enter node-editing on whatever sits under the cursor.
+            this.penSuppressDoubleClick = true;
             this.finalizePenPath();
             return;
         }
@@ -6227,24 +6291,31 @@ export class InputManager {
     }
 
     /** Add a freshly drawn path (line/pencil), apply the active style, select it.
-     *  Open strokes are stroke-only — a fill would shade the region between the
-     *  endpoints, which is never what you want from a line or freehand stroke. */
+     *  Both tools draw open strokes, so the style arrives fill-free. */
     private commitDrawnPath(subpathsJson: string) {
         const newId = this.scene.addPath(subpathsJson);
-        let style = this.ui.getCurrentStyle();
-        try {
-            const s = JSON.parse(style);
-            s.fills = [];
-            style = JSON.stringify(s);
-        } catch {
-            /* fall back to the raw style */
-        }
-        this.scene.setNodeStyleNoHistory(newId, style);
+        this.scene.setNodeStyleNoHistory(newId, this.drawnPathStyle(false));
         this.scene.engine!.clear_selection();
         this.scene.selectNode(newId, false);
         this.ui.syncWithSelection();
         this.ui.updateLayerList();
         this.maybeRevertTool();
+    }
+
+    /** The active style as a freshly drawn path should wear it. An open path is
+     *  stroke-only: a fill shades the region between its endpoints, which is
+     *  never what a line, a freehand stroke, or an unfinished pen path meant to
+     *  say. A closed path is a shape, so it keeps the active fill. */
+    private drawnPathStyle(closed: boolean): string {
+        const style = this.ui.getCurrentStyle();
+        if (closed) return style;
+        try {
+            const s = JSON.parse(style);
+            s.fills = [];
+            return JSON.stringify(s);
+        } catch {
+            return style; // unparseable — better the raw style than none
+        }
     }
 
     /** After creating a shape, one-shot back to the Selection tool (Figma-style)
