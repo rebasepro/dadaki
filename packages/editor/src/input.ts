@@ -603,6 +603,13 @@ export class InputManager {
             this.penSuppressDoubleClick = false;
             return;
         }
+        // Drilling into artwork — groups, node editing, text, Live Paint — is
+        // what the SELECTION tools do with a double-click. A creation tool is
+        // armed to draw: its double-click makes nothing (both presses are
+        // zero-size drags), and it must not open whatever it happened to land
+        // on for editing instead. Same surprise the pen used to spring, reached
+        // through the rectangle, pencil, scissors, mesh… tools.
+        if (!InputManager.DRILL_IN_TOOLS.has(this.ui.activeTool)) return;
 
         const pos = this.getPos(e);
         const hitId = this.scene.hitTest(pos.x, pos.y); // raw hit (deepest leaf)
@@ -616,12 +623,15 @@ export class InputManager {
         }
 
         // Double-click into a Live Paint group → enter paint mode on it, rather
-        // than drilling into the group's children.
+        // than drilling into the group's children. The bucket is allowed here
+        // (and nowhere below): double-clicking another painted group is how you
+        // move the paint scope from one to the next without putting it down.
         const lpGroup = this.findLivePaintAncestor(hitId);
         if (lpGroup !== null) {
             this.enterLivePaintGroup(lpGroup);
             return;
         }
+        if (this.ui.activeTool === 'paint-bucket') return;
 
         // Check if the currently selected node is a group
         const selection = this.scene.engine!.get_selection();
@@ -4546,6 +4556,11 @@ export class InputManager {
      *  select-all, copy, paste, cut. Everything else falls through to the
      *  editor's own shortcuts even while a panel field has focus. */
     static readonly FIELD_OWNED_CHORDS = new Set(['a', 'c', 'v', 'x']);
+
+    /** Tools whose double-click opens the artwork under the cursor: the two
+     *  selection tools, plus the bucket — which only ever gets as far as the
+     *  Live Paint branch, to re-scope from one painted group to another. */
+    static readonly DRILL_IN_TOOLS = new Set(['selection', 'direct', 'paint-bucket']);
 
     /** Screen-space radius (px) for hitting the first anchor to close the path. */
     static readonly PEN_CLOSE_RADIUS = 10;

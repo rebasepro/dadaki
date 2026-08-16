@@ -70,9 +70,9 @@ const ACTIVE_STYLE = {
 };
 
 /** UIEngine stub that records tool changes the way the real toolbar would. */
-function makeUI(): UIEngine {
+function makeUI(activeTool = 'pen'): UIEngine {
     const ui = {
-        activeTool: 'pen',
+        activeTool,
         toolLocked: false,
         setActiveTool(tool: string) {
             ui.activeTool = tool;
@@ -207,6 +207,24 @@ describe('pen tool — double-click finishes the path', () => {
         // steals the selection from the path just drawn.
         expect(Array.from(scene.engine!.get_selection())).toEqual([closedPath]);
         expect(rect).not.toBe(closedPath);
+    });
+
+    it('leaves node-editing alone when a creation tool is armed', () => {
+        // The pen's surprise, reached through the other drawing tools: both
+        // presses of a double-click are zero-size drags that create nothing, so
+        // the dblclick used to fall through and open the shape underneath.
+        for (const tool of ['rect', 'ellipse', 'line', 'pencil', 'text', 'scissors', 'mesh']) {
+            const scene = makeScene();
+            const ui = makeUI(tool);
+            const rect = scene.engine!.add_rect(0, 0, 300, 300);
+            const input = makeInput(scene, ui);
+
+            input.onDoubleClick(mouse(150, 150, 2));
+
+            expect(input.editingNodeId, `${tool} entered node-editing`).toBe(null);
+            expect(ui.activeTool, `${tool} was swapped out`).toBe(tool);
+            expect(rect).toBe(1);
+        }
     });
 
     it('a later, unrelated double-click still enters node-editing', () => {
