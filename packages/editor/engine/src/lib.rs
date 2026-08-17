@@ -3613,6 +3613,14 @@ impl Engine {
             return 0;
         }
 
+        // A node dragged OUT of a Live Paint group must stop cutting that
+        // group's regions. `mark_dirty` below only sees where the node landed,
+        // so a move to the root looks like an edit outside every group and left
+        // the departed shape's segments in the network — the group kept faces
+        // split along an outline that is no longer part of it. Classify before
+        // the move, while the node still sits in its old parent.
+        let left_live_paint = valid.iter().any(|&id| self.is_in_any_live_paint(id));
+
         // Compute each node's new local transform up front from the *current*
         // globals, so the visual position is preserved: new_local = parent⁻¹ * global.
         let new_parent_global = match new_parent {
@@ -3682,6 +3690,9 @@ impl Engine {
                 self.update_spatial_index(old_pid);
             }
             self.update_ancestor_group_bounds(old_pid);
+        }
+        if left_live_paint {
+            self.scene.vector_network.dirty = true;
         }
         valid.len() as u32
     }

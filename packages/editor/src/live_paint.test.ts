@@ -17,7 +17,8 @@ import { resolve } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import init, { Engine, History } from '../engine/pkg/engine';
 import { getEditorContext } from './context';
-import type { InputManager } from './input';
+import { InputManager } from './input';
+import type { Renderer } from './renderer';
 import type { UIEngine } from './ui';
 import { WasmScene } from './wasm_scene';
 
@@ -459,5 +460,151 @@ describe('Live Paint — editor context classification', () => {
         expect(getEditorContext(fakeUI('selection'), fakeInput(), scene).context).toBe(
             'live-paint-object',
         );
+    });
+});
+
+// ─── C. Adding shapes to a group that already exists ────────────────────────
+
+/** UIEngine stub with the surface the Live Paint entry points touch. */
+function stubUI(): UIEngine {
+    const ui = {
+        activeTool: 'selection',
+        setActiveTool(t: string) {
+            ui.activeTool = t;
+        },
+        setActiveRegion() {},
+        syncWithSelection() {},
+        updateLayerList() {},
+        collapseSubtreeByDefault() {},
+        getCurrentStyle: () => '{}',
+        contextBar: { refresh() {} },
+        gradientEdit: { isActive: () => false, hitTest: () => null, clear() {} },
+    };
+    return ui as unknown as UIEngine;
+}
+
+function stubRenderer(): Renderer {
+    return {
+        zoom: 1,
+        pan: { x: 0, y: 0 },
+        dpr: 1,
+        requestRender() {},
+        notifyViewChange() {},
+        onViewChange() {},
+        clearImageCache() {},
+        beginDragLayerCache: () => false,
+        setDragMovingRoots() {},
+        endDragLayerCache() {},
+        invalidateGroupSpriteFor() {},
+        invalidateAllGroupSprites() {},
+        calculatePathBounds: () => ({ minX: 0, minY: 0, maxX: 0, maxY: 0 }),
+        hoverEdgeId: -1,
+        hoverFaceId: -1,
+        selectedArtboardId: null,
+        artboardHandleHitTest: () => null,
+        artboardLabelHitTest: () => null,
+    } as unknown as Renderer;
+}
+
+function makeInput(scene: WasmScene, ui: UIEngine): InputManager {
+    return new InputManager(document.createElement('canvas'), scene, ui, stubRenderer());
+}
+
+describe('Live Paint — a shape added to an existing group joins its network', () => {
+    /** Two rects that overlap, wrapped in a Live Paint group, plus a third rect
+     *  straddling the second one's right edge — the shape about to be added. */
+    function setup() {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const a = e.add_rect(0, 0, 100, 100);
+        const b = e.add_rect(50, 0, 100, 100);
+        const group = makeLP(e, [a, b]);
+        const outsider = e.add_rect(120, 0, 100, 100);
+        return { scene, e, group, outsider };
+    }
+
+    it('dragged in through the Objects panel, it divides regions with the rest', () => {
+        const { e, scene, group, outsider } = setup();
+        expect(e.query_face_at(180, 50)).toBe(-1); // outside → nothing to paint
+
+        scene.reorderNodes([outsider], group, scene.getNodeChildren(group).length);
+
+        // Its own area is paintable, and it cuts the group's rect in two where
+        // they overlap rather than sitting on top as one undivided shape.
+        expect(e.query_face_at(180, 50)).toBeGreaterThanOrEqual(0);
+        expect(e.query_face_at(130, 50)).not.toBe(e.query_face_at(180, 50));
+    });
+
+    it('dragged back out, it stops cutting the group it left', () => {
+        const { e, scene, group } = setup();
+        const b = Array.from(scene.getNodeChildren(group))[1];
+        expect(e.query_face_at(25, 50)).not.toBe(e.query_face_at(75, 50)); // b splits a
+
+        scene.reorderNodes([b], null, 0);
+
+        // The network is rebuilt without b: `a` is one region again, and b's own
+        // area is no longer paintable. A stale network left the seam behind.
+        expect(e.query_face_at(25, 50)).toBe(e.query_face_at(75, 50));
+        expect(e.query_face_at(130, 50)).toBe(-1);
+    });
+
+    it('arming the bucket on a member enters its group instead of nesting a new one', () => {
+        const { e, scene, group, outsider } = setup();
+        scene.reorderNodes([outsider], group, scene.getNodeChildren(group).length);
+        e.clear_selection();
+        e.select_node(outsider, false); // still selected after the drag
+
+        const ui = stubUI();
+        makeInput(scene, ui).enterPaintBucketMode();
+
+        // No second Live Paint group: the inner flag would win, and the shape
+        // would form its own one-member network — the reported bug.
+        expect(scene.getNodeParent(outsider)).toBe(group);
+        expect(scene.getNodeLivePaint(outsider)).toBe(false);
+        expect(scene.getLivePaintGroup()).toBe(group);
+        expect(ui.activeTool).toBe('paint-bucket');
+        expect(e.query_face_at(180, 50)).toBeGreaterThanOrEqual(0);
+    });
+
+    it('the group plus a stray shape merges the stray in, rather than wrapping both', () => {
+        const { e, scene, group, outsider } = setup();
+        e.clear_selection();
+        e.select_node(group, true);
+        e.select_node(outsider, true);
+
+        makeInput(scene, stubUI()).makeLivePaintGroup();
+
+        expect(scene.getNodeParent(outsider)).toBe(group);
+        expect(scene.getNodeParent(group)).toBe(-1); // not wrapped in a new group
+        expect(scene.getLivePaintGroup()).toBe(group);
+        expect(e.query_face_at(180, 50)).toBeGreaterThanOrEqual(0);
+    });
+
+    it('a merged shape keeps its position on the canvas', () => {
+        const { e, scene, group, outsider } = setup();
+        const before = scene.getNodeBounds(outsider);
+        e.clear_selection();
+        e.select_node(outsider, true);
+        e.select_node(group, true);
+
+        makeInput(scene, stubUI()).makeLivePaintGroup();
+
+        expect(Array.from(scene.getNodeBounds(outsider))).toEqual(Array.from(before));
+    });
+
+    it('shapes with no Live Paint group anywhere still make a new one', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const a = e.add_rect(0, 0, 100, 100);
+        const b = e.add_rect(50, 0, 100, 100);
+        e.select_node(a, true);
+        e.select_node(b, true);
+
+        makeInput(scene, stubUI()).makeLivePaintGroup();
+
+        const group = scene.getNodeParent(a);
+        expect(group).toBeGreaterThan(0);
+        expect(scene.getNodeLivePaint(group)).toBe(true);
+        expect(e.query_face_at(75, 50)).toBeGreaterThanOrEqual(0);
     });
 });

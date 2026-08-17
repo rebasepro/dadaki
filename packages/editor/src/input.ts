@@ -4113,10 +4113,22 @@ export class InputManager {
     /** Turn the current selection into a Live Paint group — a special object
      *  (Illustrator's Object › Live Paint › Make). The selected shapes are
      *  grouped (an existing group is reused), flagged as Live Paint, renamed,
-     *  and set as the active paint target. One undo step. */
+     *  and set as the active paint target. One undo step.
+     *
+     *  A selection that already belongs to a Live Paint group is a MERGE, not a
+     *  Make (Illustrator's Object › Live Paint › Merge): the shapes join that
+     *  group instead of being wrapped in a second one. Nesting is what made a
+     *  shape you had just dragged into a group unpaintable — the inner flag wins
+     *  (`live_paint_group_of` stops at the nearest one), so the shape formed its
+     *  own one-member network and stopped dividing regions with its neighbours. */
     makeLivePaintGroup() {
         const selection = Array.from(this.scene.engine!.get_selection());
         if (selection.length === 0) return;
+        const target = this.livePaintMergeTarget(selection);
+        if (target !== null) {
+            this.mergeIntoLivePaintGroup(selection, target);
+            return;
+        }
         let groupId = 0;
         this.scene.transaction(() => {
             if (selection.length === 1 && this.scene.getNode(selection[0])?.node_type === 'Group') {
@@ -4136,6 +4148,37 @@ export class InputManager {
         this.ui.syncWithSelection();
         this.ui.contextBar?.refresh();
         this.renderer.requestRender();
+    }
+
+    /** The Live Paint group a "Make Live Paint" on `selection` should merge
+     *  into, or null when nothing selected belongs to one and a new group is
+     *  what the user is asking for. The bottom-most member's group wins, so a
+     *  selection spanning a group and a stray shape targets the group. */
+    private livePaintMergeTarget(selection: number[]): number | null {
+        for (const id of this.scene.sortByPaintOrder(selection)) {
+            const g = this.findLivePaintAncestor(id);
+            if (g !== null) return g;
+        }
+        return null;
+    }
+
+    /** Merge `selection` into an existing Live Paint group and start painting
+     *  it. Members already inside it (and the group itself) are left where they
+     *  are; outsiders are reparented as its top-most children, keeping their
+     *  position on the canvas. A shape that is its own Live Paint group is
+     *  skipped — folding one group's network into another's is a different
+     *  operation, and silently dissolving it would lose its painted faces. */
+    private mergeIntoLivePaintGroup(selection: number[], groupId: number) {
+        const incoming = this.scene
+            .sortByPaintOrder(this.scene.dedupSelection(selection))
+            .filter((id) => id !== groupId && this.findLivePaintAncestor(id) === null);
+        if (incoming.length > 0) {
+            this.scene.transaction(() => {
+                const index = this.scene.getNodeChildren(groupId).length;
+                this.scene.reorderNodes(incoming, groupId, index);
+            });
+        }
+        this.enterLivePaintGroup(groupId);
     }
 
     /** Nearest ancestor (or self) that is a Live Paint group, or null. */
