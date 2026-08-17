@@ -1,7 +1,7 @@
 // Lightweight, dependency-free analytics dispatcher.
 //
 // The core editor emits events through `logAppEvent`. It knows nothing about
-// Firebase (or any backend) — the app layer registers a single sink at init
+// any analytics backend — the app layer registers a single sink at init
 // via `registerAnalyticsSink` to forward events wherever it likes. This keeps
 // the core clean and makes analytics trivially swappable / testable.
 

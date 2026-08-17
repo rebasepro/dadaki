@@ -1,14 +1,16 @@
 // @dadaki/app — deployable shell.
 //
-// This is the ONLY wiring point that knows about the host page and the
-// (optional) analytics backend. It loads CanvasKit, mounts the editor into the
-// page via the library's `createEditor`, and owns app-only concerns: the
-// Firebase analytics sink, the unsaved-changes guard, and dev/test globals.
+// This is the ONLY wiring point that knows about the host page. It loads
+// CanvasKit, mounts the editor into the page via the library's `createEditor`,
+// and owns app-only concerns: the unsaved-changes guard and dev/test globals.
+//
+// No analytics backend is wired here. The core dispatches events to whatever
+// sink a host registers (`analyticsSink`), and this shell registers none — so
+// the demo reports nowhere.
 
 import { connectAgentBridge, createEditor, readBridgeCredentials } from '@dadaki/editor';
 import '@dadaki/editor/style.css';
 import { createIcons, icons } from 'lucide';
-import { createFirebaseAnalyticsSink } from './firebase_analytics';
 
 // The editor treats `lucide` as an optional host-provided global (it calls
 // `window.lucide?.createIcons()` to materialize its `<i data-lucide>` tags).
@@ -29,7 +31,6 @@ async function bootstrap() {
     const mount = document.getElementById('app') as HTMLElement;
     const editor = await createEditor(mount, {
         canvasKit: ck,
-        analyticsSink: createFirebaseAnalyticsSink(),
     });
 
     // Global handle used by the SVG conformance harness, the agent MCP server

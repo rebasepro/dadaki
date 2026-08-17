@@ -62,8 +62,9 @@ Returns an `EditorHandle` with `scene`, `ui`, `input`, `renderer`,
   host; see the `@dadaki/app` demo shell.)
 - **The host may load the `lucide` icon global** (`<script src=".../lucide">`).
   Icons are optional chrome; the editor works without it.
-- **The library owns everything inside `container`.** It never imports Firebase,
-  reads environment variables, or reaches into host-page structure.
+- **The library owns everything inside `container`.** It never imports an
+  analytics or backend SDK, reads environment variables, or reaches into
+  host-page structure.
 - Documents persist locally (IndexedDB) by default — there is no backend
   dependency. Cloud sync is layered on top by a host app (see `@dadaki/cloud`).
 - **A host that puts more than one session in the same document must assign

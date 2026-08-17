@@ -7,8 +7,8 @@
 //
 // The host is responsible for loading CanvasKit (and, optionally, the `lucide`
 // icon global) and passing the CanvasKit instance in via `options.canvasKit`.
-// The library never imports Firebase, reads env vars, or reaches into any host
-// page structure beyond the `container` it is given.
+// The library never imports an analytics or backend SDK, reads env vars, or
+// reaches into any host page structure beyond the `container` it is given.
 //
 // NOTE (v1): the injected chrome uses stable element ids, so only ONE editor
 // instance per document is supported. Full container-scoped, multi-instance
