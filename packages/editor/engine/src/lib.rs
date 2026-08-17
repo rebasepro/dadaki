@@ -2706,12 +2706,33 @@ impl Engine {
 
     /// Mark (or unmark) a Group node as a Live Paint group. No-op on non-groups.
     pub fn set_node_live_paint(&mut self, id: u32, live_paint: bool) {
+        // One flag per nest. `live_paint_group_of` stops at the NEAREST flagged
+        // ancestor, so a group flagged inside another one silently splits its
+        // members off the outer network: their shapes stop dividing regions with
+        // their neighbours and a fill spills across a boundary it should have
+        // stopped at. There is no drawing this expresses — a Live Paint group is
+        // "these shapes share one surface", and nesting says that twice about
+        // the same shapes — so the inner flag is refused rather than honoured.
+        if live_paint && self.live_paint_ancestor_of(id).is_some() {
+            return;
+        }
         let mut is_lp = false;
         if let Some(node) = self.scene.nodes.get_mut(&id) {
             if node.node_type == NodeType::Group {
                 node.live_paint = live_paint;
             }
             is_lp = node.live_paint;
+        }
+        // Flagging a group that already contains flagged ones is the same
+        // conflict from the other side: the outer group is the surface the user
+        // just asked for, so the flags beneath it lose.
+        if is_lp {
+            for nested in self.live_paint_descendants_of(id) {
+                if let Some(node) = self.scene.nodes.get_mut(&nested) {
+                    node.live_paint = false;
+                }
+                self.live_paint_groups.remove(&nested);
+            }
         }
         // Keep the O(1) group cache in sync with the node's actual flag.
         if is_lp {
@@ -3265,6 +3286,8 @@ impl Engine {
             || old_parent.map_or(false, |p| self.is_in_any_live_paint(p)) {
             self.scene.vector_network.dirty = true;
         }
+        // Same nesting rule as the panel drag: see clear_nested_live_paint_flags.
+        self.clear_nested_live_paint_flags();
         true
     }
 
@@ -3694,6 +3717,9 @@ impl Engine {
         if left_live_paint {
             self.scene.vector_network.dirty = true;
         }
+        // A flagged group dragged INTO a flagged one is nested now even though
+        // its own flag was legal where it was set.
+        self.clear_nested_live_paint_flags();
         valid.len() as u32
     }
 
@@ -5973,13 +5999,80 @@ impl Engine {
             || self.live_paint_groups.iter().any(|&g| self.is_descendant_of(id, g))
     }
 
+    /// The nearest FLAGGED ancestor of `id`, excluding `id` itself. Unlike
+    /// `live_paint_group_of` this answers "would flagging this nest it inside
+    /// another one", which is a question about the ancestors only.
+    fn live_paint_ancestor_of(&self, id: u32) -> Option<u32> {
+        let mut cur = self.scene.nodes.get(&id).and_then(|n| n.parent);
+        while let Some(pid) = cur {
+            match self.scene.nodes.get(&pid) {
+                Some(node) => {
+                    if node.live_paint {
+                        return Some(pid);
+                    }
+                    cur = node.parent;
+                }
+                None => break
+            }
+        }
+        None
+    }
+
+    /// Every flagged group strictly beneath `id`.
+    fn live_paint_descendants_of(&self, id: u32) -> Vec<u32> {
+        self.live_paint_groups
+            .iter()
+            .copied()
+            .filter(|&g| g != id && self.is_descendant_of(g, id))
+            .collect()
+    }
+
     /// Recompute the Live Paint group cache from scratch. Called after bulk
     /// scene replacement (snapshot load), where per-node maintenance doesn't apply.
+    ///
+    /// This is also where a document saved with a NESTED flag is healed. Until
+    /// `set_node_live_paint` learned to refuse one, arming the bucket on a shape
+    /// that was already inside a Live Paint group wrapped it in a second one, and
+    /// that flag went into the saved file — so the shape kept painting as its own
+    /// surface on every later open, and no amount of fixing the write path would
+    /// reach it. Clearing the inner flag on load is the migration: it is the only
+    /// interpretation that was ever meaningful, it needs no file-format change,
+    /// and it costs one ancestor walk per flagged group.
     fn rebuild_live_paint_cache(&mut self) {
         self.live_paint_groups = self.scene.nodes.iter()
             .filter(|(_, n)| n.live_paint)
             .map(|(&id, _)| id)
             .collect();
+        self.clear_nested_live_paint_flags();
+    }
+
+    /// Enforce one flag per nest: clear the flag on every group that has a
+    /// flagged ancestor. Returns true if anything changed.
+    ///
+    /// Nesting is reachable from three directions and the rule has to hold from
+    /// all of them, so it lives here rather than in any one caller: flagging a
+    /// group (`set_node_live_paint`), *moving* an already-flagged group into a
+    /// flagged one (the Objects panel drag — a flag that was legal where it was
+    /// set becomes nested by the move), and loading a document written before
+    /// any of this was enforced. The set is the flagged groups only, so this is
+    /// a walk per flagged group, not per node.
+    fn clear_nested_live_paint_flags(&mut self) -> bool {
+        let nested: Vec<u32> = self.live_paint_groups
+            .iter()
+            .copied()
+            .filter(|&g| self.live_paint_ancestor_of(g).is_some())
+            .collect();
+        if nested.is_empty() {
+            return false;
+        }
+        for id in nested {
+            if let Some(node) = self.scene.nodes.get_mut(&id) {
+                node.live_paint = false;
+            }
+            self.live_paint_groups.remove(&id);
+        }
+        self.scene.vector_network.dirty = true;
+        true
     }
 
     /// Recompute the Boolean Group cache from scratch, and flag every one dirty so
@@ -7438,6 +7531,36 @@ mod tests {
         assert!(engine.deserialize_scene(&saved));
         assert!(engine.has_clipboard(), "undo must not take the clipboard with it");
         assert_eq!(engine.paste_clipboard(0.0, 0.0).len(), 1);
+    }
+
+    /// Loading a document written before nesting was refused heals it.
+    ///
+    /// The flag is set on both groups directly here, which is the one way to
+    /// produce the state a pre-fix save left behind — every public path now
+    /// refuses it, so the only remaining source of a nested flag is a file.
+    /// Left alone, the inner group keeps its own network for the rest of the
+    /// document's life: `live_paint_group_of` stops at the nearest flag, so the
+    /// shapes under it never divide regions with their neighbours.
+    #[test]
+    fn loading_a_legacy_nested_live_paint_group_clears_the_inner_flag() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let added = engine.add_rect(120.0, 0.0, 100.0, 100.0);
+        let inner = engine.group_nodes(&format!("[{added}]"));
+        let outer = engine.group_nodes(&format!("[{a},{inner}]"));
+        // Straight onto the nodes: what a 0.x snapshot restores.
+        engine.scene.nodes.get_mut(&outer).unwrap().live_paint = true;
+        engine.scene.nodes.get_mut(&inner).unwrap().live_paint = true;
+
+        let saved = engine.serialize_scene();
+        let mut reloaded = Engine::new();
+        assert!(reloaded.deserialize_scene(&saved));
+
+        assert!(reloaded.get_node_live_paint(outer), "the real group keeps its flag");
+        assert!(!reloaded.get_node_live_paint(inner), "the nested flag is cleared on load");
+        assert!(!reloaded.live_paint_groups.contains(&inner), "and leaves the cache");
+        // The shape it wrapped now belongs to the outer group's surface.
+        assert_eq!(reloaded.live_paint_group_of(added), Some(outer));
     }
 
     /// Cutting a group takes its children along, and paste rebuilds the tree.
