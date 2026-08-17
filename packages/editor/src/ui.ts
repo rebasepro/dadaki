@@ -2658,7 +2658,10 @@ export class UIEngine {
         if (this.selectionIsLivePaintGroup()) {
             const note = document.createElement('div');
             note.className = 'panel-empty-note';
-            note.textContent = 'Region colours come from the Live Paint bucket (K).';
+            // B, not Illustrator's K — this editor's bucket lives on B, and a
+            // hint that names a key which does something else is worse than none.
+            note.textContent =
+                'Region colours come from the Live Paint bucket (B). Double-click to edit the shapes.';
             this.fillsList.appendChild(note);
             return;
         }

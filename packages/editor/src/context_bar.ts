@@ -47,6 +47,7 @@ import {
     iconLink,
     iconMeshGrid,
     iconMinusCircle,
+    iconPaintBucket,
     iconPencil,
     iconPlusCircle,
     iconScissors,
@@ -436,7 +437,15 @@ export class ContextBar {
     }
 
     /** A Live Paint group selected with the Selection tool: it's a special
-     *  object, so it gets Edit/Release instead of Enter Group/Ungroup. */
+     *  object, so it gets Paint/Enter/Expand/Release rather than the plain
+     *  group's Enter/Ungroup pair.
+     *
+     *  There are two things you can do to one of these and they used to share a
+     *  single button labelled "Edit", which armed the paint bucket — so the one
+     *  control that said "edit" was the one that did not let you edit anything,
+     *  and the shapes inside had no button at all. They are separate verbs and
+     *  they read as separate buttons: Paint changes the colours, Enter Group
+     *  gets you to the geometry (as does double-clicking it, like any group). */
     private renderLivePaintObject(info: ContextInfo) {
         const id = info.selectedIds[0];
         this.el.appendChild(this.createBadge(this.scene.getNodeName(id) || 'Live Paint'));
@@ -444,10 +453,22 @@ export class ContextBar {
 
         this.el.appendChild(
             this.createButton(
-                'Edit',
-                iconPencil(14),
+                'Paint',
+                iconPaintBucket(14),
                 () => {
                     this.input.enterLivePaintGroup(id);
+                },
+                false,
+                'B',
+            ),
+        );
+
+        this.el.appendChild(
+            this.createButton(
+                'Enter Group',
+                iconCornerDownRight(14),
+                () => {
+                    this.input.enterSelectedNode(id);
                 },
                 false,
                 '⏎',
@@ -825,10 +846,13 @@ export class ContextBar {
 
         const group = this.scene.getLivePaintGroup();
         if (group >= 0) {
-            this.el.appendChild(this.createBadge('Editing Live Paint'));
+            this.el.appendChild(this.createBadge('Painting'));
+            // The last clause is the way back to the geometry. Painting and
+            // editing the shapes are different tools on the same object, and the
+            // bar is the only place that says so while the bucket is in hand.
             this.el.appendChild(
                 this.createHint(
-                    'Click a region to fill · ⇧-click a line to paint its edge · ⌥-click to pick up a colour · ⌘-click to clear',
+                    'Click a region to fill · ⇧-click a line to paint its edge · ⌥-click to pick up a colour · ⌘-click to clear · V to edit the shapes',
                 ),
             );
             this.el.appendChild(this.createSeparator());

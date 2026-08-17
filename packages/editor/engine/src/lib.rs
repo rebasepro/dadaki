@@ -2365,7 +2365,7 @@ impl Engine {
             transform: Transform2D::from_translation(x, y),
             style: Style {
                 fills: vec![Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })],
-                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 2.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
+                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 1.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
                 opacity: 1.0,
                 blend_mode: 0,
                 fill_rule: 0,
@@ -2403,7 +2403,7 @@ impl Engine {
             transform: Transform2D::from_translation(cx, cy),
             style: Style {
                 fills: vec![Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })],
-                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 2.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
+                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 1.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
                 opacity: 1.0,
                 blend_mode: 0,
                 fill_rule: 0,
@@ -2474,7 +2474,7 @@ impl Engine {
             transform: Transform2D::from_translation(center_x, center_y),
             style: Style {
                 fills: vec![Paint::Solid(Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 })],
-                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 2.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
+                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 1.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
                 opacity: 1.0,
                 blend_mode: 0,
                 fill_rule: 0,
@@ -2534,7 +2534,7 @@ impl Engine {
             transform: Transform2D::from_translation(cx, cy),
             style: Style {
                 fills: vec![Paint::Solid(Color { r: 0.5, g: 0.8, b: 0.5, a: 1.0 })],
-                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 2.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
+                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 1.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
                 opacity: 1.0,
                 blend_mode: 0,
                 fill_rule: 0,
@@ -2596,7 +2596,7 @@ impl Engine {
             transform: Transform2D::from_translation(cx, cy),
             style: Style {
                 fills: vec![Paint::Solid(Color { r: 1.0, g: 0.8, b: 0.2, a: 1.0 })],
-                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 2.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
+                strokes: vec![Stroke { paint: Some(Paint::Solid(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })), width: 1.0, cap: 0, join: 0, dash_array: Vec::new(), dash_offset: 0.0, miter_limit: 4.0, alignment: StrokeAlignment::Center }],
                 opacity: 1.0,
                 blend_mode: 0,
                 fill_rule: 0,

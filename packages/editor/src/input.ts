@@ -622,16 +622,24 @@ export class InputManager {
             return;
         }
 
-        // Double-click into a Live Paint group → enter paint mode on it, rather
-        // than drilling into the group's children. The bucket is allowed here
-        // (and nowhere below): double-clicking another painted group is how you
-        // move the paint scope from one to the next without putting it down.
+        // A Live Paint group drills in like any other group. It used to enter
+        // paint mode instead, and that single line was why the shapes inside one
+        // could not be touched: double-click is the ONE gesture that means "go
+        // deeper", every other container honours it, and Live Paint spent it on
+        // arming a tool. There was then no gesture left for the geometry — the
+        // Objects panel was the only way in, and only if you thought to look.
+        //
+        // What decides whether a click paints or selects is the TOOL, which is
+        // the rule everywhere else in the editor and the one Illustrator uses:
+        // the bucket paints, the selection tools select. So the bucket keeps this
+        // gesture while it is the active tool — double-clicking another painted
+        // group is how you move the paint scope without putting the bucket down —
+        // and hands it back to drilling in for every other tool.
         const lpGroup = this.findLivePaintAncestor(hitId);
-        if (lpGroup !== null) {
-            this.enterLivePaintGroup(lpGroup);
+        if (this.ui.activeTool === 'paint-bucket') {
+            if (lpGroup !== null) this.enterLivePaintGroup(lpGroup);
             return;
         }
-        if (this.ui.activeTool === 'paint-bucket') return;
 
         // Check if the currently selected node is a group
         const selection = this.scene.engine!.get_selection();
