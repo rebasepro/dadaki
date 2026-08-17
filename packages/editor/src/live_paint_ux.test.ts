@@ -1,12 +1,17 @@
 /**
- * Who owns a click on a Live Paint group.
+ * Two rules about containers, and Live Paint obeying both of them.
  *
- * The rule this pins down: the TOOL decides. The bucket paints; the selection
- * tools select and edit. Live Paint used to break it by spending double-click —
- * the one gesture that means "go deeper" everywhere else in the editor — on
- * arming the bucket, which left the shapes inside a painted group with no
- * gesture at all. The Objects panel was the only way in, and only if you thought
- * to look there.
+ * **The tool decides.** The bucket paints; the selection tools select and edit.
+ * Live Paint used to break this by spending double-click — the one gesture that
+ * means "go deeper" everywhere else in the editor — on arming the bucket, which
+ * left the shapes inside a painted group with no gesture at all. The Objects
+ * panel was the only way in, and only if you thought to look there.
+ *
+ * **A shape is drawn into the container you are inside** (Illustrator's
+ * isolation-mode rule), where "inside" is the parent of the selection — the same
+ * notion of context the click resolver already uses. This is not a Live Paint
+ * feature: it holds for a plain group too, and is refused for a Boolean Group,
+ * where an extra operand would redraw the artwork rather than join it.
  */
 /// <reference types="node" />
 
@@ -65,6 +70,9 @@ function makeUI(activeTool = 'selection'): UIEngine {
         setActiveRegion() {},
         syncWithSelection() {},
         updateLayerList() {},
+        hideContextMenu() {},
+        refreshArtboardPanel() {},
+        applyToolCursor() {},
         collapseSubtreeByDefault() {},
         getCurrentStyle: () => '{}',
         contextBar: { refresh() {} },
@@ -140,6 +148,121 @@ describe('a Live Paint group is still a group', () => {
 
         expect(ui.activeTool).toBe('paint-bucket');
         expect(e.get_live_paint_group()).toBe(second);
+    });
+
+    it('a shape drawn while inside the group joins it, on top', () => {
+        const { scene, e, ui, input, a, group } = painted();
+        ui.setActiveTool('rect');
+        e.clear_selection();
+        e.select_node(a, false); // where drilling in leaves you
+
+        // Drag out a rect straddling `a`'s right edge.
+        input.onMouseDown(mouse(80, 20));
+        input.onMouseMove(mouse(180, 60));
+        input.onMouseUp(mouse(180, 60));
+
+        const drawn = Array.from(e.get_selection())[0];
+        expect(scene.getNodeParent(drawn)).toBe(group);
+        // Top-most member, and painting stops at the neighbour it crosses.
+        const kids = Array.from(scene.getNodeChildren(group));
+        expect(kids[kids.length - 1]).toBe(drawn);
+        expect(e.query_face_at(150, 40)).toBeGreaterThanOrEqual(0);
+        expect(e.query_face_at(150, 40)).not.toBe(e.query_face_at(90, 40));
+    });
+
+    it('one undo takes the drawn shape back out of the group', () => {
+        const { scene, e, ui, input, a, group } = painted();
+        ui.setActiveTool('rect');
+        e.clear_selection();
+        e.select_node(a, false);
+        const before = Array.from(scene.getNodeChildren(group)).length;
+
+        input.onMouseDown(mouse(80, 20));
+        input.onMouseMove(mouse(180, 60));
+        input.onMouseUp(mouse(180, 60));
+        expect(Array.from(scene.getNodeChildren(group)).length).toBe(before + 1);
+
+        scene.undo();
+
+        expect(Array.from(scene.getNodeChildren(group)).length).toBe(before);
+    });
+
+    it('a shape drawn with the group itself selected stays outside it', () => {
+        // Selecting the whole object means you are working WITH it, and as likely
+        // drawing beside it — Illustrator only adds while you are inside.
+        const { scene, e, ui, input, group } = painted();
+        ui.setActiveTool('rect');
+        e.clear_selection();
+        e.select_node(group, false);
+
+        input.onMouseDown(mouse(300, 300));
+        input.onMouseMove(mouse(360, 360));
+        input.onMouseUp(mouse(360, 360));
+
+        const drawn = Array.from(e.get_selection())[0];
+        expect(scene.getNodeParent(drawn)).toBe(-1);
+    });
+
+    it('a shape drawn with nothing selected stays outside it', () => {
+        const { scene, e, ui, input } = painted();
+        ui.setActiveTool('rect');
+        e.clear_selection();
+
+        input.onMouseDown(mouse(300, 300));
+        input.onMouseMove(mouse(360, 360));
+        input.onMouseUp(mouse(360, 360));
+
+        const drawn = Array.from(e.get_selection())[0];
+        expect(scene.getNodeParent(drawn)).toBe(-1);
+    });
+
+    it('putting the bucket down leaves you inside, so drawing keeps adding', () => {
+        const { ui, input, group } = painted('paint-bucket');
+
+        input.exitLivePaintGroup(); // the Done button
+
+        expect(ui.activeTool).toBe('selection');
+        // Still inside: the next shape drawn joins the group rather than landing
+        // at the root one step after the painting it belongs to.
+        expect(input.drawContainerTarget()).toBe(group);
+    });
+
+    it('the same rule holds for a plain group — one behaviour, not a special case', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const ui = makeUI('rect');
+        const input = new InputManager(document.createElement('canvas'), scene, ui, makeRenderer());
+        const a = e.add_rect(0, 0, 100, 100);
+        const plain = e.group_nodes(JSON.stringify([a]));
+        e.clear_selection();
+        e.select_node(a, false); // inside the plain group
+
+        input.onMouseDown(mouse(200, 200));
+        input.onMouseMove(mouse(260, 260));
+        input.onMouseUp(mouse(260, 260));
+
+        const drawn = Array.from(e.get_selection())[0];
+        expect(scene.getNodeParent(drawn)).toBe(plain);
+    });
+
+    it('a Boolean Group is left alone — an extra operand redraws the artwork', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const ui = makeUI('rect');
+        const input = new InputManager(document.createElement('canvas'), scene, ui, makeRenderer());
+        const a = e.add_rect(0, 0, 100, 100);
+        const b = e.add_rect(50, 50, 100, 100);
+        const bool = e.group_nodes(JSON.stringify([a, b]));
+        e.set_boolean_op(bool, 0); // union
+        e.clear_selection();
+        e.select_node(a, false); // inside the boolean group
+
+        input.onMouseDown(mouse(300, 300));
+        input.onMouseMove(mouse(360, 360));
+        input.onMouseUp(mouse(360, 360));
+
+        const drawn = Array.from(e.get_selection())[0];
+        expect(scene.getNodeParent(drawn)).toBe(-1);
     });
 
     it('arming the bucket on the selected group starts painting it', () => {

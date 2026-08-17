@@ -80,6 +80,11 @@ const TOOL_HINTS: Record<string, string> = {
     eyedropper: 'Click a shape to copy its appearance onto the selection',
 };
 
+/** Tools that draw vector geometry — the ones whose output is filed into the
+ *  container you are inside. Mirrors `InputManager.DRAW_JOINING_TOOLS`; the bar
+ *  only needs to know whether to say so. */
+const CREATION_TOOLS = new Set(['line', 'rect', 'ellipse', 'polygon', 'star', 'pen', 'pencil']);
+
 /** Tools whose next action applies the default style — they get style swatches. */
 const TOOLS_WITH_FILL = new Set([
     'pen',
@@ -357,6 +362,28 @@ export class ContextBar {
                 this.renderGuideSelected();
                 break;
         }
+
+        this.appendDrawContainerNotice();
+    }
+
+    /**
+     * "Drawing into <container>", while the next shape drawn would be filed into
+     * the group you are inside (Illustrator's isolation-mode rule).
+     *
+     * It goes here, after whichever bar rendered, rather than inside the tool
+     * bar: the rule needs a selection to read the context from, and with a
+     * selection the bar shows a SELECTION context, so a notice in the tool
+     * branch would only ever appear when the rule did not apply. Illustrator can
+     * leave this implicit because isolation mode dims the rest of the artwork;
+     * with no such cue, saying it is what keeps the behaviour from being a
+     * surprise that depends on invisible state.
+     */
+    private appendDrawContainerNotice() {
+        if (!CREATION_TOOLS.has(this.ui.activeTool)) return;
+        const target = this.input.drawContainerTarget();
+        if (target === null) return;
+        const name = this.scene.getNodeName(target) || 'Group';
+        this.el.appendChild(this.createBadge(`Drawing into ${name}`));
     }
 
     /** A ruler guide is selected: lock/unlock it or delete it. */

@@ -2205,6 +2205,9 @@ export class InputManager {
             this.penSuppressDoubleClick = false;
         }
         this.ui.hideContextMenu();
+        // Before anything can change the selection: whether this press starts a
+        // shape inside a Live Paint group is a fact about where we already were.
+        this.latchDrawContainerTarget();
         this.isMouseDown = true;
         this.didMove = false;
         this._canvasRect = null; // gestures never start against a stale rect
@@ -4199,6 +4202,87 @@ export class InputManager {
         return null;
     }
 
+    /** Tools whose output is vector geometry. Text is excluded: it contributes no
+     *  segments to a Live Paint surface, so filing it inside one would move a row
+     *  in the Objects panel and change nothing about the painting. */
+    private static readonly DRAW_JOINING_TOOLS = new Set([
+        'line',
+        'rect',
+        'ellipse',
+        'polygon',
+        'star',
+        'pen',
+        'pencil',
+    ]);
+
+    /**
+     * The container a shape drawn *now* should be filed into — Illustrator's rule
+     * that an object drawn while you are inside a group becomes part of it, so
+     * "keep drawing the same picture" needs no second step. On a Live Paint group
+     * that is the difference between a shape that paints with its neighbours and
+     * one that merely sits on top of them.
+     *
+     * "Inside" is the parent of the selection, which is the same notion of current
+     * context `resolveHit` already uses to decide what a click targets — so a
+     * drawn shape lands where a click would have resolved, rather than inventing
+     * a second idea of where you are. Three cases fall out of that and are all
+     * intended:
+     *
+     * - the group ITSELF selected means you are handling it as one object (its
+     *   parent is the root), and you are as likely to be drawing beside it. This
+     *   is where Illustrator draws the line too — isolation mode, not selection.
+     * - a selection spanning two parents has no single answer, so it gets none.
+     * - a deeply nested member files the shape into ITS group, not the outermost
+     *   one, which is the more precise reading of where you are — and inside a
+     *   Live Paint group that subgroup is part of the surface anyway.
+     *
+     * A Boolean Group is excluded: its children are operands consumed into one
+     * outline, so an extra one silently redraws the artwork rather than adding to
+     * it. That is a different intent and it should stay an explicit act.
+     */
+    drawContainerTarget(): number | null {
+        const sel = Array.from(this.scene.engine!.get_selection());
+        if (sel.length === 0) return null;
+        const parent = this.scene.getNodeParent(sel[0]);
+        if (parent === -1) return null; // at the root: not inside anything
+        for (const id of sel) {
+            if (this.scene.getNodeParent(id) !== parent) return null;
+        }
+        if (this.scene.isBooleanGroup(parent)) return null;
+        return parent;
+    }
+
+    /** Latched when a drawing gesture starts, consumed when it commits. A pen
+     *  path spans many clicks and its own first click changes the selection, so
+     *  the context has to be captured once at the start rather than read back at
+     *  the end. */
+    private drawJoinTarget: number | null = null;
+
+    /** Capture the container a drawing gesture begins inside. Called on the press
+     *  that starts one; a pen path in progress keeps the target it already
+     *  latched. */
+    private latchDrawContainerTarget() {
+        if (!InputManager.DRAW_JOINING_TOOLS.has(this.ui.activeTool)) return;
+        if (this.currentPathPoints.length > 0) return; // mid-path: keep the latch
+        this.drawJoinTarget = this.drawContainerTarget();
+    }
+
+    /** File a freshly drawn shape into the container the gesture started inside,
+     *  as its top-most member, keeping its position on the canvas. MUST run
+     *  inside the same transaction as the creation, or drawing one shape would
+     *  cost two undos. */
+    private joinLatchedContainer(newId: number) {
+        const target = this.drawJoinTarget;
+        this.drawJoinTarget = null;
+        if (target === null) return;
+        // The container can be gone by now (undo, delete): reorder_nodes would
+        // refuse a stale id and leave the shape at the root, but check so the
+        // intent reads rather than relying on that.
+        if (this.scene.getNodeType(target) === undefined) return;
+        const index = this.scene.getNodeChildren(target).length;
+        this.scene.reorderNodes([newId], target, index);
+    }
+
     /** Enter an existing Live Paint group: scope painting to it and arm the
      *  bucket. Used by double-click and the Edit action. */
     enterLivePaintGroup(groupId: number) {
@@ -4220,8 +4304,17 @@ export class InputManager {
     exitLivePaintGroup() {
         // The panel stops being about a region the moment you stop painting.
         this.ui.setActiveRegion(null);
+        const group = this.scene.getLivePaintGroup();
         this.ui.setActiveTool('selection');
-        this.scene.engine!.clear_selection();
+        // Putting the bucket down leaves you INSIDE the group, holding its
+        // first member — Illustrator's isolation mode outlasts the bucket the
+        // same way. It matters for more than tidiness: the group you are inside
+        // is read off the selection, so clearing it here meant the next shape
+        // you drew landed at the root and had to be merged in by hand, one step
+        // after finishing the painting that shape belongs to.
+        const members = group >= 0 ? Array.from(this.scene.getNodeChildren(group)) : [];
+        if (members.length > 0) this.scene.selectNode(members[0], false);
+        else this.scene.engine!.clear_selection();
         this.ui.syncWithSelection();
         this.ui.contextBar?.refresh();
         this.renderer.requestRender();
@@ -4733,13 +4826,16 @@ export class InputManager {
         } else if (this.currentPathPoints.length >= 2) {
             const rustPoints = this.currentPathPoints.map((p) => this.penPointToLocal(p, null, 0));
             const subpaths = [{ points: rustPoints, closed: this.penPathClosed }];
-            const newId = this.scene.addPath(JSON.stringify(subpaths));
+            this.scene.transaction(() => {
+                const newId = this.scene.addPath(JSON.stringify(subpaths));
 
-            // Apply the current UI style and select the new path. An open pen
-            // path is stroke-only, like a line or a pencil stroke.
-            this.scene.setNodeStyleNoHistory(newId, this.drawnPathStyle(this.penPathClosed));
-            this.scene.engine!.clear_selection();
-            this.scene.selectNode(newId, false);
+                // Apply the current UI style and select the new path. An open pen
+                // path is stroke-only, like a line or a pencil stroke.
+                this.scene.setNodeStyleNoHistory(newId, this.drawnPathStyle(this.penPathClosed));
+                this.joinLatchedContainer(newId);
+                this.scene.engine!.clear_selection();
+                this.scene.selectNode(newId, false);
+            });
             this.ui.syncWithSelection();
             this.ui.updateLayerList();
             // One-shot: a completed path returns to Selection like the shape
@@ -6302,23 +6398,31 @@ export class InputManager {
                 this.ui.updateLayerList();
                 this.maybeRevertTool();
             } else {
-                let newId: number | undefined;
-                if (tool === 'rect') {
-                    newId = this.scene.addRect(x, y, w, h);
-                } else if (tool === 'ellipse') {
-                    newId = this.scene.addEllipse(x + w / 2, y + h / 2, w / 2, h / 2);
-                } else if (tool === 'polygon') {
-                    newId = this.scene.addPolygon(x + w / 2, y + h / 2, Math.max(w, h) / 2, 6);
-                } else if (tool === 'star') {
-                    const r = Math.max(w, h) / 2;
-                    newId = this.scene.addStar(x + w / 2, y + h / 2, r, r * 0.4, 5);
-                }
+                // One transaction: the shape, its style, and the Live Paint group
+                // it may join are a single undo step.
+                let created: number | undefined;
+                this.scene.transaction(() => {
+                    let newId: number | undefined;
+                    if (tool === 'rect') {
+                        newId = this.scene.addRect(x, y, w, h);
+                    } else if (tool === 'ellipse') {
+                        newId = this.scene.addEllipse(x + w / 2, y + h / 2, w / 2, h / 2);
+                    } else if (tool === 'polygon') {
+                        newId = this.scene.addPolygon(x + w / 2, y + h / 2, Math.max(w, h) / 2, 6);
+                    } else if (tool === 'star') {
+                        const r = Math.max(w, h) / 2;
+                        newId = this.scene.addStar(x + w / 2, y + h / 2, r, r * 0.4, 5);
+                    }
+                    if (newId === undefined) return;
 
-                // Apply the current UI style and select the new shape
-                if (newId !== undefined) {
+                    // Apply the current UI style and select the new shape
                     this.scene.setNodeStyleNoHistory(newId, this.ui.getCurrentStyle());
+                    this.joinLatchedContainer(newId);
                     this.scene.engine!.clear_selection();
                     this.scene.selectNode(newId, false);
+                    created = newId;
+                });
+                if (created !== undefined) {
                     this.ui.syncWithSelection();
                     this.maybeRevertTool();
                 }
@@ -6363,10 +6467,14 @@ export class InputManager {
     /** Add a freshly drawn path (line/pencil), apply the active style, select it.
      *  Both tools draw open strokes, so the style arrives fill-free. */
     private commitDrawnPath(subpathsJson: string) {
-        const newId = this.scene.addPath(subpathsJson);
-        this.scene.setNodeStyleNoHistory(newId, this.drawnPathStyle(false));
-        this.scene.engine!.clear_selection();
-        this.scene.selectNode(newId, false);
+        // One transaction so the shape and the group it joins are one undo step.
+        this.scene.transaction(() => {
+            const newId = this.scene.addPath(subpathsJson);
+            this.scene.setNodeStyleNoHistory(newId, this.drawnPathStyle(false));
+            this.joinLatchedContainer(newId);
+            this.scene.engine!.clear_selection();
+            this.scene.selectNode(newId, false);
+        });
         this.ui.syncWithSelection();
         this.ui.updateLayerList();
         this.maybeRevertTool();
