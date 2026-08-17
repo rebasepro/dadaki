@@ -2003,15 +2003,34 @@ export class InputManager {
      *  copies, the same as a copy would. */
     private pasteCut(inPlace: boolean) {
         const off = inPlace ? 0 : 20;
-        const ids = this.scene.pasteClipboard(off, off);
-        if (ids.length === 0) return;
-        this.scene.engine!.clear_selection();
-        for (const id of ids) {
-            this.ui.collapseSubtreeByDefault(id);
-            this.scene.selectNode(id, true);
-        }
+        // Read the context before the paste changes the selection.
+        const container = this.drawContainerTarget();
+        this.scene.transaction(() => {
+            const ids = this.scene.pasteClipboard(off, off);
+            if (ids.length === 0) return;
+            this.pasteIntoContainer(ids, container);
+            this.scene.engine!.clear_selection();
+            for (const id of ids) {
+                this.ui.collapseSubtreeByDefault(id);
+                this.scene.selectNode(id, true);
+            }
+        });
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
+    }
+
+    /** File pasted nodes into the container the document is currently inside —
+     *  the same rule a drawn shape follows, so pasting a member back into the
+     *  Live Paint group you are working in needs no second step. `null` (nothing
+     *  selected, or a selection spanning containers) leaves them at the root,
+     *  which is where paste has always put them. */
+    private pasteIntoContainer(ids: number[], container: number | null) {
+        if (container === null || ids.length === 0) return;
+        if (this.scene.getNodeType(container) === undefined) return;
+        const index = Array.from(this.scene.getNodeChildren(container)).filter(
+            (c) => !ids.includes(c),
+        ).length;
+        this.scene.reorderNodes(ids, container, index);
     }
 
     private pasteNodes(inPlace: boolean) {
@@ -2024,16 +2043,21 @@ export class InputManager {
         const live = this.clipboardIds.filter((id) => this.scene.getNodeType(id) !== undefined);
         this.clipboardIds = live;
         if (live.length === 0) return;
+        // Read the context before the paste changes the selection.
+        const container = this.drawContainerTarget();
         this.scene.transaction(() => {
             eng.clear_selection();
+            const pasted: number[] = [];
             for (const id of live) {
                 const newId = this.scene.duplicateNode(id);
                 // duplicate_node builds in a +20,+20 offset; take it back off.
                 if (inPlace) eng.move_node(newId, -20, -20);
                 // Pasted groups start collapsed to keep the panel tidy.
                 this.ui.collapseSubtreeByDefault(newId);
-                this.scene.selectNode(newId, true);
+                pasted.push(newId);
             }
+            this.pasteIntoContainer(pasted, container);
+            for (const id of pasted) this.scene.selectNode(id, true);
         });
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
@@ -3423,6 +3447,7 @@ export class InputManager {
             this.scene.engine!.clear_selection();
             for (const id of selection) {
                 const newId = this.scene.duplicateNode(id);
+                this.keepCopyBesideOriginal(newId, id);
                 // Duplicated groups start collapsed so a large copy doesn't
                 // flood the Objects panel with expanded descendants.
                 this.ui.collapseSubtreeByDefault(newId);
@@ -3431,6 +3456,26 @@ export class InputManager {
         });
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
+    }
+
+    /**
+     * Put a copy where its original lives: same parent, directly above it.
+     *
+     * `duplicate_node` hands every clone to the root, which is right for a
+     * top-level shape and wrong for a member of anything. Duplicating a shape
+     * inside a Live Paint group used to lift the copy out of the group, so it
+     * stopped dividing regions with its neighbours and simply covered them — the
+     * same end state as the nesting bug, reached with ⌘D. In a plain group it was
+     * milder but no less wrong: the copy left the group it was made from.
+     *
+     * MUST run inside the caller's transaction so the pair stays one undo step.
+     */
+    private keepCopyBesideOriginal(copyId: number, originalId: number) {
+        const parent = this.scene.getNodeParent(originalId);
+        if (parent === -1) return; // the original is at the root; so is the copy
+        const sibs = Array.from(this.scene.getNodeChildren(parent)).filter((c) => c !== copyId);
+        const at = sibs.indexOf(originalId);
+        this.scene.reorderNodes([copyId], parent, at === -1 ? sibs.length : at + 1);
     }
 
     deleteSelection() {
@@ -4445,16 +4490,29 @@ export class InputManager {
         this.renderer.requestRender();
     }
 
-    /** Internal fallback: turn a Live Paint group back into a plain group
-     *  (removes the flag + clears the paint target). Used by Expand when there
-     *  is nothing painted to bake — there is no user-facing "Release" action. */
-    private releaseLivePaintGroup(groupId?: number) {
+    /**
+     * Turn a Live Paint group back into a plain group: the shapes stay exactly as
+     * they are, the surface and its colours go. Illustrator's Object › Live Paint
+     * › Release, and the same shape of choice a Boolean Group offers — Expand
+     * bakes the result, Release throws it away — which is why the two objects now
+     * present the same pair of buttons.
+     *
+     * The paint is discarded rather than baked, so it is destructive; undo brings
+     * it back, and Expand is there for anyone who wanted to keep the colours.
+     */
+    releaseLivePaintGroup(groupId?: number) {
         const id = groupId ?? this.scene.getLivePaintGroup();
         this.scene.transaction(() => {
             if (id >= 0) this.scene.setNodeLivePaint(id, false);
             this.scene.setLivePaintGroup(0);
         });
+        // The properties panel has to be told too, not just the bar and the
+        // Objects list: its Fill section swaps the swatch for a note explaining
+        // that region colours come from the bucket, and without this the note
+        // stayed up on what was now a plain group, advertising a tool that no
+        // longer applies to it.
         this.ui.updateLayerList();
+        this.ui.syncWithSelection();
         this.ui.contextBar?.refresh();
         this.renderer.requestRender();
     }

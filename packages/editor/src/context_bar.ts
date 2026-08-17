@@ -502,10 +502,19 @@ export class ContextBar {
             ),
         );
 
-        // Expand bakes the painted faces/edges into real, editable shapes.
+        // Expand bakes the painted faces/edges into real, editable shapes;
+        // Release drops them and hands back a plain group. Same pair, same order,
+        // same icons as a Boolean Group's Flatten/Release — these are the two
+        // special objects in the editor and they should not need learning twice.
         this.el.appendChild(
             this.createButton('Expand', iconCreateOutlines(14), () => {
                 this.input.expandLivePaintGroup(id);
+            }),
+        );
+
+        this.el.appendChild(
+            this.createButton('Release', iconUngroup(14), () => {
+                this.input.releaseLivePaintGroup(id);
             }),
         );
 

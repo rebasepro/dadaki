@@ -3187,8 +3187,9 @@ impl Engine {
         // Removing an operand (or the group) makes the enclosing boolean group's
         // outline stale — flag before the node is gone so ancestors resolve.
         self.mark_enclosing_boolean_groups_dirty(id);
-        // Drop from the group cache; descendants are cleared by the recursion below.
-        self.live_paint_groups.remove(&id);
+        // Drop from the group cache and the paint scope; descendants are cleared
+        // by the recursion below.
+        self.forget_live_paint_group(id);
         self.boolean_groups.remove(&id);
         self.dirty_boolean_groups.remove(&id);
         if let Some(node) = self.scene.nodes.remove(&id) {
@@ -4843,7 +4844,7 @@ impl Engine {
             self.scene.vector_network.dirty = true;
         }
         self.mark_enclosing_boolean_groups_dirty(id);
-        self.live_paint_groups.remove(&id);
+        self.forget_live_paint_group(id);
         self.boolean_groups.remove(&id);
         self.dirty_boolean_groups.remove(&id);
         if let Some(node) = self.scene.nodes.remove(&id) {
@@ -5218,6 +5219,18 @@ impl Engine {
     /// Ungroup a group node, promoting its children to the group's parent level.
     /// Children are inserted at the group's z-position, preserving their global positions.
     pub fn ungroup_node(&mut self, id: u32) {
+        // The group is about to stop existing: drop the Live Paint bookkeeping
+        // that outlives the node, while it is still here to be classified. Its
+        // members keep their geometry but leave the surface, so the network has
+        // to be rebuilt without them — dissolving a painted group discards the
+        // paint, the same as Release, rather than stranding it on the canvas.
+        if self.is_in_any_live_paint(id) {
+            self.scene.vector_network.dirty = true;
+        }
+        self.forget_live_paint_group(id);
+        self.boolean_groups.remove(&id);
+        self.dirty_boolean_groups.remove(&id);
+
         let (children, group_parent, group_global) = if let Some(node) = self.scene.nodes.get(&id) {
             if !matches!(node.node_type, NodeType::Group) { return; }
             let global = self.global_transforms.get(&id)
@@ -6044,6 +6057,24 @@ impl Engine {
             .map(|(&id, _)| id)
             .collect();
         self.clear_nested_live_paint_flags();
+    }
+
+    /// Forget a group that is being destroyed.
+    ///
+    /// Three pieces of state outlive a `nodes.remove()` and every one of them is
+    /// a dangling id afterwards: the group cache, the network built from that
+    /// group's members, and the active paint scope. Ungroup skipped all three,
+    /// so ungrouping a Live Paint group left its id in the render list and its
+    /// faces on the canvas — paint belonging to a group that no longer existed,
+    /// which survived until something else happened to dirty the network.
+    fn forget_live_paint_group(&mut self, id: u32) {
+        if self.live_paint_groups.remove(&id) {
+            self.scene.vector_network.dirty = true;
+        }
+        if self.scene.live_paint_group == Some(id) {
+            self.scene.live_paint_group = None;
+            self.scene.vector_network.dirty = true;
+        }
     }
 
     /// Enforce one flag per nest: clear the flag on every group that has a
@@ -7531,6 +7562,53 @@ mod tests {
         assert!(engine.deserialize_scene(&saved));
         assert!(engine.has_clipboard(), "undo must not take the clipboard with it");
         assert_eq!(engine.paste_clipboard(0.0, 0.0).len(), 1);
+    }
+
+    /// Dissolving a Live Paint group takes its paint with it.
+    ///
+    /// Ungroup removes the node, and the three things that outlive that removal
+    /// were all left dangling: the group cache still listed the id, so the render
+    /// data kept naming a group that did not exist; the paint scope still pointed
+    /// at it; and nothing dirtied the network, so its faces stayed on the canvas
+    /// as paint belonging to nothing — until some unrelated edit rebuilt it.
+    #[test]
+    fn ungrouping_a_live_paint_group_takes_its_network_with_it() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(50.0, 50.0, 100.0, 100.0);
+        let group = engine.group_nodes(&format!("[{a},{b}]"));
+        engine.set_node_live_paint(group, true);
+        engine.set_live_paint_group(group);
+        let face = engine.query_face_at(75.0, 75.0);
+        assert!(face >= 0, "the overlap is paintable to begin with");
+        engine.set_face_fill(face as u32, 0.0, 1.0, 0.0, 1.0);
+
+        engine.ungroup_node(group);
+
+        assert!(engine.scene.nodes.get(&group).is_none());
+        assert!(!engine.live_paint_groups.contains(&group), "cache still names it");
+        assert_eq!(engine.get_live_paint_group(), -1, "scope still points at it");
+        // The shapes are still there and are still shapes — they are just not a
+        // painted surface any more, so nothing is fillable.
+        assert!(engine.scene.nodes.contains_key(&a));
+        assert_eq!(engine.query_face_at(75.0, 75.0), -1);
+        assert_eq!(engine.get_live_paint_faces(), "[]");
+    }
+
+    /// Deleting a Live Paint group clears the paint scope too, for the same
+    /// reason: a scope pointing at a removed node is a dangling id.
+    #[test]
+    fn deleting_the_active_live_paint_group_clears_the_scope() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let group = engine.group_nodes(&format!("[{a}]"));
+        engine.set_node_live_paint(group, true);
+        engine.set_live_paint_group(group);
+
+        engine.remove_node(group);
+
+        assert_eq!(engine.get_live_paint_group(), -1);
+        assert!(!engine.live_paint_groups.contains(&group));
     }
 
     /// Loading a document written before nesting was refused heals it.

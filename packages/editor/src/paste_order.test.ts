@@ -150,6 +150,77 @@ describe('a pasted set keeps the originals’ stacking order', () => {
     });
 });
 
+describe('a copy stays where its original lives', () => {
+    /** A group holding two rects, the first one selected — inside the group. */
+    function inGroup() {
+        const scene = makeScene();
+        const input = new InputManager(
+            document.createElement('canvas'),
+            scene,
+            makeUI(),
+            makeRenderer(),
+        );
+        const e = scene.engine!;
+        const a = e.add_rect(0, 0, 10, 10);
+        const b = e.add_rect(20, 0, 10, 10);
+        const group = e.group_nodes(JSON.stringify([a, b]));
+        e.clear_selection();
+        e.select_node(a, false);
+        return { scene, e, input, a, b, group };
+    }
+
+    it('⌘D on a member keeps the copy in the group, directly above it', () => {
+        const { scene, e, input, a, group } = inGroup();
+
+        input.duplicateSelection();
+
+        const copy = Array.from(e.get_selection())[0];
+        expect(scene.getNodeParent(copy)).toBe(group);
+        const kids = Array.from(scene.getNodeChildren(group));
+        expect(kids.indexOf(copy)).toBe(kids.indexOf(a) + 1);
+    });
+
+    it('⌘C ⌘V pastes into the group you are inside', () => {
+        const { scene, e, input, group } = inGroup();
+
+        input.onKeyDown(key('c', { meta: true }));
+        input.onKeyDown(key('v', { meta: true }));
+
+        const pasted = Array.from(e.get_selection())[0];
+        expect(scene.getNodeParent(pasted)).toBe(group);
+    });
+
+    it('⌘X ⌘V puts a cut member back into the group', () => {
+        const { scene, e, input, a, b, group } = inGroup();
+        e.clear_selection();
+        e.select_node(b, false); // cut b, keep a selected as the context after
+
+        input.onKeyDown(key('x', { meta: true }));
+        e.select_node(a, false);
+        input.onKeyDown(key('v', { meta: true }));
+
+        const pasted = Array.from(e.get_selection())[0];
+        expect(scene.getNodeParent(pasted)).toBe(group);
+    });
+
+    it('a top-level shape still duplicates to the root', () => {
+        const scene = makeScene();
+        const input = new InputManager(
+            document.createElement('canvas'),
+            scene,
+            makeUI(),
+            makeRenderer(),
+        );
+        const e = scene.engine!;
+        const a = e.add_rect(0, 0, 10, 10);
+        e.select_node(a, false);
+
+        input.duplicateSelection();
+
+        expect(scene.getNodeParent(Array.from(e.get_selection())[0])).toBe(-1);
+    });
+});
+
 describe('WasmScene.sortByPaintOrder', () => {
     it('orders a mixed selection by the document, nested nodes included', () => {
         const scene = makeScene();

@@ -265,6 +265,33 @@ describe('a Live Paint group is still a group', () => {
         expect(scene.getNodeParent(drawn)).toBe(-1);
     });
 
+    it('Release hands back a plain group: shapes kept, surface gone', () => {
+        // The counterpart to Expand, and the pair a Boolean Group already offers.
+        const { scene, e, input, group, a, b } = painted();
+
+        input.releaseLivePaintGroup(group);
+
+        expect(scene.getNodeLivePaint(group)).toBe(false);
+        expect(e.get_live_paint_group()).toBe(-1);
+        expect(Array.from(scene.getNodeChildren(group))).toEqual([a, b]);
+        expect(e.query_face_at(75, 75)).toBe(-1); // nothing paintable any more
+        expect(JSON.parse(e.get_live_paint_faces()).length).toBe(0);
+    });
+
+    it('ungrouping a painted group takes the paint with it', () => {
+        // The engine used to leave the dead group in its cache, as the paint
+        // scope, and its faces on the canvas — paint belonging to nothing.
+        const { scene, e, group, a } = painted();
+
+        scene.ungroupNode(group);
+
+        expect(scene.getNodeType(group)).toBe(undefined);
+        expect(e.get_live_paint_group()).toBe(-1);
+        expect(JSON.parse(e.get_live_paint_render_data()).groups).toEqual([]);
+        expect(JSON.parse(e.get_live_paint_faces()).length).toBe(0);
+        expect(scene.getNodeType(a)).not.toBe(undefined); // the shapes survive
+    });
+
     it('arming the bucket on the selected group starts painting it', () => {
         const { e, ui, input, group } = painted();
         e.clear_selection();
