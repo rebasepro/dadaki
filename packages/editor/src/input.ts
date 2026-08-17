@@ -1389,7 +1389,10 @@ export class InputManager {
                 };
                 this.clipboardIds = [];
             } else {
-                this.clipboardIds = [...this.scene.engine!.get_selection()];
+                // Back-to-front, not click order — paste re-creates them one at
+                // a time on top of the stack, so the copy order IS the copies'
+                // z-order (see WasmScene.sortByPaintOrder).
+                this.clipboardIds = this.scene.sortByPaintOrder(this.scene.engine!.get_selection());
                 this.artboardClipboard = null;
             }
             this.cutPending = false;
@@ -1400,7 +1403,7 @@ export class InputManager {
         // the engine lifts the subtrees out of the document instead and keeps
         // them (Engine::cut_nodes).
         if ((e.metaKey || e.ctrlKey) && e.key === 'x' && !e.altKey) {
-            const sel = Array.from(this.scene.engine!.get_selection());
+            const sel = this.scene.sortByPaintOrder(this.scene.engine!.get_selection());
             if (sel.length > 0) {
                 e.preventDefault();
                 this.scene.cutNodes(sel);
@@ -3402,7 +3405,8 @@ export class InputManager {
             this.duplicateSelectedArtboard();
             return;
         }
-        const selection = this.scene.engine!.get_selection();
+        // Duplicate back-to-front so the copies keep the originals' stacking.
+        const selection = this.scene.sortByPaintOrder(this.scene.engine!.get_selection());
         if (selection.length === 0) return;
         this.scene.transaction(() => {
             this.scene.engine!.clear_selection();

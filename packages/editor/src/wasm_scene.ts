@@ -741,6 +741,29 @@ export class WasmScene {
         return this.engine!.get_selection();
     }
 
+    /** Reorder ids back-to-front, the way the document paints them.
+     *
+     *  The selection is stored in the order rows were *clicked*, and the Objects
+     *  panel lists front-to-back — so shift-selecting a range there hands us the
+     *  ids topmost-first. Anything that re-creates nodes one at a time (copy /
+     *  paste, cut / paste, duplicate) appends each new node on top of the stack,
+     *  which turns that click order into the copies' z-order and leaves the
+     *  pasted set stacked opposite to the originals. Feed those loops this
+     *  order instead. Ids the tree doesn't know about keep their relative order
+     *  at the end rather than being dropped. */
+    sortByPaintOrder(ids: number[] | Uint32Array): number[] {
+        const wanted = new Set<number>(Array.from(ids));
+        if (wanted.size === 0 || !this.engine) return Array.from(ids);
+        const out: number[] = [];
+        const walk = (id: number) => {
+            if (wanted.delete(id)) out.push(id);
+            for (const child of this.getNodeChildren(id)) walk(child);
+        };
+        for (const root of this.getRootNodes()) walk(root);
+        for (const id of Array.from(ids)) if (wanted.delete(id)) out.push(id);
+        return out;
+    }
+
     getRootNodes(): Uint32Array {
         return this.engine!.get_root_nodes();
     }
