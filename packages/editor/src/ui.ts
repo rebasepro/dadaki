@@ -1670,7 +1670,7 @@ export class UIEngine {
                 strokes: [
                     {
                         paint: { r: 0, g: 0, b: 0, a: 1.0 },
-                        width: 2,
+                        width: 1,
                         cap: 0,
                         join: 0,
                         dash_array: [],
