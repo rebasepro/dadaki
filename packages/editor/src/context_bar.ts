@@ -318,7 +318,10 @@ export class ContextBar {
                     ? `|mesh${me.mesh()?.rows}x${me.mesh()?.cols}:${me.selectedVertices.size}`
                     : '|mesh-idle'
                 : '';
-        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}${geoSig}${guideSig}${cornerSig}${meshSig}`;
+        // The intruder hint appears and disappears with no selection or tool
+        // change behind it, so without it here the bar keeps its old contents.
+        const intruderSig = `|intr${this.input.livePaintIntruder ?? 0}`;
+        return `${info.context}|${this.ui.activeTool}|${info.selectedIds.join(',')}|${types}|${names}|${info.pointCount}|${info.selectedPointCount}|${this.input.addPointMode ? 1 : 0}${styleSig}${lpSig}${boolSig}${geoSig}${guideSig}${cornerSig}${meshSig}${intruderSig}`;
     }
 
     /** Rebuild the bar DOM based on context info. */
@@ -891,6 +894,22 @@ export class ContextBar {
                     'Click a region to fill · ⇧-click a line to paint its edge · ⌥-click to pick up a colour · ⌘-click to clear · V to edit the shapes',
                 ),
             );
+            // Why the fill went further than the lines suggested it would. A
+            // shape that is not in the group contributes nothing to the surface,
+            // so its edges divide nothing — the one failure of this tool that
+            // looks exactly like a bug in it.
+            const intruder = this.input.livePaintIntruder;
+            if (intruder !== null) {
+                const name = this.scene.getNodeName(intruder) || 'That shape';
+                this.el.appendChild(this.createSeparator());
+                this.el.appendChild(this.createBadge(`${name} isn't in this group`));
+                this.el.appendChild(
+                    this.createButton('Add it', iconPaintBucket(14), () => {
+                        this.input.adoptLivePaintIntruder();
+                    }),
+                );
+            }
+
             this.el.appendChild(this.createSeparator());
             this.el.appendChild(
                 this.createButton(

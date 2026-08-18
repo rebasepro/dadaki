@@ -1172,6 +1172,42 @@ impl VectorNetwork {
         }
     }
 
+    /// Drop out-and-back excursions from a face walk.
+    ///
+    /// A dangling end — an open path that stops inside a region, or a line whose
+    /// tip does not quite reach the shape it looks like it meets — has the same
+    /// face on both sides, so the boundary walk goes out along it and comes
+    /// straight back. That is correct traversal and wrong geometry: the pair
+    /// encloses nothing, and leaving it in the outline hangs a zero-area spike
+    /// off the filled region. Where the stub is curved the spike is a curve
+    /// wandering into the middle of a region that has no boundary there, which
+    /// is what it looks like on screen.
+    ///
+    /// It is not only cosmetic. The polygon built from this list is what
+    /// `representative_point` and `polygon_centroid` run on, so a spur can drag
+    /// a region's identity point onto a line — or outside the region entirely —
+    /// and that point is what re-attaches a fill after every rebuild.
+    ///
+    /// Removing an `e, twin(e)` pair can expose another one underneath (a spur
+    /// hanging off a spur), so this collapses repeatedly, and finally across the
+    /// seam, because the walk is a cycle with no privileged first edge.
+    fn prune_spurs(&self, edges: &[u32]) -> Vec<u32> {
+        let twin_of = |eid: u32| self.edges.get(&eid).map(|e| e.twin);
+        let mut out: Vec<u32> = Vec::with_capacity(edges.len());
+        for &eid in edges {
+            if out.last().copied().and_then(twin_of) == Some(eid) {
+                out.pop();
+                continue;
+            }
+            out.push(eid);
+        }
+        while out.len() >= 2 && twin_of(out[out.len() - 1]) == Some(out[0]) {
+            out.pop();
+            out.remove(0);
+        }
+        out
+    }
+
     fn detect_faces(&mut self) {
         let mut visited: HashSet<u32> = HashSet::new();
         let edge_ids: Vec<u32> = self.edges.keys().copied().collect();
@@ -1238,9 +1274,17 @@ impl VectorNetwork {
             }
 
             if face_edges.len() >= 3 {
+                // The walk records what it traversed, which includes going out
+                // along every dangling end inside this face and back. Those
+                // excursions are not boundary — see `prune_spurs`.
+                let outline_edges = self.prune_spurs(&face_edges);
+                if outline_edges.len() < 3 {
+                    continue;
+                }
+
                 // Build boundary polygon
                 let mut polygon = Vec::new();
-                for &eid in &face_edges {
+                for &eid in &outline_edges {
                     if let Some(e) = self.edges.get(&eid) {
                         let pos = self.vertices[&e.from_vertex].position;
                         polygon.push([pos.x, pos.y]);
@@ -1257,7 +1301,7 @@ impl VectorNetwork {
 
                 let face = PlanarFace {
                     id: face_id,
-                    boundary_edges: face_edges.clone(),
+                    boundary_edges: outline_edges,
                     fill: None,
                     boundary_polygon: polygon,
                     signed_area: area,
@@ -1266,7 +1310,9 @@ impl VectorNetwork {
                     signature: Vec::new(), // filled in by compute_face_signatures
                 };
 
-                // Assign face to all its edges
+                // Assign the face to every edge the WALK visited, spurs included:
+                // a stub is still part of this region for painting and for
+                // `query_edge_at`, it just is not part of the region's outline.
                 for &eid in &face_edges {
                     if let Some(e) = self.edges.get_mut(&eid) {
                         e.face = Some(face_id);

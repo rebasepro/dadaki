@@ -2818,12 +2818,92 @@ export class InputManager {
             }
             const c = this.ui.getLivePaintFill();
             this.scene.setFaceFill(faceId, c.r, c.g, c.b, c.a);
+            // Painting a region whose apparent divisions come from a shape that
+            // is not in the group is the single most confusing thing this tool
+            // does: the fill floods past lines that are plainly there. Name it.
+            const grp = this.scene.getLivePaintGroup();
+            this.livePaintIntruder =
+                this.livePaintIntruderOverFace(faceId, grp) ?? this.livePaintIntruderAt(pos, grp);
             this.ui.syncWithSelection();
+            this.ui.contextBar?.refresh();
             return;
         }
         // Clicked outside every region (e.g. on the outline itself) → the nearest
         // edge is the sensible target so clicking a lone outline still paints.
         paintEdge();
+    }
+
+    /**
+     * A shape sitting over the active Live Paint group that is not in it.
+     *
+     * This is the answer to "there are clearly lines there, why is this one
+     * region". A shape outside the group contributes no segments to the network,
+     * so its edges divide nothing no matter how plainly they cross what you are
+     * looking at — and until now the tool gave no hint of that. The bar names it
+     * and offers to add it.
+     *
+     * Set on a paint click, cleared as soon as one lands somewhere the question
+     * does not arise, so it never lingers as a stale accusation.
+     */
+    livePaintIntruder: number | null = null;
+
+    /**
+     * The shape under `pos` that is NOT part of `group`, if any.
+     *
+     * Deliberately the DEEPEST hit rather than the top-level one: a stray shape
+     * is usually a sibling of the group, but it can also sit inside some other
+     * group entirely, and what matters is only whether the Live Paint group
+     * counts it as a member. Text and images are ignored — they contribute no
+     * segments to any surface, so their presence explains nothing.
+     */
+    livePaintIntruderAt(pos: { x: number; y: number }, group: number): number | null {
+        const under = this.scene.hitTest(pos.x, pos.y);
+        if (under !== undefined && this.isLivePaintIntruder(under, group)) return under;
+        return null;
+    }
+
+    /**
+     * A shape overlapping `faceId`'s region that is not in `group`.
+     *
+     * Searching the whole region rather than the point under the cursor is the
+     * difference between the hint firing and not: you click in the middle of an
+     * area to fill it, not on the line that appears to bound it. The spatial
+     * index is queried over the face's own bounds, so this costs a box query
+     * against the shapes actually near the region, not a scan of the document.
+     */
+    livePaintIntruderOverFace(faceId: number, group: number): number | null {
+        const b = Array.from(this.scene.engine!.face_bounds(faceId));
+        if (b.length !== 4) return null;
+        for (const id of this.scene.getVisibleNodes(b[0], b[1], b[2], b[3])) {
+            if (this.isLivePaintIntruder(id, group)) return id;
+        }
+        return null;
+    }
+
+    /** A vector shape that is not part of `group`. Text and images are ignored:
+     *  they contribute no segments to any surface, so their presence explains
+     *  nothing about why a region did not divide. */
+    private isLivePaintIntruder(id: number, group: number): boolean {
+        if (this.findLivePaintAncestor(id) === group) return false;
+        const kind = this.scene.getNode(id)?.node_type;
+        return kind === 'Path' || kind === 'Rect' || kind === 'Ellipse';
+    }
+
+    /** Add the shape the bar is pointing at into the group being painted. */
+    adoptLivePaintIntruder() {
+        const id = this.livePaintIntruder;
+        const group = this.scene.getLivePaintGroup();
+        this.livePaintIntruder = null;
+        if (id === null || group < 0) return;
+        if (this.scene.getNodeType(id) === undefined) return;
+        this.scene.transaction(() => {
+            const index = Array.from(this.scene.getNodeChildren(group)).length;
+            this.scene.reorderNodes([id], group, index);
+        });
+        this.ui.updateLayerList();
+        this.ui.syncWithSelection();
+        this.ui.contextBar?.refresh();
+        this.renderer.requestRender();
     }
 
     /**

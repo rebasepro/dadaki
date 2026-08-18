@@ -4896,6 +4896,27 @@ impl Engine {
         out
     }
 
+    /// World-space AABB of one face's outline as `[minX, minY, maxX, maxY]`,
+    /// or an empty vec if the id is unknown.
+    ///
+    /// Used to answer "what else is sitting on this region" — a shape outside
+    /// the Live Paint group contributes no segments, so it divides nothing, and
+    /// the only way to explain that to someone is to find it and name it.
+    pub fn face_bounds(&mut self, face_id: u32) -> Vec<f32> {
+        self.ensure_network_clean();
+        match self.scene.vector_network.faces.get(&face_id) {
+            Some(f) if !f.boundary_polygon.is_empty() => {
+                let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+                for p in &f.boundary_polygon {
+                    lo[0] = lo[0].min(p[0]); lo[1] = lo[1].min(p[1]);
+                    hi[0] = hi[0].max(p[0]); hi[1] = hi[1].max(p[1]);
+                }
+                vec![lo[0], lo[1], hi[0], hi[1]]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// True when a cut is waiting to be pasted.
     pub fn has_clipboard(&self) -> bool {
         !self.clipboard_roots.is_empty()
@@ -7639,6 +7660,57 @@ mod tests {
         assert!(!reloaded.live_paint_groups.contains(&inner), "and leaves the cache");
         // The shape it wrapped now belongs to the outer group's surface.
         assert_eq!(reloaded.live_paint_group_of(added), Some(outer));
+    }
+
+    /// A line that pokes into a region but does not cross it.
+    ///
+    /// The face walk goes out along that stub and back, so the boundary it
+    /// records visits the same geometry twice. Rendered, that is a zero-area
+    /// spike hanging off the fill — and where the stub is curved, a curve
+    /// wandering into the middle of a region that has no boundary there. It is
+    /// also what the region's representative point and centroid are computed
+    /// from, so a fill can end up keyed to a point that is not inside the shape
+    /// a user sees.
+    ///
+    /// The stub stays in the graph — it is still a paintable edge — it just
+    /// stops being part of the outline of the fill.
+    #[test]
+    fn a_dangling_stub_is_not_part_of_the_face_outline() {
+        let mut engine = Engine::new();
+        let rect = engine.add_rect(0.0, 0.0, 200.0, 100.0);
+        // An open path entering the rect from the left and stopping halfway.
+        let stub = engine.add_path(
+            r#"[{"points":[{"x":-20.0,"y":50.0,"cp1":[-20.0,50.0],"cp2":[-20.0,50.0]},
+                            {"x":90.0,"y":50.0,"cp1":[90.0,50.0],"cp2":[90.0,50.0]}],"closed":false}]"#,
+        );
+        let group = engine.group_nodes(&format!("[{rect},{stub}]"));
+        engine.set_node_live_paint(group, true);
+        engine.set_live_paint_group(group);
+
+        // The stub does not divide the rectangle: one region, as in Illustrator.
+        let face = engine.query_face_at(150.0, 50.0);
+        assert!(face >= 0);
+        assert_eq!(engine.query_face_at(20.0, 20.0), face, "a stub must not split the region");
+
+        let f = engine.scene.vector_network.faces.get(&(face as u32)).unwrap();
+        // The outline is the rectangle: four corners, no excursion along the stub
+        // and back. Before this was pruned the walk recorded the stub twice.
+        let outline = engine.scene.vector_network.face_outline(f);
+        assert!(
+            outline.len() <= 6,
+            "outline should trace the rectangle, got {} points — the stub is in it",
+            outline.len()
+        );
+        for p in &outline {
+            assert!(
+                p.x >= -1.0,
+                "outline reaches x={} — that is out along the stub, outside the region",
+                p.x
+            );
+        }
+
+        // The stub is still there to paint: an edge query on it must still hit.
+        assert!(engine.query_edge_at(50.0, 50.0, 4.0) >= 0, "the stub must stay paintable");
     }
 
     /// Cutting a group takes its children along, and paste rebuilds the tree.

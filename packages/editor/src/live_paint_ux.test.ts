@@ -292,6 +292,26 @@ describe('a Live Paint group is still a group', () => {
         expect(scene.getNodeType(a)).not.toBe(undefined); // the shapes survive
     });
 
+    it('names the shape that is over the group but not in it', () => {
+        // The reported confusion: lines plainly cross the region, the fill
+        // ignores them, and nothing says why. A shape outside the group puts no
+        // segments in the surface, so its edges divide nothing.
+        const { scene, e, input, group } = painted();
+        const stray = e.add_rect(20, 20, 60, 60); // sits over the group, outside it
+
+        expect(input.livePaintIntruderAt({ x: 40, y: 40 }, group)).toBe(stray);
+        // A point over a real member is not an accusation.
+        expect(input.livePaintIntruderAt({ x: 140, y: 140 }, group)).toBe(null);
+
+        input.livePaintIntruder = stray;
+        input.adoptLivePaintIntruder();
+
+        expect(scene.getNodeParent(stray)).toBe(group);
+        expect(input.livePaintIntruder).toBe(null);
+        // Now in the group, it divides what it crosses.
+        expect(e.query_face_at(40, 40)).not.toBe(e.query_face_at(90, 40));
+    });
+
     it('arming the bucket on the selected group starts painting it', () => {
         const { e, ui, input, group } = painted();
         e.clear_selection();
