@@ -484,6 +484,16 @@ pub struct VectorNetwork {
     /// rebuild, so it is not serialized.
     #[serde(skip)]
     pub logical_edges: HashMap<u32, LogicalEdge>,
+    /// The world transform each Live Paint group was last arranged under.
+    ///
+    /// A fill is re-attached to its region partly by where it was — and "where"
+    /// is in world space, so moving the group moved every stored point away from
+    /// the region it belonged to and the colours landed on their neighbours.
+    /// Keeping the transform means the next rebuild can ask what the group DID
+    /// since, and carry the old points along with it. Not saved: it describes the
+    /// arrangement in memory, and a freshly loaded document has no previous one.
+    #[serde(skip)]
+    pub(crate) group_built_transform: HashMap<u32, [f32; 9]>,
     /// Source curves (world space) that fragments reference for exact-bézier
     /// reconstruction. Rebuilt each pass; not serialized.
     #[serde(skip)]
@@ -515,6 +525,7 @@ impl Default for VectorNetwork {
             painted_edges: Vec::new(),
             logical_edges: HashMap::new(),
             curves: Vec::new(),
+            group_built_transform: HashMap::new(),
         }
     }
 }
@@ -754,22 +765,64 @@ pub(crate) fn segment_intersection(
     }
 }
 
+/// Move a point from the space a group used to be in into the space it is in now.
+///
+/// `from` is the transform the point was measured under, `to` the group's current
+/// one. With either missing — a first build, or a group that has since gone —
+/// there is nothing to compose and the point stands as it is.
+fn carry_point(p: Vec2, from: Option<&[f32; 9]>, to: Option<&[f32; 9]>) -> Vec2 {
+    let (Some(from), Some(to)) = (from, to) else { return p };
+    if from == to {
+        return p; // the common case: nothing moved
+    }
+    let m_from = glam::Mat3::from_cols_array(from);
+    let m_to = glam::Mat3::from_cols_array(to);
+    let det = m_from.determinant();
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return p; // degenerate: better to leave the point than to invent one
+    }
+    let local = m_from.inverse() * glam::Vec3::new(p.x, p.y, 1.0);
+    let world = m_to * local;
+    if world.z.abs() < 1e-12 {
+        return p;
+    }
+    Vec2::new(world.x / world.z, world.y / world.z)
+}
+
 // ─── Core Algorithm ────────────────────────────────────────────────────────────
 
 impl VectorNetwork {
     /// Rebuild the entire planar graph from the given scene segments + curves.
-    pub(crate) fn rebuild(&mut self, engine_segments: Vec<FlatSeg>, curves: Vec<CurveSeg>) {
+    pub(crate) fn rebuild(
+        &mut self,
+        engine_segments: Vec<FlatSeg>,
+        curves: Vec<CurveSeg>,
+        group_transforms: &HashMap<u32, [f32; 9]>,
+    ) {
         // Snapshot old filled faces as (signature, centroid, color) for re-mapping.
         // The signature (which closed shapes contain the face) lets a fill
         // re-attach to the same region even after shapes move (see remap_fills).
+        //
+        // The point is carried through whatever the group has done since it was
+        // taken. Without that, dragging a Live Paint group shifted every colour
+        // onto a neighbouring region: the stored points stayed where the drawing
+        // used to be, and matching them against the moved arrangement is asking
+        // which region is now nearest to where a different region used to sit.
+        // Rigid or not — a move, a scale, a rotation — the answer is the same
+        // composition, so this handles all of them.
         let old_filled: Vec<(Vec<u32>, Vec2, Paint)> = self.faces.values()
             .filter(|f| f.fill.is_some() && !f.is_outer)
             .map(|f| (
                 f.signature.clone(),
-                polygon_centroid(&f.boundary_polygon),
+                carry_point(
+                    polygon_centroid(&f.boundary_polygon),
+                    self.group_built_transform.get(&f.group),
+                    group_transforms.get(&f.group),
+                ),
                 f.fill.clone().unwrap(),
             ))
             .collect();
+        self.group_built_transform = group_transforms.clone();
 
         // Group the incoming (un-split) segments by source node into closed
         // outlines, used to compute each new face's containment signature.
@@ -2441,7 +2494,12 @@ impl Engine {
         if self.scene.vector_network.dirty {
             let (segments, curves) = self.collect_segments();
             self.scene.vector_network.group_gap = self.gap_overrides();
-            self.scene.vector_network.rebuild(segments, curves);
+            let group_transforms: HashMap<u32, [f32; 9]> = self
+                .live_paint_group_ids()
+                .into_iter()
+                .filter_map(|g| self.global_transforms.get(&g).copied().map(|t| (g, t)))
+                .collect();
+            self.scene.vector_network.rebuild(segments, curves, &group_transforms);
             self.resolve_painted_edges();
         }
     }

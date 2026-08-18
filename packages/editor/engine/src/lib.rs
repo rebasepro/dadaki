@@ -5771,7 +5771,14 @@ impl Engine {
     pub fn rebuild_vector_network(&mut self) {
         let (segments, curves) = self.collect_segments();
         self.scene.vector_network.group_gap = self.gap_overrides();
-        self.scene.vector_network.rebuild(segments, curves);
+        // Where each Live Paint group is now, so fills can be carried from where
+        // it was (see `rebuild`).
+        let group_transforms: std::collections::HashMap<u32, [f32; 9]> = self
+            .live_paint_group_ids()
+            .into_iter()
+            .filter_map(|g| self.global_transforms.get(&g).copied().map(|t| (g, t)))
+            .collect();
+        self.scene.vector_network.rebuild(segments, curves, &group_transforms);
     }
 
     /// Mark the vector network as needing recomputation.
@@ -8058,6 +8065,115 @@ mod tests {
             "the stroke stopped 0.4 short, so its region never closed and paints with its neighbour"
         );
         assert_ne!(left, middle, "the full-length stroke divides its side");
+    }
+
+
+    /// Moving a Live Paint group does not shuffle its colours.
+    ///
+    /// A fill is re-attached to its region after every rebuild, and part of that
+    /// is where the region was. "Where" was recorded in world space, so moving
+    /// the group left every stored point behind: matching then asks which region
+    /// is nearest to where a DIFFERENT region used to sit, and the colours land
+    /// on their neighbours. Dragging a painted group was enough to scramble it.
+    ///
+    /// The points are now carried through whatever the group did in between, so
+    /// this holds for a scale and a rotation as much as a drag.
+    #[test]
+    fn moving_a_live_paint_group_keeps_every_colour_on_its_region() {
+        // Overlapping shapes plus an open line, so some regions have a
+        // containment signature to match on and others have nothing but the
+        // point — which is the case that broke.
+        let build = || {
+            let mut e = Engine::new();
+            let a = e.add_rect(0.0, 0.0, 120.0, 110.0);
+            let b = e.add_rect(70.0, 12.0, 140.0, 96.0);
+            let l = e.add_path(
+                r#"[{"points":[{"x":-20.0,"y":47.0,"cp1":[-20.0,47.0],"cp2":[-20.0,47.0]},
+                               {"x":240.0,"y":71.0,"cp1":[240.0,71.0],"cp2":[240.0,71.0]}],"closed":false}]"#,
+            );
+            let g = e.group_nodes(&format!("[{a},{b},{l}]"));
+            e.set_node_live_paint(g, true);
+            e.set_live_paint_group(g);
+            e.ensure_network_clean();
+
+            // A distinct colour per region, and a probe point inside each.
+            let mut painted: Vec<(f32, f32, String)> = Vec::new();
+            let mut seen: Vec<i32> = Vec::new();
+            for gx in 0..12 {
+                for gy in 0..12 {
+                    let (x, y) = (-10.0 + 200.0 * gx as f32 / 12.0, -10.0 + 140.0 * gy as f32 / 12.0);
+                    let fid = e.query_face_at(x, y);
+                    if fid < 0 || seen.contains(&fid) {
+                        continue;
+                    }
+                    seen.push(fid);
+                    let shade = seen.len() as f32 / 20.0;
+                    e.set_face_paint(fid as u32, &format!(r#"{{"r":{shade},"g":0.2,"b":0.3,"a":1}}"#));
+                    painted.push((x, y, e.get_face_paint(fid as u32)));
+                }
+            }
+            (e, g, painted)
+        };
+
+        // 1. A drag.
+        let (mut e, g, painted) = build();
+        assert!(painted.len() >= 5, "the fixture should have several painted regions");
+        e.move_node(g, 250.0, 130.0);
+        e.ensure_network_clean();
+        for (x, y, paint) in &painted {
+            let fid = e.query_face_at(x + 250.0, y + 130.0);
+            assert!(fid >= 0, "a region vanished after the move");
+            assert_eq!(
+                &e.get_face_paint(fid as u32), paint,
+                "the colour at ({x},{y}) moved to another region"
+            );
+        }
+
+        // 2 and 3. A scale and a rotation. Predicting where a point lands is not
+        //    the test's business — a group carries its own transform already — so
+        //    these check an invariant that needs no coordinates: order the
+        //    painted regions by area and the sequence of colours must be
+        //    unchanged. A shuffle moves a colour onto a differently-sized region
+        //    and breaks it.
+        // Each colour keyed to the area of the region carrying it. Areas are the
+        // one thing a rigid transform relates predictably — unchanged by a
+        // rotation, scaled by k² by a scale — and keying per colour rather than
+        // comparing an ordering means two equally sized regions cannot make the
+        // check ambiguous.
+        let area_by_colour = |e: &Engine| -> Vec<(String, f64)> {
+            let mut rows: Vec<(String, f64)> = e
+                .scene
+                .vector_network
+                .faces
+                .values()
+                .filter(|f| !f.is_outer && f.fill.is_some())
+                .map(|f| (e.get_face_paint(f.id), f.signed_area.abs()))
+                .collect();
+            rows.sort_by(|a, b| a.0.cmp(&b.0));
+            rows
+        };
+
+        for (matrix, factor) in [("[2,0,0,0,2,0,0,0,1]", 4.0), ("[0,1,0,-1,0,0,0,0,1]", 1.0)] {
+            let (mut e, g, painted) = build();
+            let before = area_by_colour(&e);
+            assert_eq!(before.len(), painted.len(), "every painted region should be counted");
+            e.set_node_transform_matrix(g, matrix);
+            e.ensure_network_clean();
+            let after = area_by_colour(&e);
+            assert_eq!(
+                after.len(), before.len(),
+                "a painted region was lost transforming with {matrix}"
+            );
+            for ((c1, a1), (c2, a2)) in before.iter().zip(after.iter()) {
+                assert_eq!(c1, c2, "a colour disappeared transforming with {matrix}");
+                let want = a1 * factor;
+                assert!(
+                    (a2 - want).abs() <= want * 0.02,
+                    "colour {c1} was on a region of area {a1:.0} and is now on one of {a2:.0} \
+                     (expected about {want:.0}) after {matrix}"
+                );
+            }
+        }
     }
 
     /// A region that encloses another does not paint over it.
