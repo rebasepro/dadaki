@@ -89,12 +89,24 @@ pub struct Frag {
 #[derive(Clone, Copy, Debug)]
 pub enum CurveSeg {
     /// Straight segment `a`→`b`, parametrised linearly.
-    Line { node: u32, seg: u32, a: Vec2, b: Vec2 },
+    Line { node: u32, seg: u32, a: Vec2, b: Vec2, free: (bool, bool) },
     /// Cubic bézier with control points `p0,p1,p2,p3`.
-    Cubic { node: u32, seg: u32, p: [Vec2; 4] },
+    Cubic { node: u32, seg: u32, p: [Vec2; 4], free: (bool, bool) },
 }
 
 impl CurveSeg {
+    /// Whether this curve's `t=0` / `t=1` end is a FREE end of an open path —
+    /// a pen stroke's terminal point, which continues into nothing.
+    ///
+    /// It matters because a free end is the one thing in a drawing whose exact
+    /// position carries no information: it was put down near what it meets, and
+    /// "near" is the whole reason gap tolerance exists. Everything else — a
+    /// crossing, the joint where a corner arc meets a side — is a point the
+    /// artwork actually defines. When two of those land within tolerance of each
+    /// other, the free one is what should move.
+    fn free_ends(&self) -> (bool, bool) {
+        match self { CurveSeg::Line { free, .. } | CurveSeg::Cubic { free, .. } => *free }
+    }
     fn node(&self) -> u32 {
         match self { CurveSeg::Line { node, .. } | CurveSeg::Cubic { node, .. } => *node }
     }
@@ -103,12 +115,35 @@ impl CurveSeg {
     fn seg(&self) -> u32 {
         match self { CurveSeg::Line { seg, .. } | CurveSeg::Cubic { seg, .. } => *seg }
     }
-    fn point_at(&self, t: f32) -> Vec2 {
+    pub(crate) fn point_at(&self, t: f32) -> Vec2 {
         match self {
             CurveSeg::Line { a, b, .. } => *a + (*b - *a) * t,
             CurveSeg::Cubic { p, .. } => cubic_point(p, t),
         }
     }
+    /// dP/dt. Zero-length only for a degenerate curve, which the callers check.
+    fn tangent_at(&self, t: f32) -> Vec2 {
+        match self {
+            CurveSeg::Line { a, b, .. } => *b - *a,
+            CurveSeg::Cubic { p, .. } => {
+                let mt = 1.0 - t;
+                (p[1] - p[0]) * (3.0 * mt * mt)
+                    + (p[2] - p[1]) * (6.0 * mt * t)
+                    + (p[3] - p[2]) * (3.0 * t * t)
+            }
+        }
+    }
+
+    /// d²P/dt², needed to Newton-solve for the closest point on the curve.
+    fn curvature_vector_at(&self, t: f32) -> Vec2 {
+        match self {
+            CurveSeg::Line { .. } => Vec2::ZERO,
+            CurveSeg::Cubic { p, .. } => {
+                (p[2] - p[1] * 2.0 + p[0]) * (6.0 * (1.0 - t)) + (p[3] - p[2] * 2.0 + p[1]) * (6.0 * t)
+            }
+        }
+    }
+
     /// Control points of the sub-arc over [t0,t1], oriented t0→t1. For a line the
     /// handles are coincident with the endpoints (renders/exports as a line).
     fn subsegment(&self, t0: f32, t1: f32) -> [Vec2; 4] {
@@ -198,6 +233,104 @@ fn quads_to_open_pathpoints(quads: &[[Vec2; 4]]) -> Vec<PathPoint> {
         pts.push(PathPoint { x: q[3].x, y: q[3].y, cp1: q[2], cp2: q[3], corner_radius: 0.0 });
     }
     pts
+}
+
+/// Whether a cubic is a straight line drawn with handles — which is how pen
+/// segments and a rounded rect's flat sides are stored.
+fn is_straight(q: &[Vec2; 4]) -> bool {
+    let span = q[3] - q[0];
+    if span.length() < 1e-6 {
+        return false;
+    }
+    [q[1], q[2]].iter().all(|c| {
+        let (proj, _) = project_point_to_segment(*c, q[0], q[3]);
+        (proj - *c).length() < 1e-3
+    })
+}
+
+/// Pull a crossing found between two flattened chords onto the curves themselves.
+///
+/// ## Why this is the difference between "close" and right
+///
+/// Two curves are crossed by intersecting their FLATTENED chords, because that
+/// is the only representation they share. The answer is a point on the chords —
+/// which is *inside* the curve it approximates, by the flattening error. Every
+/// consequence of that crossing then inherits the displacement: the region
+/// boundary is forced through a vertex the shape's own outline never passes
+/// through, so a painted region's curved edge cuts across the shape that bounds
+/// it, and — less obviously — a straight edge running between two such points
+/// comes out parallel to the line it should lie on but offset from it, because
+/// both of its ends were pushed off that line.
+///
+/// Refining fixes it at the source instead of compensating downstream. Starting
+/// from the chord answer, Gauss-Newton on |A(u) − B(v)|² walks both parameters
+/// to where the true curves actually meet; the residual falls to ~1e-4 in a few
+/// iterations because the seed is already within a flattening error of the root.
+/// The vertex then lies ON both curves, so the sub-arcs reconstructed from
+/// either side pass exactly through it and the fill hugs the artwork.
+///
+/// Returns `None` — leaving the chord answer in place — when the curves are
+/// locally parallel (no isolated root to converge on), when a parameter leaves
+/// its curve, or when the two points do not actually meet. A crossing that
+/// cannot be refined is still a crossing; it just keeps the answer it had.
+fn refine_crossing(a: &CurveSeg, b: &CurveSeg, u0: f32, v0: f32) -> Option<(f32, f32, Vec2)> {
+    let (mut u, mut v) = (u0, v0);
+    for _ in 0..16 {
+        let r = a.point_at(u) - b.point_at(v);
+        if r.length() < 1e-5 {
+            break;
+        }
+        let (da, db) = (a.tangent_at(u), b.tangent_at(v));
+        // Solve [da  -db] · [du dv]ᵀ = -r for the step.
+        let det = db.x * da.y - da.x * db.y;
+        if det.abs() < 1e-9 {
+            return None; // parallel here — Newton has nothing to aim at
+        }
+        u += (r.x * db.y - db.x * r.y) / det;
+        v += (r.x * da.y - da.x * r.y) / det;
+        if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+            return None;
+        }
+    }
+    let (pa, pb) = (a.point_at(u), b.point_at(v));
+    ((pa - pb).length() < 1e-3).then(|| (u, v, (pa + pb) * 0.5))
+}
+
+/// The point on `c` genuinely closest to `p`, refined from a chord projection.
+///
+/// The T-junction counterpart of {@link refine_crossing}: an open end landing on
+/// a curve is attached where it meets the curve, not where it meets the chord.
+/// Newton on d/dt |C(t) − p|² = 0, i.e. driving (C(t) − p)·C′(t) to zero.
+fn refine_closest_point(c: &CurveSeg, p: Vec2, t0: f32) -> Option<(f32, Vec2)> {
+    // Seed from a coarse scan, keeping the caller's estimate as one candidate.
+    // Newton alone is only as good as where it starts, and a cubic can be
+    // parametrised unevenly enough that a position-derived guess lands in the
+    // basin of the wrong stationary point — or on a vanishing derivative, where
+    // it cannot step at all.
+    let mut t = t0;
+    let mut best = (c.point_at(t0) - p).length_squared();
+    for k in 0..=32 {
+        let s = k as f32 / 32.0;
+        let d = (c.point_at(s) - p).length_squared();
+        if d < best {
+            best = d;
+            t = s;
+        }
+    }
+    for _ in 0..16 {
+        let d = c.point_at(t) - p;
+        let d1 = c.tangent_at(t);
+        let f = d.dot(d1);
+        if f.abs() < 1e-6 {
+            break;
+        }
+        let df = d1.length_squared() + d.dot(c.curvature_vector_at(t));
+        if df.abs() < 1e-9 {
+            break; // flat here — the scan's answer is what there is
+        }
+        t = (t - f / df).clamp(0.0, 1.0);
+    }
+    Some((t, c.point_at(t)))
 }
 
 /// A flattened segment that remembers the source curve + t-range it came from,
@@ -448,10 +581,14 @@ fn flatten_cubic_t(
 const FLATTEN_TOL: f32 = 0.08;
 
 /// Emit one Cubic curve per path segment, plus its flattened `FlatSeg`s.
-fn push_path_curves(points: &[PathPoint], node: u32, group: u32, curves: &mut Vec<CurveSeg>, out: &mut Vec<FlatSeg>) {
+fn push_path_curves(
+    points: &[PathPoint], node: u32, group: u32, closed: bool,
+    curves: &mut Vec<CurveSeg>, out: &mut Vec<FlatSeg>,
+) {
     if points.len() < 2 {
         return;
     }
+    let last = points.len() - 2;
     for i in 0..points.len() - 1 {
         let p = [
             Vec2::new(points[i].x, points[i].y),
@@ -459,14 +596,31 @@ fn push_path_curves(points: &[PathPoint], node: u32, group: u32, curves: &mut Ve
             points[i + 1].cp1,
             Vec2::new(points[i + 1].x, points[i + 1].y),
         ];
-        push_cubic(p, node, group, i as u32, curves, out);
+        let free = (!closed && i == 0, !closed && i == last);
+        // A segment drawn with no handles is a LINE, and it has to be recorded as
+        // one. Stored as the cubic [p0,p0,p3,p3] it is still geometrically
+        // straight, but its parameter no longer moves with distance — it sweeps
+        // as 3t²−2t³, easing in and out — so any code that reads a position along
+        // it as a parameter is wrong by as much as an eighth of its length. On
+        // the reported drawing that mismatch reached 10.25 units, and it is what
+        // made a boundary reconstruct along the wrong stretch of its own line.
+        if (p[1] - p[0]).length() < 1e-6 && (p[2] - p[3]).length() < 1e-6 {
+            let ci = curves.len() as u32;
+            curves.push(CurveSeg::Line { node, seg: i as u32, a: p[0], b: p[3], free });
+            out.push(FlatSeg { a: p[0], b: p[3], node, group, curve: ci, ta: 0.0, tb: 1.0 });
+        } else {
+            push_cubic(p, node, group, i as u32, free, curves, out);
+        }
     }
 }
 
 /// Register a cubic in the curve table and append its flattened `FlatSeg`s.
-fn push_cubic(p: [Vec2; 4], node: u32, group: u32, seg: u32, curves: &mut Vec<CurveSeg>, out: &mut Vec<FlatSeg>) {
+fn push_cubic(
+    p: [Vec2; 4], node: u32, group: u32, seg: u32, free: (bool, bool),
+    curves: &mut Vec<CurveSeg>, out: &mut Vec<FlatSeg>,
+) {
     let ci = curves.len() as u32;
-    curves.push(CurveSeg::Cubic { node, seg, p });
+    curves.push(CurveSeg::Cubic { node, seg, p, free });
     let mut flat: Vec<(Vec2, f32)> = vec![(p[0], 0.0)];
     flatten_cubic_t(p[0], p[1], p[2], p[3], 0.0, 1.0, FLATTEN_TOL, &mut flat);
     for w in flat.windows(2) {
@@ -497,7 +651,7 @@ fn push_world_subpath(
     if sp.closed && world_points.len() >= 2 {
         world_points.push(world_points[0].clone());
     }
-    push_path_curves(&world_points, node, group, curves, out);
+    push_path_curves(&world_points, node, group, sp.closed, curves, out);
 }
 
 fn push_rect_curves(w: f32, h: f32, transform: &[f32; 9], node: u32, group: u32, curves: &mut Vec<CurveSeg>, out: &mut Vec<FlatSeg>) {
@@ -510,7 +664,7 @@ fn push_rect_curves(w: f32, h: f32, transform: &[f32; 9], node: u32, group: u32,
     for i in 0..4 {
         let (a, b) = (c[i], c[(i + 1) % 4]);
         let ci = curves.len() as u32;
-        curves.push(CurveSeg::Line { node, seg: i as u32, a, b });
+        curves.push(CurveSeg::Line { node, seg: i as u32, a, b, free: (false, false) });
         out.push(FlatSeg { a, b, node, group, curve: ci, ta: 0.0, tb: 1.0 });
     }
 }
@@ -532,7 +686,7 @@ fn push_ellipse_curves(rx: f32, ry: f32, transform: &[f32; 9], node: u32, group:
             transform_point(arc[2], transform),
             transform_point(arc[3], transform),
         ];
-        push_cubic(p, node, group, i as u32, curves, out);
+        push_cubic(p, node, group, i as u32, (false, false), curves, out);
     }
 }
 
@@ -791,17 +945,23 @@ impl VectorNetwork {
     /// How far a source curve may stray from the arrangement before it is
     /// refused as a description of it.
     ///
-    /// The two can never agree exactly, and it is worth being precise about why:
-    /// a crossing is computed between FLATTENED segments, because that is the
-    /// only representation both curves share, so the vertex lands on a chord
-    /// rather than on either true curve. The gap is therefore the flattening
-    /// error — measured here at 0.25 to 0.64 units across radii from 50 to 2000
-    /// — and a threshold below that rejects every genuine arc.
+    /// Crossings are refined onto the curves themselves, so a curve now passes
+    /// through the vertices it created. What it cannot pass through is a vertex
+    /// that was MERGED: two junctions within the snapping tolerance become one
+    /// point, and that point can sit anywhere within that tolerance of either
+    /// curve. So the bound is the tolerance itself — deriving it keeps the two
+    /// honest when the tolerance changes, which a fixed constant did not.
     ///
-    /// One unit sits above that and far below what this exists to catch: the
-    /// drifted parameter range that started this work put its curve 16.6 units
-    /// from its own boundary.
-    const CURVE_AGREEMENT_EPS: f32 = 1.0;
+    /// The floor covers the vertices no merge touched, which sit on the curve to
+    /// within the flattening error.
+    ///
+    /// This is not a precision knob; it is a lie detector. What it exists to
+    /// catch is a curve that has no business describing a boundary at all — the
+    /// drifted parameter range that started this work reconstructed 16.6 units
+    /// away from its own vertices.
+    fn curve_agreement_eps(&self) -> f32 {
+        self.gap_tolerance.max(0.25)
+    }
 
     /// The boundary of a face: the arrangement, described by a source curve
     /// wherever that curve provably IS the arrangement.
@@ -848,9 +1008,33 @@ impl VectorNetwork {
             let pos = |v: &u32| me.vertices.get(v).map(|x| x.position).unwrap_or_default();
             let (a, b) = (pos(&verts[0]), pos(verts.last().unwrap()));
 
+            let eps = me.curve_agreement_eps();
+            // The parameter range is re-derived from the run's own end vertices
+            // rather than taken from the fragments' accumulated bookkeeping.
+            //
+            // Those two can disagree, and the disagreement is visible. A range
+            // whose end lands even a fraction off the vertex is still drawn TO
+            // that vertex — the ends are snapped so neighbouring pieces meet —
+            // so the curve gets dragged there, and the error grows steadily
+            // along the last stretch before collapsing to zero at the anchor.
+            // That is a boundary sliding off the shape that bounds it, thickest
+            // just before the corner. Asking the curve where the vertices
+            // actually sit on it removes the disagreement instead of snapping
+            // over it.
+            let range = me.curves.get(c as usize).and_then(|cv| {
+                let (u, _) = refine_closest_point(cv, a, t0)?;
+                let (v, _) = refine_closest_point(cv, b, t1)?;
+                // Still the same stretch of curve, in the same direction: a
+                // vertex whose nearest point is somewhere else entirely means
+                // this run is not describable by this curve, and the fallback
+                // below is the honest answer.
+                ((u - t0).abs() < 0.25 && (v - t1).abs() < 0.25).then_some((u, v))
+            });
+            let (t0, t1) = range.unwrap_or((t0, t1));
+
             let accepted = me.curves.get(c as usize).map(|cv| cv.subsegment(t0, t1)).filter(|q| {
-                if (q[0] - a).length() > Self::CURVE_AGREEMENT_EPS { return false; }
-                if (q[3] - b).length() > Self::CURVE_AGREEMENT_EPS { return false; }
+                if (q[0] - a).length() > eps { return false; }
+                if (q[3] - b).length() > eps { return false; }
                 // Matching ends say nothing about the bulge between them. Every
                 // vertex this run passes through must lie on the curve, so
                 // sample the curve finely enough to measure that and ask each
@@ -861,12 +1045,18 @@ impl VectorNetwork {
                 (1..16).all(|k| {
                     let t = k as f32 / 16.0;
                     point_to_polyline_distance(cubic_point(q, t), &polyline)
-                        <= Self::CURVE_AGREEMENT_EPS
+                        <= eps
                 })
             });
 
             match accepted {
-                // Snap the ends to the arrangement so consecutive pieces meet exactly.
+                // Snap the ends to the arrangement so consecutive pieces meet
+                // exactly. A straight source stays straight through that snap:
+                // keeping its interior handles while moving an end bends the
+                // last stretch of a line that has no bend in it, which is what a
+                // pen stroke ending just short of the line it meets produced —
+                // the join curling into the junction instead of running to it.
+                Some(q) if is_straight(&q) => quads.push([a, a, b, b]),
                 Some(q) => quads.push([a, q[1], q[2], b]),
                 None => {
                     // The arrangement, as it holds it: straight from vertex to vertex.
@@ -928,6 +1118,21 @@ impl VectorNetwork {
     }
 
     fn find_intersections_and_split(&self, segments: Vec<FlatSeg>) -> Vec<FlatSeg> {
+        /// A fragment-local position (0..1 along the chord) as a parameter on the
+        /// source curve. `None` for a fragment spanning no parameter at all.
+        fn curve_param(seg: &FlatSeg, local: f32) -> Option<f32> {
+            (seg.tb != seg.ta).then(|| seg.ta + local * (seg.tb - seg.ta))
+        }
+        /// The inverse: a curve parameter back to fragment-local, which is what
+        /// the split list is keyed and sorted by.
+        fn local_param(seg: &FlatSeg, curve: f32) -> Option<f32> {
+            (seg.tb != seg.ta).then(|| (curve - seg.ta) / (seg.tb - seg.ta))
+        }
+        /// Strictly inside the fragment, so a split never degenerates to an end.
+        fn in_span(local: f32) -> bool {
+            local > 1e-4 && local < 1.0 - 1e-4
+        }
+
         // Split points are stored as the flat-local parameter `t` ∈ [0,1] + point.
         let n = segments.len();
         let mut splits: Vec<Vec<(f32, Vec2)>> = vec![Vec::new(); n];
@@ -984,12 +1189,37 @@ impl VectorNetwork {
             if segments[i].group != segments[j].group {
                 continue;
             }
-            // Proper crossing (both interiors).
+            // Proper crossing (both interiors). The chord answer is only the
+            // seed: `refine_crossing` walks it onto the curves themselves, so
+            // the vertex lands where the artwork actually crosses rather than a
+            // flattening error inside it.
             if let Some((t, u, pt)) = segment_intersection(
                 segments[i].a, segments[i].b, segments[j].a, segments[j].b,
             ) {
-                splits[i].push((t, pt));
-                splits[j].push((u, pt));
+                let refined = self
+                    .curves
+                    .get(segments[i].curve as usize)
+                    .zip(self.curves.get(segments[j].curve as usize))
+                    .and_then(|(ci, cj)| {
+                        let (u_seed, v_seed) = (
+                            curve_param(&segments[i], t)?,
+                            curve_param(&segments[j], u)?,
+                        );
+                        let (cu, cv, p) = refine_crossing(ci, cj, u_seed, v_seed)?;
+                        let (li, lj) =
+                            (local_param(&segments[i], cu)?, local_param(&segments[j], cv)?);
+                        // The refined root has to be the crossing THESE two
+                        // fragments have. Newton can walk to a different root of
+                        // the same pair of curves — a circle crossed by a line
+                        // has two — and adopting that one would move the split to
+                        // a place this fragment does not cover, handing it a
+                        // parameter range that describes some other part of the
+                        // curve entirely.
+                        (in_span(li) && in_span(lj)).then_some((li, lj, p))
+                    });
+                let (ti, tj, point) = refined.unwrap_or((t, u, pt));
+                splits[i].push((ti, point));
+                splits[j].push((tj, point));
             }
             // T-junctions & collinear overlaps, both directions: an endpoint of
             // one segment lying on the interior of the other (missed by the
@@ -1001,10 +1231,23 @@ impl VectorNetwork {
                     let (proj, t) = project_point_to_segment(p, pa, pb);
                     if t > T_EPS && t < 1.0 - T_EPS && (proj - p).length() < on_eps {
                         // Split the crossed segment AT ITS OWN GEOMETRY — the
-                        // projection — not at the loose end's position, which
-                        // differs by however far the end missed and bends the
-                        // line it landed on.
-                        splits[x].push((t, proj));
+                        // point on the curve nearest the open end, not the end's
+                        // own position, which differs by however far it missed
+                        // and bends the line it landed on.
+                        let refined = self
+                            .curves
+                            .get(segments[x].curve as usize)
+                            .and_then(|cx| {
+                                let seed = curve_param(&segments[x], t)?;
+                                let (ct, q) = refine_closest_point(cx, p, seed)?;
+                                Some((local_param(&segments[x], ct)?, q))
+                            })
+                            .filter(|(lt, q)| {
+                                // Only if it still describes this fragment's own
+                                // span and still counts as touching.
+                                *lt > T_EPS && *lt < 1.0 - T_EPS && (*q - p).length() < on_eps
+                            });
+                        splits[x].push(refined.unwrap_or((t, proj)));
                     }
                 }
             }
@@ -1023,8 +1266,29 @@ impl VectorNetwork {
             pts.sort_by_key(|(t, _)| OrderedFloat(*t));
             let mut prev = seg.a;
             let mut prev_ct = seg.ta;
+            let (lo, hi) = (seg.ta.min(seg.tb), seg.ta.max(seg.tb));
             for (ft, pt) in &pts {
-                let ct = curve_t(*ft);
+                // The parameter of a split, asked of the curve rather than
+                // assumed from the chord.
+                //
+                // Position along a chord is not proportional to the parameter
+                // that produced it: a cubic with handles anywhere but the thirds
+                // sweeps its parameter unevenly, and a straight one flattens to a
+                // SINGLE chord spanning the whole range, so the assumption is
+                // applied at full length with nothing to bound the error. On the
+                // reported drawing that put a fragment's parameter 10.25 units
+                // away from the fragment's own endpoint. Everything downstream
+                // then reconstructs the wrong stretch of curve — a boundary that
+                // wanders off the artwork, which is the shape of this whole bug.
+                let linear = curve_t(*ft);
+                let ct = self
+                    .curves
+                    .get(seg.curve as usize)
+                    .and_then(|cv| {
+                        let (t, q) = refine_closest_point(cv, *pt, linear)?;
+                        ((q - *pt).length() < 0.05 && t >= lo && t <= hi).then_some(t)
+                    })
+                    .unwrap_or(linear);
                 if (*pt - prev).length() > 1e-6 {
                     result.push(FlatSeg { a: prev, b: *pt, node: seg.node, group: seg.group, curve: seg.curve, ta: prev_ct, tb: ct });
                 }
@@ -1076,7 +1340,7 @@ impl VectorNetwork {
         let cell = tolerance.max(1e-4);
         let cell_of = |p: Vec2| ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32);
 
-        let mut get_or_create_vertex = |pos: Vec2,
+        let get_or_create_vertex = |pos: Vec2,
                                         group: u32,
                                         vn: &mut VectorNetwork,
                                         vmap: &mut HashMap<(OrderedVec2, u32), u32>,
@@ -1116,6 +1380,46 @@ impl VectorNetwork {
             grid.entry((cx, cy, group)).or_default().push(id);
             id
         };
+
+        // Two passes, and the order is the point.
+        //
+        // A merge keeps one position and discards the other, so whichever point
+        // arrives first decides where the junction IS. Done in one pass, that is
+        // whichever fragment happened to come first — and when a pen stroke ends
+        // three quarters of a unit off the line it meets, the line gets dragged
+        // to the stray end. The whole line then renders off its own path, and
+        // every region bounded by it is painted along the wrong edge. That is
+        // visible: a fill that runs parallel to the line it should sit on.
+        //
+        // An endpoint whose curve parameter is INTERIOR is a point the geometry
+        // itself produced — a crossing, or where an open end met this curve — and
+        // it lies on the curve exactly. Those go first and claim their positions.
+        // Free ends merge into them afterwards, so what moves is the loose end,
+        // which is the thing that was never precisely anywhere.
+        // "Structural" means the artwork defines this point: a crossing, or a
+        // joint between two segments of one path — the corner arc meeting the
+        // side it runs into. Only a FREE end of an open path is exempt, and only
+        // at the parameter where it is actually free.
+        let free_ends: Vec<(bool, bool)> = self.curves.iter().map(|c| c.free_ends()).collect();
+        let structural = |seg: &FlatSeg, t: f32, at_start: bool| -> bool {
+            if t > 1e-4 && t < 1.0 - 1e-4 {
+                return true; // interior: a split, and splits sit on the curve
+            }
+            match free_ends.get(seg.curve as usize).copied() {
+                Some((free_at_0, free_at_1)) => {
+                    if at_start { !free_at_0 } else { !free_at_1 }
+                }
+                None => true,
+            }
+        };
+        for seg in &segments {
+            if structural(seg, seg.ta, seg.ta <= seg.tb) {
+                get_or_create_vertex(seg.a, seg.group, self, &mut vertex_map, &mut grid);
+            }
+            if structural(seg, seg.tb, seg.tb < seg.ta) {
+                get_or_create_vertex(seg.b, seg.group, self, &mut vertex_map, &mut grid);
+            }
+        }
 
         let mut remapped = Vec::new();
         for seg in &segments {

@@ -7978,6 +7978,144 @@ mod tests {
 
 
 
+
+    /// A painted boundary sits ON the curve it borrows, not near it.
+    ///
+    /// Crossings are found between flattened chords, because that is the only
+    /// representation two curves share — and a chord sits inside the curve it
+    /// approximates. Left there, the vertex is a point the shape's own outline
+    /// never passes through, and the region drawn through it cuts across the
+    /// shape that bounds it: a fill that visibly leaves the artwork at a rounded
+    /// corner, thickest a little before the corner and pinching to nothing at
+    /// it. Refining the crossing onto the curves removes the disagreement rather
+    /// than rendering over it.
+    #[test]
+    fn a_painted_boundary_sits_on_the_curve_it_borrows() {
+        let mut e = Engine::new();
+        let circle = e.add_ellipse(200.0, 200.0, 120.0, 120.0);
+        // Two chords across it, so the disc is cut into regions whose boundaries
+        // are part line, part arc.
+        for (x1, y1, x2, y2) in [(40.0, 150.0, 360.0, 190.0), (150.0, 40.0, 210.0, 360.0)] {
+            e.add_path(&format!(
+                r#"[{{"points":[{{"x":{x1},"y":{y1},"cp1":[{x1},{y1}],"cp2":[{x1},{y1}]}},
+                                {{"x":{x2},"y":{y2},"cp1":[{x2},{y2}],"cp2":[{x2},{y2}]}}],"closed":false}}]"#
+            ));
+        }
+        let ids: Vec<u32> = e.scene.root_nodes.clone();
+        let list = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let g = e.group_nodes(&format!("[{list}]"));
+        e.set_node_live_paint(g, true);
+        e.set_live_paint_group(g);
+        e.ensure_network_clean();
+        let _ = circle;
+
+        // The artwork itself, densely sampled: what every boundary must lie on.
+        let truth: Vec<Vec<Vec2>> = e
+            .scene
+            .vector_network
+            .curves
+            .iter()
+            .map(|cv| (0..=256).map(|k| cv.point_at(k as f32 / 256.0)).collect())
+            .collect();
+        let distance_to_artwork = |q: Vec2| -> f32 {
+            truth
+                .iter()
+                .flat_map(|poly| poly.windows(2))
+                .map(|w| {
+                    let (proj, _) = crate::vector_network::project_point_to_segment(q, w[0], w[1]);
+                    (proj - q).length()
+                })
+                .fold(f32::MAX, f32::min)
+        };
+
+        let faces: Vec<crate::vector_network::PlanarFace> = e
+            .scene
+            .vector_network
+            .faces
+            .values()
+            .filter(|f| !f.is_outer)
+            .cloned()
+            .collect();
+        assert!(faces.len() >= 4, "two chords should cut the disc into several regions");
+
+        let mut checked = 0;
+        for face in &faces {
+            let outline = e.scene.vector_network.face_outline(face);
+            for i in 0..outline.len() {
+                let (a, b) = (&outline[i], &outline[(i + 1) % outline.len()]);
+                let (p0, p3) = (Vec2::new(a.x, a.y), Vec2::new(b.x, b.y));
+                // Only the curved spans: a straight span may legitimately cut
+                // across empty drawing when it closes a gap.
+                if (a.cp2 - p0).length() < 0.01 && (b.cp1 - p3).length() < 0.01 {
+                    continue;
+                }
+                checked += 1;
+                let curve = [p0, a.cp2, b.cp1, p3];
+                for k in 0..=32 {
+                    let pt = crate::vector_network::cubic_point(&curve, k as f32 / 32.0);
+                    let off = distance_to_artwork(pt);
+                    assert!(off < 0.05, "a painted arc sits {off:.2} units off the circle");
+                }
+            }
+        }
+        assert!(checked > 0, "the regions should be bounded by arcs, not only chords");
+    }
+
+    /// A straight pen segment is a LINE, and its length maps to its parameter.
+    ///
+    /// Drawn without handles it is stored as the cubic [p0,p0,p3,p3]: still
+    /// straight, but parametrised as 3t²−2t³, which eases in and out. Reading a
+    /// position along it as a parameter is then wrong by up to an eighth of its
+    /// length — 10.25 units on the reported drawing — and every fragment carved
+    /// out of it claims a stretch of curve it does not occupy. What reaches the
+    /// screen is a region boundary running alongside the line that defines it.
+    #[test]
+    fn a_straight_pen_segment_maps_length_to_parameter() {
+        let mut e = Engine::new();
+        // One long straight segment, no handles, crossed near its far end —
+        // where the parameterisation error is at its worst.
+        let line = e.add_path(
+            r#"[{"points":[{"x":0.0,"y":0.0,"cp1":[0.0,0.0],"cp2":[0.0,0.0]},
+                           {"x":400.0,"y":0.0,"cp1":[400.0,0.0],"cp2":[400.0,0.0]}],"closed":false}]"#,
+        );
+        // A second stroke ENDING on that line, three quarters along — the
+        // T-junction a drawing is mostly made of, and the case that has to ask
+        // the curve where that point falls rather than assume.
+        let tee = e.add_path(
+            r#"[{"points":[{"x":300.0,"y":-90.0,"cp1":[300.0,-90.0],"cp2":[300.0,-90.0]},
+                           {"x":300.0,"y":0.0,"cp1":[300.0,0.0],"cp2":[300.0,0.0]}],"closed":false}]"#,
+        );
+        let box_ = e.add_rect(340.0, -60.0, 120.0, 120.0);
+        let g = e.group_nodes(&format!("[{line},{tee},{box_}]"));
+        e.set_node_live_paint(g, true);
+        e.set_live_paint_group(g);
+        e.ensure_network_clean();
+
+        // Every fragment of the line must sit where its own parameters say.
+        let vn = &e.scene.vector_network;
+        let mut checked = 0;
+        for edge in vn.edges.values() {
+            let Some(frag) = edge.frag else { continue };
+            let Some(curve) = vn.curves.get(frag.curve as usize) else { continue };
+            let (from, to) = (
+                vn.vertices[&edge.from_vertex].position,
+                vn.vertices[&edge.to_vertex].position,
+            );
+            let (da, db) = (
+                (curve.point_at(frag.ta) - from).length(),
+                (curve.point_at(frag.tb) - to).length(),
+            );
+            checked += 1;
+            assert!(
+                da < 0.05 && db < 0.05,
+                "a fragment claims t[{:.4},{:.4}] but sits {da:.2}/{db:.2} units from there",
+                frag.ta,
+                frag.tb
+            );
+        }
+        assert!(checked > 0, "the crossing should have split the line into fragments");
+    }
+
     /// The same drawing arranges the same way every time.
     ///
     /// It did not. Vertex merging took the first vertex it found within
@@ -8108,13 +8246,35 @@ mod tests {
             faces.len()
         );
 
-        let mut curved_points = 0;
+        // A span counts as CURVED when it actually bends away from the straight
+        // line between its own anchors — not merely because it carries handles.
+        // A straight edge is legitimately expressed as a cubic with collinear
+        // handles (that is what a rounded rect's flat sides are), and counting
+        // those as curvature measures notation instead of geometry.
+        let bend_of = |a: &PathPoint, b: &PathPoint| -> f32 {
+            let (p0, p3) = (Vec2::new(a.x, a.y), Vec2::new(b.x, b.y));
+            let curve = [p0, a.cp2, b.cp1, p3];
+            (1..16)
+                .map(|k| {
+                    let pt = crate::vector_network::cubic_point(&curve, k as f32 / 16.0);
+                    let (proj, _) = crate::vector_network::project_point_to_segment(pt, p0, p3);
+                    (proj - pt).length()
+                })
+                .fold(0.0, f32::max)
+        };
+
+        let mut curved_spans = 0;
+        let mut total_spans = 0;
         for face in &faces {
-            for pt in e.scene.vector_network.face_outline(face) {
-                let anchor = Vec2::new(pt.x, pt.y);
-                if (pt.cp1 - anchor).length() > 0.01 || (pt.cp2 - anchor).length() > 0.01 {
-                    curved_points += 1;
+            let outline = e.scene.vector_network.face_outline(face);
+            for i in 0..outline.len() {
+                total_spans += 1;
+                if bend_of(&outline[i], &outline[(i + 1) % outline.len()]) > 0.05 {
+                    curved_spans += 1;
                 }
+            }
+            for pt in &outline {
+                let anchor = Vec2::new(pt.x, pt.y);
                 // Whatever the outline is made of, it has to be geometry the
                 // document actually contains.
                 let stray = segments
@@ -8163,18 +8323,14 @@ mod tests {
         }
 
         // The corners are the drawing's only curvature, and they are four small
-        // arcs on one shape: a handful of outline points, not a fifth of them.
+        // arcs on one shape: a handful of spans, not a fifth of them.
         assert!(
-            curved_points > 0,
+            curved_spans > 0,
             "the rounded corners were squared off by the arrangement"
         );
-        let total: usize = faces
-            .iter()
-            .map(|f| e.scene.vector_network.face_outline(f).len())
-            .sum();
         assert!(
-            curved_points * 5 < total,
-            "curvature has spread beyond the four corners: {curved_points} of {total} points"
+            curved_spans * 5 < total_spans,
+            "curvature has spread beyond the four corners: {curved_spans} of {total_spans} spans"
         );
     }
     /// Cutting a group takes its children along, and paste rebuilds the tree.
