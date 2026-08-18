@@ -1330,8 +1330,12 @@ impl VectorNetwork {
     ///   1. **Signature** — a face contained by the exact same set of closed
     ///      shapes is the same region, no matter how far it moved or reshaped.
     ///      Ties (several regions share a signature) break by nearest centroid.
-    ///   2. **Centroid fallback** — when no signature matches (topology changed,
-    ///      or a pre-v6 file with no stored signature), attach to the nearest
+    ///   2. **Containment** — the stored point still lies inside a face. Survives
+    ///      the outline changing shape under the fill, which a distance match
+    ///      does not: a file painted before dangling ends stopped polluting face
+    ///      polygons carries centroids pulled toward those stubs.
+    ///   3. **Centroid fallback** — when neither matches (topology changed, or a
+    ///      pre-v6 file with no stored signature), attach to the nearest
     ///      unclaimed face within `FILL_REMAP_THRESHOLD`, else drop the fill.
     ///
     /// `old_filled` are the fills from before this rebuild; `pending_fills` are
@@ -1368,7 +1372,43 @@ impl VectorNetwork {
                 }
             }
 
-            // Tier 2: nearest centroid within threshold. To avoid a fill bleeding
+            // Tier 2: the stored point lies INSIDE a candidate. Containment beats
+            // distance whenever the outline itself changed shape between the save
+            // and this load — which is exactly what happened when face walks
+            // stopped recording excursions out along dangling ends. A stub drags
+            // the centroid of the polygon it pollutes toward itself, so a file
+            // painted before that fix carries points tens of units from where the
+            // same region's centre now computes, and a purely distance-based
+            // match would hand the fill to a neighbour or drop it. The point was
+            // inside its region when it was written and it still is; that is the
+            // durable fact, so use it. Faces partition the plane within a group,
+            // so at most one can claim the point.
+            //
+            // Only for a fill with NO signature. One with a signature already has
+            // a better answer above, and letting containment speak for it breaks
+            // something this depends on: when two shapes separate, the fill in
+            // their vanished overlap must DROP rather than move. Its stored point
+            // still lands inside whichever shape it used to sit in, so
+            // containment would happily rescue a region that no longer exists.
+            // A signature-less fill has no such story — the region it names is
+            // bounded by open lines, contained by nothing, and the point is the
+            // only evidence there is.
+            if best.is_none() && sig.is_empty() {
+                for (fid, _, _) in &candidates {
+                    if taken.contains(fid) {
+                        continue;
+                    }
+                    let inside = self.faces.get(fid).is_some_and(|f| {
+                        point_in_polygon(&[centroid.x, centroid.y], &f.boundary_polygon)
+                    });
+                    if inside {
+                        best = Some((*fid, 0.0));
+                        break;
+                    }
+                }
+            }
+
+            // Tier 3: nearest centroid within threshold. To avoid a fill bleeding
             // onto an unrelated region (e.g. its defining shapes were deleted),
             // a candidate must still share at least one defining shape with the
             // old fill. Legacy fills with no signature fall back to pure centroid.

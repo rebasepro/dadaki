@@ -7760,9 +7760,70 @@ mod tests {
             err * 100.0
         );
 
-        // And the rendered outline is two arcs, not a polygon of flattened bits.
+        // And the rendered outline is arcs, not the flattened hull. An ellipse is
+        // four quarter-arcs, so the exact count depends on how many of them each
+        // side of the lens spans — what matters is that it is a handful of
+        // control points rather than the ~40 the flattened polyline would give.
         let outline = engine.scene.vector_network.face_outline(&engine.scene.vector_network.faces[&(lens as u32)]);
-        assert!(outline.len() <= 4, "outline should be a couple of arcs, got {} points", outline.len());
+        assert!(
+            (2..=8).contains(&outline.len()),
+            "outline should be a few arcs, got {} points",
+            outline.len()
+        );
+    }
+
+    /// A document painted BEFORE dangling ends stopped polluting face outlines.
+    ///
+    /// Its fills were saved with a centroid computed from a polygon that ran out
+    /// along every stub in the region and back, so the stored point sits well
+    /// away from where that same region's centre computes now — further than the
+    /// distance fallback will reach. The point was inside its region when it was
+    /// written and it still is, which is what re-attachment now uses. Without
+    /// that, opening such a file drops the paint or hands it to a neighbour.
+    #[test]
+    fn a_fill_saved_against_the_old_outline_still_lands_on_its_region() {
+        let mut engine = Engine::new();
+        let rect = engine.add_rect(0.0, 0.0, 400.0, 200.0);
+        // A long stub reaching deep into the region — the thing that used to drag
+        // the polygon, and with it the centroid this fill was saved against.
+        let stub = engine.add_path(
+            r#"[{"points":[{"x":10.0,"y":100.0,"cp1":[10.0,100.0],"cp2":[10.0,100.0]},
+                            {"x":300.0,"y":100.0,"cp1":[300.0,100.0],"cp2":[300.0,100.0]}],"closed":false}]"#,
+        );
+        let group = engine.group_nodes(&format!("[{rect},{stub}]"));
+        engine.set_node_live_paint(group, true);
+        engine.set_live_paint_group(group);
+
+        let face = engine.query_face_at(200.0, 50.0);
+        assert!(face >= 0);
+
+        // Stand in for the old file: a fill whose stored point is inside the
+        // region but 120 units from the pruned centroid — far outside the
+        // FILL_REMAP_THRESHOLD of 50 that a distance match would allow.
+        let here = crate::vector_network::face_centroid(&engine.scene.vector_network.faces[&(face as u32)]);
+        let stored = Vec2::new(here.x - 120.0, here.y);
+        assert!(stored.x > 0.0, "the stand-in point must still be inside the rectangle");
+        // No signature, which is what the old build wrote whenever the polluted
+        // polygon put the representative point on the stub rather than in the
+        // region — a point on a line is inside no closed shape. That leaves the
+        // signature tier nothing to match, and 120 units leaves the distance
+        // tier nothing either.
+        engine.scene.vector_network.pending_fills.push(crate::vector_network::PendingFill {
+            centroid: stored,
+            signature: Vec::new(),
+            color: Paint::Solid(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+        });
+
+        // Force the rebuild that a load performs.
+        engine.scene.vector_network.dirty = true;
+        engine.ensure_network_clean();
+
+        let landed = engine.query_face_at(stored.x, stored.y);
+        assert!(landed >= 0, "the stored point must still resolve to a region");
+        let fill = engine.scene.vector_network.faces[&(landed as u32)].fill.clone();
+        assert!(fill.is_some(), "the fill was dropped — an existing painted file would open blank");
+        // And it is the region the point was written inside, not a neighbour.
+        assert_eq!(landed, engine.query_face_at(200.0, 50.0));
     }
 
     /// Cutting a group takes its children along, and paste rebuilds the tree.
