@@ -7713,6 +7713,58 @@ mod tests {
         assert!(engine.query_edge_at(50.0, 50.0, 4.0) >= 0, "the stub must stay paintable");
     }
 
+    /// Two overlapping circles: no gaps, no open ends, nothing dangling.
+    ///
+    /// The lens is bounded by exactly two arcs, and its area is analytic. If the
+    /// fill's outline wanders off the real boundary — an arc reconstructed over
+    /// the wrong t-range, a fragment merged across a junction it should have
+    /// turned at — the area moves and the outline leaves the lens's bounding box.
+    #[test]
+    fn a_lens_between_two_circles_is_exactly_the_lens() {
+        let mut engine = Engine::new();
+        // Unit-ish circles of radius 100, centres 100 apart → d = r.
+        let a = engine.add_ellipse(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_ellipse(100.0, 0.0, 100.0, 100.0);
+        let g = engine.group_nodes(&format!("[{a},{b}]"));
+        engine.set_node_live_paint(g, true);
+        engine.set_live_paint_group(g);
+
+        let lens = engine.query_face_at(50.0, 0.0);
+        assert!(lens >= 0, "the overlap must be a region");
+        engine.set_face_fill(lens as u32, 1.0, 0.0, 0.0, 1.0);
+
+        let f = engine.scene.vector_network.faces.get(&(lens as u32)).unwrap();
+        let poly = &f.boundary_polygon;
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for p in poly {
+            lo[0] = lo[0].min(p[0]); lo[1] = lo[1].min(p[1]);
+            hi[0] = hi[0].max(p[0]); hi[1] = hi[1].max(p[1]);
+        }
+        // The lens spans x ∈ [0,100] and y ∈ [-86.6, 86.6] (r√3/2).
+        assert!(lo[0] > -1.0 && hi[0] < 101.0, "outline x extent {:?}..{:?} leaves the lens", lo[0], hi[0]);
+        assert!(lo[1] > -87.6 && hi[1] < 87.6, "outline y extent {:?}..{:?} leaves the lens", lo[1], hi[1]);
+
+        // Analytic lens area for two equal circles at distance d = r:
+        // 2r²·acos(d/2r) − (d/2)·√(4r²−d²) = 2·10000·acos(0.5) − 50·√30000
+        // `signed_area` runs on `boundary_polygon`, which is the FLATTENED hull —
+        // chords inside arcs — so it sits a little under the analytic figure by
+        // construction. What matters is that it is the lens and not something
+        // else: a stray arc or a fragment merged across a junction moves this by
+        // far more than flattening does.
+        let expected = 2.0 * 10000.0 * (0.5f64).acos() - 50.0 * 30000.0f64.sqrt();
+        let got = engine.scene.vector_network.faces[&(lens as u32)].signed_area.abs();
+        let err = (expected - got) / expected;
+        assert!(
+            (0.0..0.05).contains(&err),
+            "lens area {got:.0} vs analytic {expected:.0} — {:.1}% out, expected a small under-read",
+            err * 100.0
+        );
+
+        // And the rendered outline is two arcs, not a polygon of flattened bits.
+        let outline = engine.scene.vector_network.face_outline(&engine.scene.vector_network.faces[&(lens as u32)]);
+        assert!(outline.len() <= 4, "outline should be a couple of arcs, got {} points", outline.len());
+    }
+
     /// Cutting a group takes its children along, and paste rebuilds the tree.
     #[test]
     fn cut_carries_the_whole_subtree() {
