@@ -1,0 +1,72 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  /* GitHub renders this at 1280×640 and scales it down hard in feeds and
+     link unfurls, so everything here is sized to survive a 2× reduction:
+     no body text, one headline, one supporting line. */
+  @font-face {
+    font-family: 'Inter';
+    src: url('INTER_URL') format('truetype');
+    font-weight: 100 900;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: 440px; }
+  body {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 34px;
+    padding: 0 96px;
+    font-family: Inter, -apple-system, system-ui, sans-serif;
+    color: #f5f5f5;
+    background:
+      radial-gradient(1100px 620px at 78% 12%, rgba(59,130,246,0.16), transparent 62%),
+      radial-gradient(760px 520px at 12% 96%, rgba(236,72,153,0.13), transparent 60%),
+      linear-gradient(160deg, #1b1b1b 0%, #101010 100%);
+    position: relative;
+    overflow: hidden;
+  }
+  /* A faint bézier, because the subject is curves. Drawn with the handles
+     showing: it is a vector editor, not a drawing app. */
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.028) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.028) 1px, transparent 1px);
+    background-size: 64px 64px;
+  }
+  .row { display: flex; align-items: center; gap: 26px; position: relative; }
+  .mark { width: 112px; height: 112px; display: block; }
+  .word { font-size: 96px; letter-spacing: -0.035em; line-height: 1; color: #fff; }
+  .lede { font-size: 41px; line-height: 1.3; letter-spacing: -0.012em; max-width: 880px; position: relative; color: rgba(245,245,245,0.9); }
+  .meta {
+    position: relative;
+    display: flex; align-items: center; gap: 14px;
+    font-size: 25px; color: rgba(245,245,245,0.55);
+  }
+  .dot { width: 5px; height: 5px; border-radius: 50%; background: rgba(245,245,245,0.34); }
+  .curve { position: absolute; right: 80px; bottom: 54px; width: 380px; opacity: 0.72; z-index: 0; }
+  .row, .lede, .meta { z-index: 1; }
+</style>
+<div class="grid"></div>
+<svg class="curve" viewBox="0 0 460 150" fill="none">
+  <!-- A cubic with its handles showing, sitting in the empty band under the
+       text: the subject is curves, and an editor's curve is never just the ink
+       — it is the ink plus the two points that decide it. Handles are kept
+       short so the motif stays inside its own box instead of trailing across
+       the words. -->
+  <path d="M14 122 C 120 122, 130 28, 232 28 C 334 28, 344 122, 446 122" stroke="#3b82f6" stroke-width="3.5" opacity="0.85"/>
+  <line x1="232" y1="28" x2="150" y2="28" stroke="rgba(255,255,255,0.3)" stroke-width="2"/>
+  <line x1="232" y1="28" x2="314" y2="28" stroke="rgba(255,255,255,0.3)" stroke-width="2"/>
+  <circle cx="150" cy="28" r="7.5" fill="#141414" stroke="rgba(255,255,255,0.55)" stroke-width="2.5"/>
+  <circle cx="314" cy="28" r="7.5" fill="#141414" stroke="rgba(255,255,255,0.55)" stroke-width="2.5"/>
+  <rect x="225" y="21" width="14" height="14" fill="#3b82f6"/>
+  <rect x="7" y="115" width="14" height="14" fill="#3b82f6" opacity="0.75"/>
+  <rect x="439" y="115" width="14" height="14" fill="#3b82f6" opacity="0.75"/>
+</svg>
+<div class="row">
+  <img class="mark" src="MARK_URL" alt="">
+  <span class="word">dadaki</span>
+</div>
+<p class="lede">A vector editor that runs in the browser — Rust/WASM engine, CanvasKit rendering.</p>
+

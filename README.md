@@ -1,15 +1,10 @@
-<p align="center">
-  <img src="packages/app/public/favicon.svg" width="96" height="96" alt="Dadaki" />
-</p>
+<img src=".github/readme-banner.png" alt="Dadaki — a vector editor that runs in the browser" />
 
-<h1 align="center">Dadaki Vector Editor</h1>
+# Dadaki Vector Editor
 
-<p align="center">
-  <a href="https://dadaki.com">dadaki.com</a>
-</p>
-
-A high-performance, in-browser **vector graphics editor** — Rust/WASM + CanvasKit
-core, TypeScript UI. This repository is the **open-source** editor.
+**[dadaki.com](https://dadaki.com)** — a high-performance, in-browser **vector
+graphics editor**: Rust/WASM + CanvasKit core, TypeScript UI. This repository is
+the **open-source** editor.
 
 It is a pnpm workspace with two packages:
 
