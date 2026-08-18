@@ -373,28 +373,20 @@ describe('Live Paint — a face boundary sits on the true intersections', () => 
     });
 
     /**
-     * KNOWN BUG. The arrangement a faceted isometric drawing actually produces:
-     * a face tiled by several bands, then one more quad laid across all of them
-     * to cut a row. Every shape is closed with straight edges, and both tests
-     * above show that any *pair* of these resolves exactly — but together the
-     * region comes out inflated:
+     * The arrangement a faceted isometric drawing actually produces: a face
+     * tiled by several bands, then one more quad laid across all of them to cut
+     * a row. Every shape is closed with straight edges, and any *pair* of them
+     * resolved exactly long before this case did.
      *
-     *   want (132,-76) (194,-112) (395,  4) (333, 40)
-     *   got  (132,-76) (204,-118) (408, 12) (346, 48)
-     *
-     * One corner is right; the u=0.56 edge lands at ~0.59 and the v=0.58 edge
-     * at ~0.62, each pushed outward by ~11-16 units. Because neighbouring
-     * regions are each inflated over their shared edges, a painted drawing
-     * renders with overlapping, wandering bands and white gaps rather than a
-     * clean tiling — which is what Live Paint on an isometric cube looks like
-     * today. Axis-aligned arrangements are unaffected, which is why the simple
-     * cases all pass.
-     *
-     * Marked `fails` so the suite stays green while the bug is on record. When
-     * the engine is fixed this starts failing — that is the signal to drop the
-     * marker, not the test.
+     * Together they used to come out inflated — each interior edge landing 11 to
+     * 16 units outside the crossing that defined it, so neighbouring regions
+     * overlapped across their shared edges and a painted isometric cube rendered
+     * as wandering bands with white gaps between them. The cause was the T-shaped
+     * junction: an edge ending *on* another was split at the loose end rather
+     * than at the point on the line it met, which dragged the crossed edge with
+     * it. Splitting at the projection is what makes this exact.
      */
-    it.fails('isometric: a face tiled by bands, then cut by a row quad', () => {
+    it('isometric: a face tiled by bands, then cut by a row quad', () => {
         const scene = makeScene();
         const e = scene.engine!;
         const at = iso();

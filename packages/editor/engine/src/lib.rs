@@ -7893,6 +7893,290 @@ mod tests {
         assert!(curved, "the region's outline has no curves — corners came back square");
     }
 
+    fn deviation_of(e: &mut Engine) -> f32 {
+        e.ensure_network_clean();
+        let (segs, _) = e.collect_segments();
+        let ids: Vec<u32> = e.scene.vector_network.faces.values().filter(|f| !f.is_outer).map(|f| f.id).collect();
+        let mut maxd = 0.0f32;
+        for fid in ids {
+            let f = &e.scene.vector_network.faces[&fid];
+            for w in e.scene.vector_network.face_outline(f).windows(2) {
+                let p0 = Vec2::new(w[0].x, w[0].y);
+                let p3 = Vec2::new(w[1].x, w[1].y);
+                let (c1, c2) = (w[0].cp2, w[1].cp1);
+                for k in 0..=10 {
+                    let t = k as f32 / 10.0; let mt = 1.0 - t;
+                    let pt = p0*(mt*mt*mt) + c1*(3.0*mt*mt*t) + c2*(3.0*mt*t*t) + p3*(t*t*t);
+                    let mut best = f32::MAX;
+                    for sg in &segs {
+                        let (proj, _) = crate::vector_network::project_point_to_segment(pt, sg.a, sg.b);
+                        best = best.min((proj - pt).length());
+                    }
+                    maxd = maxd.max(best);
+                }
+            }
+        }
+        maxd
+    }
+
+    /// A region's outline never wanders off the geometry that bounds it.
+    ///
+    /// The reported failure, in one number. A fragment carries the t-range of
+    /// the curve it came from, derived through flattening and through every
+    /// split, and that range can drift from the geometry it labels: one claiming
+    /// t[0.0588, 0.9412] reconstructed to an arc whose ends sat 16.6 units from
+    /// its own vertices. Drawn, it swung the region's outline clean across the
+    /// artwork — straight shapes acquiring curves they never contained, at the
+    /// moment they were painted.
+    ///
+    /// A shape on its own never showed it, because nothing splits its curves.
+    /// One line across it is the whole reproduction: 10.5 units of stray.
+    #[test]
+    fn a_face_outline_stays_on_the_geometry_that_bounds_it() {
+        let mut e = Engine::new();
+        let r = e.add_rect(0.0, 0.0, 300.0, 200.0);
+        e.set_node_style(r, r#"{"fills":[{"r":0.5,"g":0.5,"b":0.5,"a":1.0}],"strokes":[],"opacity":1.0,"blend_mode":0,"fill_rule":0,"corner_radius":30.0,"effects":[]}"#);
+        let l = e.add_path(
+            r#"[{"points":[{"x":-20.0,"y":100.0,"cp1":[-20.0,100.0],"cp2":[-20.0,100.0]},
+                            {"x":320.0,"y":100.0,"cp1":[320.0,100.0],"cp2":[320.0,100.0]}],"closed":false}]"#,
+        );
+        let g = e.group_nodes(&format!("[{r},{l}]"));
+        e.set_node_live_paint(g, true);
+        e.set_live_paint_group(g);
+        e.ensure_network_clean();
+
+        let (segs, _) = e.collect_segments();
+        let ids: Vec<u32> = e.scene.vector_network.faces.values()
+            .filter(|f| !f.is_outer).map(|f| f.id).collect();
+        assert!(ids.len() >= 2, "the line must divide the rectangle");
+
+        let mut worst = 0.0f32;
+        for fid in ids {
+            let f = &e.scene.vector_network.faces[&fid];
+            for w in e.scene.vector_network.face_outline(f).windows(2) {
+                let (p0, p3) = (Vec2::new(w[0].x, w[0].y), Vec2::new(w[1].x, w[1].y));
+                let (c1, c2) = (w[0].cp2, w[1].cp1);
+                for k in 0..=10 {
+                    let t = k as f32 / 10.0;
+                    let mt = 1.0 - t;
+                    let pt = p0 * (mt * mt * mt) + c1 * (3.0 * mt * mt * t)
+                        + c2 * (3.0 * mt * t * t) + p3 * (t * t * t);
+                    let mut best = f32::MAX;
+                    for sg in &segs {
+                        let (proj, _) = crate::vector_network::project_point_to_segment(pt, sg.a, sg.b);
+                        best = best.min((proj - pt).length());
+                    }
+                    worst = worst.max(best);
+                }
+            }
+        }
+        // Flattening alone accounts for well under a unit; anything beyond that
+        // is outline that does not follow the drawing.
+        assert!(worst < 1.0, "outline strays {worst:.2} units from any geometry in the document");
+    }
+
+
+
+
+    /// The same drawing arranges the same way every time.
+    ///
+    /// It did not. Vertex merging took the first vertex it found within
+    /// tolerance while walking a `HashMap`, whose order changes with the process
+    /// hash seed, so where two junctions were both in range the winner was
+    /// decided by the seed. The fuzz test below caught it as a shape centre that
+    /// was paintable in two runs out of three and a dead zone in the third, with
+    /// no code change in between — and it is the most likely reason a document
+    /// would paint correctly once and wrongly after a reload.
+    ///
+    /// Rebuilding inside one process is a real test of it: the second build
+    /// allocates its maps afresh and lands its keys in different slots, so an
+    /// order-sensitive decision shows up as a different arrangement here.
+    #[test]
+    fn arranging_the_same_drawing_twice_gives_the_same_regions() {
+        let build = || {
+            let mut e = Engine::new();
+            // Coincident and near-coincident junctions, which is where the
+            // choice of which vertex absorbs a point actually matters.
+            for i in 0..12 {
+                let t = i as f32;
+                e.add_rect(t * 7.0, t * 5.0, 90.0 + t, 70.0 + t * 2.0);
+                e.add_ellipse(40.0 + t * 9.0, 60.0 + t * 4.0, 30.0 + t, 25.0 + t);
+            }
+            let ids: Vec<u32> = e.scene.root_nodes.clone();
+            let list = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+            let g = e.group_nodes(&format!("[{list}]"));
+            e.set_node_live_paint(g, true);
+            e.set_live_paint_group(g);
+            e.ensure_network_clean();
+
+            let mut vertices: Vec<(i64, i64)> = e
+                .scene
+                .vector_network
+                .vertices
+                .values()
+                .map(|v| ((v.position.x * 1000.0) as i64, (v.position.y * 1000.0) as i64))
+                .collect();
+            vertices.sort_unstable();
+            let mut areas: Vec<i64> = e
+                .scene
+                .vector_network
+                .faces
+                .values()
+                .filter(|f| !f.is_outer)
+                .map(|f| (f.signed_area.abs() * 1000.0) as i64)
+                .collect();
+            areas.sort_unstable();
+            (vertices, areas)
+        };
+
+        let first = build();
+        assert!(first.1.len() > 30, "the fixture should produce plenty of regions");
+        for _ in 0..4 {
+            let again = build();
+            assert_eq!(again.0, first.0, "the same drawing produced different vertices");
+            assert_eq!(again.1, first.1, "the same drawing produced different regions");
+        }
+    }
+
+    /// The reported drawing, in the shape that broke it: a skewed rounded
+    /// rectangle crossed by a fan of straight pen lines.
+    ///
+    /// Three things have to hold at once, and each one was broken at some point
+    /// by a fix for another:
+    ///
+    /// - every cell a person can see between those lines is paintable, so the
+    ///   junction tolerance may not swallow the thin slivers between two lines
+    ///   that nearly meet;
+    /// - the corner radii survive the arrangement, rather than being squared off
+    ///   the moment the group becomes a Live Paint group;
+    /// - nothing invents geometry: away from those four corners the drawing is
+    ///   made of straight lines, and the painted regions may not contain a curve
+    ///   the drawing does not have.
+    #[test]
+    fn a_skewed_rounded_rect_crossed_by_pen_lines_paints_every_cell_it_shows() {
+        let mut e = Engine::new();
+
+        let rect = e.add_rect(0.0, 0.0, 400.0, 300.0);
+        e.scene.nodes.get_mut(&rect).unwrap().style.corner_radius = 24.0;
+        // Skew it, the way the reported document was drawn.
+        e.set_node_transform_matrix(rect, "[1,0,0,0.18,1,0,0,0,1]");
+
+        // Nine pen lines crossing the rectangle, none of them axis-aligned and
+        // none of them meeting at a shared point — the case that has to be found
+        // by intersection rather than by construction.
+        let lines: [(f32, f32, f32, f32); 9] = [
+            (-20.0, 40.0, 430.0, 95.0),
+            (-20.0, 130.0, 430.0, 100.0),
+            (-20.0, 220.0, 430.0, 265.0),
+            (30.0, -20.0, 95.0, 380.0),
+            (150.0, -20.0, 120.0, 380.0),
+            (280.0, -20.0, 330.0, 380.0),
+            (-20.0, 320.0, 430.0, 190.0),
+            (60.0, -20.0, 380.0, 380.0),
+            (380.0, -20.0, 40.0, 380.0),
+        ];
+        for (x1, y1, x2, y2) in lines {
+            e.add_path(&format!(
+                r#"[{{"points":[{{"x":{x1},"y":{y1},"cp1":[{x1},{y1}],"cp2":[{x1},{y1}]}},
+                                {{"x":{x2},"y":{y2},"cp1":[{x2},{y2}],"cp2":[{x2},{y2}]}}],"closed":false}}]"#
+            ));
+        }
+
+        let ids: Vec<u32> = e.scene.root_nodes.clone();
+        let list = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let g = e.group_nodes(&format!("[{list}]"));
+        e.set_node_live_paint(g, true);
+        e.set_live_paint_group(g);
+        e.ensure_network_clean();
+
+        let (segments, _) = e.collect_segments();
+        let faces: Vec<crate::vector_network::PlanarFace> = e
+            .scene
+            .vector_network
+            .faces
+            .values()
+            .filter(|f| !f.is_outer)
+            .cloned()
+            .collect();
+
+        // Nine mutually crossing lines over a rectangle cut it into far more
+        // than a handful of cells; the number is only a floor, because what
+        // matters is that the small ones are not being collapsed away.
+        assert!(
+            faces.len() >= 20,
+            "nine crossing lines should leave many paintable cells, got {}",
+            faces.len()
+        );
+
+        let mut curved_points = 0;
+        for face in &faces {
+            for pt in e.scene.vector_network.face_outline(face) {
+                let anchor = Vec2::new(pt.x, pt.y);
+                if (pt.cp1 - anchor).length() > 0.01 || (pt.cp2 - anchor).length() > 0.01 {
+                    curved_points += 1;
+                }
+                // Whatever the outline is made of, it has to be geometry the
+                // document actually contains.
+                let stray = segments
+                    .iter()
+                    .map(|s| {
+                        let (proj, _) =
+                            crate::vector_network::project_point_to_segment(anchor, s.a, s.b);
+                        (proj - anchor).length()
+                    })
+                    .fold(f32::MAX, f32::min);
+                assert!(
+                    stray < 1.0,
+                    "a painted outline sits {stray:.2} units away from anything in the drawing"
+                );
+            }
+        }
+
+        // An anchor sitting on the drawing is not enough: a control point can
+        // bulge a curve far away from geometry whose endpoints both check out,
+        // which is exactly how the reported artefact looked. Sample the bodies.
+        for face in &faces {
+            let outline = e.scene.vector_network.face_outline(face);
+            for i in 0..outline.len() {
+                let (a, b) = (&outline[i], &outline[(i + 1) % outline.len()]);
+                let (p0, p3) = (Vec2::new(a.x, a.y), Vec2::new(b.x, b.y));
+                if (a.cp2 - p0).length() < 0.01 && (b.cp1 - p3).length() < 0.01 {
+                    continue; // a straight run needs no sampling
+                }
+                let curve = [p0, a.cp2, b.cp1, p3];
+                for k in 0..=24 {
+                    let pt = crate::vector_network::cubic_point(&curve, k as f32 / 24.0);
+                    let stray = segments
+                        .iter()
+                        .map(|s| {
+                            let (proj, _) =
+                                crate::vector_network::project_point_to_segment(pt, s.a, s.b);
+                            (proj - pt).length()
+                        })
+                        .fold(f32::MAX, f32::min);
+                    assert!(
+                        stray < 1.0,
+                        "a painted curve bulges {stray:.2} units off the drawing"
+                    );
+                }
+            }
+        }
+
+        // The corners are the drawing's only curvature, and they are four small
+        // arcs on one shape: a handful of outline points, not a fifth of them.
+        assert!(
+            curved_points > 0,
+            "the rounded corners were squared off by the arrangement"
+        );
+        let total: usize = faces
+            .iter()
+            .map(|f| e.scene.vector_network.face_outline(f).len())
+            .sum();
+        assert!(
+            curved_points * 5 < total,
+            "curvature has spread beyond the four corners: {curved_points} of {total} points"
+        );
+    }
     /// Cutting a group takes its children along, and paste rebuilds the tree.
     #[test]
     fn cut_carries_the_whole_subtree() {

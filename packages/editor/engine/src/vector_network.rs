@@ -122,6 +122,84 @@ impl CurveSeg {
     }
 }
 
+/// Evaluate a cubic bézier at parameter `t`.
+pub(crate) fn cubic_point(p: &[Vec2; 4], t: f32) -> Vec2 {
+    let mt = 1.0 - t;
+    p[0] * (mt * mt * mt)
+        + p[1] * (3.0 * mt * mt * t)
+        + p[2] * (3.0 * mt * t * t)
+        + p[3] * (t * t * t)
+}
+
+/// de Casteljau split of a cubic at `t`; returns the [0,t] (left) and [t,1]
+/// (right) control-point quads.
+fn cubic_split(p: &[Vec2; 4], t: f32) -> ([Vec2; 4], [Vec2; 4]) {
+    let a = p[0].lerp(p[1], t);
+    let b = p[1].lerp(p[2], t);
+    let c = p[2].lerp(p[3], t);
+    let d = a.lerp(b, t);
+    let e = b.lerp(c, t);
+    let f = d.lerp(e, t);
+    ([p[0], a, d, f], [f, e, c, p[3]])
+}
+
+/// Control points of the cubic restricted to [t0,t1], oriented t0→t1
+/// (reversed if t0 > t1). Exact — this is what makes faces true béziers.
+fn cubic_subsegment(p: &[Vec2; 4], t0: f32, t1: f32) -> [Vec2; 4] {
+    let (mut lo, mut hi) = (t0, t1);
+    let reversed = lo > hi;
+    if reversed {
+        std::mem::swap(&mut lo, &mut hi);
+    }
+    // Restrict to [0, hi], then take the [lo/hi, 1] tail of that.
+    let (left, _) = cubic_split(p, hi.clamp(0.0, 1.0));
+    let u = if hi > 1e-9 { (lo / hi).clamp(0.0, 1.0) } else { 0.0 };
+    let (_, seg) = cubic_split(&left, u);
+    if reversed { [seg[3], seg[2], seg[1], seg[0]] } else { seg }
+}
+
+/// Convert an ordered list of cubic control quads (each `[c0,c1,c2,c3]`, head to
+/// tail) into a CLOSED subpath's `PathPoint`s (anchor + cp1/cp2 per point). The
+/// final anchor coincides with the first, so it's folded into the first point's
+/// incoming handle (the engine's closed-subpath convention).
+fn quads_to_closed_pathpoints(quads: &[[Vec2; 4]]) -> Vec<PathPoint> {
+    if quads.is_empty() {
+        return Vec::new();
+    }
+    let mut pts: Vec<PathPoint> = Vec::new();
+    let first = quads[0][0];
+    pts.push(PathPoint { x: first.x, y: first.y, cp1: first, cp2: first, corner_radius: 0.0 });
+    for q in quads {
+        if let Some(last) = pts.last_mut() {
+            last.cp2 = q[1]; // outgoing handle of the current anchor
+        }
+        pts.push(PathPoint { x: q[3].x, y: q[3].y, cp1: q[2], cp2: q[3], corner_radius: 0.0 });
+    }
+    if pts.len() > 1 {
+        let last = pts.pop().unwrap();
+        pts[0].cp1 = last.cp1;
+    }
+    pts
+}
+
+/// Like `quads_to_closed_pathpoints` but for an OPEN chain — every anchor is
+/// kept (nothing folded), so painted edges reconstruct as true curves.
+fn quads_to_open_pathpoints(quads: &[[Vec2; 4]]) -> Vec<PathPoint> {
+    if quads.is_empty() {
+        return Vec::new();
+    }
+    let mut pts: Vec<PathPoint> = Vec::new();
+    let first = quads[0][0];
+    pts.push(PathPoint { x: first.x, y: first.y, cp1: first, cp2: first, corner_radius: 0.0 });
+    for q in quads {
+        if let Some(last) = pts.last_mut() {
+            last.cp2 = q[1];
+        }
+        pts.push(PathPoint { x: q[3].x, y: q[3].y, cp1: q[2], cp2: q[3], corner_radius: 0.0 });
+    }
+    pts
+}
+
 /// A flattened segment that remembers the source curve + t-range it came from,
 /// and which Live Paint group it belongs to (segments of different groups never
 /// interact, so the planar graph is partitioned per group).
@@ -132,8 +210,8 @@ pub(crate) struct FlatSeg {
     pub(crate) node: u32,
     group: u32,
     curve: u32,
-    ta: f32,
-    tb: f32,
+    pub(crate) ta: f32,
+    pub(crate) tb: f32,
 }
 
 /// `FlatSeg` after endpoints are resolved to vertex ids (post `build_vertices`).
@@ -267,7 +345,17 @@ impl Default for VectorNetwork {
             edges: HashMap::new(),
             faces: HashMap::new(),
             next_id: 1,
-            gap_tolerance: 2.0,
+            // How far apart two points may be and still be treated as one.
+            //
+            // It has to reach the imprecision in a hand-drawn junction — pen ends
+            // in a real drawing sit a few tenths of a unit off the line they meet
+            // — and it must not reach across a thin region, because anything
+            // narrower than this collapses into nothing and stops being
+            // paintable. Both halves measured on that drawing: at 0.25 junctions
+            // stayed open and it yielded 17 regions; at 1.0, 24; at 2.0 it fell
+            // back to 23, the missing one a sliver of area 6.7 that the tolerance
+            // had swallowed. Wider is not safer — it is regions deleted.
+            gap_tolerance: 1.0,
             dirty: true,
             gap_bridge_distance: 0.0,
             group_gap: HashMap::new(),
@@ -343,88 +431,21 @@ fn flatten_cubic_t(
     flatten_cubic_t(mid, m123, m23, p3, tmid, t1, tolerance, out);
 }
 
-/// Evaluate a cubic bézier at parameter `t`.
-fn cubic_point(p: &[Vec2; 4], t: f32) -> Vec2 {
-    let mt = 1.0 - t;
-    p[0] * (mt * mt * mt)
-        + p[1] * (3.0 * mt * mt * t)
-        + p[2] * (3.0 * mt * t * t)
-        + p[3] * (t * t * t)
-}
-
-/// de Casteljau split of a cubic at `t`; returns the [0,t] (left) and [t,1]
-/// (right) control-point quads.
-fn cubic_split(p: &[Vec2; 4], t: f32) -> ([Vec2; 4], [Vec2; 4]) {
-    let a = p[0].lerp(p[1], t);
-    let b = p[1].lerp(p[2], t);
-    let c = p[2].lerp(p[3], t);
-    let d = a.lerp(b, t);
-    let e = b.lerp(c, t);
-    let f = d.lerp(e, t);
-    ([p[0], a, d, f], [f, e, c, p[3]])
-}
-
-/// Control points of the cubic restricted to [t0,t1], oriented t0→t1
-/// (reversed if t0 > t1). Exact — this is what makes faces true béziers.
-fn cubic_subsegment(p: &[Vec2; 4], t0: f32, t1: f32) -> [Vec2; 4] {
-    let (mut lo, mut hi) = (t0, t1);
-    let reversed = lo > hi;
-    if reversed {
-        std::mem::swap(&mut lo, &mut hi);
-    }
-    // Restrict to [0, hi], then take the [lo/hi, 1] tail of that.
-    let (left, _) = cubic_split(p, hi.clamp(0.0, 1.0));
-    let u = if hi > 1e-9 { (lo / hi).clamp(0.0, 1.0) } else { 0.0 };
-    let (_, seg) = cubic_split(&left, u);
-    if reversed { [seg[3], seg[2], seg[1], seg[0]] } else { seg }
-}
-
-/// Convert an ordered list of cubic control quads (each `[c0,c1,c2,c3]`, head to
-/// tail) into a CLOSED subpath's `PathPoint`s (anchor + cp1/cp2 per point). The
-/// final anchor coincides with the first, so it's folded into the first point's
-/// incoming handle (the engine's closed-subpath convention).
-fn quads_to_closed_pathpoints(quads: &[[Vec2; 4]]) -> Vec<PathPoint> {
-    if quads.is_empty() {
-        return Vec::new();
-    }
-    let mut pts: Vec<PathPoint> = Vec::new();
-    let first = quads[0][0];
-    pts.push(PathPoint { x: first.x, y: first.y, cp1: first, cp2: first, corner_radius: 0.0 });
-    for q in quads {
-        if let Some(last) = pts.last_mut() {
-            last.cp2 = q[1]; // outgoing handle of the current anchor
-        }
-        pts.push(PathPoint { x: q[3].x, y: q[3].y, cp1: q[2], cp2: q[3], corner_radius: 0.0 });
-    }
-    if pts.len() > 1 {
-        let last = pts.pop().unwrap();
-        pts[0].cp1 = last.cp1;
-    }
-    pts
-}
-
-/// Like `quads_to_closed_pathpoints` but for an OPEN chain — every anchor is
-/// kept (nothing folded), so painted edges reconstruct as true curves.
-fn quads_to_open_pathpoints(quads: &[[Vec2; 4]]) -> Vec<PathPoint> {
-    if quads.is_empty() {
-        return Vec::new();
-    }
-    let mut pts: Vec<PathPoint> = Vec::new();
-    let first = quads[0][0];
-    pts.push(PathPoint { x: first.x, y: first.y, cp1: first, cp2: first, corner_radius: 0.0 });
-    for q in quads {
-        if let Some(last) = pts.last_mut() {
-            last.cp2 = q[1];
-        }
-        pts.push(PathPoint { x: q[3].x, y: q[3].y, cp1: q[2], cp2: q[3], corner_radius: 0.0 });
-    }
-    pts
-}
-
 /// Flattening tolerance (world units) for building the planar graph. Curves are
 /// reconstructed exactly from `curves` for rendering/export, so this only needs
 /// to be fine enough for topology (intersections/containment).
-const FLATTEN_TOL: f32 = 0.5;
+/// How finely a curve is flattened on its way into the arrangement.
+///
+/// This is now the ONLY place curvature is decided. Faces and painted lines are
+/// the arrangement itself (see `face_outline`), so a corner arc is as smooth as
+/// it is flattened here and no smoother — which is why this is well under a
+/// pixel at ordinary zoom rather than the half unit it used to be, when a
+/// separate exact-bézier reconstruction was expected to make it pretty later.
+/// That reconstruction is what put curves through drawings that had none.
+///
+/// The cost is linear: more, shorter segments through intersection finding,
+/// which is bucketed by a spatial hash and does not care.
+const FLATTEN_TOL: f32 = 0.08;
 
 /// Emit one Cubic curve per path segment, plus its flattened `FlatSeg`s.
 fn push_path_curves(points: &[PathPoint], node: u32, group: u32, curves: &mut Vec<CurveSeg>, out: &mut Vec<FlatSeg>) {
@@ -674,10 +695,14 @@ impl VectorNetwork {
             if polyline.len() < 2 {
                 continue;
             }
-            // Exact-bézier outline: resolve the chain's ordered half-edges, then
-            // merge same-curve fragments into cubics (open chain — keep all pts).
+            // The painted line is the arrangement's own chain, for the same
+            // reason a face's outline is (see `face_outline`): a second geometry
+            // re-derived from stored curve parameters is a second answer to a
+            // question that already has one, and the two drift apart.
             let chain_edges = self.verts_to_edges(&verts);
-            let outline = quads_to_open_pathpoints(&self.edges_to_quads(&chain_edges));
+            let outline: Vec<PathPoint> = polyline.iter()
+                .map(|&p| PathPoint { x: p.x, y: p.y, cp1: p, cp2: p, corner_radius: 0.0 })
+                .collect();
             // Structural identity: which source segments (+ t-ranges) the chain
             // covers, and a representative anchor (its middle fragment).
             let mut segs: Vec<(u32, f32, f32)> = Vec::new();
@@ -763,48 +788,123 @@ impl VectorNetwork {
     }
 
     /// Reconstruct a face's boundary as EXACT béziers (anchor + handles): walk
-    /// the boundary half-edges, merge consecutive fragments of the same source
-    /// curve into one cubic sub-arc, and fall back to straight lines for
-    /// synthetic/no-frag edges. Returns a closed subpath's points.
+    /// How far a source curve may stray from the arrangement before it is
+    /// refused as a description of it.
+    ///
+    /// The two can never agree exactly, and it is worth being precise about why:
+    /// a crossing is computed between FLATTENED segments, because that is the
+    /// only representation both curves share, so the vertex lands on a chord
+    /// rather than on either true curve. The gap is therefore the flattening
+    /// error — measured here at 0.25 to 0.64 units across radii from 50 to 2000
+    /// — and a threshold below that rejects every genuine arc.
+    ///
+    /// One unit sits above that and far below what this exists to catch: the
+    /// drifted parameter range that started this work put its curve 16.6 units
+    /// from its own boundary.
+    const CURVE_AGREEMENT_EPS: f32 = 1.0;
+
+    /// The boundary of a face: the arrangement, described by a source curve
+    /// wherever that curve provably IS the arrangement.
+    ///
+    /// ## The rule, and why it exists
+    ///
+    /// Every decision about this surface is made on the flattened arrangement:
+    /// where segments cross, where a loose end lands, which points are one
+    /// point, which cycle of half-edges encloses a region. Drawing the fill from
+    /// a *second* description of that boundary — source curves re-derived from
+    /// stored parameter ranges — means two geometries claim to be one boundary,
+    /// and nothing made them agree.
+    ///
+    /// They did not agree. A fragment's `t` range is carried through flattening
+    /// and through every split, and one arriving here claiming `t[0.0588,
+    /// 0.9412]` reconstructed to an arc whose ends sat 16.6 units from the
+    /// vertices it was supposed to join. Drawn, that swung the outline across
+    /// the drawing — straight artwork acquiring curves it never contained, at
+    /// the moment it was painted. A shape alone never showed it, because nothing
+    /// splits its curves; one line across it was the whole reproduction.
+    ///
+    /// The curve does not get to assert; it gets to agree. A run of half-edges
+    /// along one source curve is reconstructed, then checked against the
+    /// arrangement at both ends AND at its middle — the middle because two
+    /// matching endpoints say nothing about the bulge between them. Agreement
+    /// means the two geometries are the same boundary and the exact curve is
+    /// kept, which is what makes a painted circle export as a circle. Anything
+    /// else is drawn as the arrangement holds it: straight between its vertices.
+    /// So a curve appears only where the drawing has one.
     pub(crate) fn face_outline(&self, face: &PlanarFace) -> Vec<PathPoint> {
         quads_to_closed_pathpoints(&self.edges_to_quads(&face.boundary_edges))
     }
 
-    /// Merge an ordered run of half-edges into cubic control quads: consecutive
-    /// fragments of the same source curve with contiguous t collapse into one
-    /// exact sub-arc; synthetic/no-frag edges become straight quads.
+    /// Ordered half-edges → cubic control quads, one per run of edges that share
+    /// a source curve contiguously and in one direction. See `face_outline` for
+    /// why each run has to earn its curve.
     fn edges_to_quads(&self, edge_ids: &[u32]) -> Vec<[Vec2; 4]> {
         let mut quads: Vec<[Vec2; 4]> = Vec::new();
-        let mut run: Option<(u32, f32, f32)> = None; // (curve, t_start, t_last)
-        let flush = |run: &mut Option<(u32, f32, f32)>, quads: &mut Vec<[Vec2; 4]>, curves: &[CurveSeg]| {
-            if let Some((c, t0, t1)) = run.take() {
-                if let Some(cv) = curves.get(c as usize) {
-                    quads.push(cv.subsegment(t0, t1));
+        // (curve, t_start, t_last, ordered vertices the run passes through)
+        let mut run: Option<(u32, f32, f32, Vec<u32>)> = None;
+
+        let flush = |run: &mut Option<(u32, f32, f32, Vec<u32>)>, quads: &mut Vec<[Vec2; 4]>, me: &Self| {
+            let Some((c, t0, t1, verts)) = run.take() else { return };
+            let pos = |v: &u32| me.vertices.get(v).map(|x| x.position).unwrap_or_default();
+            let (a, b) = (pos(&verts[0]), pos(verts.last().unwrap()));
+
+            let accepted = me.curves.get(c as usize).map(|cv| cv.subsegment(t0, t1)).filter(|q| {
+                if (q[0] - a).length() > Self::CURVE_AGREEMENT_EPS { return false; }
+                if (q[3] - b).length() > Self::CURVE_AGREEMENT_EPS { return false; }
+                // Matching ends say nothing about the bulge between them. Every
+                // vertex this run passes through must lie on the curve, so
+                // sample the curve finely enough to measure that and ask each
+                // one. A drifted parameter range fails immediately: the run whose
+                // reconstruction started this — t[0.0588, 0.9412] — put its curve
+                // 16.6 units from its own vertices.
+                let polyline: Vec<Vec2> = verts.iter().map(pos).collect();
+                (1..16).all(|k| {
+                    let t = k as f32 / 16.0;
+                    point_to_polyline_distance(cubic_point(q, t), &polyline)
+                        <= Self::CURVE_AGREEMENT_EPS
+                })
+            });
+
+            match accepted {
+                // Snap the ends to the arrangement so consecutive pieces meet exactly.
+                Some(q) => quads.push([a, q[1], q[2], b]),
+                None => {
+                    // The arrangement, as it holds it: straight from vertex to vertex.
+                    for w in verts.windows(2) {
+                        let (p, q) = (pos(&w[0]), pos(&w[1]));
+                        quads.push([p, p, q, q]);
+                    }
                 }
             }
         };
+
         for &eid in edge_ids {
-            let e = match self.edges.get(&eid) { Some(e) => e, None => continue };
+            let Some(e) = self.edges.get(&eid) else { continue };
             match e.frag {
-                Some(f) if (f.curve as usize) < self.curves.len() => match run {
-                    // Extend when it's the same curve and t is contiguous.
-                    Some((c, t0, t1)) if c == f.curve && (f.ta - t1).abs() < 1e-3 => {
-                        run = Some((c, t0, f.tb));
+                Some(f) if (f.curve as usize) < self.curves.len() => {
+                    let extend = matches!(&run, Some((c, t0, t1, _))
+                        if *c == f.curve
+                            && (f.ta - t1).abs() < 1e-3
+                            && (t1 - t0) * (f.tb - f.ta) >= 0.0);
+                    if extend {
+                        if let Some((_, _, t1, verts)) = run.as_mut() {
+                            *t1 = f.tb;
+                            verts.push(e.to_vertex);
+                        }
+                    } else {
+                        flush(&mut run, &mut quads, self);
+                        run = Some((f.curve, f.ta, f.tb, vec![e.from_vertex, e.to_vertex]));
                     }
-                    _ => {
-                        flush(&mut run, &mut quads, &self.curves);
-                        run = Some((f.curve, f.ta, f.tb));
-                    }
-                },
+                }
                 _ => {
-                    flush(&mut run, &mut quads, &self.curves);
+                    flush(&mut run, &mut quads, self);
                     let a = self.vertices[&e.from_vertex].position;
                     let b = self.vertices[&e.to_vertex].position;
                     quads.push([a, a, b, b]);
                 }
             }
         }
-        flush(&mut run, &mut quads, &self.curves);
+        flush(&mut run, &mut quads, self);
         quads
     }
 
@@ -900,7 +1000,11 @@ impl VectorNetwork {
                 for &p in &[segments[y].a, segments[y].b] {
                     let (proj, t) = project_point_to_segment(p, pa, pb);
                     if t > T_EPS && t < 1.0 - T_EPS && (proj - p).length() < on_eps {
-                        splits[x].push((t, p));
+                        // Split the crossed segment AT ITS OWN GEOMETRY — the
+                        // projection — not at the loose end's position, which
+                        // differs by however far the end missed and bends the
+                        // line it landed on.
+                        splits[x].push((t, proj));
                     }
                 }
             }
@@ -934,18 +1038,68 @@ impl VectorNetwork {
         result
     }
 
+    /// Resolve every fragment endpoint to a vertex, merging points that are
+    /// within tolerance of each other.
+    ///
+    /// ## Why the *nearest* one, and why ties go to the lowest id
+    ///
+    /// This used to take the first vertex it found within tolerance while
+    /// walking `self.vertices` — a `HashMap`, whose iteration order changes with
+    /// the process hash seed. Wherever two existing vertices were both in range,
+    /// which one absorbed the point was decided by that seed, so the same
+    /// drawing arranged differently from one run to the next: usually the same,
+    /// occasionally a region that closed before now leaked into its neighbour and
+    /// stopped being paintable at all. It reproduced as a fuzz seed that failed
+    /// roughly one run in three with no code change between them, and it is the
+    /// most likely explanation for a document that paints correctly once and
+    /// wrongly after a reload.
+    ///
+    /// Nearest-wins is both deterministic and the better answer — a point
+    /// belongs to the junction it is closest to — and the id tie-break settles
+    /// exact ties, which coincident geometry produces constantly. The result now
+    /// depends only on the fragment order, which is built from the scene in
+    /// document order.
+    ///
+    /// The grid is what keeps that affordable: cells are one tolerance wide, so
+    /// everything within reach of a point lives in the nine cells around it, and
+    /// a document with thousands of crossings no longer costs a full scan per
+    /// endpoint.
     fn build_vertices(&mut self, segments: Vec<FlatSeg>) -> Vec<RemFlat> {
         let tolerance = self.gap_tolerance;
-        // Exact-position dedup keyed by (position, group).
+        let tol2 = tolerance * tolerance;
+        // Exact-position dedup keyed by (position, group), which is what catches
+        // coincident points when the tolerance is zero.
         let mut vertex_map: HashMap<(OrderedVec2, u32), u32> = HashMap::new();
+        // Vertex ids by grid cell, per group: two groups' coincident points must
+        // stay distinct so their graphs don't fuse.
+        let mut grid: HashMap<(i32, i32, u32), Vec<u32>> = HashMap::new();
+        let cell = tolerance.max(1e-4);
+        let cell_of = |p: Vec2| ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32);
 
-        // Merge endpoints within tolerance, but ONLY within the same group — two
-        // groups' coincident points must stay distinct so their graphs don't fuse.
-        let get_or_create_vertex = |pos: Vec2, group: u32, vn: &mut VectorNetwork, vmap: &mut HashMap<(OrderedVec2, u32), u32>| -> u32 {
-            for v in vn.vertices.values() {
-                if v.group == group && (v.position - pos).length() < tolerance {
-                    return v.id;
+        let mut get_or_create_vertex = |pos: Vec2,
+                                        group: u32,
+                                        vn: &mut VectorNetwork,
+                                        vmap: &mut HashMap<(OrderedVec2, u32), u32>,
+                                        grid: &mut HashMap<(i32, i32, u32), Vec<u32>>|
+         -> u32 {
+            let (cx, cy) = cell_of(pos);
+            let mut best: Option<(f32, u32)> = None;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    let Some(ids) = grid.get(&(cx + dx, cy + dy, group)) else { continue };
+                    for &id in ids {
+                        let d2 = (vn.vertices[&id].position - pos).length_squared();
+                        if d2 >= tol2 {
+                            continue;
+                        }
+                        if best.is_none_or(|(bd, bid)| d2 < bd || (d2 == bd && id < bid)) {
+                            best = Some((d2, id));
+                        }
+                    }
                 }
+            }
+            if let Some((_, id)) = best {
+                return id;
             }
             let key = (OrderedVec2(OrderedFloat(pos.x), OrderedFloat(pos.y)), group);
             if let Some(&id) = vmap.get(&key) {
@@ -959,13 +1113,14 @@ impl VectorNetwork {
                 group,
             });
             vmap.insert(key, id);
+            grid.entry((cx, cy, group)).or_default().push(id);
             id
         };
 
         let mut remapped = Vec::new();
         for seg in &segments {
-            let from = get_or_create_vertex(seg.a, seg.group, self, &mut vertex_map);
-            let to = get_or_create_vertex(seg.b, seg.group, self, &mut vertex_map);
+            let from = get_or_create_vertex(seg.a, seg.group, self, &mut vertex_map, &mut grid);
+            let to = get_or_create_vertex(seg.b, seg.group, self, &mut vertex_map, &mut grid);
             if from != to {
                 remapped.push(RemFlat { from, to, node: seg.node, group: seg.group, curve: seg.curve, ta: seg.ta, tb: seg.tb });
             }
@@ -1252,7 +1407,12 @@ impl VectorNetwork {
 
     fn detect_faces(&mut self) {
         let mut visited: HashSet<u32> = HashSet::new();
-        let edge_ids: Vec<u32> = self.edges.keys().copied().collect();
+        // Sorted, so a document's faces come out with the same ids every time it
+        // is arranged. The set of faces does not depend on where the walks start,
+        // but their ids do, and reproducible ids are what make a wrong region
+        // possible to chase across runs.
+        let mut edge_ids: Vec<u32> = self.edges.keys().copied().collect();
+        edge_ids.sort_unstable();
 
         for start_edge_id in edge_ids {
             if visited.contains(&start_edge_id) {
@@ -1392,10 +1552,14 @@ impl VectorNetwork {
         }
 
         // Precompute candidate faces once: (id, signature, centroid).
-        let candidates: Vec<(u32, Vec<u32>, Vec2)> = self.faces.values()
+        // Ordered by id: every tier below walks this list, and two faces that
+        // are equally good a match must not be separated by which one the map
+        // happened to yield first.
+        let mut candidates: Vec<(u32, Vec<u32>, Vec2)> = self.faces.values()
             .filter(|f| !f.is_outer)
             .map(|f| (f.id, f.signature.clone(), polygon_centroid(&f.boundary_polygon)))
             .collect();
+        candidates.sort_by_key(|(fid, _, _)| *fid);
 
         let mut taken: HashSet<u32> = HashSet::new();
         for (sig, centroid, color) in &to_place {
@@ -1408,7 +1572,7 @@ impl VectorNetwork {
                         continue;
                     }
                     let d = (*centroid - *ccent).length();
-                    if best.map_or(true, |(_, bd)| d < bd) {
+                    if best.is_none_or(|(bid, bd)| d < bd || (d == bd && *fid < bid)) {
                         best = Some((*fid, d));
                     }
                 }
@@ -1465,7 +1629,9 @@ impl VectorNetwork {
                         continue;
                     }
                     let d = (*centroid - *ccent).length();
-                    if d <= FILL_REMAP_THRESHOLD && best.map_or(true, |(_, bd)| d < bd) {
+                    if d <= FILL_REMAP_THRESHOLD
+                        && best.is_none_or(|(bid, bd)| d < bd || (d == bd && *fid < bid))
+                    {
                         best = Some((*fid, d));
                     }
                 }
@@ -1484,6 +1650,10 @@ impl VectorNetwork {
     pub fn query_face_at(&self, x: f32, y: f32) -> Option<u32> {
         let point = [x, y];
         // Find the smallest non-outer face containing the point
+        // Smallest containing face wins — a region nested inside another is the
+        // one under the cursor — and an exact tie goes to the lower id rather
+        // than to whichever the map yielded first, so the same click always
+        // paints the same region.
         let mut best: Option<(u32, f64)> = None;
         for (fid, face) in &self.faces {
             if face.is_outer {
@@ -1491,14 +1661,8 @@ impl VectorNetwork {
             }
             if point_in_polygon(&point, &face.boundary_polygon) {
                 let area = face.signed_area.abs();
-                match best {
-                    Some((_, best_area)) if area < best_area => {
-                        best = Some((*fid, area));
-                    }
-                    None => {
-                        best = Some((*fid, area));
-                    }
-                    _ => {}
+                if best.is_none_or(|(bid, ba)| area < ba || (area == ba && *fid < bid)) {
+                    best = Some((*fid, area));
                 }
             }
         }
@@ -1705,7 +1869,15 @@ impl Engine {
     pub(crate) fn collect_segments(&self) -> (Vec<FlatSeg>, Vec<CurveSeg>) {
         let mut segments = Vec::new();
         let mut curves: Vec<CurveSeg> = Vec::new();
-        for (&id, node) in &self.scene.nodes {
+        // In paint order, not map order. The arrangement is built greedily —
+        // whichever endpoint arrives first at a junction creates the vertex the
+        // rest snap onto — so the order shapes get read in is part of the answer.
+        // Reading them out of a `HashMap` made that order the process's hash
+        // seed, and the same document could arrange one way now and another way
+        // after a reload. Document order is stable, and it is the order the
+        // drawing is drawn in.
+        for id in self.draw_order() {
+            let Some(node) = self.scene.nodes.get(&id) else { continue };
             if !node.visible {
                 continue;
             }
