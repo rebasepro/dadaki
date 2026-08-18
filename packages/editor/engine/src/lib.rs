@@ -7979,6 +7979,54 @@ mod tests {
 
 
 
+
+    /// A wide gap tolerance closes gaps; it does not delete thin regions.
+    ///
+    /// The tolerance is there for hand-drawn ends that stop short of what they
+    /// meet, and documents carry generous values. Applied to every point it
+    /// becomes destructive: two shapes whose outlines run within it — a rounded
+    /// rectangle and a copy of itself a unit away, which is what the reported
+    /// drawing contains — have their junctions fused, and the thin region between
+    /// them stops existing. On screen a fill then crosses straight over a corner
+    /// arc into the shape beyond, because the boundary that should have stopped
+    /// it was merged away.
+    ///
+    /// So geometry the artwork defines merges only when it genuinely coincides,
+    /// and only free ends travel the full tolerance.
+    #[test]
+    fn a_wide_gap_tolerance_does_not_swallow_the_gap_between_two_shapes() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 200.0, 150.0);
+        let b = engine.add_rect(1.2, 1.2, 200.0, 150.0);
+        for id in [a, b] {
+            engine.scene.nodes.get_mut(&id).unwrap().style.corner_radius = 30.0;
+        }
+        let g = engine.group_nodes(&format!("[{a},{b}]"));
+        engine.set_node_live_paint(g, true);
+        engine.set_live_paint_group(g);
+        // Wider than the gap between the two outlines, as the reported file is.
+        engine.set_gap_tolerance(2.0);
+        engine.ensure_network_clean();
+
+        // A point in the sliver: inside the first rect, outside the second.
+        let sliver = engine.query_face_at(0.6, 75.0);
+        let inside = engine.query_face_at(100.0, 75.0);
+        assert!(sliver >= 0, "the region between the two outlines is unpaintable");
+        assert!(inside >= 0, "the shared interior is unpaintable");
+        assert_ne!(
+            sliver, inside,
+            "the tolerance merged the two outlines, so the sliver between them is gone"
+        );
+
+        // And the corner arcs still bound it: the sliver has to follow them
+        // around the corner rather than being cut off at the tangent point.
+        let corner_sliver = engine.query_face_at(9.0, 9.5);
+        assert_eq!(
+            corner_sliver, sliver,
+            "the sliver stops at the corner instead of following the arc"
+        );
+    }
+
     /// A painted boundary sits ON the curve it borrows, not near it.
     ///
     /// Crossings are found between flattened chords, because that is the only

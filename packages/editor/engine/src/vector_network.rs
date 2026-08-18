@@ -580,6 +580,16 @@ fn flatten_cubic_t(
 /// which is bucketed by a spatial hash and does not care.
 const FLATTEN_TOL: f32 = 0.08;
 
+/// How close two points the ARTWORK defines must be to count as one.
+///
+/// Not the gap tolerance — that one is about hand-drawn ends missing their mark,
+/// and is deliberately generous. This is about geometry that is supposed to
+/// coincide: a corner where two segments of a path meet, two crossings computed
+/// at the same place from either side. Those agree to within flattening error or
+/// they are genuinely different points, and treating "genuinely different" as
+/// "the same" is how thin regions disappear.
+const STRUCTURAL_MERGE_EPS: f32 = 0.1;
+
 /// Emit one Cubic curve per path segment, plus its flattened `FlatSeg`s.
 fn push_path_curves(
     points: &[PathPoint], node: u32, group: u32, closed: bool,
@@ -1342,6 +1352,7 @@ impl VectorNetwork {
 
         let get_or_create_vertex = |pos: Vec2,
                                         group: u32,
+                                        tol2: f32,
                                         vn: &mut VectorNetwork,
                                         vmap: &mut HashMap<(OrderedVec2, u32), u32>,
                                         grid: &mut HashMap<(i32, i32, u32), Vec<u32>>|
@@ -1412,19 +1423,34 @@ impl VectorNetwork {
                 None => true,
             }
         };
+        // Structural points are held to a far tighter radius than free ends.
+        //
+        // The tolerance exists for one thing: a hand-drawn end that stops short
+        // of what it meets. Applying it to everything makes it destructive —
+        // two shapes whose outlines run within it, like a rounded rectangle and
+        // a copy of itself a unit away, have their junctions fused, and the thin
+        // region between them stops existing. What the drawing shows is a fill
+        // crossing straight over a corner arc into the shape beyond it, because
+        // the boundary that should have stopped it was merged away.
+        //
+        // So: geometry the artwork defines merges only when it genuinely
+        // coincides, at flattening scale. Free ends still merge across the full
+        // tolerance, because that is the case the tolerance was for. A wide
+        // setting now closes gaps without deleting anything.
+        let structural_tol2 = STRUCTURAL_MERGE_EPS * STRUCTURAL_MERGE_EPS;
         for seg in &segments {
             if structural(seg, seg.ta, seg.ta <= seg.tb) {
-                get_or_create_vertex(seg.a, seg.group, self, &mut vertex_map, &mut grid);
+                get_or_create_vertex(seg.a, seg.group, structural_tol2, self, &mut vertex_map, &mut grid);
             }
             if structural(seg, seg.tb, seg.tb < seg.ta) {
-                get_or_create_vertex(seg.b, seg.group, self, &mut vertex_map, &mut grid);
+                get_or_create_vertex(seg.b, seg.group, structural_tol2, self, &mut vertex_map, &mut grid);
             }
         }
 
         let mut remapped = Vec::new();
         for seg in &segments {
-            let from = get_or_create_vertex(seg.a, seg.group, self, &mut vertex_map, &mut grid);
-            let to = get_or_create_vertex(seg.b, seg.group, self, &mut vertex_map, &mut grid);
+            let from = get_or_create_vertex(seg.a, seg.group, tol2, self, &mut vertex_map, &mut grid);
+            let to = get_or_create_vertex(seg.b, seg.group, tol2, self, &mut vertex_map, &mut grid);
             if from != to {
                 remapped.push(RemFlat { from, to, node: seg.node, group: seg.group, curve: seg.curve, ta: seg.ta, tb: seg.tb });
             }
