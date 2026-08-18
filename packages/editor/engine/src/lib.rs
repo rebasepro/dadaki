@@ -857,7 +857,7 @@ fn path_hit(subpaths: &[Subpath], style: &Style, p: Vec2, tol: f32) -> bool {
 /// rect's rounding has to move it onto vertices first. Sharing this between
 /// `convert_to_path` and the bounds pass is what keeps a rounded rect measuring
 /// the same before and after conversion.
-fn rect_subpaths(width: f32, height: f32, corner_radius: f32) -> Vec<Subpath> {
+pub(crate) fn rect_subpaths(width: f32, height: f32, corner_radius: f32) -> Vec<Subpath> {
     let cr = corner_radius;
     vec![Subpath {
         points: vec![
@@ -873,7 +873,7 @@ fn rect_subpaths(width: f32, height: f32, corner_radius: f32) -> Vec<Subpath> {
 /// Expand every straight-line corner that carries a `corner_radius` into an
 /// explicit fillet (two anchors + an arc-as-cubic). Vertices that already have
 /// Bézier handles, or sit on an open subpath's endpoint, are left untouched.
-fn round_subpaths(subpaths: &[Subpath]) -> Vec<Subpath> {
+pub(crate) fn round_subpaths(subpaths: &[Subpath]) -> Vec<Subpath> {
     subpaths.iter().map(round_subpath).collect()
 }
 
@@ -7824,6 +7824,73 @@ mod tests {
         assert!(fill.is_some(), "the fill was dropped — an existing painted file would open blank");
         // And it is the region the point was written inside, not a neighbour.
         assert_eq!(landed, engine.query_face_at(200.0, 50.0));
+    }
+
+    /// A pen line dropped onto another line lands a fraction of a unit off, and
+    /// that has to count as meeting it.
+    ///
+    /// Measured on a real drawing: ends sitting 0.25 to 0.92 units from the line
+    /// they plainly touch. Vertices merged within `gap_tolerance` (2.0), but an
+    /// endpoint landing on the INTERIOR of another line only counted within 0.1 —
+    /// twenty times stricter, for the junction a drawing is mostly made of. Every
+    /// one of those ends fell through, so no vertex appeared there, so nothing
+    /// merged, and the region flooded into its neighbour. Some areas painted and
+    /// some did not, with nothing to distinguish them.
+    #[test]
+    fn a_line_ending_just_short_of_another_still_divides_the_region() {
+        for miss in [0.0_f32, 0.3, 0.9] {
+            let mut engine = Engine::new();
+            let rect = engine.add_rect(0.0, 0.0, 200.0, 100.0);
+            // A divider crossing the rect, whose ends stop `miss` units short of
+            // the top and bottom edges.
+            let d = engine.add_path(&format!(
+                r#"[{{"points":[{{"x":100.0,"y":{top},"cp1":[100.0,{top}],"cp2":[100.0,{top}]}},
+                                 {{"x":100.0,"y":{bot},"cp1":[100.0,{bot}],"cp2":[100.0,{bot}]}}],"closed":false}}]"#,
+                top = miss, bot = 100.0 - miss
+            ));
+            let g = engine.group_nodes(&format!("[{rect},{d}]"));
+            engine.set_node_live_paint(g, true);
+            engine.set_live_paint_group(g);
+
+            let left = engine.query_face_at(50.0, 50.0);
+            let right = engine.query_face_at(150.0, 50.0);
+            assert!(left >= 0 && right >= 0, "both halves must be regions (miss {miss})");
+            assert_ne!(left, right, "a divider {miss} units short must still divide the rectangle");
+        }
+    }
+
+    /// A rounded rectangle enters the Live Paint surface rounded.
+    ///
+    /// A flagged group renders its faces instead of its members' own fills, so
+    /// emitting the rect's four sharp corners into the network meant the corner
+    /// arcs disappeared the instant Live Paint was applied — the shape on screen
+    /// changed under the user at the moment they asked to paint it.
+    #[test]
+    fn a_rounded_rect_keeps_its_corners_in_the_surface() {
+        let mut engine = Engine::new();
+        let rect = engine.add_rect(0.0, 0.0, 200.0, 200.0);
+        engine.set_node_style(rect, r#"{"fills":[{"r":0.5,"g":0.5,"b":0.5,"a":1.0}],"strokes":[],"opacity":1.0,"blend_mode":0,"fill_rule":0,"corner_radius":40.0,"effects":[]}"#);
+        let g = engine.group_nodes(&format!("[{rect}]"));
+        engine.set_node_live_paint(g, true);
+        engine.set_live_paint_group(g);
+
+        let face = engine.query_face_at(100.0, 100.0);
+        assert!(face >= 0);
+
+        // The corner is cut away: a point 6 units inside the sharp corner sits
+        // outside a 40-unit rounded one, so it must belong to no region.
+        assert_eq!(
+            engine.query_face_at(6.0, 6.0), -1,
+            "the sharp corner is still in the surface — the rounding was dropped"
+        );
+        // And the outline carries real curvature rather than four straight sides.
+        let f = engine.scene.vector_network.faces.get(&(face as u32)).unwrap();
+        let outline = engine.scene.vector_network.face_outline(f);
+        let curved = outline.iter().any(|p| {
+            (p.cp1.x - p.x).abs() > 0.5 || (p.cp1.y - p.y).abs() > 0.5
+                || (p.cp2.x - p.x).abs() > 0.5 || (p.cp2.y - p.y).abs() > 0.5
+        });
+        assert!(curved, "the region's outline has no curves — corners came back square");
     }
 
     /// Cutting a group takes its children along, and paste rebuilds the tree.

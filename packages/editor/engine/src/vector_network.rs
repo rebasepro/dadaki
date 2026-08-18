@@ -127,9 +127,9 @@ impl CurveSeg {
 /// interact, so the planar graph is partitioned per group).
 #[derive(Clone, Copy)]
 pub(crate) struct FlatSeg {
-    a: Vec2,
-    b: Vec2,
-    node: u32,
+    pub(crate) a: Vec2,
+    pub(crate) b: Vec2,
+    pub(crate) node: u32,
     group: u32,
     curve: u32,
     ta: f32,
@@ -454,6 +454,31 @@ fn push_cubic(p: [Vec2; 4], node: u32, group: u32, seg: u32, curves: &mut Vec<Cu
 }
 
 /// Rect → 4 Line curves.
+/// One subpath, taken to world space and handed to the curve extractor. A closed
+/// subpath gets its wrap segment (last → first) so the region actually closes.
+fn push_world_subpath(
+    sp: &Subpath, transform: &[f32; 9], node: u32, group: u32,
+    curves: &mut Vec<CurveSeg>, out: &mut Vec<FlatSeg>,
+) {
+    let mut world_points: Vec<PathPoint> = sp.points.iter().map(|p| PathPoint {
+        x: transform[0] * p.x + transform[3] * p.y + transform[6],
+        y: transform[1] * p.x + transform[4] * p.y + transform[7],
+        cp1: Vec2::new(
+            transform[0] * p.cp1.x + transform[3] * p.cp1.y + transform[6],
+            transform[1] * p.cp1.x + transform[4] * p.cp1.y + transform[7],
+        ),
+        cp2: Vec2::new(
+            transform[0] * p.cp2.x + transform[3] * p.cp2.y + transform[6],
+            transform[1] * p.cp2.x + transform[4] * p.cp2.y + transform[7],
+        ),
+        corner_radius: p.corner_radius,
+    }).collect();
+    if sp.closed && world_points.len() >= 2 {
+        world_points.push(world_points[0].clone());
+    }
+    push_path_curves(&world_points, node, group, curves, out);
+}
+
 fn push_rect_curves(w: f32, h: f32, transform: &[f32; 9], node: u32, group: u32, curves: &mut Vec<CurveSeg>, out: &mut Vec<FlatSeg>) {
     let c = [
         transform_point(Vec2::new(0.0, 0.0), transform),
@@ -834,7 +859,24 @@ impl VectorNetwork {
             }
         }
 
-        const ON_EPS: f32 = 0.1; // world-space distance for "point lies on segment"
+        // How far apart two things can be and still count as touching. This has
+        // to be the SAME number `build_vertices` merges vertices with, and for a
+        // long time it was not: endpoints merged with each other within
+        // `gap_tolerance` (2.0) while an endpoint landing on the INTERIOR of
+        // another line only counted within 0.1. Twenty times stricter, for the
+        // junction a drawing is most often made of.
+        //
+        // A pen line dropped onto another line lands a fraction of a unit off —
+        // measured on a real drawing: ends sitting 0.25 to 0.92 units from the
+        // line they plainly meet. Every one of those fell through this test, so
+        // no vertex was ever created there, so nothing merged, so the region
+        // stayed open and flooded into its neighbour. That is "some areas paint,
+        // some are totally wrong": the ones that happened to land under 0.1
+        // worked, the rest silently did not.
+        //
+        // Beyond this distance the ends are a real gap, which is what the group's
+        // gap-closing distance is for — a separate, visible, user-set number.
+        let on_eps = self.gap_tolerance.max(0.1);
         const T_EPS: f32 = 1e-4; // keep the split strictly interior
         for &(i, j) in &pairs {
             // Different Live Paint groups are independent — they never split each
@@ -857,7 +899,7 @@ impl VectorNetwork {
                 let (pa, pb) = (segments[x].a, segments[x].b);
                 for &p in &[segments[y].a, segments[y].b] {
                     let (proj, t) = project_point_to_segment(p, pa, pb);
-                    if t > T_EPS && t < 1.0 - T_EPS && (proj - p).length() < ON_EPS {
+                    if t > T_EPS && t < 1.0 - T_EPS && (proj - p).length() < on_eps {
                         splits[x].push((t, p));
                     }
                 }
@@ -1583,7 +1625,7 @@ pub(crate) fn polyline_midpoint(polyline: &[Vec2]) -> Vec2 {
 
 /// Project `p` onto segment `a`→`b`, returning the closest point and its
 /// clamped parameter `t` ∈ [0,1] (0 = at `a`, 1 = at `b`).
-fn project_point_to_segment(p: Vec2, a: Vec2, b: Vec2) -> (Vec2, f32) {
+pub(crate) fn project_point_to_segment(p: Vec2, a: Vec2, b: Vec2) -> (Vec2, f32) {
     let ab = b - a;
     let len2 = ab.length_squared();
     if len2 < 1e-12 {
@@ -1686,29 +1728,30 @@ impl Engine {
                 .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
 
             match &node.geometry {
+                // Per-vertex rounding is resolved for the same reason a rect's is:
+                // the surface must be the shape on screen, corners included.
                 Geometry::Path { ref subpaths, .. } => {
-                    // Transform subpath points to world space, then extract curves.
-                    for sp in subpaths {
-                        let mut world_points: Vec<PathPoint> = sp.points.iter().map(|p| {
-                            PathPoint {
-                                x: transform[0] * p.x + transform[3] * p.y + transform[6],
-                                y: transform[1] * p.x + transform[4] * p.y + transform[7],
-                                cp1: Vec2::new(
-                                    transform[0] * p.cp1.x + transform[3] * p.cp1.y + transform[6],
-                                    transform[1] * p.cp1.x + transform[4] * p.cp1.y + transform[7],
-                                ),
-                                cp2: Vec2::new(
-                                    transform[0] * p.cp2.x + transform[3] * p.cp2.y + transform[6],
-                                    transform[1] * p.cp2.x + transform[4] * p.cp2.y + transform[7],
-                                ),
-                                corner_radius: p.corner_radius,
-                            }
-                        }).collect();
-                        // A closed subpath adds the wrap segment last → first.
-                        if sp.closed && world_points.len() >= 2 {
-                            world_points.push(world_points[0].clone());
-                        }
-                        push_path_curves(&world_points, id, group, &mut curves, &mut segments);
+                    let rounded;
+                    let source = if subpaths.iter().any(|sp| sp.points.iter().any(|p| p.corner_radius > 1e-3)) {
+                        rounded = crate::round_subpaths(subpaths);
+                        &rounded
+                    } else {
+                        subpaths
+                    };
+                    for sp in source {
+                        push_world_subpath(sp, &transform, id, group, &mut curves, &mut segments);
+                    }
+                }
+                // A rounded rect has to enter the network ROUNDED. Emitting its
+                // four sharp corners meant the surface disagreed with the drawing
+                // the moment a rect was flagged: the corner arcs vanished and the
+                // faces — which is what a Live Paint group renders instead of its
+                // members' own fills — came back square.
+                Geometry::Rect { width, height } if node.style.corner_radius > 1e-3 => {
+                    for sp in &crate::round_subpaths(&crate::rect_subpaths(
+                        *width, *height, node.style.corner_radius,
+                    )) {
+                        push_world_subpath(sp, &transform, id, group, &mut curves, &mut segments);
                     }
                 }
                 Geometry::Rect { width, height } => {
