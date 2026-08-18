@@ -1797,12 +1797,19 @@ impl Engine {
         self.render_buffer.extend_from_slice(&CMD_LP_FACES.to_le_bytes());
         self.render_buffer.extend_from_slice(&0u32.to_le_bytes()); // advisory nodeId
         self.render_buffer.extend_from_slice(&(faces.len() as u32).to_le_bytes());
-        for (paint, outline) in &faces {
+        for (paint, rings) in &faces {
             // v13: a full paint block (same encoding as a node's fill), not the
             // four floats a face used to be limited to. This is what lets a
             // region hold a gradient.
             write_paint(&mut self.render_buffer, &Some(paint.clone()), 1.0);
-            write_outline_points(&mut self.render_buffer, outline);
+            // v14: a ring COUNT, then that many contours. Ring 0 is the
+            // silhouette; the rest are islands, drawn as holes (even-odd) so an
+            // enclosed region stays visible and paintable instead of being
+            // covered by the region around it.
+            self.render_buffer.extend_from_slice(&(rings.len() as u32).to_le_bytes());
+            for ring in rings {
+                write_outline_points(&mut self.render_buffer, ring);
+            }
         }
         end_record(&mut self.render_buffer, rec);
         *total_nodes += 1;
@@ -5873,15 +5880,24 @@ impl Engine {
         let rank: std::collections::HashMap<u32, usize> =
             order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
         let vn = &self.scene.vector_network;
-        let faces: Vec<serde_json::Value> = vn.faces.values()
-            .filter(|f| !f.is_outer)
+        let mut ordered: Vec<&crate::vector_network::PlanarFace> =
+            vn.faces.values().filter(|f| !f.is_outer).collect();
+        ordered.sort_by(|a, b| b.signed_area.abs()
+            .partial_cmp(&a.signed_area.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.id.cmp(&b.id)));
+        let faces: Vec<serde_json::Value> = ordered.into_iter()
             .filter_map(|f| {
                 let paint = f.fill.clone().or_else(|| self.inherited_face_paint(f, &rank));
                 paint.map(|p| {
                     let c = paint_color(&p).unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
+                    let rings = vn.face_rings(f);
                     serde_json::json!({
                         "group": f.group,
-                        "outline": pathpoints_to_json(&vn.face_outline(f)),
+                        "outline": pathpoints_to_json(&rings[0]),
+                        // Islands inside this region. An exporter that ignores
+                        // them draws a solid region over whatever it enclosed.
+                        "holes": rings[1..].iter().map(|r| pathpoints_to_json(r)).collect::<Vec<_>>(),
                         "fill": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
                         "paint": p,
                     })
@@ -5909,10 +5925,13 @@ impl Engine {
     pub fn get_live_paint_faces(&mut self) -> String {
         self.ensure_network_clean();
         let items: Vec<serde_json::Value> = self.live_paint_faces_effective(self.scene.live_paint_group).into_iter()
-            .map(|(paint, outline)| {
+            .map(|(paint, rings)| {
                 let c = paint_color(&paint).unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
                 serde_json::json!({
-                    "outline": pathpoints_to_json(&outline),
+                    "outline": pathpoints_to_json(&rings[0]),
+                    // Islands, so a baked region keeps its holes instead of
+                    // becoming a solid slab over whatever it enclosed.
+                    "holes": rings[1..].iter().map(|r| pathpoints_to_json(r)).collect::<Vec<_>>(),
                     "fill": { "r": c.r, "g": c.g, "b": c.b, "a": c.a },
                     "paint": paint,
                 })
@@ -5944,17 +5963,28 @@ impl Engine {
     /// Every colored face as (effective color, exact-bézier outline). Effective
     /// color = painted override, else the topmost covering source fill. Shared by
     /// Expand (JSON) and the render writer (in-stream faces). Pure reads.
-    fn live_paint_faces_effective(&self, group: Option<u32>) -> Vec<(Paint, Vec<PathPoint>)> {
+    fn live_paint_faces_effective(&self, group: Option<u32>) -> Vec<(Paint, Vec<Vec<PathPoint>>)> {
         let order = self.draw_order();
         let rank: std::collections::HashMap<u32, usize> =
             order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
         let vn = &self.scene.vector_network;
-        vn.faces.values()
+        let mut faces: Vec<&crate::vector_network::PlanarFace> = vn.faces.values()
             .filter(|f| !f.is_outer)
             .filter(|f| group.map_or(true, |g| f.group == g))
+            .collect();
+        // Largest first, ties by id. Faces carry their islands as holes now, so
+        // nothing should depend on this order — but a region drawn over its
+        // neighbour was previously decided by map iteration, which is not an
+        // order at all, and "biggest underneath" is the one that degrades
+        // sensibly if a hole is ever missed.
+        faces.sort_by(|a, b| b.signed_area.abs()
+            .partial_cmp(&a.signed_area.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.id.cmp(&b.id)));
+        faces.into_iter()
             .filter_map(|f| {
                 let paint = f.fill.clone().or_else(|| self.inherited_face_paint(f, &rank));
-                paint.map(|p| (p, vn.face_outline(f)))
+                paint.map(|p| (p, vn.face_rings(f)))
             })
             .collect()
     }
@@ -7979,6 +8009,134 @@ mod tests {
 
 
 
+
+
+
+    /// A stroke stopping just short of the line it meets still closes its region.
+    ///
+    /// The snapping tolerance says "points this close are meant to be the same
+    /// point". That claim used to be honoured by merging any two points within
+    /// it, which also fused shapes running parallel and deleted the thin regions
+    /// between them — so merging is now held to genuine coincidence. But the
+    /// claim still has to hold for a DANGLING end, or a line drawn to close a
+    /// region and falling a third of a unit short leaves it open, and the area
+    /// inside it can only be painted together with everything around it.
+    ///
+    /// Bridging is the right mechanism for that: a terminal has nothing
+    /// continuing past it, so attaching it ADDS a boundary rather than
+    /// destroying one. It runs on the tolerance alone, with no Gaps setting.
+    #[test]
+    fn a_stroke_that_stops_just_short_still_closes_its_region() {
+        let mut e = Engine::new();
+        let frame = e.add_rect(0.0, 0.0, 200.0, 100.0);
+        // Two strokes cutting the frame into three, the second stopping 0.4
+        // units short of the frame's top edge — the reported drawing's case.
+        let full = e.add_path(
+            r#"[{"points":[{"x":60.0,"y":0.0,"cp1":[60.0,0.0],"cp2":[60.0,0.0]},
+                           {"x":60.0,"y":100.0,"cp1":[60.0,100.0],"cp2":[60.0,100.0]}],"closed":false}]"#,
+        );
+        // Drawn as a CLOSED path doubling back on itself, which is how the
+        // reported drawing's strokes are built. Its tip is not a free end — the
+        // path continues through it on paper — so merging will not move it, and
+        // only bridging can attach it.
+        let short = e.add_path(
+            r#"[{"points":[{"x":140.0,"y":0.4,"cp1":[140.0,0.4],"cp2":[140.0,0.4]},
+                           {"x":140.0,"y":100.0,"cp1":[140.0,100.0],"cp2":[140.0,100.0]}],"closed":true}]"#,
+        );
+        let g = e.group_nodes(&format!("[{frame},{full},{short}]"));
+        e.set_node_live_paint(g, true);
+        e.set_live_paint_group(g);
+        e.set_gap_tolerance(1.0); // no Gaps setting at all, just the tolerance
+        e.ensure_network_clean();
+
+        let left = e.query_face_at(30.0, 50.0);
+        let middle = e.query_face_at(100.0, 50.0);
+        let right = e.query_face_at(170.0, 50.0);
+        assert!(left >= 0 && middle >= 0 && right >= 0, "all three should be paintable");
+        assert_ne!(
+            middle, right,
+            "the stroke stopped 0.4 short, so its region never closed and paints with its neighbour"
+        );
+        assert_ne!(left, middle, "the full-length stroke divides its side");
+    }
+
+    /// A region that encloses another does not paint over it.
+    ///
+    /// A planar face is not always simply connected: draw a shape inside another
+    /// and the region between them has two boundary components. The walk yields
+    /// one cycle per face, so the island's cycle came out clockwise, was
+    /// classified as an outer face and discarded — and the enclosing region,
+    /// knowing nothing about it, rendered as a solid closed path across it. The
+    /// island was a real region the whole time: clicking picked it, and its paint
+    /// then vanished under its neighbour, which reads as an inner area that
+    /// cannot be painted no matter how many times you click.
+    #[test]
+    fn a_region_that_encloses_another_keeps_it_as_a_hole() {
+        let mut e = Engine::new();
+        let outer = e.add_rect(0.0, 0.0, 200.0, 200.0);
+        let inner = e.add_rect(70.0, 70.0, 60.0, 60.0); // inside, touching nothing
+        let g = e.group_nodes(&format!("[{outer},{inner}]"));
+        e.set_node_live_paint(g, true);
+        e.set_live_paint_group(g);
+        e.ensure_network_clean();
+
+        let ring = e.query_face_at(20.0, 100.0);
+        let island = e.query_face_at(100.0, 100.0);
+        assert!(ring >= 0 && island >= 0, "both regions should be paintable");
+        assert_ne!(ring, island, "the island is its own region");
+
+        // The enclosing region carries the island as a hole...
+        let vn = &e.scene.vector_network;
+        let ring_face = &vn.faces[&(ring as u32)];
+        assert_eq!(ring_face.holes.len(), 1, "the enclosing region has no hole for the island");
+        assert_eq!(vn.face_rings(ring_face).len(), 2, "the region should draw as two contours");
+
+        // ...and the island's own area is NOT part of it, so a click there can
+        // never be answered with the region around it.
+        assert_eq!(
+            ring_face.hole_polygons.len(),
+            1,
+            "the hole needs a polygon, or hit-testing cannot exclude it"
+        );
+        assert!(
+            ring_face.hole_polygons[0].iter().any(|p| p[0] > 69.0 && p[0] < 131.0),
+            "the hole polygon should be the island's own outline"
+        );
+
+        // Painting them separately keeps both colours.
+        assert!(e.set_face_paint(ring as u32, r#"{"r":1,"g":0,"b":0,"a":1}"#));
+        assert!(e.set_face_paint(island as u32, r#"{"r":0,"g":0,"b":1,"a":1}"#));
+        let data = e.get_live_paint_render_data();
+        assert!(data.contains("\"holes\""), "render data should carry the hole rings");
+    }
+
+    /// Three shapes nested one inside the next: each ring belongs to the region
+    /// immediately around it, not to every region that contains it.
+    #[test]
+    fn nested_islands_attach_to_the_region_that_actually_bounds_them() {
+        let mut e = Engine::new();
+        let a = e.add_rect(0.0, 0.0, 300.0, 300.0);
+        let b = e.add_rect(50.0, 50.0, 200.0, 200.0);
+        let c = e.add_rect(100.0, 100.0, 100.0, 100.0);
+        let g = e.group_nodes(&format!("[{a},{b},{c}]"));
+        e.set_node_live_paint(g, true);
+        e.set_live_paint_group(g);
+        e.ensure_network_clean();
+
+        let outer_ring = e.query_face_at(20.0, 150.0);
+        let mid_ring = e.query_face_at(70.0, 150.0);
+        let core = e.query_face_at(150.0, 150.0);
+        assert!(outer_ring >= 0 && mid_ring >= 0 && core >= 0);
+        assert_ne!(outer_ring, mid_ring);
+        assert_ne!(mid_ring, core);
+
+        let vn = &e.scene.vector_network;
+        // Each ring holds exactly ONE island: the next one in. If containment
+        // alone decided it, the outermost would have claimed both.
+        assert_eq!(vn.faces[&(outer_ring as u32)].holes.len(), 1, "outer ring holes");
+        assert_eq!(vn.faces[&(mid_ring as u32)].holes.len(), 1, "middle ring holes");
+        assert_eq!(vn.faces[&(core as u32)].holes.len(), 0, "the core encloses nothing");
+    }
 
     /// A wide gap tolerance closes gaps; it does not delete thin regions.
     ///

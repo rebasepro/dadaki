@@ -4458,6 +4458,10 @@ export class InputManager {
         // Every colored face with its EFFECTIVE fill (painted, or absorbed source).
         const faces = JSON.parse(e.get_live_paint_faces()) as Array<{
             outline: Pt[];
+            /** Islands inside the region. Baked as extra subpaths with an
+             *  even-odd rule, or the expanded shape becomes a solid slab over
+             *  whatever it enclosed. */
+            holes?: Pt[][];
             fill: { r: number; g: number; b: number; a: number };
             /** The region's real paint — a gradient survives Expand through this;
              *  `fill` is only the flat fallback. */
@@ -4488,7 +4492,12 @@ export class InputManager {
             for (const f of faces) {
                 const pts = outPts(f.outline);
                 if (pts.length < 3) continue;
-                const id = e.add_path(JSON.stringify([{ closed: true, points: pts }]));
+                const rings = [{ closed: true, points: pts }];
+                for (const hole of f.holes ?? []) {
+                    const hp = outPts(hole);
+                    if (hp.length >= 3) rings.push({ closed: true, points: hp });
+                }
+                const id = e.add_path(JSON.stringify(rings));
                 e.set_node_style(
                     id,
                     JSON.stringify({
@@ -4496,7 +4505,11 @@ export class InputManager {
                         strokes: [],
                         opacity: 1,
                         blend_mode: 0,
-                        fill_rule: 0,
+                        // Even-odd whenever this region has islands: the rings
+                        // come from the arrangement, which does not promise them
+                        // wound opposite to the silhouette, and nonzero would
+                        // fill the holes in.
+                        fill_rule: rings.length > 1 ? 1 : 0,
                         corner_radius: 0,
                         effects: [],
                     }),

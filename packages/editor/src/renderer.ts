@@ -2473,7 +2473,7 @@ export class Renderer {
                     // either painted with the bucket, or inherited from a
                     // gradient-filled member showing through.
                     const paint = this.readPaint(reader);
-                    const path = this.readOutlinePath(reader, true);
+                    const path = this.readFaceRingsPath(reader);
                     if (!lpSkip) {
                         if (paint.type === 2 || paint.type === 3) {
                             // Face outlines are WORLD space and carry no
@@ -5989,6 +5989,26 @@ export class Renderer {
 
     /** Read a bézier outline from the render buffer (`[count][x,y,cp1x,cp1y,
      *  cp2x,cp2y]×N`) and build a CanvasKit path. Matches `write_outline_points`. */
+    /** Read a face as its silhouette plus any islands, as ONE path.
+     *
+     *  v14 of the stream writes a ring count before the contours. The islands
+     *  are holes: a region that encloses another used to be a plain closed path
+     *  and painted straight over it, so the inner area could not be painted at
+     *  all — it was there, and clicking picked it, but the region around it was
+     *  drawn on top. Even-odd is used rather than trusting the rings to be wound
+     *  oppositely, since the arrangement decides winding, not this reader. */
+    private readFaceRingsPath(reader: BinaryReader): Path {
+        const ringCount = reader.u32();
+        const path = new this.ck.Path();
+        for (let r = 0; r < ringCount; r++) {
+            const ring = this.readOutlinePath(reader, true);
+            path.addPath(ring);
+            ring.delete();
+        }
+        path.setFillType(this.ck.FillType.EvenOdd);
+        return path;
+    }
+
     private readOutlinePath(reader: BinaryReader, closed: boolean): Path {
         const n = reader.u32();
         const pts: OutlinePt[] = [];

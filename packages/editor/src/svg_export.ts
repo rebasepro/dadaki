@@ -77,6 +77,9 @@ export interface LivePaintFace {
     fill: RGBA;
     /** The region's actual paint. Absent on data from an older engine. */
     paint?: Paint;
+    /** Islands inside this region, exported as holes of the same path. Without
+     *  them a region that encloses another exports as a solid slab over it. */
+    holes?: OutlinePt[][];
 }
 
 /** A painted Live Paint edge, drawn ON TOP of its group's members. */
@@ -251,8 +254,17 @@ export function buildSVGFromData(input: SVGExportInput): string {
                     // needs fill-opacity.
                     const opacity =
                         f.paint && !isSolid(f.paint) ? '' : ` fill-opacity="${f.fill.a}"`;
+                    // Islands become extra contours on the same path, filled
+                    // even-odd so they read as holes. Winding is the
+                    // arrangement's business, not the exporter's, so the rule
+                    // that does not depend on it is the right one.
+                    const rings = [
+                        faceToPathD(f.outline, f.boundary),
+                        ...(f.holes ?? []).map((h) => faceToPathD(h, undefined)),
+                    ].join(' ');
+                    const rule = f.holes && f.holes.length > 0 ? ' fill-rule="evenodd"' : '';
                     return (
-                        `<path d="${faceToPathD(f.outline, f.boundary)}" fill="${value}"` +
+                        `<path d="${rings}" fill="${value}"${rule}` +
                         `${opacity} stroke="none" />`
                     );
                 })

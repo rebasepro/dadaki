@@ -379,6 +379,25 @@ pub struct PlanarFace {
     /// The Live Paint group this face belongs to.
     #[serde(default)]
     pub group: u32,
+    /// Boundary rings that bound this face from INSIDE it — islands.
+    ///
+    /// A planar face is not always simply connected. Draw a shape entirely
+    /// within another and the region between them is one face with two boundary
+    /// components: the outer shape, and the inner one seen from outside. The
+    /// walk only ever produces one cycle per face, so the inner component came
+    /// out as a separate clockwise "outer" face and was discarded — leaving the
+    /// enclosing region as a plain closed path that paints straight over the
+    /// island. What that looks like is an inner area that cannot be painted: it
+    /// is a real region, and clicking picks it, but the region around it is
+    /// drawn on top of it.
+    ///
+    /// Each entry is an ordered half-edge ring, like `boundary_edges`.
+    #[serde(default)]
+    pub holes: Vec<Vec<u32>>,
+    /// Hole polygons, for hit-testing: a point inside one of these is NOT in
+    /// this face, it is in whatever the island contains.
+    #[serde(default)]
+    pub hole_polygons: Vec<Vec<[f32; 2]>>,
     /// Containment signature: sorted ids of the closed source shapes that
     /// contain this face's interior. This is a topological invariant — it stays
     /// the same when shapes move as long as the inside/outside relationship
@@ -788,7 +807,15 @@ impl VectorNetwork {
         // not-quite-closed regions become fillable (Illustrator "Gap Options").
         // The tolerance is per Live Paint group, so one group can be painted
         // with a wide tolerance without loosening every other group.
-        if self.gap_bridge_distance > 0.0 || self.group_gap.values().any(|&d| d > 0.0) {
+        // Runs whenever there is any distance to work with — the user's Gaps
+        // setting OR the snapping tolerance, which is the same claim about which
+        // points are meant to be one (see `bridge_gaps`). Gated on Gaps alone,
+        // an end stopping a third of a unit short of the line it meets stayed
+        // open, and the region it was drawn to close could not be painted.
+        if self.gap_tolerance > 0.0
+            || self.gap_bridge_distance > 0.0
+            || self.group_gap.values().any(|&d| d > 0.0)
+        {
             self.bridge_gaps();
         }
 
@@ -797,6 +824,9 @@ impl VectorNetwork {
 
         // Step 6: Detect faces via left-hand turn traversal
         self.detect_faces();
+
+        // Step 6b: Give every face the islands that sit inside it.
+        self.attach_holes();
 
         // Step 7: Tag each face with its containment signature.
         self.compute_face_signatures(&node_outlines);
@@ -1003,6 +1033,23 @@ impl VectorNetwork {
     /// So a curve appears only where the drawing has one.
     pub(crate) fn face_outline(&self, face: &PlanarFace) -> Vec<PathPoint> {
         quads_to_closed_pathpoints(&self.edges_to_quads(&face.boundary_edges))
+    }
+
+    /// Every ring that bounds this face: the outline first, then each island.
+    ///
+    /// Drawn as one path with these contours, the islands are holes rather than
+    /// something the face paints over — which is what makes an enclosed region
+    /// paintable in its own right. Callers that only want the silhouette can
+    /// keep using `face_outline`.
+    pub(crate) fn face_rings(&self, face: &PlanarFace) -> Vec<Vec<PathPoint>> {
+        let mut rings = vec![self.face_outline(face)];
+        for hole in &face.holes {
+            let ring = quads_to_closed_pathpoints(&self.edges_to_quads(hole));
+            if ring.len() >= 3 {
+                rings.push(ring);
+            }
+        }
+        rings
     }
 
     /// Ordered half-edges → cubic control quads, one per run of edges that share
@@ -1610,7 +1657,22 @@ impl VectorNetwork {
             };
             let vpos = self.vertices[&vid].position;
             let vgrp = self.vertices[&vid].group;
-            let max_d = self.gap_distance_for(vgrp);
+            // The snapping tolerance is a floor here, not just the user's Gaps
+            // setting.
+            //
+            // Those two say different things. Gaps is "close holes up to this
+            // wide, on purpose". The tolerance says "points this close are meant
+            // to be the same point" — and that claim has to be honoured for a
+            // DANGLING end, or a line that stops a third of a unit short of the
+            // line it meets leaves the region it was drawn to close hanging open,
+            // and the area inside it cannot be painted separately at all.
+            //
+            // It is safe here in a way that merging is not, because a dangling
+            // end is a terminal: nothing continues past it, so attaching it adds
+            // a boundary instead of destroying one. Two shapes running parallel
+            // within the tolerance have joints, not terminals, and are untouched
+            // — which is what keeps a thin region between two shapes alive.
+            let max_d = self.gap_distance_for(vgrp).max(self.gap_tolerance);
             if max_d <= 0.0 { continue; }
             let max_d2 = max_d * max_d;
             let neighbor = self.edges[&out].to_vertex;
@@ -1834,6 +1896,8 @@ impl VectorNetwork {
                 let face = PlanarFace {
                     id: face_id,
                     boundary_edges: outline_edges,
+                    holes: Vec::new(),
+                    hole_polygons: Vec::new(),
                     fill: None,
                     boundary_polygon: polygon,
                     signed_area: area,
@@ -1976,6 +2040,68 @@ impl VectorNetwork {
         }
     }
 
+    /// Hand each island's boundary to the face that surrounds it.
+    ///
+    /// The face walk yields one cycle per face, so a region with an island in it
+    /// comes out as two pieces: the region (bounded by its outer cycle) and the
+    /// island's cycle, wound the other way and therefore classified "outer" and
+    /// thrown away. Nothing then told the region that a hole was punched in it,
+    /// and it painted over the island — an inner area that looks unpaintable
+    /// however often you click it.
+    ///
+    /// A clockwise cycle is an island of whichever face contains it, and the
+    /// SMALLEST containing face is the one it actually bounds: with nested
+    /// shapes, every ancestor contains the ring, but only the innermost has it
+    /// as a boundary. The one cycle contained by nothing is the true unbounded
+    /// face, and it keeps its role.
+    fn attach_holes(&mut self) {
+        // (ring id, its polygon, a point on it, its area) for every clockwise cycle.
+        let islands: Vec<(u32, Vec<[f32; 2]>, [f32; 2], f64)> = self
+            .faces
+            .values()
+            .filter(|f| f.is_outer && !f.boundary_polygon.is_empty())
+            .map(|f| {
+                let p = polygon_centroid(&f.boundary_polygon);
+                (f.id, f.boundary_polygon.clone(), [p.x, p.y], f.signed_area.abs())
+            })
+            .collect();
+
+        // Candidate parents, smallest first, so the innermost wins.
+        let mut parents: Vec<(u32, f64)> = self
+            .faces
+            .values()
+            .filter(|f| !f.is_outer)
+            .map(|f| (f.id, f.signed_area.abs()))
+            .collect();
+        parents.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+
+        let mut assign: Vec<(u32, u32)> = Vec::new(); // (parent, island)
+        for (island, poly, probe, island_area) in &islands {
+            let parent = parents.iter().find(|(pid, parea)| {
+                // Bigger than the island, and containing it. The centroid of a
+                // ring is not guaranteed to be inside the ring itself, but it is
+                // reliably inside the PARENT either way, which is what is being
+                // tested here.
+                parea > island_area
+                    && self.faces.get(pid).is_some_and(|f| {
+                        point_in_polygon(probe, &f.boundary_polygon)
+                            && poly.iter().all(|v| point_in_polygon(v, &f.boundary_polygon))
+                    })
+            });
+            if let Some((pid, _)) = parent {
+                assign.push((*pid, *island));
+            }
+        }
+
+        for (parent, island) in assign {
+            let ring = self.faces.get(&island).map(|f| (f.boundary_edges.clone(), f.boundary_polygon.clone()));
+            if let (Some((edges, poly)), Some(face)) = (ring, self.faces.get_mut(&parent)) {
+                face.holes.push(edges);
+                face.hole_polygons.push(poly);
+            }
+        }
+    }
+
     /// Query which face contains the given point.
     pub fn query_face_at(&self, x: f32, y: f32) -> Option<u32> {
         let point = [x, y];
@@ -1989,7 +2115,9 @@ impl VectorNetwork {
             if face.is_outer {
                 continue;
             }
-            if point_in_polygon(&point, &face.boundary_polygon) {
+            if point_in_polygon(&point, &face.boundary_polygon)
+                && !face.hole_polygons.iter().any(|h| point_in_polygon(&point, h))
+            {
                 let area = face.signed_area.abs();
                 if best.is_none_or(|(bid, ba)| area < ba || (area == ba && *fid < bid)) {
                     best = Some((*fid, area));
