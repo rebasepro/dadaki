@@ -6,6 +6,8 @@
 graphics editor**: Rust/WASM + CanvasKit core, TypeScript UI. This repository is
 the **open-source** editor.
 
+<img src=".github/screenshot.png" alt="The Dadaki editor: overlapping circles and lines whose regions have been filled with the Live Paint bucket, the layer tree on the left, shape properties on the right" />
+
 It is a pnpm workspace with two packages:
 
 | Package                          | What it is                                                            |
