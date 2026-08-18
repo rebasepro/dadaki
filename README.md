@@ -1,4 +1,12 @@
-# Dadaki Vector Editor
+<p align="center">
+  <img src="packages/app/public/favicon.svg" width="96" height="96" alt="Dadaki" />
+</p>
+
+<h1 align="center">Dadaki Vector Editor</h1>
+
+<p align="center">
+  <a href="https://dadaki.com">dadaki.com</a>
+</p>
 
 A high-performance, in-browser **vector graphics editor** — Rust/WASM + CanvasKit
 core, TypeScript UI. This repository is the **open-source** editor.
