@@ -288,3 +288,61 @@ describe('InputManager — marquee selection', () => {
         expect(sel).not.toContain(r);
     });
 });
+
+describe('shift-click selection', () => {
+    /** A click that does not move: down and up at the same point. */
+    function click(input: InputManager, x: number, y: number, opts: MouseOpts = {}) {
+        input.onMouseDown(mouse(x, y, opts));
+        input.onMouseUp(mouse(x, y, opts));
+    }
+
+    it('shift-clicking a selected shape takes it out of the selection', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const a = e.add_rect(0, 0, 50, 50);
+        const b = e.add_rect(100, 0, 50, 50);
+        const { input } = makeInput(scene);
+
+        click(input, 25, 25);
+        click(input, 125, 25, { shiftKey: true });
+        expect(Array.from(e.get_selection()).sort()).toEqual([a, b].sort());
+
+        // The reported bug: this did nothing at all.
+        click(input, 125, 25, { shiftKey: true });
+        expect(Array.from(e.get_selection())).toEqual([a]);
+    });
+
+    it('shift-dragging a selected shape still moves the whole selection', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const a = e.add_rect(0, 0, 50, 50);
+        const b = e.add_rect(100, 0, 50, 50);
+        const { input } = makeInput(scene);
+
+        click(input, 25, 25);
+        click(input, 125, 25, { shiftKey: true });
+
+        // Grab one member and drag: both must move, and both must stay selected
+        // — removing the shape under the cursor as the drag starts is exactly
+        // what deferring the toggle to mouse-up avoids.
+        const before = bounds(scene, a);
+        input.onMouseDown(mouse(125, 25, { shiftKey: true }));
+        input.onMouseMove(mouse(165, 25, { shiftKey: true }));
+        input.onMouseUp(mouse(165, 25, { shiftKey: true }));
+
+        expect(Array.from(e.get_selection()).sort()).toEqual([a, b].sort());
+        expect(bounds(scene, a)[0]).toBeGreaterThan(before[0]);
+    });
+
+    it('shift-clicking an unselected shape still adds it', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const a = e.add_rect(0, 0, 50, 50);
+        const b = e.add_rect(100, 0, 50, 50);
+        const { input } = makeInput(scene);
+
+        click(input, 25, 25);
+        click(input, 125, 25, { shiftKey: true });
+        expect(Array.from(e.get_selection()).sort()).toEqual([a, b].sort());
+    });
+});

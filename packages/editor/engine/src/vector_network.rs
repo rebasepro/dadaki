@@ -810,9 +810,10 @@ impl VectorNetwork {
         // which region is now nearest to where a different region used to sit.
         // Rigid or not — a move, a scale, a rotation — the answer is the same
         // composition, so this handles all of them.
-        let old_filled: Vec<(Vec<u32>, Vec2, Paint)> = self.faces.values()
+        let old_filled: Vec<(u32, Vec<u32>, Vec2, Paint)> = self.faces.values()
             .filter(|f| f.fill.is_some() && !f.is_outer)
             .map(|f| (
+                f.group,
                 f.signature.clone(),
                 carry_point(
                     polygon_centroid(&f.boundary_polygon),
@@ -1989,10 +1990,17 @@ impl VectorNetwork {
     ///
     /// `old_filled` are the fills from before this rebuild; `pending_fills` are
     /// fills loaded from a file/undo snapshot. Both are placed here.
-    fn remap_fills(&mut self, old_filled: Vec<(Vec<u32>, Vec2, Paint)>) {
-        let to_place: Vec<(Vec<u32>, Vec2, Paint)> = old_filled.into_iter()
+    fn remap_fills(&mut self, old_filled: Vec<(u32, Vec<u32>, Vec2, Paint)>) {
+        // `ANY_GROUP` is for fills read from a file: they predate this
+        // arrangement and carry no group, so they may land wherever they fit.
+        // A fill lifted from a live face keeps its group and may only return to
+        // one — two Live Paint groups are independent surfaces, and a colour
+        // crossing from one to the other is never the right answer, however
+        // close the geometry happens to be.
+        const ANY_GROUP: u32 = u32::MAX;
+        let to_place: Vec<(u32, Vec<u32>, Vec2, Paint)> = old_filled.into_iter()
             .chain(self.pending_fills.drain(..)
-                .map(|pf| (pf.signature, pf.centroid, pf.color)))
+                .map(|pf| (ANY_GROUP, pf.signature, pf.centroid, pf.color)))
             .collect();
         if to_place.is_empty() {
             return;
@@ -2002,14 +2010,18 @@ impl VectorNetwork {
         // Ordered by id: every tier below walks this list, and two faces that
         // are equally good a match must not be separated by which one the map
         // happened to yield first.
-        let mut candidates: Vec<(u32, Vec<u32>, Vec2)> = self.faces.values()
+        let mut all_candidates: Vec<(u32, u32, Vec<u32>, Vec2)> = self.faces.values()
             .filter(|f| !f.is_outer)
-            .map(|f| (f.id, f.signature.clone(), polygon_centroid(&f.boundary_polygon)))
+            .map(|f| (f.id, f.group, f.signature.clone(), polygon_centroid(&f.boundary_polygon)))
             .collect();
-        candidates.sort_by_key(|(fid, _, _)| *fid);
+        all_candidates.sort_by_key(|(fid, _, _, _)| *fid);
 
         let mut taken: HashSet<u32> = HashSet::new();
-        for (sig, centroid, color) in &to_place {
+        for (fill_group, sig, centroid, color) in &to_place {
+            let candidates: Vec<(u32, Vec<u32>, Vec2)> = all_candidates.iter()
+                .filter(|(_, fgroup, _, _)| *fill_group == ANY_GROUP || fgroup == fill_group)
+                .map(|(id, _, s, c)| (*id, s.clone(), *c))
+                .collect();
             let mut best: Option<(u32, f32)> = None;
 
             // Tier 1: exact signature match (distance-independent).

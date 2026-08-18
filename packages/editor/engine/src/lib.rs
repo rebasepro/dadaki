@@ -4124,6 +4124,15 @@ impl Engine {
         }
     }
 
+    /// Take one node out of the selection, leaving the rest untouched.
+    ///
+    /// `select_node(id, true)` only ever adds — so shift-clicking a shape that
+    /// was already selected did nothing at all, when what it means everywhere
+    /// else is "remove this one".
+    pub fn deselect_node(&mut self, id: u32) {
+        self.scene.selection.retain(|&s| s != id);
+    }
+
     pub fn clear_selection(&mut self) {
         self.scene.selection.clear();
     }
@@ -6282,6 +6291,45 @@ impl Engine {
     /// Remove ALL Live Paint face fills and edge paints. Used by Expand once the
     /// painted marks have been baked into real path shapes so they don't
     /// double-render on top of the baked geometry.
+    /// Drop every mark belonging to ONE Live Paint group.
+    ///
+    /// Expand bakes a group's colours into real shapes and then has to remove the
+    /// marks it baked, or the same paint exists twice. It used to do that with
+    /// the document-wide clear below — so expanding one group erased the colours
+    /// of every OTHER group too. Copy a painted group, expand the copy, and the
+    /// original came back blank, which is what it looked like from the outside:
+    /// paint vanishing from something the user had not touched.
+    ///
+    /// Faces and logical edges carry their group, and a painted edge is found
+    /// through the shape it was painted on. A pending fill — one read from a file
+    /// and not yet placed — is attributed by its signature: if every shape that
+    /// bounded it belongs to this group, it was this group's.
+    pub fn clear_live_paint_marks_in_group(&mut self, group: u32) {
+        let members: HashSet<u32> = self.scene.nodes.keys()
+            .copied()
+            .filter(|&id| self.live_paint_group_of(id) == Some(group))
+            .collect();
+
+        for face in self.scene.vector_network.faces.values_mut() {
+            if face.group == group {
+                face.fill = None;
+            }
+        }
+        for le in self.scene.vector_network.logical_edges.values_mut() {
+            if le.group == group {
+                le.paint = None;
+                le.width = 0.0;
+            }
+        }
+        self.scene.vector_network.painted_edges.retain(|pe| !members.contains(&pe.source_node));
+        self.scene.vector_network.pending_fills.retain(|pf| {
+            // No signature means nothing ties it to a group; leaving it is the
+            // conservative half — it can still find a home, where dropping it
+            // would lose a colour that was never this group's to discard.
+            pf.signature.is_empty() || !pf.signature.iter().all(|n| members.contains(n))
+        });
+    }
+
     pub fn clear_live_paint_marks(&mut self) {
         self.scene.vector_network.pending_fills.clear();
         self.scene.vector_network.painted_edges.clear();
@@ -8174,6 +8222,136 @@ mod tests {
                 );
             }
         }
+    }
+
+
+    /// Expanding one Live Paint group leaves every other group's colours alone.
+    ///
+    /// Expand bakes a group's regions into real shapes and then drops the marks
+    /// it baked, or the same paint would exist twice. It did that with the
+    /// document-wide clear, so it also erased every other group — copy a painted
+    /// group, expand the copy, and the original came back blank. From the outside
+    /// that is paint disappearing from something the user never touched.
+    #[test]
+    fn expanding_one_group_does_not_strip_another_groups_paint() {
+        let mut e = Engine::new();
+        let build = |e: &mut Engine, dx: f32| {
+            let a = e.add_rect(dx, 0.0, 120.0, 110.0);
+            let b = e.add_rect(dx + 70.0, 12.0, 140.0, 96.0);
+            let g = e.group_nodes(&format!("[{a},{b}]"));
+            e.set_node_live_paint(g, true);
+            g
+        };
+        let keep = build(&mut e, 0.0);
+        let copy = build(&mut e, 400.0);
+        e.set_live_paint_group(keep);
+        e.ensure_network_clean();
+
+        // Paint both groups.
+        let mut kept: Vec<(f32, f32, String)> = Vec::new();
+        let mut seen: Vec<i32> = Vec::new();
+        for gx in 0..10 {
+            for gy in 0..10 {
+                let (x, y) = (5.0 + 200.0 * gx as f32 / 10.0, 5.0 + 100.0 * gy as f32 / 10.0);
+                for offset in [0.0, 400.0] {
+                    let fid = e.query_face_at(x + offset, y);
+                    if fid < 0 || seen.contains(&fid) {
+                        continue;
+                    }
+                    seen.push(fid);
+                    let shade = seen.len() as f32 / 10.0;
+                    e.set_face_paint(fid as u32, &format!(r#"{{"r":{shade},"g":0.2,"b":0.3,"a":1}}"#));
+                    if offset == 0.0 {
+                        kept.push((x, y, e.get_face_paint(fid as u32)));
+                    }
+                }
+            }
+        }
+        assert!(kept.len() >= 3, "the group we keep should have several painted regions");
+
+        // Expand the copy, as the UI does: bake, drop that group's marks, delete it.
+        let baked = e.get_live_paint_faces();
+        assert!(!baked.is_empty());
+        e.set_live_paint_group(0);
+        e.clear_live_paint_marks_in_group(copy);
+        e.remove_node(copy);
+        e.set_live_paint_group(keep);
+        e.ensure_network_clean();
+
+        for (x, y, colour) in &kept {
+            let fid = e.query_face_at(*x, *y);
+            assert!(fid >= 0, "a region of the untouched group vanished");
+            assert_eq!(
+                &e.get_face_paint(fid as u32), colour,
+                "expanding the other group took the colour at ({x},{y}) with it"
+            );
+        }
+    }
+
+
+    /// A colour never crosses from one Live Paint group to another.
+    ///
+    /// Two groups are independent surfaces. When the region a fill belonged to
+    /// stops existing, the fill looks for the region that replaced it — and that
+    /// search used to consider every face in the document. The exposed case is a
+    /// region bounded only by open lines: it has no containment signature, so
+    /// nothing about which shapes made it constrains where its colour may go, and
+    /// the fallback is "whichever face contains the point". Another group's face
+    /// sitting over the same spot answers that perfectly well, and a colour turns
+    /// up in a group the user never painted.
+    #[test]
+    fn a_fill_never_migrates_into_another_live_paint_group() {
+        let mut e = Engine::new();
+        // Group A: four open strokes boxing in a cell. No closed shape bounds
+        // it, so the region has an empty signature.
+        let mut lines = Vec::new();
+        for (x1, y1, x2, y2) in [
+            (-10.0f32, 20.0f32, 110.0f32, 20.0f32),
+            (-10.0, 80.0, 110.0, 80.0),
+            (20.0, -10.0, 20.0, 110.0),
+            (80.0, -10.0, 80.0, 110.0),
+        ] {
+            lines.push(e.add_path(&format!(
+                r#"[{{"points":[{{"x":{x1},"y":{y1},"cp1":[{x1},{y1}],"cp2":[{x1},{y1}]}},
+                                {{"x":{x2},"y":{y2},"cp1":[{x2},{y2}],"cp2":[{x2},{y2}]}}],"closed":false}}]"#
+            )));
+        }
+        let list = lines.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let a = e.group_nodes(&format!("[{list}]"));
+        e.set_node_live_paint(a, true);
+
+        // Group B: a plain rect over the same ground, cut so it has regions of
+        // its own — one of which contains the middle of A's cell.
+        let rect = e.add_rect(0.0, 0.0, 100.0, 100.0);
+        let cut = e.add_path(
+            r#"[{"points":[{"x":-10.0,"y":90.0,"cp1":[-10.0,90.0],"cp2":[-10.0,90.0]},
+                           {"x":110.0,"y":90.0,"cp1":[110.0,90.0],"cp2":[110.0,90.0]}],"closed":false}]"#,
+        );
+        let b = e.group_nodes(&format!("[{rect},{cut}]"));
+        e.set_node_live_paint(b, true);
+        e.set_live_paint_group(a);
+        e.ensure_network_clean();
+
+        let target = e.query_face_at(50.0, 50.0);
+        assert!(target >= 0, "the cell should be paintable");
+        let face = &e.scene.vector_network.faces[&(target as u32)];
+        assert_eq!(face.group, a, "fixture: the cell belongs to group A");
+        assert!(face.signature.is_empty(), "fixture: bounded by open lines, so no signature");
+        e.set_face_paint(target as u32, r#"{"r":1,"g":0,"b":0,"a":1}"#);
+
+        // Take group A away. Its colour is homeless, and the only faces left
+        // belong to B — one of which contains the very point it was stored at.
+        e.remove_node(a);
+        e.ensure_network_clean();
+
+        let strays: Vec<u32> = e.scene.vector_network.faces.values()
+            .filter(|f| !f.is_outer && f.fill.is_some() && f.group == b)
+            .map(|f| f.id)
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "a colour painted in one group turned up in another: faces {strays:?}"
+        );
     }
 
     /// A region that encloses another does not paint over it.

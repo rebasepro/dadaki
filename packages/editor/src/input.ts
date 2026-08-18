@@ -164,6 +164,19 @@ export class InputManager {
     } | null = null;
     /** Whether any actual movement happened during a drag. */
     didMove: boolean = false;
+    /**
+     * A shape shift-clicked while it was already selected, waiting to see
+     * whether this turns into a drag.
+     *
+     * Shift-click has to mean two things at once: "add this to the selection"
+     * and, on something already in it, "take it out again". Doing the removal on
+     * mouse-DOWN would break the other half — shift-dragging a multi-selection by
+     * grabbing one of its members, which is how anyone moves a group of shapes —
+     * because the shape under the cursor would leave the selection just as the
+     * drag began. So the removal waits for mouse-up, and only happens if nothing
+     * moved.
+     */
+    pendingShiftDeselect: number | null = null;
     /** Live preview rect in world coords, read by Renderer each frame. */
     previewRect: { x: number; y: number; w: number; h: number; tool: string } | null = null;
     /** Live line-tool preview (start → end) in world coords, read by Renderer. */
@@ -2418,6 +2431,10 @@ export class InputManager {
                     if (!currentSel.includes(hitId)) {
                         this.scene.selectNode(hitId, false);
                     }
+                } else if (this.scene.engine!.get_selection().includes(hitId)) {
+                    // Already selected: this is a removal unless it becomes a
+                    // drag. Decided on mouse-up (see `pendingShiftDeselect`).
+                    this.pendingShiftDeselect = hitId;
                 } else {
                     this.scene.selectNode(hitId, true);
                 }
@@ -4553,9 +4570,12 @@ export class InputManager {
                 e.set_node_name(id, 'Edge');
                 strokeIds.push(id);
             }
-            // Destructive: drop the Live Paint marks and the ORIGINAL shapes.
+            // Destructive: drop THIS group's marks and its original shapes.
+            // Scoped on purpose — the document-wide clear took every other Live
+            // Paint group's colours with it, so expanding a copy blanked the
+            // original it was copied from.
             e.set_live_paint_group(0);
-            e.clear_live_paint_marks();
+            e.clear_live_paint_marks_in_group(groupId);
             e.remove_node(groupId);
             // Nest Fills (bottom) + Strokes (top) inside an "Expanded" group.
             const parts: number[] = [];
@@ -6302,6 +6322,19 @@ export class InputManager {
 
     onMouseUp(e: MouseEvent) {
         if (!this.isMouseDown) return;
+        // A shift-click on something already selected takes it out again — but
+        // only if the gesture stayed a click. A drag was the user moving the
+        // selection by one of its members, and that must leave it intact.
+        if (this.pendingShiftDeselect !== null) {
+            const target = this.pendingShiftDeselect;
+            this.pendingShiftDeselect = null;
+            if (!this.didMove) {
+                this.scene.engine!.deselect_node(target);
+                this.ui.syncWithSelection();
+                this.ui.updateLayerList();
+                this.renderer.requestRender();
+            }
+        }
         this.isMouseDown = false;
         this.dragMode = 'none';
         this.isDraggingHandle = false;
