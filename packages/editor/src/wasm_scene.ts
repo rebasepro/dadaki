@@ -1183,6 +1183,34 @@ export class WasmScene {
         return newId;
     }
 
+    /**
+     * Put a copy where its original lives: same parent, directly above it.
+     *
+     * `duplicate_node` hands every clone to the ROOT wearing the local
+     * transform it had inside its parent — which reads as a different size and
+     * place the moment anything above the original is scaled or turned. Every
+     * copy a person makes (⌘D, ⌘V, an ⌥-drag, an offset path, an outlined
+     * stroke) has to be filed back beside the thing it was copied from, and
+     * carry that local transform across rather than preserving the world
+     * position it briefly had at the root.
+     *
+     * Reparents through the engine directly: the caller owns the undo step
+     * (a transaction) and the cache invalidation.
+     */
+    fileCopyBesideOriginal(copyId: number, originalId: number) {
+        const parent = this.getNodeParent(originalId);
+        if (parent === -1) return; // the original is at the root; so is the copy
+        const sibs = Array.from(this.getNodeChildren(parent)).filter((c) => c !== copyId);
+        const at = sibs.indexOf(originalId);
+        const local = this.engine!.get_node_transform_components(copyId);
+        this.engine!.reorder_nodes(
+            JSON.stringify([copyId]),
+            parent,
+            at === -1 ? sibs.length : at + 1,
+        );
+        this.engine!.set_node_transform_components(copyId, local);
+    }
+
     /** Cut: lift the nodes out of the document into the engine's clipboard,
      *  where paste can still reach them. See `Engine::cut_nodes`. */
     cutNodes(ids: number[] | Uint32Array): number {

@@ -3628,39 +3628,10 @@ export class InputManager {
         this.ui.syncWithSelection();
     }
 
-    /**
-     * Put a copy where its original lives: same parent, directly above it.
-     *
-     * `duplicate_node` hands every clone to the root, which is right for a
-     * top-level shape and wrong for a member of anything. Duplicating a shape
-     * inside a Live Paint group used to lift the copy out of the group, so it
-     * stopped dividing regions with its neighbours and simply covered them — the
-     * same end state as the nesting bug, reached with ⌘D. In a plain group it was
-     * milder but no less wrong: the copy left the group it was made from.
-     *
-     * MUST run inside the caller's transaction (⌘D) or gesture (a clone-drag) —
-     * it reparents through the engine directly, so the caller owns the undo step
-     * and the cache invalidation.
-     */
+    /** Put a copy where its original lives — see WasmScene.fileCopyBesideOriginal.
+     *  MUST run inside the caller's transaction (⌘D) or gesture (a clone-drag). */
     private keepCopyBesideOriginal(copyId: number, originalId: number) {
-        const parent = this.scene.getNodeParent(originalId);
-        if (parent === -1) return; // the original is at the root; so is the copy
-        const sibs = Array.from(this.scene.getNodeChildren(parent)).filter((c) => c !== copyId);
-        const at = sibs.indexOf(originalId);
-        // The clone was made at the root, so its local transform is its original's
-        // read against the root — and `reorder_nodes` preserves a node's WORLD
-        // position, which would bake that misreading in for good. Under a rotated
-        // or scaled group that is what turned a copy into an unrotated shape
-        // sitting somewhere its original never was. Carry the local transform
-        // across instead: the copy occupies the same place in the parent's own
-        // space as the original, offset by however far the clone was nudged.
-        const local = this.scene.engine!.get_node_transform_components(copyId);
-        this.scene.engine!.reorder_nodes(
-            JSON.stringify([copyId]),
-            parent,
-            at === -1 ? sibs.length : at + 1,
-        );
-        this.scene.engine!.set_node_transform_components(copyId, local);
+        this.scene.fileCopyBesideOriginal(copyId, originalId);
     }
 
     deleteSelection() {
@@ -4896,6 +4867,10 @@ export class InputManager {
                     const strokeNodeId = this.scene.duplicateNode(id);
                     // duplicate_node offsets +20,+20 — undo it so the outline sits exactly on top
                     this.scene.moveNode(strokeNodeId, -20, -20);
+                    // ...and it leaves the clone at the root, where the local
+                    // transform it kept means something else entirely if the
+                    // original sits in a group that has been scaled or turned.
+                    this.scene.fileCopyBesideOriginal(strokeNodeId, id);
 
                     // 2. Original keeps fill, loses stroke
                     const fillStyle = { ...style, strokes: [] };

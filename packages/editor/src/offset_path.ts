@@ -97,10 +97,19 @@ export function offsetPath(
         const style = scene.getNodeStyle(newId);
         scene.setNodeStyleNoHistory(newId, JSON.stringify({ ...style, fill_rule: res.fillRule }));
 
+        // File it back beside the original — same parent, same space. Landing
+        // it there by preserving the world position it had as a root would bake
+        // in the root's reading of a local transform that belongs to a group.
+        scene.fileCopyBesideOriginal(newId, nodeId);
+        // ...then tuck it directly BELOW the original (an offset reads as an
+        // outline around it, not a shape on top of it).
         const parent = scene.getNodeParent(nodeId); // -1 == root
         const siblings = parent < 0 ? scene.getRootNodes() : scene.getNodeChildren(parent);
-        const idx = Array.from(siblings).indexOf(nodeId);
-        if (idx >= 0) scene.reorderNode(newId, parent < 0 ? null : parent, idx);
+        const idx = Array.from(siblings)
+            .filter((c) => c !== newId)
+            .indexOf(nodeId);
+        if (idx >= 0 && parent < 0) scene.reorderNode(newId, null, idx);
+        else if (idx >= 0) scene.engine!.reorder_nodes(JSON.stringify([newId]), parent, idx);
     });
     return newId >= 0 ? newId : null;
 }

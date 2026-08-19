@@ -924,7 +924,12 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
 
         duplicate(id) {
             requireNodes(id);
-            return scene.transaction(() => scene.duplicateNode(id));
+            return scene.transaction(() => {
+                const copy = scene.duplicateNode(id);
+                // A copy belongs where its original lives, not at the root.
+                scene.fileCopyBesideOriginal(copy, id);
+                return copy;
+            });
         },
 
         remove(ids) {
