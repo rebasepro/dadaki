@@ -2169,6 +2169,15 @@ impl VectorNetwork {
 
     /// Query which face contains the given point.
     pub fn query_face_at(&self, x: f32, y: f32) -> Option<u32> {
+        self.query_face_at_in_group(x, y, None)
+    }
+
+    /// The same query, optionally confined to ONE Live Paint group.
+    ///
+    /// Groups are independent surfaces that can overlap on screen, so "which
+    /// region of THIS group is under the cursor" is not answerable by the
+    /// smallest face overall — that can belong to the group next door.
+    pub fn query_face_at_in_group(&self, x: f32, y: f32, group: Option<u32>) -> Option<u32> {
         let point = [x, y];
         // Find the smallest non-outer face containing the point
         // Smallest containing face wins — a region nested inside another is the
@@ -2178,6 +2187,9 @@ impl VectorNetwork {
         let mut best: Option<(u32, f64)> = None;
         for (fid, face) in &self.faces {
             if face.is_outer {
+                continue;
+            }
+            if group.is_some_and(|g| face.group != g) {
                 continue;
             }
             if point_in_polygon(&point, &face.boundary_polygon)

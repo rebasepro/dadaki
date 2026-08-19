@@ -323,3 +323,64 @@ describe('a Live Paint group is still a group', () => {
         expect(e.get_live_paint_group()).toBe(group);
     });
 });
+
+/**
+ * What a Live Paint group paints is exactly what it catches.
+ *
+ * A member of one paints no fill of its own — the faces do — so an unpainted
+ * region shows whatever sits behind the group. Picking never knew that: it
+ * asked the member for its silhouette, and every click over an uncoloured
+ * region was swallowed by a shape that had drawn nothing there. From the
+ * outside it looked like the selection box lying about the artwork's size.
+ */
+describe('a Live Paint group catches clicks only where it paints', () => {
+    /** A background rect, with an unpainted Live Paint group of two outlined
+     *  squares over it. */
+    function overBackground() {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const ui = makeUI('selection');
+        const input = new InputManager(document.createElement('canvas'), scene, ui, makeRenderer());
+        const bg = e.add_rect(0, 0, 400, 400);
+        const a = e.add_rect(0, 0, 100, 100);
+        const b = e.add_rect(50, 50, 100, 100);
+        for (const id of [a, b]) {
+            e.set_node_style(id, JSON.stringify({
+                fills: [],
+                strokes: [{
+                    paint: { r: 0, g: 0, b: 0, a: 1 }, width: 1, cap: 0, join: 0,
+                    dash_array: [], dash_offset: 0, miter_limit: 4, alignment: 'Center',
+                }],
+                opacity: 1, blend_mode: 0, fill_rule: 0, corner_radius: 0, effects: [],
+            }));
+        }
+        const group = e.group_nodes(JSON.stringify([a, b]));
+        e.set_node_live_paint(group, true);
+        e.set_live_paint_group(group);
+        return { scene, e, ui, input, bg, a, b, group };
+    }
+
+    function click(input: InputManager, x: number, y: number) {
+        input.onMouseDown(mouse(x, y));
+        input.onMouseUp(mouse(x, y));
+    }
+
+    it('a click on an unpainted region reaches the shape behind it', () => {
+        const { e, input, bg } = overBackground();
+        click(input, 25, 25);
+        expect(Array.from(e.get_selection())).toEqual([bg]);
+    });
+
+    it('a click on a painted region selects the group', () => {
+        const { scene, e, input, group } = overBackground();
+        scene.setFaceFill(e.query_face_at(25, 25), 1, 0, 0, 1);
+        click(input, 25, 25);
+        expect(Array.from(e.get_selection())).toEqual([group]);
+    });
+
+    it('a click on a member outline selects the group, painted or not', () => {
+        const { e, input, group } = overBackground();
+        click(input, 0, 50); // A's left edge — a stroke that IS drawn
+        expect(Array.from(e.get_selection())).toEqual([group]);
+    });
+});

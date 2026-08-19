@@ -1963,14 +1963,17 @@ impl Engine {
             // Multi-fill, Multi-stroke, and Transforms format
             let s = &node.style;
             
-            // Fills. A member of ANY Live Paint group writes ZERO fills — the
+            // Fills. A member of a Live Paint group writes ZERO fills — the
             // face pass provides its interior colour (so painted faces aren't
             // hidden behind the member's own fill), matching Illustrator.
             //
-            // A mask is the exception, and it has to be: an alpha mask's coverage
-            // IS its painted alpha, so stripping its fill left it covering
-            // nothing and the whole masked group vanished.
-            let suppress_fills = self.is_in_any_live_paint(id) && !self.is_within_mask(id);
+            // Which members, exactly, is `lp_surface_member`: only the shapes
+            // that put contours INTO the surface, and never a mask. Anything
+            // else has no face standing in for its fill, so taking the fill away
+            // just erases it — which is what happened to text in a painted
+            // group. The hit test asks the same question, so what the group
+            // catches is what it paints.
+            let suppress_fills = self.lp_surface_member(id).is_some();
             let active_fills = if suppress_fills { Vec::new() } else { s.fills.clone() };
             self.render_buffer.extend_from_slice(&(active_fills.len() as u32).to_le_bytes());
             for fill in &active_fills {
@@ -3891,7 +3894,20 @@ impl Engine {
         }
     }
 
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<u32> {
+    /// The node a click at this world point lands on, topmost first.
+    ///
+    /// Takes `&mut self` for one reason: inside a Live Paint group the question
+    /// "is this point painted?" is answered by the FACES, and those have to be
+    /// current before it can be asked. Documents with no Live Paint group skip
+    /// that entirely and this is a pure read.
+    pub fn hit_test(&mut self, x: f32, y: f32) -> Option<u32> {
+        if self.has_live_paint() {
+            self.ensure_network_clean();
+        }
+        self.pick_at(x, y)
+    }
+
+    fn pick_at(&self, x: f32, y: f32) -> Option<u32> {
         // Walk the scene in reverse draw order (topmost first) and return the first hit.
         // This ensures we always pick the visually topmost element.
         let point = [x, y];
@@ -3912,35 +3928,193 @@ impl Engine {
             self.collect_draw_order(root_id, &mut draw_order);
         }
 
+        // "Does this Live Paint group paint anything here?" is one question per
+        // group, asked by every member and by the group itself. Answering it
+        // walks the group's faces, so answer it once.
+        let mut lp_painted: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
+
         // Iterate in reverse (topmost first)
         for &id in draw_order.iter().rev() {
-            if !candidate_ids.contains(&id) { continue; }
-            
+            // A Live Paint group is picked through its own faces, so it is
+            // tested even though a group is not in the R-tree. Everything else
+            // has to be a spatial candidate.
+            let is_lp_group = self.scene.nodes.get(&id).map_or(false, |n| n.live_paint);
+            if !is_lp_group && !candidate_ids.contains(&id) { continue; }
+
             // A node without a resolved global transform is mid-edit and not on
             // screen; `point_in_geometry` needs one either way.
             if let (Some(node), true) = (self.scene.nodes.get(&id), self.global_transforms.contains_key(&id)) {
                 if !node.visible { continue; }
                 if node.locked { continue; }
                 
-                // A Group is never hit as itself — its leaves are — with one
-                // exception: a Boolean Group IS a leaf as far as the canvas is
-                // concerned. It paints one resolved outline and its operands are
+                // A Group is never hit as itself — its leaves are — with two
+                // exceptions. A Boolean Group IS a leaf as far as the canvas is
+                // concerned: it paints one resolved outline and its operands are
                 // never drawn, so it is picked through that outline. Its children
                 // don't reach this loop at all (collect_draw_order stops at the
                 // group), which is what keeps a click in a subtract's hole, or
                 // beside an intersection, from selecting the shape.
+                //
+                // A Live Paint group is the other: the colour in one belongs to
+                // its FACES, which are the group's, not any member's. A region
+                // painted between two crossing lines lies inside no member at
+                // all — without this, clicking the paint you just applied
+                // selected whatever was behind the group.
                 if node.node_type == NodeType::Group && node.boolean_op.is_none() {
+                    if node.live_paint
+                        && *lp_painted.entry(id).or_insert_with(|| self.lp_paint_at(id, x, y))
+                        && self.inside_group_mask(id, x, y)
+                        && !self.masked_away(id, x, y)
+                    {
+                        return Some(id);
+                    }
                     continue;
                 }
 
+                // Inside a Live Paint group a member paints NO fill of its own —
+                // the face pass provides the interior colour — so its interior
+                // picks it only where the group actually paints something. Its
+                // outline (and stroke) is drawn either way and always picks it.
+                // Without this an unpainted region swallowed every click over it,
+                // and nothing behind the group could be reached.
+                let hit = match self.lp_surface_member(id) {
+                    Some(group) => {
+                        self.point_on_outline(id, x, y)
+                            || (self.point_in_geometry(id, x, y)
+                                && *lp_painted
+                                    .entry(group)
+                                    .or_insert_with(|| self.lp_paint_at(group, x, y)))
+                    }
+                    None => self.point_in_geometry(id, x, y),
+                };
+
                 // Masked-away artwork is not painted, so it is not clickable
                 // either — see `masked_away`.
-                if self.point_in_geometry(id, x, y) && !self.masked_away(id, x, y) {
+                if hit && !self.masked_away(id, x, y) {
                     return Some(id);
                 }
             }
         }
         None
+    }
+
+    /// The Live Paint group whose face pass replaces this node's own fill, if
+    /// any. Mirrors the renderer's `suppress_fills` exactly — the two must agree
+    /// or the editor picks something it never painted.
+    ///
+    /// Only shapes that CONTRIBUTE contours to the surface are suppressed: text
+    /// and images add no segments (see `collect_segments`), so there is no face
+    /// standing in for their fill and taking it away would simply erase them.
+    /// A mask is the other exception — see the renderer for why.
+    fn lp_surface_member(&self, id: u32) -> Option<u32> {
+        let node = self.scene.nodes.get(&id)?;
+        // A group carries a 0×0 Rect geometry it never paints; only leaves are
+        // members of the surface.
+        if node.node_type == NodeType::Group {
+            return None;
+        }
+        if !matches!(
+            node.geometry,
+            Geometry::Path { .. } | Geometry::Rect { .. } | Geometry::Ellipse { .. }
+        ) {
+            return None;
+        }
+        if self.is_within_mask(id) {
+            return None;
+        }
+        let group = self.live_paint_group_of(id)?;
+        (group != id).then_some(group)
+    }
+
+    /// Does Live Paint group `group` paint anything at this world point?
+    ///
+    /// A face counts when it carries a visible paint — the one the user
+    /// bucketed on, or the one it inherits from the shape showing through, the
+    /// same resolution `live_paint_faces_effective` renders with. An unpainted
+    /// (or fully transparent) region paints nothing, and nothing is what the
+    /// canvas shows there.
+    fn lp_paint_at(&self, group: u32, x: f32, y: f32) -> bool {
+        let vn = &self.scene.vector_network;
+        let face = match vn.query_face_at_in_group(x, y, Some(group)) {
+            Some(fid) => match vn.faces.get(&fid) {
+                Some(f) => f,
+                None => return false,
+            },
+            None => return false,
+        };
+        let paint = match &face.fill {
+            Some(p) => Some(p.clone()),
+            None => {
+                let order = self.draw_order();
+                let rank: std::collections::HashMap<u32, usize> =
+                    order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+                self.inherited_face_paint(face, &rank)
+            }
+        };
+        paint.map_or(false, |p| paint_is_visible(&p))
+    }
+
+    /// True when the point is inside a mask a group's own children impose (or
+    /// there is none). A Live Paint group's faces render INSIDE that mask span,
+    /// so paint outside it is not on the canvas.
+    fn inside_group_mask(&self, group: u32, x: f32, y: f32) -> bool {
+        let node = match self.scene.nodes.get(&group) {
+            Some(n) => n,
+            None => return true,
+        };
+        let mut masks = node.children.iter().copied().filter(|&c| self.acts_as_mask(c)).peekable();
+        if masks.peek().is_none() {
+            return true;
+        }
+        masks.any(|m| self.point_in_geometry(m, x, y))
+    }
+
+    /// Does the point land on this node's OUTLINE (its stroke, plus the pick
+    /// tolerance) rather than its interior? This is what a shape with no fill
+    /// answers to `point_in_geometry`; primitives get the same treatment here
+    /// because inside a Live Paint group they have no fill either.
+    fn point_on_outline(&self, id: u32, x: f32, y: f32) -> bool {
+        let (node, transform_bytes) =
+            match (self.scene.nodes.get(&id), self.global_transforms.get(&id)) {
+                (Some(n), Some(t)) => (n, t),
+                _ => return false,
+            };
+        let global_transform = Mat3::from_cols_array(transform_bytes);
+        let local_point = global_transform.inverse().transform_point2(Vec2::new(x, y));
+        let det = (global_transform.x_axis.x * global_transform.y_axis.y
+            - global_transform.x_axis.y * global_transform.y_axis.x)
+            .abs();
+        let local_tol = HIT_TOLERANCE / det.sqrt().max(1e-6);
+        // The same style minus its fills: `path_hit` then tests the outline only.
+        let mut style = node.style.clone();
+        style.fills.clear();
+        match &node.geometry {
+            Geometry::Rect { width, height } => path_hit(
+                &round_subpaths(&rect_subpaths(*width, *height, node.style.corner_radius)),
+                &style,
+                local_point,
+                local_tol,
+            ),
+            Geometry::Path { ref subpaths, .. } => {
+                path_hit(subpaths, &style, local_point, local_tol)
+            }
+            Geometry::Ellipse { radius_x, radius_y } => {
+                // Distance to the ellipse, near enough: the normalised radius
+                // scaled back by the smaller semi-axis.
+                let rx = radius_x.abs().max(1e-6);
+                let ry = radius_y.abs().max(1e-6);
+                let k = ((local_point.x / rx).powi(2) + (local_point.y / ry).powi(2)).sqrt();
+                let reach = style.strokes.iter()
+                    .filter(|s| s.paint.is_some())
+                    .map(|s| s.width)
+                    .fold(0.0f32, f32::max) * 0.5 + local_tol;
+                ((k - 1.0).abs() * rx.min(ry)) <= reach
+            }
+            // Text and images are never surface members (see `lp_surface_member`),
+            // so this is unreachable for them; answer for the whole shape rather
+            // than silently making one unclickable.
+            _ => self.point_in_geometry(id, x, y),
+        }
     }
 
     /// Does the world point land on this node's own painted geometry?
@@ -4041,7 +4215,7 @@ impl Engine {
     /// chain to find the topmost Group ancestor that is a direct child of root
     /// (or of a non-Group parent). Returns that group's ID, or the leaf ID if
     /// no Group ancestor exists.
-    pub fn hit_test_grouped(&self, x: f32, y: f32) -> Option<u32> {
+    pub fn hit_test_grouped(&mut self, x: f32, y: f32) -> Option<u32> {
         let leaf_id = self.hit_test(x, y)?;
         Some(self.find_topmost_group_ancestor(leaf_id))
     }
@@ -7292,6 +7466,17 @@ fn compose_affine(outer: &[f32; 6], inner: &[f32; 6]) -> [f32; 6] {
     ]
 }
 
+/// Does this paint put anything on the canvas? A fully transparent solid (or a
+/// gradient whose every stop is) draws nothing, and something that draws
+/// nothing must not be clickable either.
+fn paint_is_visible(p: &Paint) -> bool {
+    match p {
+        Paint::Solid(c) => c.a > 0.001,
+        Paint::Gradient(g) => g.stops.iter().any(|s| s.color.a > 0.001),
+        Paint::Pattern(_) | Paint::Mesh(_) => true,
+    }
+}
+
 fn paint_color(p: &Paint) -> Option<Color> {
     match p {
         Paint::Solid(c) => Some(*c),
@@ -9250,7 +9435,7 @@ mod tests {
 
     #[test]
     fn boolean_group_is_picked_through_its_outline() {
-        let (engine, gid, _) = intersect_boolean_group();
+        let (mut engine, gid, _) = intersect_boolean_group();
 
         // Inside the painted intersection → the group itself.
         assert_eq!(engine.hit_test(250.0, 300.0), Some(gid));
@@ -11445,5 +11630,141 @@ mod tests {
             assert!((as_rect[i] - as_path[i]).abs() < 0.5,
                 "rect vs path bounds disagree at {i}: {as_rect:?} vs {as_path:?}");
         }
+    }
+
+    // ─── Live Paint: what is painted is what is clickable ───────────────────
+
+    /// Build `bg` (a big rect at the bottom) + a Live Paint group of two
+    /// overlapping unfilled squares over it. Nothing in the group is painted yet.
+    fn lp_over_background() -> (Engine, u32, u32, Vec<u32>) {
+        let mut engine = Engine::new();
+        let bg = engine.add_rect(0.0, 0.0, 400.0, 400.0);
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(50.0, 50.0, 100.0, 100.0);
+        for id in [a, b] {
+            engine.scene.nodes.get_mut(&id).unwrap().style.fills.clear();
+        }
+        let g = engine.group_nodes(&format!("[{a},{b}]"));
+        engine.set_node_live_paint(g, true);
+        engine.set_live_paint_group(g);
+        (engine, bg, g, vec![a, b])
+    }
+
+    #[test]
+    fn an_unpainted_live_paint_region_lets_the_click_through() {
+        // The bug as reported: a Live Paint group's members paint no fill of
+        // their own, so an unpainted region shows whatever is behind it — but
+        // the pick still went to the member, and the shape you could see could
+        // not be clicked.
+        let (mut engine, bg, _g, _members) = lp_over_background();
+        assert_eq!(engine.hit_test(25.0, 25.0), Some(bg), "unpainted region is see-through");
+        assert_eq!(engine.hit_test(75.0, 75.0), Some(bg), "the overlap too");
+    }
+
+    #[test]
+    fn painting_a_region_makes_it_clickable_again() {
+        let (mut engine, bg, g, members) = lp_over_background();
+        let face = engine.query_face_at(25.0, 25.0);
+        assert!(face >= 0);
+        engine.set_face_fill(face as u32, 1.0, 0.0, 0.0, 1.0);
+
+        assert_eq!(engine.hit_test(25.0, 25.0), Some(members[0]),
+            "the painted region picks the member that bounds it");
+        assert_eq!(engine.hit_test(75.0, 75.0), Some(bg),
+            "its unpainted neighbour still lets the click through");
+        assert_eq!(engine.hit_test_grouped(25.0, 25.0), Some(g), "and selects the group");
+    }
+
+    #[test]
+    fn a_region_painted_between_bare_lines_is_clickable() {
+        // A face is the GROUP's, not a member's: two crossing lines enclose a
+        // region that lies inside no shape at all. Picking only ever looked at
+        // the members, so the colour you had just bucketed on selected whatever
+        // was behind the group.
+        let mut engine = Engine::new();
+        let bg = engine.add_rect(0.0, 0.0, 400.0, 400.0);
+        let h = engine.add_path(r#"[{"points":[{"x":0,"y":100,"cp1":[0,100],"cp2":[0,100],"corner_radius":0},{"x":200,"y":100,"cp1":[200,100],"cp2":[200,100],"corner_radius":0}],"closed":false}]"#);
+        let v = engine.add_path(r#"[{"points":[{"x":100,"y":0,"cp1":[100,0],"cp2":[100,0],"corner_radius":0},{"x":100,"y":200,"cp1":[100,0],"cp2":[100,0],"corner_radius":0}],"closed":false}]"#);
+        let ring = engine.add_path(r#"[{"points":[{"x":0,"y":0,"cp1":[0,0],"cp2":[0,0],"corner_radius":0},{"x":200,"y":0,"cp1":[200,0],"cp2":[200,0],"corner_radius":0},{"x":200,"y":200,"cp1":[200,200],"cp2":[200,200],"corner_radius":0},{"x":0,"y":200,"cp1":[0,200],"cp2":[0,200],"corner_radius":0}],"closed":true}]"#);
+        for id in [h, v, ring] {
+            engine.scene.nodes.get_mut(&id).unwrap().style.fills.clear();
+        }
+        let g = engine.group_nodes(&format!("[{h},{v},{ring}]"));
+        engine.set_node_live_paint(g, true);
+        engine.set_live_paint_group(g);
+
+        let quadrant = engine.query_face_at(50.0, 50.0);
+        assert!(quadrant >= 0, "the lines enclose a paintable region");
+        engine.set_face_fill(quadrant as u32, 0.0, 0.0, 1.0, 1.0);
+
+        assert_eq!(engine.hit_test(50.0, 50.0), Some(g),
+            "the paint belongs to the group, so the group is what it picks");
+        assert_eq!(engine.hit_test(150.0, 50.0), Some(bg),
+            "the quadrant nobody painted is still see-through");
+    }
+
+    #[test]
+    fn a_live_paint_member_is_still_picked_on_its_outline() {
+        // Fill suppression is not invisibility: the members' strokes are drawn
+        // over the faces, and clicking one has to select it however little of
+        // the group is painted.
+        let (mut engine, _bg, _g, members) = lp_over_background();
+        assert_eq!(engine.hit_test(0.0, 50.0), Some(members[0]), "left edge of A");
+        assert_eq!(engine.hit_test(150.0, 100.0), Some(members[1]), "right edge of B");
+    }
+
+    #[test]
+    fn a_face_painted_transparent_paints_nothing_and_picks_nothing() {
+        let (mut engine, bg, _g, _members) = lp_over_background();
+        let face = engine.query_face_at(25.0, 25.0);
+        engine.set_face_fill(face as u32, 1.0, 0.0, 0.0, 0.0);
+        assert_eq!(engine.hit_test(25.0, 25.0), Some(bg),
+            "a fully transparent region is not paint");
+    }
+
+    #[test]
+    fn a_filled_shape_in_a_live_paint_group_is_picked_where_it_shows() {
+        // The ordinary case has to be unchanged: a filled member's region
+        // inherits its colour, so every point inside it is painted, and picks it.
+        let mut engine = Engine::new();
+        let bg = engine.add_rect(0.0, 0.0, 400.0, 400.0);
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let g = engine.group_nodes(&format!("[{a}]"));
+        engine.set_node_live_paint(g, true);
+        engine.set_live_paint_group(g);
+        assert_eq!(engine.hit_test(50.0, 50.0), Some(a));
+        assert_eq!(engine.hit_test(200.0, 200.0), Some(bg));
+    }
+
+    #[test]
+    fn text_in_a_live_paint_group_keeps_its_fill() {
+        // Text contributes no contours to the surface (collect_segments skips
+        // it), so no face stands in for its fill. Suppressing it anyway left the
+        // words invisible — and still clickable, with the group's selection box
+        // stretched around nothing.
+        let mut engine = Engine::new();
+        let r = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let t = engine.add_text(200.0, 200.0, "hello", 24.0);
+        let g = engine.group_nodes(&format!("[{r},{t}]"));
+        engine.set_node_live_paint(g, true);
+        engine.set_live_paint_group(g);
+        engine.update_render_buffer(vec![r, t, g], vec![]);
+
+        let buf = &engine.render_buffer;
+        let rd = |off: usize| u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+        let count = rd(8);
+        let mut off = 12usize;
+        let mut fills_by_node = std::collections::HashMap::new();
+        for _ in 0..count {
+            let len = rd(off) as usize;
+            let start = off + 4;
+            if rd(start) == CMD_DRAW_NODE {
+                // DRAW_NODE: cmd, nodeId, nodeType, 9×f32 transform, then fillCount.
+                fills_by_node.insert(rd(start + 4), rd(start + 4 + 4 + 4 + 36));
+            }
+            off += 4 + len;
+        }
+        assert_eq!(fills_by_node.get(&r), Some(&0), "the surface member's fill is the face's job");
+        assert_eq!(fills_by_node.get(&t), Some(&1), "the text still paints itself");
     }
 }
