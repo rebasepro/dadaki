@@ -500,6 +500,40 @@ describe('sweep: entering a group and painting', () => {
         expect(sel(scene)).toEqual([a]);
     });
 
+    it('a shape dragged into a group can still be double-clicked into', () => {
+        // The Objects panel drops a shape into a group and leaves it selected.
+        // That selection alone used to read as "you are inside this group", so
+        // the group could never be entered again by double-clicking: the click
+        // resolved to the child, and the double-click node-edited it.
+        const scene = makeScene();
+        const e = scene.engine!;
+        const [a, b, c] = threeRects(scene);
+        const g = e.group_nodes(JSON.stringify([a, b]));
+        e.select_node(c, false);
+        scene.reorderNodes([c], g, 0);
+
+        const input = makeInput(scene);
+        click(input, 130, 20); // the newcomer, still selected from the drag
+        expect(sel(scene)).toEqual([g]); // a click picks the whole group
+        input.onDoubleClick(mouse(130, 20));
+        expect(sel(scene)).toEqual([c]); // and the double-click goes inside
+    });
+
+    it('a click outside the group you entered leaves it', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const [a, b, c] = threeRects(scene);
+        const g = e.group_nodes(JSON.stringify([a, b]));
+        const input = makeInput(scene);
+        click(input, 20, 20);
+        input.onDoubleClick(mouse(20, 20));
+        expect(sel(scene)).toEqual([a]); // inside the group
+        click(input, 130, 20); // the loose rect outside it
+        expect(sel(scene)).toEqual([c]);
+        click(input, 70, 20); // back to the group: whole group again
+        expect(sel(scene)).toEqual([g]);
+    });
+
     it('the bucket paints the region under the click, not the shape', () => {
         const scene = makeScene();
         const e = scene.engine!;

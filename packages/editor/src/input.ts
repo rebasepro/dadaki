@@ -257,6 +257,23 @@ export class InputManager {
     /** Node under the cursor (selection tool, not dragging) — outlined by the Renderer. */
     hoverNodeId: number | null = null;
 
+    /** The group the user has DRILLED INTO — set only by a gesture that means
+     *  "go inside": a double-click on a group, or Enter on one. While it is set,
+     *  clicks inside it pick its children instead of promoting to the whole
+     *  group, which is what makes editing within a group feel like a place you
+     *  are standing in.
+     *
+     *  It used to be inferred instead — "selection[0] has a group parent, so we
+     *  must be inside that group" — and that quietly made every OTHER way of
+     *  selecting a child a one-way door. Drag a shape into a group in the
+     *  Objects panel and it stays selected, now with a group parent: the editor
+     *  believed you were inside the group you had never entered, so a
+     *  double-click no longer entered it — it went straight to node-editing the
+     *  shape, and nothing short of Escape or an empty-canvas click got you back
+     *  out. Entering is a gesture; it is not something to guess from a parent
+     *  pointer. */
+    private enteredGroup: number | null = null;
+
     // --- Direct selection state ---
     /** Node being edited in direct selection mode. */
     editingNodeId: number | null = null;
@@ -627,6 +644,7 @@ export class InputManager {
         const pos = this.getPos(e);
         const hitId = this.scene.hitTest(pos.x, pos.y); // raw hit (deepest leaf)
         if (hitId === undefined) {
+            this.enteredGroup = null;
             // Double-click on empty canvas: leave node-editing mode
             if (this.editingNodeId !== null) {
                 this.exitEditMode();
@@ -671,6 +689,7 @@ export class InputManager {
                 // Find the direct child of this group that is (or contains) the hit leaf
                 const targetChild = this.findDirectChildContaining(selection[0], hitId);
                 if (targetChild !== undefined) {
+                    this.enteredGroup = selection[0];
                     this.scene.selectNode(targetChild, false);
                     this.ui.syncWithSelection();
                     this.ui.updateLayerList();
@@ -1267,7 +1286,9 @@ export class InputManager {
                         // so that Ctrl+Z can revert back into the group context
                         // with the element in its pre-move position.
                         this.scene.pushHistorySnapshot();
-                        // Exit group context: select the parent group
+                        // Exit group context: select the parent group, and step
+                        // the drilled-into context out with it.
+                        this.enteredGroup = this.groupParentOf(parentId);
                         this.scene.selectNode(parentId, false);
                     } else {
                         // At root level: clear selection
@@ -3528,6 +3549,7 @@ export class InputManager {
             case 'Group': {
                 const children = Array.from(this.scene.getNodeChildren(id));
                 if (children.length > 0) {
+                    this.enteredGroup = id;
                     this.scene.selectNode(children[0], false);
                     this.ui.syncWithSelection();
                     this.ui.updateLayerList();
@@ -7234,9 +7256,10 @@ export class InputManager {
     }
 
     /**
-     * Find the node that should be selected given a hit position and the current selection.
-     * This implements "context-aware" selection: if you are inside a group, you select
-     * siblings/children of that group. If not, you select the topmost group.
+     * Find the node a click at `pos` should select.
+     *
+     * Context-aware: inside a group you have entered, you select that group's
+     * children; otherwise you select the topmost group the hit belongs to.
      */
     private getTargetIdForHit(
         pos: { x: number; y: number },
@@ -7249,34 +7272,54 @@ export class InputManager {
             return rawHitId;
         }
 
-        const selection = this.scene.engine!.get_selection();
-        if (selection.length === 0) {
-            // Nothing selected: return topmost group ancestor
-            return this.scene.hitTestGrouped(pos.x, pos.y);
-        }
+        // Inside a group you have entered, a click picks that group's children.
+        // Outside of one, it picks whole top-level groups.
+        const context = this.currentGroupContext();
+        if (context === null) return this.scene.hitTestGrouped(pos.x, pos.y);
 
-        // We have a selection. Let's see if the raw hit is "inside" the current context.
-        // A common context is the parent of the first selected item.
-        const contextParentId = this.scene.getNodeParent(selection[0]);
+        // Pick the child of the entered group that contains the hit.
+        const child = this.findDirectChildContaining(context, rawHitId);
+        if (child !== undefined) return child;
 
-        if (contextParentId === -1) {
-            // Selected item is at root. Default to topmost group.
-            return this.scene.hitTestGrouped(pos.x, pos.y);
-        }
-
-        // Walk up from rawHitId to see if it's a descendant of contextParentId.
-        // We want to pick the child of contextParentId that contains the hit.
-        let current = rawHitId;
-        while (current !== -1) {
-            const p = this.scene.getNodeParent(current);
-            if (p === contextParentId) {
-                return current;
-            }
-            current = p;
-        }
-
-        // Hit is outside current context. Fall back to topmost group.
+        // Clicking outside the group you are in leaves it, the same way it does
+        // in Illustrator and Figma — otherwise the context would outlive any
+        // gesture that could plausibly end it.
+        this.enteredGroup = null;
         return this.scene.hitTestGrouped(pos.x, pos.y);
+    }
+
+    /**
+     * The group clicks currently resolve inside, or null for the top level.
+     *
+     * Being inside one is a two-part fact: the user entered it, AND the
+     * selection still lives there. Selecting something elsewhere (the Objects
+     * panel, Select All, an undo that took the group away) ends it, so a stale
+     * `enteredGroup` can never keep promoting clicks to the wrong depth.
+     */
+    private currentGroupContext(): number | null {
+        const group = this.enteredGroup;
+        if (group === null) return null;
+        if (this.scene.getNode(group)?.node_type !== 'Group') {
+            this.enteredGroup = null;
+            return null;
+        }
+        const selection = this.scene.engine!.get_selection();
+        if (
+            selection.length === 0 ||
+            this.findDirectChildContaining(group, selection[0]) === undefined
+        ) {
+            this.enteredGroup = null;
+            return null;
+        }
+        return group;
+    }
+
+    /** The node's parent if it is a Group, else null — the context left behind
+     *  when you step out of a group one level. */
+    private groupParentOf(id: number): number | null {
+        const parent = this.scene.getNodeParent(id);
+        if (parent === -1) return null;
+        return this.scene.getNode(parent)?.node_type === 'Group' ? parent : null;
     }
 
     /** Convert a text node to a path node (destructive). Parses the font with
