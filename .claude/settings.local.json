@@ -10,7 +10,8 @@
       "Read(//opt/homebrew/opt/**)",
       "Bash(npm install *)",
       "Bash(kubectl *)",
-      "Bash(rebase cloud *)"
+      "Bash(rebase cloud *)",
+      "Bash(rebase cloud deploy *)"
     ]
   }
 }
