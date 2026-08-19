@@ -264,8 +264,7 @@ export function buildSVGFromData(input: SVGExportInput): string {
                     ].join(' ');
                     const rule = f.holes && f.holes.length > 0 ? ' fill-rule="evenodd"' : '';
                     return (
-                        `<path d="${rings}" fill="${value}"${rule}` +
-                        `${opacity} stroke="none" />`
+                        `<path d="${rings}" fill="${value}"${rule}` + `${opacity} stroke="none" />`
                     );
                 })
                 .join(''),

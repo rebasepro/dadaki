@@ -4631,13 +4631,34 @@ export class InputManager {
     }
 
     ungroupSelection() {
-        const selection = this.scene.engine!.get_selection();
+        const selection = Array.from(this.scene.engine!.get_selection());
         if (selection.length === 0) return;
+        // What the selection should be afterwards, gathered BEFORE the groups
+        // stop existing.
+        //
+        // The engine does not touch the selection when it dissolves a group, so
+        // the selection was left holding an id that no longer named anything:
+        // nothing appeared selected, and the shapes just released could not be
+        // moved, restyled or re-grouped without hunting for them again. Every
+        // editor leaves the released members selected, which is also the only
+        // answer that lets you undo the decision by pressing group again.
+        const released: number[] = [];
         this.scene.transaction(() => {
             for (const id of selection) {
-                this.scene.ungroupNode(id);
+                const node = this.scene.getNode(id);
+                if (node?.node_type === 'Group' && node.children?.length) {
+                    released.push(...node.children);
+                    this.scene.ungroupNode(id);
+                } else {
+                    // Not a group (or an empty one): the engine leaves it alone,
+                    // so it stays selected rather than silently dropping out.
+                    released.push(id);
+                }
             }
         });
+        const engine = this.scene.engine!;
+        engine.clear_selection();
+        for (const id of released) engine.select_node(id, true);
         this.ui.updateLayerList();
         this.ui.syncWithSelection();
     }
@@ -7155,6 +7176,24 @@ export class InputManager {
         const rx = Math.min(Math.max(radius, visualMin), rect.width / 2);
         const ry = Math.min(Math.max(radius, visualMin), rect.height / 2);
 
+        // The grab zones may not reach the middle of the shape.
+        //
+        // Each corner zone is a square of `threshold` about its handle, and the
+        // handles sit `rx`/`ry` inside the edges. On a small rectangle those four
+        // squares TILE THE WHOLE INTERIOR: a 40×40 rect put its handles at 14
+        // with a 10-unit reach, so every point inside was within reach of one.
+        // The corner-radius drag is checked before selection, so a small selected
+        // rectangle could not be moved, could not be shift-deselected, and did
+        // not respond to a click — every gesture became a radius drag. It was
+        // reported as "impossible to deselect a single shape".
+        //
+        // `room` is what is left between a handle and the shape's centre. Where
+        // there is none, the shape is too small to carry a distinct corner
+        // control and it gets none, which is also what a person would expect:
+        // nothing that small shows a handle worth aiming at.
+        const room = Math.min(rect.width / 2 - rx, rect.height / 2 - ry);
+        if (room <= 0) return null;
+
         const handlePos = [
             [rx, ry],
             [rect.width - rx, ry],
@@ -7162,7 +7201,7 @@ export class InputManager {
             [rx, rect.height - ry],
         ];
 
-        const threshold = 10 / this.renderer.zoom;
+        const threshold = Math.min(10 / this.renderer.zoom, room);
         for (const [hx, hy] of handlePos) {
             if (Math.abs(lx - hx) < threshold && Math.abs(ly - hy) < threshold) {
                 return { nodeId: id };
