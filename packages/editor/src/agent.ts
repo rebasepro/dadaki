@@ -852,6 +852,20 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
 
         resize(id, w, h) {
             requireNodes(id);
+            // Text is auto-width: `resize_node` is a no-op for it, so asking to
+            // resize a text node did nothing at all and said nothing about it.
+            // Scale the type instead, the way dragging its handles does — the
+            // result is as close to the box as a line of text can be.
+            const text = scene.getNodeGeometry(id)?.Text;
+            if (text) {
+                const b = worldBounds(id) ?? scene.getNodeBounds(id);
+                const curW = Math.max(b[2] - b[0], 1e-6);
+                const curH = Math.max(b[3] - b[1], 1e-6);
+                const k = Math.sqrt((w / curW) * (h / curH));
+                const size = Math.max(1, Math.min(2000, text.font_size * k));
+                scene.transaction(() => scene.setTextContent(id, text.content, size));
+                return;
+            }
             // A group is sized in world units by the engine; a leaf's geometry
             // is written in its own space.
             const size = scene.getNodeType(id) === 3 ? { w, h } : scene.worldSizeToLocal(id, w, h);

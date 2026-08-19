@@ -735,6 +735,20 @@ describe('agent API — position round trip', () => {
     });
 });
 
+describe('agent API — resize reaches every kind of node', () => {
+    it('a text node scales its type instead of ignoring the call', async () => {
+        // Text is auto-width, so the engine's resize is a no-op for it: asking
+        // to resize a text node did nothing and reported nothing.
+        const { agent } = makeAgent();
+        const id = agent.createText(0, 100, 'Hello there', 20);
+        const before = (await agent.describeNode(id))!.bounds;
+        agent.resize(id, before[2] * 2, before[3] * 2);
+        const after = (await agent.describeNode(id))!.bounds;
+        expect(after[2]).toBeGreaterThan(before[2]);
+        expect(after[3]).toBeGreaterThan(before[3]);
+    });
+});
+
 describe('agent API — styling', () => {
     it('setStroke preserves width when only the colour changes', async () => {
         const { agent } = makeAgent();
