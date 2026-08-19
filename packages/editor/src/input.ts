@@ -1318,12 +1318,13 @@ export class InputManager {
             }
         }
 
-        // Z-ordering: ]/[ = step forward/backward, Cmd+]/Cmd+[ = front/back
+        // Z-ordering: ]/[ = step forward/backward, Cmd+]/Cmd+[ = front/back.
+        // One press is one undo step, however many nodes moved.
         if (e.key === ']') {
-            this.restack('forward', e.metaKey || e.ctrlKey);
+            this.scene.transaction(() => this.restack('forward', e.metaKey || e.ctrlKey));
         }
         if (e.key === '[') {
-            this.restack('backward', e.metaKey || e.ctrlKey);
+            this.scene.transaction(() => this.restack('backward', e.metaKey || e.ctrlKey));
         }
 
         // Cmd+D / Ctrl+D: duplicate selected nodes
