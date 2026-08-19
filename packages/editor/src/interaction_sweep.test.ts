@@ -487,6 +487,30 @@ describe('sweep: keyboard and modes', () => {
         drag(input, 40, 40, 140, 40);
         expect(Array.from(scene.getNodeBounds(r))).toEqual(before);
     });
+
+    it('...nor nudged, when the Objects panel is what selected it', () => {
+        // The panel can select a locked node — that is how you unlock it — and
+        // every gesture refused to touch it there except the arrow keys.
+        const scene = makeScene();
+        const e = scene.engine!;
+        const r = e.add_rect(0, 0, 80, 80);
+        e.set_node_locked(r, true);
+        e.select_node(r, false);
+        const input = makeInput(scene);
+        const before = Array.from(scene.getNodeBounds(r));
+        input.onKeyDown({
+            key: 'ArrowRight',
+            code: 'ArrowRight',
+            shiftKey: false,
+            metaKey: false,
+            altKey: false,
+            ctrlKey: false,
+            target: document.body,
+            preventDefault() {},
+            stopPropagation() {},
+        } as unknown as KeyboardEvent);
+        expect(Array.from(scene.getNodeBounds(r))).toEqual(before);
+    });
 });
 
 describe('sweep: working inside a group that has been scaled or turned', () => {

@@ -1388,7 +1388,13 @@ export class InputManager {
                 if (this.ui.meshEdit.nudge(dx, dy)) this.ui.syncWithSelection();
                 return;
             }
-            const selection = this.scene.engine!.get_selection();
+            // Locked artwork is inert. It can still be SELECTED from the
+            // Objects panel — that is how you unlock it — and every other
+            // gesture already refuses to touch it there, but the arrow keys
+            // moved it: the one way to shove a locked shape around by accident.
+            const selection = Array.from(this.scene.engine!.get_selection()).filter(
+                (id) => !this.scene.isLockedInTree(id),
+            );
             if (selection.length > 0) {
                 e.preventDefault();
                 const step = e.shiftKey ? 10 : 1;
@@ -6023,7 +6029,11 @@ export class InputManager {
                 // Snapshot the pre-drag scene (same approach as resize).
                 // We restore this every frame so modifier changes (Alt, Shift) apply cleanly.
                 this.moveSnapshot = this.scene.engine!.serialize_scene();
-                this.moveOriginalIds = [...this.scene.engine!.get_selection()];
+                // Same rule as the arrow keys: a locked node in the selection
+                // (only the panel can put one there) comes along for no drag.
+                this.moveOriginalIds = [...this.scene.engine!.get_selection()].filter(
+                    (id) => !this.scene.isLockedInTree(id),
+                );
                 this.moveStartBounds = this.getSelectionBounds();
                 // Pristine transforms for the fast per-frame reset (non-Alt moves).
                 this.captureGesturePristine(this.moveOriginalIds);
