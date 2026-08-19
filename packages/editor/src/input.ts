@@ -3555,19 +3555,10 @@ export class InputManager {
      * For a delta *vector* (not a point) we only invert the linear part (2×2
      * upper-left of the 3×3 matrix), ignoring translation.
      */
-    /**
-     * A world-space size expressed in the node's own geometry space.
-     *
-     * Groups are excluded by their caller: the engine sizes those in world
-     * units, by scaling their transform. For everything else the geometry is
-     * written directly, so the scale accumulated down the parent chain (and the
-     * node's own) has to come back out first.
-     */
+    /** A world-space size in the node's own geometry space. Groups are excluded
+     *  by their caller — the engine sizes those in world units. */
     private worldSizeToLocal(id: number, w: number, h: number): { w: number; h: number } {
-        const t = this.scene.getTransform(id); // world matrix, row-major
-        const sx = Math.hypot(t[0], t[3]) || 1;
-        const sy = Math.hypot(t[1], t[4]) || 1;
-        return { w: w / sx, h: h / sy };
+        return this.scene.worldSizeToLocal(id, w, h);
     }
 
     worldDeltaToLocal(nodeId: number, wdx: number, wdy: number): { dx: number; dy: number } {

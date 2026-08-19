@@ -1758,8 +1758,17 @@ export class UIEngine {
         return !!input && input.value !== input.dataset.synced;
     }
 
-    /** Current visual size of a node, full precision — the same measure the
-     *  panel displays and resizeNode targets (resolved rounded outline for paths). */
+    /**
+     * Current visual size of a node, full precision — what the panel displays.
+     *
+     * WORLD units, like every other number in the panel: X/Y are world, the
+     * rulers are world, the shape you are pointing at is world. W/H used to be
+     * the raw local geometry, so a shape inside a group scaled to 200% measured
+     * 80 on the canvas and reported 40 here, with nothing on the panel to
+     * explain the difference (the Scale field shows the node's OWN scale, which
+     * is 100%). Rotation doesn't change it: this is the shape's own size, not
+     * its bounding box, which is what Figma reports too.
+     */
     private getNodeDisplaySize(node: SceneNode, id: number): { w: number; h: number } | null {
         // Groups have no geometry of their own — report their world bounding box
         // (the same rectangle the selection frame draws).
@@ -1772,21 +1781,27 @@ export class UIEngine {
             }
             return null;
         }
-        if (node.geometry.Rect) {
-            return { w: node.geometry.Rect.width, h: node.geometry.Rect.height };
-        }
-        if (node.geometry.Ellipse) {
-            return { w: node.geometry.Ellipse.radius_x * 2, h: node.geometry.Ellipse.radius_y * 2 };
-        }
-        if (node.geometry.Path) {
-            const resolved = this.scene.getResolvedSubpaths(id);
-            const b = this.scene.renderer?.calculatePathBounds({ subpaths: resolved });
-            if (b && b.maxX > b.minX && b.maxY > b.minY) {
-                return { w: b.maxX - b.minX, h: b.maxY - b.minY };
+        const local = (): { w: number; h: number } | null => {
+            if (node.geometry.Rect) {
+                return { w: node.geometry.Rect.width, h: node.geometry.Rect.height };
+            }
+            if (node.geometry.Ellipse) {
+                return {
+                    w: node.geometry.Ellipse.radius_x * 2,
+                    h: node.geometry.Ellipse.radius_y * 2,
+                };
+            }
+            if (node.geometry.Path) {
+                const resolved = this.scene.getResolvedSubpaths(id);
+                const b = this.scene.renderer?.calculatePathBounds({ subpaths: resolved });
+                if (b && b.maxX > b.minX && b.maxY > b.minY) {
+                    return { w: b.maxX - b.minX, h: b.maxY - b.minY };
+                }
             }
             return null;
-        }
-        return null;
+        };
+        const l = local();
+        return l ? this.scene.localSizeToWorld(id, l.w, l.h) : null;
     }
 
     /** Convert a world-space translation delta into the delta to add to the
@@ -1855,7 +1870,13 @@ export class UIEngine {
                     }
                 }
                 if (newW > 0 && newH > 0) {
-                    this.scene.resizeNode(id, newW, newH);
+                    // The fields are world-space; a group is sized in world
+                    // units, everything else in its own geometry space.
+                    const size =
+                        node.node_type === 'Group'
+                            ? { w: newW, h: newH }
+                            : this.scene.worldSizeToLocal(id, newW, newH);
+                    this.scene.resizeNode(id, size.w, size.h);
                 }
             }
 

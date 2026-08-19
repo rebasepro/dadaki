@@ -715,6 +715,31 @@ export class WasmScene {
         return { dx: (d * wdx - b * wdy) / det, dy: (-c * wdx + a * wdy) / det };
     }
 
+    /**
+     * A world-space SIZE expressed in the node's own geometry space.
+     *
+     * Geometry (a rect's width, an ellipse's radii) is written in local units,
+     * while everything a person reads off the canvas — the rulers, the
+     * selection frame, the pointer — is world. The two are the same number only
+     * while nothing above the node is scaled. Groups are the exception and must
+     * not use this: the engine sizes those in world units, by scaling their
+     * transform.
+     */
+    worldSizeToLocal(id: number, w: number, h: number): { w: number; h: number } {
+        const t = this.getTransform(id); // world matrix, row-major
+        const sx = Math.hypot(t[0], t[3]) || 1;
+        const sy = Math.hypot(t[1], t[4]) || 1;
+        return { w: w / sx, h: h / sy };
+    }
+
+    /** The world-space size of a local one — the inverse of `worldSizeToLocal`. */
+    localSizeToWorld(id: number, w: number, h: number): { w: number; h: number } {
+        const t = this.getTransform(id);
+        const sx = Math.hypot(t[0], t[3]) || 1;
+        const sy = Math.hypot(t[1], t[4]) || 1;
+        return { w: w * sx, h: h * sy };
+    }
+
     /** Move a node by a WORLD-space delta, whatever its parent's transform. */
     moveNodeWorld(id: number, wdx: number, wdy: number) {
         const { dx, dy } = this.worldDeltaToLocal(id, wdx, wdy);
