@@ -3910,18 +3910,6 @@ impl Engine {
                 if !node.visible { continue; }
                 if node.locked { continue; }
                 
-                let global_transform = Mat3::from_cols_array(transform_bytes);
-                let inv_transform = global_transform.inverse();
-                let local_point = inv_transform.transform_point2(Vec2::new(x, y));
-
-                // Local-space tolerance: HIT_TOLERANCE is in world pixels, so
-                // divide by the transform's average scale factor.
-                let local_tol = {
-                    let det = (global_transform.x_axis.x * global_transform.y_axis.y
-                        - global_transform.x_axis.y * global_transform.y_axis.x).abs();
-                    HIT_TOLERANCE / det.sqrt().max(1e-6)
-                };
-
                 // A Group is never hit as itself — its leaves are — with one
                 // exception: a Boolean Group IS a leaf as far as the canvas is
                 // concerned. It paints one resolved outline and its operands are
@@ -3929,43 +3917,112 @@ impl Engine {
                 // don't reach this loop at all (collect_draw_order stops at the
                 // group), which is what keeps a click in a subtract's hole, or
                 // beside an intersection, from selecting the shape.
-                if node.node_type == NodeType::Group {
-                    if node.boolean_op.is_some()
-                        && path_hit(&node.bool_cache, &node.style, local_point, local_tol)
-                    {
-                        return Some(id);
-                    }
+                if node.node_type == NodeType::Group && node.boolean_op.is_none() {
                     continue;
                 }
 
-                let is_hit = match node.geometry {
-                    Geometry::Rect { width, height } | Geometry::Image { width, height, .. } => {
-                        local_point.x >= 0.0 && local_point.x <= width &&
-                        local_point.y >= 0.0 && local_point.y <= height
-                    },
-                    Geometry::Ellipse { radius_x, radius_y } => {
-                        let dx = local_point.x;
-                        let dy = local_point.y;
-                        (dx * dx) / (radius_x * radius_x) + (dy * dy) / (radius_y * radius_y) <= 1.0
-                    },
-                    Geometry::Path { ref subpaths, .. } => {
-                        // Precise geometric test against the actual outline.
-                        path_hit(subpaths, &node.style, local_point, local_tol)
-                    },
-                    Geometry::Text { ref content, font_size, line_height, text_align, .. } => {
-                        let [x0, y0, x1, y1] =
-                            text_local_bbox(content, font_size, line_height, text_align);
-                        local_point.x >= x0 && local_point.x <= x1 &&
-                        local_point.y >= y0 && local_point.y <= y1
-                    },
-                };
-
-                if is_hit {
+                // Masked-away artwork is not painted, so it is not clickable
+                // either — see `masked_away`.
+                if self.point_in_geometry(id, x, y) && !self.masked_away(id, x, y) {
                     return Some(id);
                 }
             }
         }
         None
+    }
+
+    /// Does the world point land on this node's own painted geometry?
+    ///
+    /// Ignores visibility, locking and masks — those are the caller's business.
+    /// A Boolean Group answers for its resolved outline; a plain group paints
+    /// nothing itself, so it answers for any visible descendant, which is what
+    /// lets a group be used as a mask shape.
+    fn point_in_geometry(&self, id: u32, x: f32, y: f32) -> bool {
+        let (node, transform_bytes) =
+            match (self.scene.nodes.get(&id), self.global_transforms.get(&id)) {
+                (Some(n), Some(t)) => (n, t),
+                _ => return false,
+            };
+        let global_transform = Mat3::from_cols_array(transform_bytes);
+        let local_point = global_transform.inverse().transform_point2(Vec2::new(x, y));
+
+        // Local-space tolerance: HIT_TOLERANCE is in world pixels, so
+        // divide by the transform's average scale factor.
+        let local_tol = {
+            let det = (global_transform.x_axis.x * global_transform.y_axis.y
+                - global_transform.x_axis.y * global_transform.y_axis.x)
+                .abs();
+            HIT_TOLERANCE / det.sqrt().max(1e-6)
+        };
+
+        if node.node_type == NodeType::Group {
+            if node.boolean_op.is_some() {
+                return path_hit(&node.bool_cache, &node.style, local_point, local_tol);
+            }
+            return node.children.iter().any(|&c| {
+                self.scene.nodes.get(&c).map_or(false, |n| n.visible)
+                    && self.point_in_geometry(c, x, y)
+            });
+        }
+
+        match node.geometry {
+            Geometry::Rect { width, height } | Geometry::Image { width, height, .. } => {
+                local_point.x >= 0.0 && local_point.x <= width &&
+                local_point.y >= 0.0 && local_point.y <= height
+            },
+            Geometry::Ellipse { radius_x, radius_y } => {
+                let dx = local_point.x;
+                let dy = local_point.y;
+                (dx * dx) / (radius_x * radius_x) + (dy * dy) / (radius_y * radius_y) <= 1.0
+            },
+            Geometry::Path { ref subpaths, .. } => {
+                // Precise geometric test against the actual outline.
+                path_hit(subpaths, &node.style, local_point, local_tol)
+            },
+            Geometry::Text { ref content, font_size, line_height, text_align, .. } => {
+                let [x0, y0, x1, y1] =
+                    text_local_bbox(content, font_size, line_height, text_align);
+                local_point.x >= x0 && local_point.x <= x1 &&
+                local_point.y >= y0 && local_point.y <= y1
+            },
+        }
+    }
+
+    /// True when the point falls outside a mask that covers this node.
+    ///
+    /// What a mask paints is content ∩ mask; everything else is simply not
+    /// there. The hit test used to ignore that entirely, so an image masked
+    /// down to a small circle kept its whole rectangle clickable: clicks on
+    /// empty canvas selected and dragged it, and anything sitting behind it
+    /// could not be reached at all. Ancestors are walked too — a masked group
+    /// clips everything inside it, however deep.
+    fn masked_away(&self, id: u32, x: f32, y: f32) -> bool {
+        let mut current = Some(id);
+        while let Some(n) = current {
+            if let Some(mask) = self.mask_covering(n) {
+                if !self.point_in_geometry(mask, x, y) {
+                    return true;
+                }
+            }
+            current = self.scene.nodes.get(&n).and_then(|node| node.parent);
+        }
+        false
+    }
+
+    /// The mask a node is under: the nearest preceding sibling that acts as
+    /// one, mirroring the spans `write_siblings_with_masks` opens.
+    fn mask_covering(&self, id: u32) -> Option<u32> {
+        let node = self.scene.nodes.get(&id)?;
+        if node.is_mask {
+            return None; // a mask defines the coverage, it isn't clipped by it
+        }
+        let parent = self.scene.nodes.get(&node.parent?)?;
+        let idx = parent.children.iter().position(|&c| c == id)?;
+        parent.children[..idx]
+            .iter()
+            .rev()
+            .find(|&&s| self.acts_as_mask(s))
+            .copied()
     }
 
     /// Group-aware hit test: finds the deepest leaf hit, then walks up the parent
@@ -7706,6 +7763,45 @@ mod tests {
         assert_eq!(node.transform.x, 40.0, "paste in place keeps the position");
         assert_eq!(node.transform.y, 60.0);
         assert_ne!(pasted[0], id, "the pasted node gets a fresh id");
+    }
+
+    /// A mask hides artwork; the hit test has to agree.
+    ///
+    /// An image masked down to a small circle used to keep its whole rectangle
+    /// clickable: clicks on empty canvas selected and dragged it, and anything
+    /// behind it could not be reached at all.
+    #[test]
+    fn masked_away_artwork_is_not_clickable() {
+        let mut engine = Engine::new();
+        let behind = engine.add_rect(60.0, 60.0, 40.0, 40.0);
+        let mask = engine.add_rect(0.0, 0.0, 20.0, 20.0); // bottom of the group
+        let art = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        engine.group_nodes(&format!("[{mask},{art}]"));
+        engine.set_node_is_mask(mask, true);
+
+        assert_eq!(engine.hit_test(10.0, 10.0), Some(art), "where it is painted");
+        assert_eq!(engine.hit_test(30.0, 10.0), None, "and nowhere the mask isn't");
+        assert_eq!(engine.hit_test(80.0, 80.0), Some(behind), "what is behind is reachable");
+
+        // A mask that isn't drawn masks nothing — the same rule the renderer
+        // uses to decide whether to open the span at all.
+        engine.set_node_visible(mask, false);
+        assert_eq!(engine.hit_test(30.0, 10.0), Some(art));
+    }
+
+    /// A masked group clips everything inside it, however deep.
+    #[test]
+    fn a_masked_group_clips_its_whole_subtree() {
+        let mut engine = Engine::new();
+        let mask = engine.add_rect(0.0, 0.0, 20.0, 20.0);
+        let a = engine.add_rect(0.0, 0.0, 100.0, 100.0);
+        let b = engine.add_rect(50.0, 0.0, 40.0, 40.0);
+        let inner = engine.group_nodes(&format!("[{a},{b}]"));
+        engine.group_nodes(&format!("[{mask},{inner}]"));
+        engine.set_node_is_mask(mask, true);
+
+        assert_eq!(engine.hit_test(10.0, 10.0), Some(a));
+        assert_eq!(engine.hit_test(60.0, 10.0), None, "b is masked away with the rest");
     }
 
     /// Every line of a paragraph is clickable, and only where its glyphs are.
