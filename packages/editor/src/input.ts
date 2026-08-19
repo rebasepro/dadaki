@@ -1,6 +1,7 @@
 import { type AlignMode, alignSelection } from './align';
 import { blendNodes } from './blend';
 import { type BoolOp, nodeToWorldPath, pathToSubpaths, transformSubpaths } from './boolean_ops';
+import { cornerRadiusHandles, grabsCornerHandle } from './corner_handles';
 import type { DocumentManager } from './document_manager';
 import { computeEqualSpacing } from './equal_spacing';
 import { adoptEmbeddedFonts, FileIO } from './file_io';
@@ -1410,10 +1411,16 @@ export class InputManager {
                     this.nudgeTimer = null;
                 }, 500);
 
-                // moveNodes performs the (transform-only) invalidation, and
+                // A nudge is a step across the CANVAS — one world unit, the
+                // direction the arrow points — for a shape at the root and for
+                // one inside a group scaled to 200% alike. Sent as a local
+                // delta it was multiplied by whatever scale the group carried,
+                // and turned diagonal under a rotated one.
+                //
+                // moveNodesWorld performs the (transform-only) invalidation, and
                 // batches so a large selection stays linear rather than
                 // re-unioning each shared group ancestor once per node.
-                this.scene.moveNodes(selection, dx, dy);
+                this.scene.moveNodesWorld(selection, dx, dy);
                 this.ui.syncWithSelection();
             }
         }
@@ -3508,25 +3515,23 @@ export class InputManager {
      * For a delta *vector* (not a point) we only invert the linear part (2×2
      * upper-left of the 3×3 matrix), ignoring translation.
      */
+    /**
+     * A world-space size expressed in the node's own geometry space.
+     *
+     * Groups are excluded by their caller: the engine sizes those in world
+     * units, by scaling their transform. For everything else the geometry is
+     * written directly, so the scale accumulated down the parent chain (and the
+     * node's own) has to come back out first.
+     */
+    private worldSizeToLocal(id: number, w: number, h: number): { w: number; h: number } {
+        const t = this.scene.getTransform(id); // world matrix, row-major
+        const sx = Math.hypot(t[0], t[3]) || 1;
+        const sy = Math.hypot(t[1], t[4]) || 1;
+        return { w: w / sx, h: h / sy };
+    }
+
     worldDeltaToLocal(nodeId: number, wdx: number, wdy: number): { dx: number; dy: number } {
-        const parentId = this.scene.engine!.get_node_parent(nodeId);
-        if (parentId < 0) {
-            // Node is at root level — world space == local space
-            return { dx: wdx, dy: wdy };
-        }
-        // getTransform returns the row-major global transform:
-        //   [scaleX, skewX, transX,  skewY, scaleY, transY,  p0, p1, p2]
-        const t = this.scene.getTransform(parentId);
-        const a = t[0],
-            b = t[1]; // row0: scaleX, skewX
-        const d = t[3],
-            e = t[4]; // row1: skewY,  scaleY
-        const det = a * e - b * d;
-        if (Math.abs(det) < 1e-10) return { dx: wdx, dy: wdy };
-        return {
-            dx: (e * wdx - b * wdy) / det,
-            dy: (-d * wdx + a * wdy) / det,
-        };
+        return this.scene.worldDeltaToLocal(nodeId, wdx, wdy);
     }
 
     /** Flip every selected node in place (⇧H / ⇧V and the context bar flip buttons). */
@@ -3602,14 +3607,29 @@ export class InputManager {
      * same end state as the nesting bug, reached with ⌘D. In a plain group it was
      * milder but no less wrong: the copy left the group it was made from.
      *
-     * MUST run inside the caller's transaction so the pair stays one undo step.
+     * MUST run inside the caller's transaction (⌘D) or gesture (a clone-drag) —
+     * it reparents through the engine directly, so the caller owns the undo step
+     * and the cache invalidation.
      */
     private keepCopyBesideOriginal(copyId: number, originalId: number) {
         const parent = this.scene.getNodeParent(originalId);
         if (parent === -1) return; // the original is at the root; so is the copy
         const sibs = Array.from(this.scene.getNodeChildren(parent)).filter((c) => c !== copyId);
         const at = sibs.indexOf(originalId);
-        this.scene.reorderNodes([copyId], parent, at === -1 ? sibs.length : at + 1);
+        // The clone was made at the root, so its local transform is its original's
+        // read against the root — and `reorder_nodes` preserves a node's WORLD
+        // position, which would bake that misreading in for good. Under a rotated
+        // or scaled group that is what turned a copy into an unrotated shape
+        // sitting somewhere its original never was. Carry the local transform
+        // across instead: the copy occupies the same place in the parent's own
+        // space as the original, offset by however far the clone was nudged.
+        const local = this.scene.engine!.get_node_transform_components(copyId);
+        this.scene.engine!.reorder_nodes(
+            JSON.stringify([copyId]),
+            parent,
+            at === -1 ? sibs.length : at + 1,
+        );
+        this.scene.engine!.set_node_transform_components(copyId, local);
     }
 
     deleteSelection() {
@@ -5930,11 +5950,22 @@ export class InputManager {
                         );
                         this.scene.engine!.set_text_content(id, tg.content, newSize);
                     } else {
-                        this.scene.engine!.resize_node(
-                            id,
-                            (b[2] - b[0]) * scaleX,
-                            (b[3] - b[1]) * scaleY,
-                        );
+                        // `resize_node` writes a leaf's LOCAL geometry, while
+                        // these bounds are world — the same number only while
+                        // the node's chain is unscaled. Inside a group scaled to
+                        // 200%, or on a shape set to 200% in the panel, the
+                        // world size handed over was applied as a local one and
+                        // the shape jumped to twice the size of the drag,
+                        // running away from the pointer that was sizing it.
+                        // (Groups are the exception: `resize_node` sizes those
+                        // in world units, by scaling their transform.)
+                        const worldW = (b[2] - b[0]) * scaleX;
+                        const worldH = (b[3] - b[1]) * scaleY;
+                        const size =
+                            this.scene.getNodeType(id) === 3
+                                ? { w: worldW, h: worldH }
+                                : this.worldSizeToLocal(id, worldW, worldH);
+                        this.scene.engine!.resize_node(id, size.w, size.h);
                     }
                     const nb = this.scene.getNodeBounds(id);
                     const dx = targetX - nb[0];
@@ -6089,6 +6120,17 @@ export class InputManager {
                         // off the axis the constraint had just locked. The paste
                         // path takes it back off for the same reason.
                         this.scene.engine!.move_node(newId, -20, -20);
+                        // ...and it hands every clone to the ROOT, which for a
+                        // shape inside a group means ⌥-dragging a copy of it
+                        // quietly lifted the copy out of the group: out of its
+                        // z-order, out of its mask, out of a Live Paint group's
+                        // region network — and, under a rotated or scaled group,
+                        // landing somewhere else entirely, since the local
+                        // transform it kept was measured against a parent it no
+                        // longer had. ⌘D already files its copies beside their
+                        // originals; a clone-drag is the same duplicate with the
+                        // pointer choosing where it lands.
+                        this.keepCopyBesideOriginal(newId, id);
                         this.scene.engine!.select_node(newId, true);
                         moveTargets.push(newId);
                     }
@@ -7217,42 +7259,9 @@ export class InputManager {
         const lx = ia * pos.x + ib * pos.y + itx;
         const ly = ic * pos.x + id_ * pos.y + ity;
 
-        const visualMin = 14 / this.renderer.zoom;
-        const rx = Math.min(Math.max(radius, visualMin), rect.width / 2);
-        const ry = Math.min(Math.max(radius, visualMin), rect.height / 2);
-
-        // The grab zones may not reach the middle of the shape.
-        //
-        // Each corner zone is a square of `threshold` about its handle, and the
-        // handles sit `rx`/`ry` inside the edges. On a small rectangle those four
-        // squares TILE THE WHOLE INTERIOR: a 40×40 rect put its handles at 14
-        // with a 10-unit reach, so every point inside was within reach of one.
-        // The corner-radius drag is checked before selection, so a small selected
-        // rectangle could not be moved, could not be shift-deselected, and did
-        // not respond to a click — every gesture became a radius drag. It was
-        // reported as "impossible to deselect a single shape".
-        //
-        // `room` is what is left between a handle and the shape's centre. Where
-        // there is none, the shape is too small to carry a distinct corner
-        // control and it gets none, which is also what a person would expect:
-        // nothing that small shows a handle worth aiming at.
-        const room = Math.min(rect.width / 2 - rx, rect.height / 2 - ry);
-        if (room <= 0) return null;
-
-        const handlePos = [
-            [rx, ry],
-            [rect.width - rx, ry],
-            [rect.width - rx, rect.height - ry],
-            [rx, rect.height - ry],
-        ];
-
-        const threshold = Math.min(10 / this.renderer.zoom, room);
-        for (const [hx, hy] of handlePos) {
-            if (Math.abs(lx - hx) < threshold && Math.abs(ly - hy) < threshold) {
-                return { nodeId: id };
-            }
-        }
-        return null;
+        const handles = cornerRadiusHandles(rect.width, rect.height, radius, this.renderer.zoom);
+        if (!handles) return null;
+        return grabsCornerHandle(handles, lx, ly) ? { nodeId: id } : null;
     }
 
     /**

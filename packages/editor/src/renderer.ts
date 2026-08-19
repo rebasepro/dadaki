@@ -14,6 +14,7 @@ type OutlinePt = { x: number; y: number; cp1: number[]; cp2: number[] };
 
 import { adaptiveTileSources, maxTileScale, rasterizeAdaptiveTile } from './adaptive_tiles';
 import { appendSubpathsToPath, invertAffine, nodeToWorldPath } from './boolean_ops';
+import { cornerRadiusHandles } from './corner_handles';
 import { dashIntervals } from './dash';
 import { neighborGaps } from './equal_spacing';
 import {
@@ -4529,33 +4530,26 @@ export class Renderer {
                 node.geometry.Rect.width > 0 &&
                 node.geometry.Rect.height > 0
             ) {
-                const style = node.style;
                 const rect = node.geometry.Rect;
-                const radius = style.corner_radius || 0;
-                const transform = this.scene.getTransform(id);
-
-                canvas.save();
-                canvas.concat(transform);
-
-                // Draw 4 handles inside the corners
-                // Use a minimum visual offset so they are always draggable
-                const visualMin = 14 / this.zoom;
-                const rx = Math.min(Math.max(radius, visualMin), rect.width / 2);
-                const ry = Math.min(Math.max(radius, visualMin), rect.height / 2);
-
-                const handlePos = [
-                    [rx, ry],
-                    [rect.width - rx, ry],
-                    [rect.width - rx, rect.height - ry],
-                    [rx, rect.height - ry],
-                ];
-
-                const hSize = 3.5 / this.zoom;
-                for (const [hx, hy] of handlePos) {
-                    canvas.drawCircle(hx, hy, hSize, op.selHandleFill);
-                    canvas.drawCircle(hx, hy, hSize, op.selHandleStroke);
+                // Same rule the press uses, so a dot is drawn exactly where one
+                // can be grabbed — and a shape too small for the control shows
+                // none rather than four dots that fight its drag.
+                const handles = cornerRadiusHandles(
+                    rect.width,
+                    rect.height,
+                    node.style.corner_radius || 0,
+                    this.zoom,
+                );
+                if (handles) {
+                    canvas.save();
+                    canvas.concat(this.scene.getTransform(id));
+                    const hSize = 3.5 / this.zoom;
+                    for (const [hx, hy] of handles.positions) {
+                        canvas.drawCircle(hx, hy, hSize, op.selHandleFill);
+                        canvas.drawCircle(hx, hy, hSize, op.selHandleStroke);
+                    }
+                    canvas.restore();
                 }
-                canvas.restore();
             }
         }
 

@@ -1790,19 +1790,10 @@ export class UIEngine {
     }
 
     /** Convert a world-space translation delta into the delta to add to the
-     *  node's LOCAL translation, undoing the parent's linear transform. For a
-     *  top-level node (identity parent) this is a no-op passthrough. */
+     *  node's LOCAL translation, undoing the parent's linear transform. */
     private worldDeltaToLocal(id: number, wdx: number, wdy: number): [number, number] {
-        const parentId = this.scene.getNodeParent(id);
-        if (parentId < 0) return [wdx, wdy]; // top-level: parent is identity
-        const p = this.scene.getTransform(parentId); // row-major global
-        const a = p[0],
-            b = p[1],
-            c = p[3],
-            d = p[4];
-        const det = a * d - b * c;
-        if (Math.abs(det) < 1e-9) return [wdx, wdy];
-        return [(d * wdx - b * wdy) / det, (-c * wdx + a * wdy) / det];
+        const { dx, dy } = this.scene.worldDeltaToLocal(id, wdx, wdy);
+        return [dx, dy];
     }
 
     updateTransform(pushHistory: boolean = true) {

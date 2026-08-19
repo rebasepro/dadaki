@@ -691,6 +691,52 @@ export class WasmScene {
         this.invalidateCacheTransformOnly(list);
     }
 
+    /**
+     * A world-space delta expressed in `id`'s own local space.
+     *
+     * `move_node` and friends translate a node by its LOCAL transform, which is
+     * the same vector only while nothing above it is rotated or scaled. Every
+     * caller that measured a delta off world bounds — align, distribute, an
+     * arrow-key nudge — was handing a world vector to a local mover, so inside
+     * a group scaled to 200% a 1px nudge moved 2px and "align top" overshot the
+     * edge it was aligning to by the same factor.
+     */
+    worldDeltaToLocal(id: number, wdx: number, wdy: number): { dx: number; dy: number } {
+        const parentId = this.engine!.get_node_parent(id);
+        if (parentId < 0) return { dx: wdx, dy: wdy }; // at the root: same space
+        // Row-major global: [scaleX, skewX, transX, skewY, scaleY, transY, …]
+        const t = this.getTransform(parentId);
+        const a = t[0],
+            b = t[1],
+            c = t[3],
+            d = t[4];
+        const det = a * d - b * c;
+        if (Math.abs(det) < 1e-10) return { dx: wdx, dy: wdy };
+        return { dx: (d * wdx - b * wdy) / det, dy: (-c * wdx + a * wdy) / det };
+    }
+
+    /** Move a node by a WORLD-space delta, whatever its parent's transform. */
+    moveNodeWorld(id: number, wdx: number, wdy: number) {
+        const { dx, dy } = this.worldDeltaToLocal(id, wdx, wdy);
+        this.moveNode(id, dx, dy);
+    }
+
+    /** Move many nodes by one shared WORLD-space delta, in a single engine
+     *  call. Each node's delta is converted in its own parent's space. */
+    moveNodesWorld(ids: ArrayLike<number>, wdx: number, wdy: number) {
+        const list = Array.from(ids);
+        if (list.length === 0) return;
+        this.engine!.move_nodes(
+            JSON.stringify(
+                list.map((id) => {
+                    const { dx, dy } = this.worldDeltaToLocal(id, wdx, wdy);
+                    return { id, dx, dy };
+                }),
+            ),
+        );
+        this.invalidateCacheTransformOnly(list);
+    }
+
     /** Call after a drag operation is complete to save state for undo. */
     saveMoveHistory() {
         this.saveHistory();

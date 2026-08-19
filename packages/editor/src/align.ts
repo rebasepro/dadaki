@@ -64,7 +64,10 @@ export function alignSelection(scene: WasmScene, ids: number[], mode: AlignMode)
                 break;
         }
         if (dx !== 0 || dy !== 0) {
-            scene.moveNode(it.id, dx, dy);
+            // The deltas above are measured off WORLD bounds, so they have to
+            // be moved in world space — inside a scaled or rotated group a raw
+            // local move lands somewhere else entirely.
+            scene.moveNodeWorld(it.id, dx, dy);
         }
     }
     scene.invalidateCache();
@@ -93,8 +96,8 @@ export function distributeSelection(scene: WasmScene, ids: number[], axis: 'h' |
     for (const it of sorted) {
         const delta = cursor - min(it);
         if (Math.abs(delta) > 0.01) {
-            if (axis === 'h') scene.moveNode(it.id, delta, 0);
-            else scene.moveNode(it.id, 0, delta);
+            if (axis === 'h') scene.moveNodeWorld(it.id, delta, 0);
+            else scene.moveNodeWorld(it.id, 0, delta);
         }
         cursor += size(it) + gap;
     }

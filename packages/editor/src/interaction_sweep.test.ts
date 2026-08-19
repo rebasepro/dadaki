@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import init, { Engine, History } from '../engine/pkg/engine';
+import { alignSelection } from './align';
 import { InputManager } from './input';
 import type { Renderer } from './renderer';
 import type { UIEngine } from './ui';
@@ -488,6 +489,109 @@ describe('sweep: keyboard and modes', () => {
     });
 });
 
+describe('sweep: working inside a group that has been scaled or turned', () => {
+    const key = (input: InputManager, k: string) =>
+        input.onKeyDown({
+            key: k,
+            code: k,
+            shiftKey: false,
+            metaKey: false,
+            altKey: false,
+            ctrlKey: false,
+            target: document.body,
+            preventDefault() {},
+            stopPropagation() {},
+        } as unknown as KeyboardEvent);
+
+    /** Two rects in a group scaled to 200%, so world units are twice local ones. */
+    function scaledGroup() {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const a = e.add_rect(0, 0, 40, 40);
+        const b = e.add_rect(60, 20, 40, 40);
+        const g = e.group_nodes(JSON.stringify([a, b]));
+        scene.setNodeTransformComponents(g, {
+            x: 0,
+            y: 0,
+            scale_x: 2,
+            scale_y: 2,
+            rotation_deg: 0,
+            skew_x_deg: 0,
+            skew_y_deg: 0,
+        });
+        return { scene, e, a, b, g };
+    }
+
+    it('an arrow key steps one unit across the canvas, not one times the scale', () => {
+        const { scene, e, a } = scaledGroup();
+        const input = makeInput(scene);
+        e.select_node(a, false);
+        key(input, 'ArrowRight');
+        expect(Array.from(scene.getNodeBounds(a))).toEqual([1, 0, 81, 80]);
+    });
+
+    it('an arrow key steps along the canvas axes inside a rotated group', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const [a, b] = threeRects(scene);
+        const g = e.group_nodes(JSON.stringify([a, b]));
+        scene.rotateNode(g, Math.PI / 6);
+        const before = Array.from(scene.getNodeBounds(a));
+        const input = makeInput(scene);
+        e.select_node(a, false);
+        key(input, 'ArrowRight');
+        const after = Array.from(scene.getNodeBounds(a));
+        expect(after[0] - before[0]).toBeCloseTo(1, 5);
+        expect(after[1] - before[1]).toBeCloseTo(0, 5); // not diagonal
+    });
+
+    it('a resize handle follows the pointer inside a scaled group', () => {
+        // resize_node writes LOCAL geometry; the drag measures WORLD bounds. The
+        // world size was handed over unconverted, so the shape grew by the
+        // group's scale on top of the drag and ran away from the cursor.
+        const { scene, e, a } = scaledGroup();
+        const input = makeInput(scene);
+        e.select_node(a, false);
+        expect(Array.from(scene.getNodeBounds(a))).toEqual([0, 0, 80, 80]);
+        input.onMouseDown(mouse(80, 80)); // the bottom-right handle
+        input.onMouseMove(mouse(120, 120));
+        input.onMouseMove(mouse(160, 160));
+        input.onMouseUp(mouse(160, 160));
+        expect(Array.from(scene.getNodeBounds(a))).toEqual([0, 0, 160, 160]);
+    });
+
+    it('align and distribute are exact inside a scaled group', () => {
+        const { scene, a, b } = scaledGroup();
+        alignSelection(scene, [a, b], 'top');
+        expect(Array.from(scene.getNodeBounds(a))[1]).toBe(0);
+        expect(Array.from(scene.getNodeBounds(b))[1]).toBe(0);
+    });
+});
+
+describe('sweep: the controls drawn on top of a shape', () => {
+    it('a rect is dragged by its middle, not rounded by it', () => {
+        // The corner-radius grab zones used to be three times the size of the
+        // dots that advertise them and met in the middle: on a 40×40 rect every
+        // press but the exact centre rounded the corners instead of moving it.
+        const scene = makeScene();
+        const r = scene.engine!.add_rect(0, 0, 40, 40);
+        const input = makeInput(scene);
+        click(input, 20, 20);
+        drag(input, 20, 32, 20, 132); // inside the shape, clear of the handles
+        expect(Array.from(scene.getNodeBounds(r))).toEqual([0, 100, 40, 140]);
+        expect(scene.getNode(r)?.style.corner_radius ?? 0).toBe(0);
+    });
+
+    it('...but a press on a corner handle still rounds it', () => {
+        const scene = makeScene();
+        const r = scene.engine!.add_rect(0, 0, 40, 40);
+        const input = makeInput(scene);
+        click(input, 20, 20);
+        drag(input, 14, 14, 20, 20); // the handle itself, 14 in from the corner
+        expect(scene.getNode(r)?.style.corner_radius ?? 0).toBeGreaterThan(0);
+    });
+});
+
 describe('sweep: entering a group and painting', () => {
     it('double-clicking a group selects the member under the cursor', () => {
         const scene = makeScene();
@@ -532,6 +636,44 @@ describe('sweep: entering a group and painting', () => {
         expect(sel(scene)).toEqual([c]);
         click(input, 70, 20); // back to the group: whole group again
         expect(sel(scene)).toEqual([g]);
+    });
+
+    it('an alt-dragged copy stays in the group its original is in', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const [a, b] = threeRects(scene);
+        const g = e.group_nodes(JSON.stringify([a, b]));
+        const input = makeInput(scene);
+        click(input, 20, 20);
+        input.onDoubleClick(mouse(20, 20)); // inside the group
+        drag(input, 20, 20, 20, 220, { altKey: true });
+        const copy = sel(scene)[0];
+        expect(copy).not.toBe(a);
+        expect(scene.getNodeParent(copy)).toBe(g);
+        expect(Array.from(scene.getRootNodes())).not.toContain(copy);
+    });
+
+    it('a copy made inside a rotated group is still rotated', () => {
+        // duplicate_node hands every clone to the root, so the clone's local
+        // transform was being read against the root and then FROZEN there by a
+        // world-preserving reparent: the copy came out unrotated, beside a
+        // rotated original.
+        const scene = makeScene();
+        const e = scene.engine!;
+        const [a, b] = threeRects(scene);
+        const g = e.group_nodes(JSON.stringify([a, b]));
+        scene.rotateNode(g, Math.PI / 6);
+        const wide = (id: number) => {
+            const [x0, , x1] = Array.from(scene.getNodeBounds(id));
+            return Math.round((x1 - x0) * 100) / 100;
+        };
+        const rotatedWidth = wide(a); // a 40×40 square turned 30° spans 54.64
+        e.select_node(a, false);
+        const input = makeInput(scene);
+        input.duplicateSelection();
+        const copy = sel(scene)[0];
+        expect(scene.getNodeParent(copy)).toBe(g);
+        expect(wide(copy)).toBe(rotatedWidth);
     });
 
     it('the bucket paints the region under the click, not the shape', () => {
