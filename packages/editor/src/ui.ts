@@ -1244,8 +1244,29 @@ export class UIEngine {
             // already closed out here; the pen was simply left out. Commit it on
             // the same terms Escape uses: placed points are real geometry, so
             // they are finished, never silently dropped.
-            if (toolId !== 'pen' && im.currentPathPoints.length > 0) im.finalizePenPath();
+            //
+            // Including when the tool being armed IS the pen. Reaching for a
+            // tool means "start with this", and the answer cannot depend on what
+            // happens to be half-drawn: pressing P with a path in progress has
+            // to leave you where pressing P from a standing start leaves you —
+            // holding the pen, with nothing attached to the cursor. It used to
+            // be excluded, so P mid-path did nothing and the next click ran a
+            // segment back to the shape you thought you had put down.
+            //
+            // Every other stateful tool already works this way: the text overlay
+            // above commits unconditionally, node editing exits unconditionally.
+            // The pen was the one exception.
+            if (im.currentPathPoints.length > 0) im.finalizePenPath();
             if (im.editingNodeId !== null) im.exitEditMode();
+
+            // Re-assert the tool the user asked for. Finishing a path one-shots
+            // back to Selection — right when the pen finishes on its own, wrong
+            // here, where the finish happened BECAUSE someone reached for a
+            // tool. Without this, pressing P mid-path committed the shape and
+            // then quietly handed back the arrow.
+            this.activeTool = toolId;
+            this.toolLocked = lock;
+            this.toolbar?.sync(toolId);
         }
 
         // Set cursor on canvas based on tool

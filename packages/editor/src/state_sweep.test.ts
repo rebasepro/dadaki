@@ -27,6 +27,14 @@ beforeAll(async () => {
 });
 beforeEach(() => {
     document.body.innerHTML = '<div id="canvas-container"></div>';
+    // The text overlay measures glyphs through a 2D context to auto-size; jsdom
+    // has none, and without this it throws on the first keystroke.
+    const fakeCtx = {
+        font: '',
+        measureText: (t: string) => ({ width: t.length * 8 }),
+    } as unknown as CanvasRenderingContext2D;
+    HTMLCanvasElement.prototype.getContext = (() =>
+        fakeCtx) as unknown as typeof HTMLCanvasElement.prototype.getContext;
 });
 
 function makeScene(): WasmScene {
@@ -55,6 +63,8 @@ function makeRenderer(): Renderer {
         selectedArtboardId: null,
         artboardHandleHitTest: () => null,
         artboardLabelHitTest: () => null,
+        // Read when a committed path's local bounds are needed.
+        calculatePathBounds: () => ({ x: 0, y: 0, width: 1, height: 1 }),
     } as unknown as Renderer;
 }
 /** A UI stub that behaves like UIEngine where the transitions depend on it. */
@@ -71,8 +81,10 @@ function makeUI(activeTool = 'selection') {
             const im = ui.__im as InputManager | undefined;
             if (!im) return;
             im.commitActiveTextEdit();
-            if (t !== 'pen' && im.currentPathPoints.length > 0) im.finalizePenPath();
+            if (im.currentPathPoints.length > 0) im.finalizePenPath();
             if (im.editingNodeId !== null) im.exitEditMode();
+            ui.activeTool = t;
+            ui.toolLocked = lock;
         },
         __im: undefined as InputManager | undefined,
         getCurrentStyle: () =>
@@ -559,5 +571,108 @@ describe('transitions: nothing is left pointing at a corpse', () => {
         input.deleteSelection();
         for (const id of sel(scene)) expect(e.get_node_type(id)).not.toBeUndefined();
         expect(g).toBeGreaterThan(0);
+    });
+});
+
+describe('states: re-arming a tool means "start fresh with it"', () => {
+    /** The keyboard route, exactly as a person uses it. */
+    const pressTool = (i: InputManager, key: string) => i.onKeyDown(keyEv(key));
+    const roots = (s: WasmScene) => JSON.parse(s.engine!.get_scene_json()).root_nodes;
+
+    it('P with a path in progress commits it and starts a new one', () => {
+        const scene = makeScene();
+        const { input } = makeInput(scene, 'pen');
+        click(input, 0, 0);
+        click(input, 60, 0);
+        click(input, 60, 60);
+
+        pressTool(input, 'p');
+        // Committed, and nothing is attached to the cursor any more.
+        expect(roots(scene).length).toBe(1);
+        expect(input.currentPathPoints.length).toBe(0);
+
+        // The next clicks are a SECOND shape, not a continuation of the first.
+        click(input, 200, 0);
+        click(input, 260, 0);
+        input.onKeyDown(keyEv('Enter'));
+        expect(roots(scene).length).toBe(2);
+    });
+
+    it('P mid-path leaves the same state as P from a standing start', () => {
+        // The rule stated as an equality, since that is what "consistent" means
+        // here: the tool does not remember what it was doing.
+        const fresh = makeScene();
+        const { input: a } = makeInput(fresh, 'selection');
+        a.onKeyDown(keyEv('p'));
+        const standing = { pts: a.currentPathPoints.length, editing: a.editingNodeId };
+
+        const busy = makeScene();
+        const { input: b } = makeInput(busy, 'pen');
+        click(b, 0, 0);
+        click(b, 60, 0);
+        b.onKeyDown(keyEv('p'));
+
+        expect({ pts: b.currentPathPoints.length, editing: b.editingNodeId }).toEqual(standing);
+    });
+
+    it('the same holds for the toolbar, not just the key', () => {
+        const scene = makeScene();
+        const { input, ui } = makeInput(scene, 'pen');
+        click(input, 0, 0);
+        click(input, 60, 0);
+        ui.setActiveTool('pen');
+        expect(input.currentPathPoints.length).toBe(0);
+        expect(roots(scene).length).toBe(1);
+    });
+
+    it('T while editing text commits and opens a fresh box', () => {
+        const scene = makeScene();
+        const { input, ui } = makeInput(scene, 'text');
+        input.onMouseDown(mouse(50, 60));
+        const el = document.querySelector('.text-input-overlay') as HTMLTextAreaElement;
+        el.value = 'first';
+        ui.setActiveTool('text');
+        const texts = roots(scene).filter((id: number) => scene.getNode(id)?.node_type === 'Text');
+        expect(texts.length).toBe(1);
+        expect(scene.getNode(texts[0])?.geometry?.Text?.content).toBe('first');
+    });
+});
+
+describe('states: the re-arm rule holds for every tool, not just the pen', () => {
+    // Stated once as a property. A rule that holds for the tool someone
+    // complained about and nowhere else is not consistency, it is a patch.
+    const TOOLS = ['pen', 'rect', 'ellipse', 'line', 'text', 'pencil'];
+
+    it('re-arming any tool leaves it armed and holds nothing in progress', () => {
+        for (const tool of TOOLS) {
+            const scene = makeScene();
+            const { input, ui } = makeInput(scene, tool);
+            // Put the pen into a half-drawn state where that is possible; for
+            // the others there is nothing to leave behind, and the assertion is
+            // that re-arming is still a no-op rather than a surprise.
+            if (tool === 'pen') {
+                click(input, 0, 0);
+                click(input, 60, 0);
+            }
+            ui.setActiveTool(tool);
+            expect(ui.activeTool, `${tool} should stay armed`).toBe(tool);
+            expect(input.currentPathPoints.length, `${tool} left a path in progress`).toBe(0);
+            expect(input.editingNodeId, `${tool} left node editing open`).toBeNull();
+            expect(
+                document.querySelector('.text-input-overlay'),
+                `${tool} left a text box open`,
+            ).toBeNull();
+        }
+    });
+
+    it('switching between two creation tools never leaves the first one running', () => {
+        const scene = makeScene();
+        const { input, ui } = makeInput(scene, 'pen');
+        click(input, 0, 0);
+        click(input, 60, 0);
+        ui.setActiveTool('rect');
+        expect(ui.activeTool).toBe('rect');
+        expect(input.currentPathPoints.length).toBe(0);
+        expect(JSON.parse(scene.engine!.get_scene_json()).root_nodes.length).toBe(1);
     });
 });
