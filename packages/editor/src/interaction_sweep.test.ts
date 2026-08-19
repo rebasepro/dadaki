@@ -453,6 +453,33 @@ describe('sweep: keyboard and modes', () => {
             stopPropagation() {},
         } as unknown as KeyboardEvent);
 
+    it('] steps a multi-selection forward instead of shuffling it in place', () => {
+        // Nodes move one at a time, so walking the selection back-to-front made
+        // each move undo the one before it: two neighbours stepped past each
+        // other and the stack came out exactly as it started.
+        const scene = makeScene();
+        const [a, b, c] = threeRects(scene);
+        const e = scene.engine!;
+        e.select_node(a, false);
+        e.select_node(b, true);
+        const input = makeInput(scene);
+        key(input, ']');
+        expect(Array.from(scene.getRootNodes())).toEqual([c, a, b]);
+    });
+
+    it('...and the selection keeps its own stacking', () => {
+        const scene = makeScene();
+        const [a, b, c] = threeRects(scene);
+        const e = scene.engine!;
+        e.select_node(b, false);
+        e.select_node(c, true); // already the top two
+        const input = makeInput(scene);
+        key(input, ']');
+        expect(Array.from(scene.getRootNodes())).toEqual([a, b, c]);
+        key(input, '[');
+        expect(Array.from(scene.getRootNodes())).toEqual([b, c, a]);
+    });
+
     it('cmd-A selects everything and Escape clears it', () => {
         const scene = makeScene();
         const [a, b, c] = threeRects(scene);

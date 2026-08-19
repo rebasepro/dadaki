@@ -572,25 +572,19 @@ export class InputManager {
         if (selection.length === 0) return;
 
         switch (action) {
+            // Same restacking rules as the ] and [ keys — order of travel and
+            // the selection moving as a block.
             case 'bring-to-front':
-                this.scene.transaction(() => {
-                    for (const id of selection) this.scene.bringToFront(id);
-                });
+                this.scene.transaction(() => this.restack('forward', true));
                 break;
             case 'bring-forward':
-                this.scene.transaction(() => {
-                    for (const id of selection) this.scene.bringForward(id);
-                });
+                this.scene.transaction(() => this.restack('forward', false));
                 break;
             case 'send-backward':
-                this.scene.transaction(() => {
-                    for (const id of selection) this.scene.sendBackward(id);
-                });
+                this.scene.transaction(() => this.restack('backward', false));
                 break;
             case 'send-to-back':
-                this.scene.transaction(() => {
-                    for (const id of selection) this.scene.sendToBack(id);
-                });
+                this.scene.transaction(() => this.restack('backward', true));
                 break;
             case 'duplicate':
                 this.duplicateSelection();
@@ -1326,22 +1320,10 @@ export class InputManager {
 
         // Z-ordering: ]/[ = step forward/backward, Cmd+]/Cmd+[ = front/back
         if (e.key === ']') {
-            const selection = this.scene.engine!.get_selection();
-            if (e.metaKey || e.ctrlKey) {
-                for (const id of selection) this.scene.bringToFront(id);
-            } else {
-                for (const id of selection) this.scene.bringForward(id);
-            }
-            this.ui.updateLayerList();
+            this.restack('forward', e.metaKey || e.ctrlKey);
         }
         if (e.key === '[') {
-            const selection = this.scene.engine!.get_selection();
-            if (e.metaKey || e.ctrlKey) {
-                for (const id of selection) this.scene.sendToBack(id);
-            } else {
-                for (const id of selection) this.scene.sendBackward(id);
-            }
-            this.ui.updateLayerList();
+            this.restack('backward', e.metaKey || e.ctrlKey);
         }
 
         // Cmd+D / Ctrl+D: duplicate selected nodes
@@ -3632,6 +3614,47 @@ export class InputManager {
      *  MUST run inside the caller's transaction (⌘D) or gesture (a clone-drag). */
     private keepCopyBesideOriginal(copyId: number, originalId: number) {
         this.scene.fileCopyBesideOriginal(copyId, originalId);
+    }
+
+    /**
+     * Step the selection through the z-order, or send it all the way.
+     *
+     * Order matters twice over. Nodes are moved one at a time, so a selection
+     * stepped FORWARD has to be walked front-to-back or each move undoes the
+     * last one — pressing ] with two neighbours selected shuffled them past
+     * each other and left the stack exactly as it was, which read as the key
+     * doing nothing at all. And a member whose neighbour in the direction of
+     * travel is also selected does not move: the selection travels as a block,
+     * keeping its own stacking, rather than collapsing into a pile.
+     */
+    private restack(direction: 'forward' | 'backward', allTheWay: boolean) {
+        const selection = this.scene.engine!.get_selection();
+        if (selection.length === 0) return;
+        const chosen = new Set(selection);
+        const backToFront = this.scene.sortByPaintOrder(selection);
+        const forward = direction === 'forward';
+        // Stepping: walk toward the direction of travel. Going all the way:
+        // walk the other way, so the last one moved is the one that ends up
+        // outermost and the selection keeps its own stacking.
+        const stepOrder = forward ? [...backToFront].reverse() : backToFront;
+        const jumpOrder = forward ? backToFront : [...backToFront].reverse();
+        for (const id of allTheWay ? jumpOrder : stepOrder) {
+            if (allTheWay) {
+                if (forward) this.scene.bringToFront(id);
+                else this.scene.sendToBack(id);
+                continue;
+            }
+            const parent = this.scene.getNodeParent(id);
+            const sibs = Array.from(
+                parent === -1 ? this.scene.getRootNodes() : this.scene.getNodeChildren(parent),
+            );
+            const idx = sibs.indexOf(id);
+            const neighbour = forward ? sibs[idx + 1] : sibs[idx - 1];
+            if (neighbour !== undefined && chosen.has(neighbour)) continue;
+            if (forward) this.scene.bringForward(id);
+            else this.scene.sendBackward(id);
+        }
+        this.ui.updateLayerList();
     }
 
     deleteSelection() {
