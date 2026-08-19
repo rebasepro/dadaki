@@ -3662,6 +3662,16 @@ impl Engine {
         // the move, while the node still sits in its old parent.
         let left_live_paint = valid.iter().any(|&id| self.is_in_any_live_paint(id));
 
+        // An operand dragged OUT of a boolean group leaves that group's cached
+        // outline describing a shape it no longer contains — the operand went on
+        // drawing as part of the boolean AND on its own. `mark_dirty` below only
+        // reaches the chain the node landed in, so flag the one it is leaving
+        // while it is still attached to it. (Deleting an operand and dropping
+        // one in were already covered; only moving one out was not.)
+        for &id in &valid {
+            self.mark_enclosing_boolean_groups_dirty(id);
+        }
+
         // Compute each node's new local transform up front from the *current*
         // globals, so the visual position is preserved: new_local = parent⁻¹ * global.
         let new_parent_global = match new_parent {
@@ -7763,6 +7773,24 @@ mod tests {
         assert_eq!(node.transform.x, 40.0, "paste in place keeps the position");
         assert_eq!(node.transform.y, 60.0);
         assert_ne!(pasted[0], id, "the pasted node gets a fresh id");
+    }
+
+    /// An operand dragged out of a boolean group leaves it needing a recompute.
+    ///
+    /// Only the chain a node LANDS in was flagged, so the group it left kept
+    /// drawing the outline that included the departed shape — which was now
+    /// also drawing on its own, in two places at once.
+    #[test]
+    fn moving_an_operand_out_flags_the_boolean_group() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 60.0, 60.0);
+        let b = engine.add_rect(30.0, 30.0, 60.0, 60.0);
+        let g = engine.group_nodes(&format!("[{a},{b}]"));
+        engine.set_boolean_op(g, 0); // union
+        engine.take_dirty_boolean_groups(); // the JS recompute has run
+
+        engine.reorder_nodes(&format!("[{b}]"), None, 0);
+        assert_eq!(engine.take_dirty_boolean_groups(), format!("[{g}]"));
     }
 
     /// A mask hides artwork; the hit test has to agree.
