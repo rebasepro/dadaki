@@ -6039,6 +6039,20 @@ impl History {
             None
         }
     }
+
+    /// How many states are on each stack. The editor keeps a parallel stack of
+    /// the *mode* each state was captured in (which shape was being
+    /// node-edited, which group you had drilled into) so undo can put you back
+    /// where you were, and it trims that mirror against these lengths — this
+    /// struct silently drops the oldest state once `max_size` is exceeded, and
+    /// a mirror that missed the drop would hand every undo the wrong mode.
+    pub fn undo_len(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    pub fn redo_len(&self) -> usize {
+        self.redo_stack.len()
+    }
 }
 
 // ─── Live Paint / Vector Network API ────────────────────────────────────────────

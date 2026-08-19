@@ -546,6 +546,172 @@ describe('states: the bucket is a mode of its own', () => {
     });
 });
 
+/**
+ * ⌘Z is a way back to a PLACE, not just to older geometry.
+ *
+ * Deleting an anchor, leaving node editing and pressing ⌘Z used to restore the
+ * anchor into a shape you were no longer inside — the change was invisible and
+ * untouchable, and the mode you had been working in was gone. Figma and
+ * Illustrator both hand you back the context an edit was made in, because that
+ * is the only place the restored edit means anything. Redo is the exact
+ * inverse: it returns you to where you were standing when you pressed undo.
+ */
+describe('transitions: undo restores the mode, not just the document', () => {
+    const anchorCount = (s: WasmScene, id: number) =>
+        (s.getNodeGeometry(id)?.Path?.subpaths ?? []).reduce(
+            (n: number, sp: { points: unknown[] }) => n + sp.points.length,
+            0,
+        );
+    const undo = (i: InputManager) => i.onKeyDown(keyEv('z', { metaKey: true }));
+    const redo = (i: InputManager) => i.onKeyDown(keyEv('z', { metaKey: true, shiftKey: true }));
+    /** A rect opened for node editing, with its top-left anchor picked. */
+    function editingRect(tool = 'selection') {
+        const scene = makeScene();
+        const r = scene.engine!.add_rect(0, 0, 100, 100);
+        const { input, ui } = makeInput(scene, tool);
+        click(input, 50, 50);
+        input.onDoubleClick(mouse(50, 50)); // enters node editing (rect → path)
+        click(input, 0, 0); // pick the top-left anchor
+        return { scene, input, ui, r };
+    }
+
+    it('brings the deleted anchor back AND puts you back in node editing', () => {
+        const { scene, input, r } = editingRect();
+        expect(input.selectedPoints.size).toBe(1);
+        input.onKeyDown(keyEv('Backspace'));
+        expect(anchorCount(scene, r)).toBe(3);
+        input.onKeyDown(keyEv('Escape')); // leave node editing
+        expect(input.editingNodeId).toBeNull();
+
+        undo(input);
+        expect(anchorCount(scene, r)).toBe(4);
+        expect(input.editingNodeId, 'undo left the restored anchor out of reach').toBe(r);
+        // ...and the anchor it brought back is the one that is selected, so the
+        // next thing you type acts on it.
+        expect(Array.from(input.selectedPoints)).toEqual(['0:0']);
+    });
+
+    it('re-entering node editing hands back the Direct Selection tool', () => {
+        const { input, ui, r } = editingRect();
+        input.onKeyDown(keyEv('Backspace'));
+        ui.setActiveTool('rect'); // wander off to a creation tool
+        undo(input);
+        expect(input.editingNodeId).toBe(r);
+        expect(ui.activeTool, 'node editing with a creation tool armed').toBe('direct');
+    });
+
+    it('redo puts you back where undo found you', () => {
+        const { scene, input, r } = editingRect();
+        input.onKeyDown(keyEv('Backspace'));
+        input.onKeyDown(keyEv('Escape'));
+        undo(input);
+        expect(input.editingNodeId).toBe(r);
+
+        redo(input);
+        // Undo was pressed from outside node editing, so redo returns there —
+        // ⌘Z ⇧⌘Z is a round trip, not a drift.
+        expect(anchorCount(scene, r)).toBe(3);
+        expect(input.editingNodeId).toBeNull();
+    });
+
+    it('undoing past the point node editing began leaves it', () => {
+        const { scene, input, r } = editingRect();
+        input.onKeyDown(keyEv('Backspace'));
+        undo(input); // the anchor
+        undo(input); // the rect → path conversion that entering performed
+        expect(scene.getNode(r)?.node_type).toBe('Rect');
+        // A Rect has no anchors to edit, so staying "in" node editing on it
+        // would be a mode pointing at nothing.
+        expect(input.editingNodeId).toBeNull();
+    });
+
+    it('undo with nothing left to undo does not throw you out of the mode', () => {
+        const scene = makeScene();
+        const r = scene.engine!.add_rect(0, 0, 100, 100);
+        const { input } = makeInput(scene);
+        click(input, 50, 50);
+        input.onDoubleClick(mouse(50, 50));
+        scene.history = new History(50); // nothing left to undo
+        for (let i = 0; i < 3; i++) undo(input);
+        // A ⌘Z that undoes nothing must not change anything else either. It
+        // used to tear down node editing on the way in, so pressing it out of
+        // habit at the start of a session dropped you out of the mode.
+        expect(input.editingNodeId).toBe(r);
+    });
+
+    it('deleting every anchor removes the shape; undo brings back both it and the mode', () => {
+        const { scene, input, r } = editingRect();
+        input.selectedPoints = new Set(['0:0', '0:1', '0:2', '0:3']);
+        input.onKeyDown(keyEv('Backspace'));
+        expect(scene.getNode(r)).toBeNull();
+        expect(input.editingNodeId).toBeNull();
+
+        undo(input);
+        expect(scene.getNode(r)?.node_type).toBe('Path');
+        expect(input.editingNodeId, 'the shape came back, the mode did not').toBe(r);
+    });
+
+    it('steps back into the group the edit was made inside', () => {
+        const scene = makeScene();
+        const { a, g } = nested(scene);
+        const { input } = makeInput(scene);
+        click(input, 30, 30);
+        input.onDoubleClick(mouse(30, 30)); // drill into the group
+        input.onKeyDown(keyEv('ArrowRight')); // nudge the child
+        input.onKeyDown(keyEv('Escape')); // step back out to the group
+        expect(sel(scene)).toEqual([g]);
+
+        undo(input);
+        expect(sel(scene)).toEqual([a]);
+        // Standing inside the group again, so the next click picks its members
+        // rather than re-selecting the whole group.
+        click(input, 110, 30);
+        expect(sel(scene)).not.toEqual([g]);
+    });
+});
+
+/**
+ * One gesture is one ⌘Z, and a gesture that changed nothing is none at all.
+ * Anchor editing used to push a state on mouse-DOWN and another on mouse-UP,
+ * so a drag took two presses (the first of them silent) and merely CLICKING an
+ * anchor to select it left two dead steps behind.
+ */
+describe('states: an undo step means something changed', () => {
+    const undo = (i: InputManager) => i.onKeyDown(keyEv('z', { metaKey: true }));
+    const anchorX = (s: WasmScene, id: number) =>
+        s.getNodeGeometry(id)?.Path?.subpaths?.[0]?.points?.[0]?.x;
+
+    it('clicking an anchor to select it costs no undo step', () => {
+        const scene = makeScene();
+        const r = scene.engine!.add_rect(0, 0, 100, 100);
+        const { input } = makeInput(scene);
+        click(input, 50, 50);
+        input.onDoubleClick(mouse(50, 50));
+        click(input, 0, 0);
+        click(input, 100, 0);
+        click(input, 0, 0);
+        // The only step on the stack is the rect → path conversion, so ONE ⌘Z
+        // gets all the way back — no silent presses in between.
+        undo(input);
+        expect(scene.getNode(r)?.node_type).toBe('Rect');
+    });
+
+    it('dragging an anchor is a single ⌘Z', () => {
+        const scene = makeScene();
+        const r = scene.engine!.add_rect(0, 0, 100, 100);
+        const { input } = makeInput(scene);
+        click(input, 50, 50);
+        input.onDoubleClick(mouse(50, 50));
+        input.onMouseDown(mouse(0, 0));
+        input.onMouseMove(mouse(20, 20));
+        input.onMouseUp(mouse(20, 20));
+        expect(anchorX(scene, r)).toBeCloseTo(20);
+
+        undo(input);
+        expect(anchorX(scene, r), 'the first ⌘Z after a drag did nothing').toBeCloseTo(0);
+    });
+});
+
 describe('transitions: nothing is left pointing at a corpse', () => {
     it('undo does not leave the selection holding a deleted id', () => {
         const scene = makeScene();

@@ -43,6 +43,28 @@ import { applyWidthProfile, type WidthProfile } from './width_profile';
  */
 const DRAG_START_THRESHOLD_PX = 4;
 
+/**
+ * The mode the user is standing in, stored alongside every undo state so ⌘Z
+ * can put them back in it. See InputManager.captureModeContext.
+ */
+export interface ModeContext {
+    /** Active tool at the time — restored only where a mode implies it. */
+    tool: string;
+    /** Open for node editing, with the anchors that were picked inside it. */
+    editing: {
+        nodeId: number;
+        /** "subpathIndex:pointIndex" keys, as in `selectedPoints`. */
+        points: string[];
+        anchorSubpath: number;
+        anchorIndex: number;
+        addPoint: boolean;
+    } | null;
+    /** The group drilled into, if any. */
+    enteredGroup: number | null;
+    /** The mesh fill open for editing, with its selected vertices. */
+    mesh: { nodeId: number; fillIndex: number; vertices: number[] } | null;
+}
+
 /** 2D affine matrix in DOMMatrix convention: x' = a·x + c·y + e, y' = b·x + d·y + f. */
 interface Mat {
     a: number;
@@ -305,6 +327,11 @@ export class InputManager {
     selectedAnchorIndex: number = -1;
     /** The segment currently under the cursor in edit mode. */
     hoverSegment: { subpathIndex: number; segmentIndex: number } | null = null;
+    /** Scene bytes captured when an anchor/handle press begins, held until the
+     *  gesture proves it moved something. See beginPointDrag. */
+    private pointDragPre: Uint8Array | null = null;
+    /** True once the in-flight point drag has actually changed geometry. */
+    private pointDragChanged = false;
 
     // --- Path operation state ---
     /** True when Add Point mode is active (next click on segment adds a point). */
@@ -379,6 +406,13 @@ export class InputManager {
         // Keep an open inline text overlay glued over the glyphs when the view
         // transform changes (zoom/pan while editing).
         this.renderer.onViewChange(() => this.repositionOverlay?.());
+
+        // Undo restores the document; these hooks make it restore the MODE the
+        // edit was made in as well. See captureModeContext.
+        this.scene.historyContext = {
+            capture: () => this.captureModeContext(),
+            restore: (ctx) => this.restoreModeContext(ctx as ModeContext | null),
+        };
 
         this.init();
     }
@@ -763,6 +797,9 @@ export class InputManager {
      *  clears all per-edit state and refreshes the panel so the scene un-dims. */
     exitEditMode() {
         if (this.editingNodeId === null) return;
+        // A press that is still open (Escape, or a tool switch, mid-drag) still
+        // owns an undo step for whatever it moved.
+        this.commitPointDrag();
         this.editingNodeId = null;
         this.editingPoints = null;
         this.editingTransform = null;
@@ -784,6 +821,200 @@ export class InputManager {
             return null;
         }
         return this.editingNodeId;
+    }
+
+    /** Re-read the edited path's geometry and transform from the document.
+     *  `editingPoints` is a working COPY, so anything that changes the path
+     *  underneath us — undo, redo, a panel edit, an agent command — leaves it
+     *  describing anchors that are no longer there. Drops selected points that
+     *  the fresh geometry no longer has. Returns false (and exits) when the
+     *  node stopped being an editable path. */
+    refreshEditingGeometry(): boolean {
+        if (this.editingNodeId === null) return false;
+        const subpaths = this.scene.getNodeGeometry(this.editingNodeId)?.Path?.subpaths;
+        if (!subpaths) {
+            this.exitEditMode();
+            return false;
+        }
+        this.editingPoints = JSON.parse(JSON.stringify(subpaths));
+        this.editingTransform = this.scene.getTransform(this.editingNodeId);
+        for (const key of Array.from(this.selectedPoints)) {
+            if (!this.anchorExists(key)) this.selectedPoints.delete(key);
+        }
+        if (!this.anchorExists(`${this.selectedAnchorSubpath}:${this.selectedAnchorIndex}`)) {
+            this.selectedAnchorSubpath = -1;
+            this.selectedAnchorIndex = -1;
+        }
+        return true;
+    }
+
+    /** True when "subpathIndex:pointIndex" names an anchor the edited path
+     *  actually has right now. */
+    private anchorExists(key: string): boolean {
+        const [si, pi] = key.split(':').map(Number);
+        return this.editingPoints?.[si]?.points?.[pi] !== undefined;
+    }
+
+    // ─── One anchor gesture, one undo step ──────────────────────────────
+    //
+    // Pressing on an anchor used to push an undo state immediately, and the
+    // mouse-up committed the result through updatePathPoints — which pushed
+    // again. So dragging a point cost TWO ⌘Z presses (the first restoring the
+    // state you were already looking at, i.e. doing nothing visible), and
+    // merely CLICKING an anchor to select it left two dead undo steps behind:
+    // press ⌘Z after picking a point and the editor ignored you twice.
+    //
+    // Instead the press only remembers the document as it stands, and the step
+    // is pushed on release, once, and only if the geometry actually moved.
+
+    /** Remember the pre-gesture document for an anchor/handle press. */
+    private beginPointDrag() {
+        this.pointDragPre = this.scene.serializeScene();
+        this.pointDragChanged = false;
+    }
+
+    /** Close the gesture: push its single undo step and commit the geometry if
+     *  anything moved, otherwise leave history untouched. Idempotent, so both
+     *  mouse-up and an interrupted edit can call it. */
+    private commitPointDrag() {
+        const pre = this.pointDragPre;
+        const changed = this.pointDragChanged;
+        this.pointDragPre = null;
+        this.pointDragChanged = false;
+        if (!changed || this.editingNodeId === null || !this.editingPoints) return;
+        if (pre) this.scene.pushHistoryState(pre);
+        this.scene.updatePathPointsNoHistory(
+            this.editingNodeId,
+            JSON.stringify(this.editingPoints),
+        );
+    }
+
+    // ─── The mode undo puts you back into ───────────────────────────────
+    //
+    // The document snapshot behind ⌘Z carries geometry and selection. It does
+    // NOT carry where the user was STANDING when they made the edit: the shape
+    // open for node editing and the anchors picked inside it, the group they
+    // had drilled into, the mesh fill they were pulling. Undo used to simply
+    // drop all of it — worse, it force-exited node editing on the way in, so
+    // deleting an anchor, leaving node editing and pressing ⌘Z restored the
+    // anchor somewhere you could no longer see or touch. (It exited even when
+    // there was nothing left to undo.)
+    //
+    // Figma and Illustrator both take you back to the context an edit was made
+    // in, and it is the only behaviour that can work: a restored anchor is only
+    // meaningful inside the mode that can edit anchors. So every history state
+    // is pushed with the mode it was captured in, and undo/redo restore the
+    // two together. Redo is the exact inverse — it returns you to the mode you
+    // were in when you pressed undo — so ⌘Z ⇧⌘Z is a round trip, not a drift.
+    //
+    // Entering or leaving a mode is NOT itself an undo step (same as both of
+    // those editors): Escape out of node editing and the next ⌘Z undoes your
+    // last EDIT — while putting you back in front of it.
+
+    /** Snapshot of the mode the user is in, stored alongside a history state. */
+    captureModeContext(): ModeContext {
+        const mesh = this.ui.meshEdit;
+        return {
+            tool: this.ui.activeTool,
+            editing:
+                this.editingNodeId === null
+                    ? null
+                    : {
+                          nodeId: this.editingNodeId,
+                          points: Array.from(this.selectedPoints),
+                          anchorSubpath: this.selectedAnchorSubpath,
+                          anchorIndex: this.selectedAnchorIndex,
+                          addPoint: this.addPointMode,
+                      },
+            enteredGroup: this.enteredGroup,
+            mesh:
+                mesh?.nodeId == null
+                    ? null
+                    : {
+                          nodeId: mesh.nodeId,
+                          fillIndex: mesh.fillIndex,
+                          vertices: Array.from(mesh.selectedVertices ?? []),
+                      },
+        };
+    }
+
+    /** Put the user back where `ctx` says they were. Every part of it is
+     *  re-validated against the document that was just restored: a mode
+     *  pointing at a node that is gone is not a mode worth entering. */
+    restoreModeContext(ctx: ModeContext | null) {
+        if (!ctx) {
+            // A state pushed with no mode recorded (an older session, or the
+            // agent driving the scene headlessly). "No mode" is the honest
+            // reading, and matches what undo did before it carried context.
+            this.exitEditMode();
+            return;
+        }
+
+        // Group isolation — the place you are standing, if it still exists.
+        this.enteredGroup =
+            ctx.enteredGroup !== null && this.scene.getNodeType(ctx.enteredGroup) !== undefined
+                ? ctx.enteredGroup
+                : null;
+
+        this.restoreNodeEditing(ctx);
+        this.restoreMeshEditing(ctx);
+        this.ui.contextBar?.refresh();
+        this.renderer.requestRender();
+    }
+
+    private restoreNodeEditing(ctx: ModeContext) {
+        const want = ctx.editing;
+        // Only a real Path is editable, and entering one that isn't would
+        // CONVERT it (a document mutation, mid-undo). Anything else: leave.
+        const editable =
+            want !== null && this.scene.getNodeGeometry(want.nodeId)?.Path !== undefined;
+        if (!editable) {
+            this.exitEditMode();
+            return;
+        }
+
+        if (this.editingNodeId !== want!.nodeId) {
+            this.exitEditMode();
+            // The tool goes first: setActiveTool exits node editing, so
+            // entering before it would immediately undo itself. Node editing
+            // implies a tool that can work on anchors — keep the one the edit
+            // was made with when it qualifies, otherwise hand over Direct
+            // Selection rather than leaving a creation tool armed over it.
+            const tool = InputManager.NODE_EDIT_TOOLS.has(ctx.tool) ? ctx.tool : 'direct';
+            if (this.ui.activeTool !== tool) this.ui.setActiveTool(tool);
+            this.enterPathEditMode(want!.nodeId);
+            if (this.editingNodeId === null) return;
+        } else if (!this.refreshEditingGeometry()) {
+            return;
+        }
+
+        this.selectedPoints = new Set(want!.points.filter((key) => this.anchorExists(key)));
+        const anchor = `${want!.anchorSubpath}:${want!.anchorIndex}`;
+        const hasAnchor = this.anchorExists(anchor);
+        this.selectedAnchorSubpath = hasAnchor ? want!.anchorSubpath : -1;
+        this.selectedAnchorIndex = hasAnchor ? want!.anchorIndex : -1;
+        this.addPointMode = want!.addPoint;
+    }
+
+    /** Tools that can be held while a path is open for node editing. Anything
+     *  else (a creation tool, the bucket) means the mode was left behind. */
+    static readonly NODE_EDIT_TOOLS = new Set(['direct', 'selection', 'pen', 'scissors']);
+
+    private restoreMeshEditing(ctx: ModeContext) {
+        const mesh = this.ui.meshEdit;
+        const want = ctx.mesh;
+        // Never *clears* a live mesh edit: MeshEditController reconciles itself
+        // against the restored selection, and this only re-opens a target that
+        // is still a mesh fill.
+        if (!want || typeof mesh?.activate !== 'function') return;
+        const fill = this.scene.getNode(want.nodeId)?.style.fills?.[want.fillIndex];
+        if (!fill || !isMeshGradient(fill)) return;
+        if (this.ui.activeTool !== 'mesh') this.ui.setActiveTool('mesh');
+        mesh.activate(want.nodeId, want.fillIndex);
+        mesh.selectedVertices.clear();
+        for (const vi of want.vertices) {
+            if (vi < fill.vertices.length) mesh.selectedVertices.add(vi);
+        }
     }
 
     onKeyDown(e: KeyboardEvent) {
@@ -1136,7 +1367,9 @@ export class InputManager {
         if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
             e.preventDefault();
             if (this.undoLastPenPoint()) return;
-            if (this.editingNodeId !== null) this.exitEditMode();
+            // Node editing is NOT torn down here: scene.undo() restores the
+            // mode the undone edit was made in (see restoreModeContext), which
+            // is how the anchor it brings back is somewhere you can see.
             this.scene.undo();
             this.ui.updateLayerList();
             this.ui.syncWithSelection();
@@ -1146,7 +1379,6 @@ export class InputManager {
         if ((e.metaKey || e.ctrlKey) && e.key === 'z' && e.shiftKey) {
             e.preventDefault();
             if (this.redoLastPenPoint()) return;
-            if (this.editingNodeId !== null) this.exitEditMode();
             this.scene.redo();
             this.ui.updateLayerList();
             this.ui.syncWithSelection();
@@ -3382,7 +3614,7 @@ export class InputManager {
                     // Pull the outgoing handle; the incoming one mirrors it.
                     this.draggingHandleType = 'cp2';
                     this.convertingAnchor = true;
-                    this.scene.saveMoveHistory();
+                    this.beginPointDrag();
                     this.ui.contextBar?.refresh();
                     return;
                 }
@@ -3415,7 +3647,7 @@ export class InputManager {
                 this.draggingSubpathIndex = hitInfo.subpathIndex;
                 this.draggingPointIndex = hitInfo.index;
                 this.draggingHandleType = hitInfo.type;
-                this.scene.saveMoveHistory();
+                this.beginPointDrag();
                 this.ui.contextBar?.refresh();
                 return;
             } else {
@@ -3460,7 +3692,7 @@ export class InputManager {
                     this.selectedPoints.add(pointKey);
                     this.selectedAnchorSubpath = hitInfo.subpathIndex;
                     this.selectedAnchorIndex = hitInfo.index;
-                    this.scene.saveMoveHistory();
+                    this.beginPointDrag();
                     this.ui.contextBar?.refresh();
                 }
             }
@@ -3746,7 +3978,10 @@ export class InputManager {
 
     /** Apply a resolved scissors cut, pushing an undo snapshot and refreshing UI. */
     private applyScissorCut(target: ScissorTarget) {
-        this.scene.saveMoveHistory();
+        // No snapshot here: the cut is computed on a COPY and lands through
+        // updatePathPoints, which pushes the pre-cut state itself. Doing both
+        // pushed the same state twice, so the first ⌘Z after a cut did nothing
+        // visible and the second one undid it.
         const newSubpaths = target.anchor
             ? splitPathAtPoint(
                   target.subpaths,
@@ -3822,8 +4057,9 @@ export class InputManager {
             segHit.t,
         );
 
-        // Update engine and local editing state
-        this.scene.saveMoveHistory();
+        // Update engine and local editing state. updatePathPoints pushes the
+        // pre-edit state itself — a second snapshot here would only add a
+        // silent ⌘Z step.
         this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(newSubpaths));
         this.editingPoints = newSubpaths;
         this.addPointMode = false;
@@ -3907,7 +4143,8 @@ export class InputManager {
             this.editingPoints = null;
             this.selectedPoints.clear();
         } else {
-            this.scene.saveMoveHistory();
+            // One press, one undo step: updatePathPoints snapshots the path as
+            // it stands (the deletion was computed on a copy).
             this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(currentSubpaths));
             this.editingPoints = currentSubpaths;
             this.selectedPoints.clear();
@@ -4042,7 +4279,6 @@ export class InputManager {
 
         const [si, pi] = Array.from(this.selectedPoints)[0].split(':').map(Number);
 
-        this.scene.saveMoveHistory();
         const newSubpaths = splitPathAtPoint(this.editingPoints, si, pi);
         this.scene.updatePathPoints(this.editingNodeId, JSON.stringify(newSubpaths));
         this.editingPoints = newSubpaths;
@@ -6450,7 +6686,9 @@ export class InputManager {
                     p.cp1[1] = 2 * p.y - local.y;
                 }
             }
-            // Live update the engine so it renders immediately
+            // Live update the engine so it renders immediately. The undo step
+            // is pushed once, on mouse-up, and only because of this flag.
+            this.pointDragChanged = true;
             this.scene.engine!.update_path_points(
                 this.editingNodeId!,
                 JSON.stringify(this.editingPoints),
@@ -6648,18 +6886,18 @@ export class InputManager {
             if (this.convertingAnchor && dist <= 3) {
                 const sp = this.editingPoints[this.draggingSubpathIndex];
                 const p = sp?.points[this.draggingPointIndex];
-                if (p) {
+                const collapsed =
+                    p &&
+                    (p.cp1[0] !== p.x || p.cp1[1] !== p.y || p.cp2[0] !== p.x || p.cp2[1] !== p.y);
+                if (p && collapsed) {
                     p.cp1[0] = p.x;
                     p.cp1[1] = p.y;
                     p.cp2[0] = p.x;
                     p.cp2[1] = p.y;
-                    this.scene.engine!.update_path_points(
-                        this.editingNodeId!,
-                        JSON.stringify(this.editingPoints),
-                    );
+                    this.pointDragChanged = true;
                 }
             }
-            this.scene.updatePathPoints(this.editingNodeId!, JSON.stringify(this.editingPoints));
+            this.commitPointDrag();
             this.draggingPointIndex = -1;
             this.draggingHandleType = null;
             this.convertingAnchor = false;

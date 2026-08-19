@@ -19,6 +19,19 @@ import { isMeshGradient } from './types';
 /** Shared empty typed array for the common "no sprite roots" render path. */
 const EMPTY_U32 = new Uint32Array(0);
 
+/**
+ * How the scene asks the UI layer "what mode is the user in?" so every history
+ * entry can carry it, and hands it back on undo/redo. Opaque on purpose: the
+ * scene stores and returns the value without reading it, so the shape of a mode
+ * stays the InputManager's business. See WasmScene.undo().
+ */
+export interface HistoryContextHooks {
+    /** The mode the user is in right now, captured with a pushed state. */
+    capture(): unknown;
+    /** Put the user back in `ctx` (null = no recorded mode: leave any mode). */
+    restore(ctx: unknown): void;
+}
+
 export class WasmScene {
     engine: Engine | null = null;
     history: History | null = null;
@@ -536,10 +549,18 @@ export class WasmScene {
 
     updatePathPoints(id: number, pointsJson: string) {
         this.saveHistory();
+        this.updatePathPointsNoHistory(id, pointsJson);
+    }
+
+    /** Write path geometry WITHOUT pushing an undo step — for callers that
+     *  already own the step, i.e. a gesture that pushed its pre-drag state
+     *  once (see InputManager.commitPointDrag). Pushing here as well is what
+     *  made one anchor drag cost two ⌘Z presses, the first of them silent. */
+    updatePathPointsNoHistory(id: number, pointsJson: string) {
         this.engine!.update_path_points(id, pointsJson);
         // The engine stretched any mesh fills through the geometry's bbox
         // affine; re-snap their outer ring exactly onto the edited outline.
-        // Runs inside the same history step (saveHistory already fired).
+        // Runs inside the same history step.
         this.snapMeshFillsToGeometry(id);
         this.invalidateCache();
         this.autosave?.trigger();
@@ -907,12 +928,74 @@ export class WasmScene {
         return this.engine!.get_root_nodes();
     }
 
+    // ─── The mode each history state was captured in ────────────────────
+    //
+    // The engine snapshot carries the document and the selection, and nothing
+    // about WHERE THE USER WAS STANDING: which shape was open for node editing
+    // and with which anchors selected, which group they had drilled into. Undo
+    // used to drop all of that on the floor — delete an anchor, leave node
+    // editing, press ⌘Z, and the anchor came back somewhere you were no longer
+    // looking. Figma and Illustrator both put you back in the context the edit
+    // was made in, because that is the only place the restored change is
+    // visible and editable.
+    //
+    // So each pushed state gets a parallel entry describing that context,
+    // captured at push time — i.e. the mode the user was in when they made the
+    // edit. The stacks are kept per `History` object (documents own theirs, and
+    // tab switches swap the pointer) and re-trimmed against the engine's own
+    // lengths after every operation, so an entry aged out of a full undo stack
+    // takes its context with it.
+
+    /** Installed by the UI layer (InputManager). */
+    historyContext: HistoryContextHooks | null = null;
+    private ctxStacks = new WeakMap<History, { undo: unknown[]; redo: unknown[] }>();
+
+    private ctxFor(history: History): { undo: unknown[]; redo: unknown[] } {
+        let stacks = this.ctxStacks.get(history);
+        if (!stacks) {
+            stacks = { undo: [], redo: [] };
+            this.ctxStacks.set(history, stacks);
+        }
+        return stacks;
+    }
+
+    /** Re-align the mirror with the engine's stacks (which drop the oldest
+     *  state at capacity). Trims from the FRONT of the undo stack, matching
+     *  where History drops. */
+    private trimContexts(history: History, stacks: { undo: unknown[]; redo: unknown[] }) {
+        while (stacks.undo.length > history.undo_len()) stacks.undo.shift();
+        while (stacks.redo.length > history.redo_len()) stacks.redo.shift();
+        // Entries pushed before the hooks existed leave the mirror short; pad
+        // at the front so index N still means state N.
+        while (stacks.undo.length < history.undo_len()) stacks.undo.unshift(null);
+        while (stacks.redo.length < history.redo_len()) stacks.redo.unshift(null);
+    }
+
+    /** Record the current editing context alongside a state just pushed onto
+     *  the undo stack. Call immediately after every `history.push_state`. */
+    private pushContext() {
+        const history = this.history;
+        if (!history) return;
+        const stacks = this.ctxFor(history);
+        stacks.undo.push(this.historyContext?.capture() ?? null);
+        stacks.redo.length = 0; // push_state clears redo
+        this.trimContexts(history, stacks);
+    }
+
     undo() {
         const currentState = this.engine!.serialize_scene();
+        const currentContext = this.historyContext?.capture() ?? null;
+        const stacks = this.ctxFor(this.history!);
         const prevState = this.history!.undo(currentState);
         if (prevState) {
+            const prevContext = stacks.undo.pop() ?? null;
+            stacks.redo.push(currentContext);
+            this.trimContexts(this.history!, stacks);
             this.engine!.deserialize_scene(prevState);
             this.invalidateCache();
+            // After the document is back, not before: restoring a mode reads
+            // the geometry it is about to open for editing.
+            this.historyContext?.restore(prevContext);
             this.autosave?.trigger();
             logAppEvent('history_action', { action: 'undo' });
         }
@@ -920,10 +1003,16 @@ export class WasmScene {
 
     redo() {
         const currentState = this.engine!.serialize_scene();
+        const currentContext = this.historyContext?.capture() ?? null;
+        const stacks = this.ctxFor(this.history!);
         const nextState = this.history!.redo(currentState);
         if (nextState) {
+            const nextContext = stacks.redo.pop() ?? null;
+            stacks.undo.push(currentContext);
+            this.trimContexts(this.history!, stacks);
             this.engine!.deserialize_scene(nextState);
             this.invalidateCache();
+            this.historyContext?.restore(nextContext);
             this.autosave?.trigger();
             logAppEvent('history_action', { action: 'redo' });
         }
@@ -972,6 +1061,7 @@ export class WasmScene {
     pushHistoryState(state: Uint8Array) {
         if (this._inTransaction) return;
         this.history!.push_state(state);
+        this.pushContext();
         this.autosave?.trigger();
     }
 
@@ -979,6 +1069,7 @@ export class WasmScene {
         if (this._inTransaction) return;
         const state = this.engine!.serialize_scene();
         this.history!.push_state(state);
+        this.pushContext();
     }
 
     /**
@@ -1745,7 +1836,10 @@ export class WasmScene {
             index,
         );
         if (moved > 0) {
-            if (snapshot !== null) this.history!.push_state(snapshot);
+            if (snapshot !== null) {
+                this.history!.push_state(snapshot);
+                this.pushContext();
+            }
             this.invalidateCache();
             this.autosave?.trigger();
         }
