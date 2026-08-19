@@ -192,6 +192,9 @@ export class InputManager {
     isDraggingHandle: boolean = false;
     /** Marquee selection rect in world coords, read by Renderer each frame. */
     marqueeRect: { x: number; y: number; w: number; h: number } | null = null;
+    /** The group being worked in when a marquee started — captured because the
+     *  marquee clears the selection that establishes it. */
+    private marqueeGroupContext: number | null = null;
     clipboardIds: number[] = [];
     /** Figma-style artwork clipboard: a frame descriptor plus its contained
      *  top-level node ids, captured on copy. When set, it takes precedence over
@@ -2475,7 +2478,10 @@ export class InputManager {
                 }
                 this.dragMode = 'move';
             } else {
-                // Clicked on empty space — start marquee selection
+                // Clicked on empty space — start marquee selection. Read the
+                // group being worked in BEFORE the selection that proves it is
+                // thrown away.
+                this.marqueeGroupContext = this.currentGroupContext();
                 if (!e.shiftKey) {
                     this.scene.engine!.clear_selection();
                 }
@@ -6651,8 +6657,28 @@ export class InputManager {
             // promotes a leaf to its topmost group: reading the leaf's own flag
             // let a marquee select a locked group through an unlocked child.
             const groupPromoted = new Set<number>();
+            // Inside a group you have entered, a marquee gathers ITS members —
+            // the same depth a click there picks. Promoting to the whole group
+            // meant the one gesture for "these three, not that one" could not be
+            // used on a group's contents at all: you could only ever re-select
+            // the group you were already standing in.
+            const context = this.marqueeGroupContext;
+            let stayedInContext = false;
             for (const id of nodesInRect) {
                 if (this.scene.isLockedInTree(id) || !this.scene.isVisibleInTree(id)) continue;
+                if (context !== null) {
+                    const child = this.findDirectChildContaining(context, id);
+                    if (child !== undefined) {
+                        groupPromoted.add(child);
+                        stayedInContext = true;
+                        continue;
+                    }
+                    // The group being worked in, or one wrapping it, is under
+                    // the marquee by definition — selecting it would hand back
+                    // the container instead of the members just gathered.
+                    if (id === context || this.findDirectChildContaining(id, context) !== undefined)
+                        continue;
+                }
                 // Walk up to find topmost group ancestor
                 let promoted = id;
                 let current = id;
@@ -6667,6 +6693,8 @@ export class InputManager {
                 }
                 groupPromoted.add(promoted);
             }
+            // Keep standing inside the group if that is where the marquee landed.
+            if (stayedInContext) this.enteredGroup = context;
             for (const id of groupPromoted) {
                 this.scene.selectNode(id, true);
             }

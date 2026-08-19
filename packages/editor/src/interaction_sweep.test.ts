@@ -660,6 +660,19 @@ describe('sweep: entering a group and painting', () => {
         expect(sel(scene)).toEqual([c]); // and the double-click goes inside
     });
 
+    it('a marquee inside a group gathers its members, not the group', () => {
+        const scene = makeScene();
+        const e = scene.engine!;
+        const [a, b, c] = threeRects(scene);
+        const g = e.group_nodes(JSON.stringify([a, b, c]));
+        const input = makeInput(scene);
+        click(input, 20, 20);
+        input.onDoubleClick(mouse(20, 20)); // stand inside the group
+        drag(input, -20, -20, 110, 60); // over a and b, not c
+        expect(sel(scene)).toEqual([a, b]);
+        expect(sel(scene)).not.toContain(g);
+    });
+
     it('a click outside the group you entered leaves it', () => {
         const scene = makeScene();
         const e = scene.engine!;
