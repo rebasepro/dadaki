@@ -408,7 +408,7 @@ tool(
 
 tool(
     'set_position',
-    'Move a single object so its origin sits at an absolute x,y.',
+    'Move a single object so the top-left of its bounds — the x,y describe_scene reports — sits at an absolute x,y.',
     { id: z.number(), x: z.number(), y: z.number() },
     async (a) => {
         await session.call('setPosition', [a.id, a.x, a.y]);

@@ -704,6 +704,37 @@ describe('agent API — importSVG', () => {
     });
 });
 
+/**
+ * `describe` reports a node's BOUNDS, so that is the corner `setPosition` has
+ * to take. It used to set the transform origin, which is the top-left only for
+ * a rectangle: handing an ellipse or a star back the position just read for it
+ * shoved it half its own size across the canvas.
+ */
+describe('agent API — position round trip', () => {
+    for (const [what, make] of [
+        ['a rect', (a: AgentApi) => a.createRect(100, 100, 40, 40)],
+        ['an ellipse', (a: AgentApi) => a.createEllipse(100, 100, 50, 30)],
+        ['a star', (a: AgentApi) => a.createStar(200, 200, 60, 30, 5)],
+        ['a polygon', (a: AgentApi) => a.createPolygon(200, 200, 50, 6)],
+    ] as const) {
+        it(`setting ${what} to the position describe reports leaves it put`, async () => {
+            const { agent } = makeAgent();
+            const id = make(agent);
+            const before = (await agent.describeNode(id))!.bounds;
+            agent.setPosition(id, before[0], before[1]);
+            const after = (await agent.describeNode(id))!.bounds;
+            expect(after).toEqual(before);
+        });
+    }
+
+    it('and moves it exactly where asked', async () => {
+        const { agent } = makeAgent();
+        const id = agent.createEllipse(100, 100, 50, 30);
+        agent.setPosition(id, 0, 0);
+        expect((await agent.describeNode(id))!.bounds.slice(0, 2)).toEqual([0, 0]);
+    });
+});
+
 describe('agent API — styling', () => {
     it('setStroke preserves width when only the colour changes', async () => {
         const { agent } = makeAgent();
@@ -758,7 +789,7 @@ describe('agent API — inside a transformed group', () => {
         expect(box(scene, a)).toEqual([100, 0, 180, 80]);
     });
 
-    it('setPosition lands the origin on the point it was given', () => {
+    it('setPosition lands the shape on the point it was given', () => {
         const { agent, scene, a } = scaledGroup();
         agent.setPosition(a, 300, 300);
         expect(box(scene, a).slice(0, 2)).toEqual([300, 300]);

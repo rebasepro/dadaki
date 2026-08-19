@@ -176,6 +176,8 @@ export interface AgentApi {
 
     // ─── Arranging ─────────────────────────────────────────────────────
     move(ids: number | number[], dx: number, dy: number): void;
+    /** Move a node so the top-left of its bounds — what `describe` reports —
+     *  lands on (x, y). */
     setPosition(id: number, x: number, y: number): void;
     resize(id: number, w: number, h: number): void;
     rotate(id: number, degrees: number): void;
@@ -835,8 +837,17 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
 
         setPosition(id, x, y) {
             requireNodes(id);
-            const local = scene.worldPointToParentLocal(id, x, y);
-            scene.transaction(() => scene.setNodePosition(id, local.x, local.y));
+            scene.transaction(() => {
+                // (x, y) is the TOP-LEFT of the shape — the same corner
+                // `describe` reports and the editor's own X/Y fields set. It
+                // used to be the node's transform origin, which is the top-left
+                // only for a rectangle: feeding an ellipse or a star back the
+                // position just read for it shoved it half its own size across
+                // the canvas, and any layout computed from `describe` landed
+                // off by that much.
+                const b = worldBounds(id) ?? scene.getNodeBounds(id);
+                scene.moveNodeWorld(id, x - b[0], y - b[1]);
+            });
         },
 
         resize(id, w, h) {
