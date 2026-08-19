@@ -1541,6 +1541,8 @@ export class InputManager {
         color: string;
         value: string;
         placeholder?: string;
+        /** Turn of the text on the canvas, in degrees, about `world`. */
+        rotationDeg?: number;
         /** Content (trailing newlines stripped) on Enter/blur. */
         onCommit: (content: string) => void;
         onCancel?: () => void;
@@ -1598,6 +1600,10 @@ export class InputManager {
             input.style.left = `${opts.world.x * zoom + this.renderer.pan.x}px`;
             input.style.top = `${opts.world.y * zoom + this.renderer.pan.y}px`;
             input.style.fontSize = `${opts.fontSize * zoom}px`;
+            if (opts.rotationDeg) {
+                input.style.transformOrigin = '0 0';
+                input.style.transform = `rotate(${opts.rotationDeg}deg)`;
+            }
             input.style.letterSpacing = `${lsWorld * zoom}px`;
             input.style.paddingTop = `${baselineCorrectionEm * opts.fontSize * zoom}px`;
             // Auto-size to the widest line × line count at the current zoom.
@@ -1675,22 +1681,31 @@ export class InputManager {
                 : '#000';
         if (geo.Text.font_family) ensureFontCSS(geo.Text.font_family);
 
-        // Hide the underlying node while its overlay stands in (no more doubling).
-        this.renderer.editingTextId = id;
-        this.renderer.requestRender();
-
+        // The overlay stands in for the glyphs on the canvas, so it has to be
+        // the size and turn of the glyphs on the canvas — not of the node's own
+        // font_size, which is measured in its parent's space. Editing a text
+        // inside a group scaled to 200% used to shrink it to half size for as
+        // long as the cursor was in it, and a rotated one straightened out.
+        const [a, b, tx, c, d, ty] = [t[0], t[1], t[2], t[3], t[4], t[5]];
+        const scaleY = Math.hypot(b, d) || 1; // how tall one em is on the canvas
+        const scaleX = Math.hypot(a, c) || 1;
+        const rotationDeg = (Math.atan2(c, a) * 180) / Math.PI;
+        // Local box origin, which also carries the alignment shift (centred and
+        // right-aligned runs are drawn left of the node's origin).
+        const local = this.renderer.getTextLocalBounds(id) ?? { x: 0, y: -fontSize };
         this.spawnTextOverlay({
             // One em above the baseline: the overlay's padding pins its CSS
             // first-line baseline exactly one em below this point, so the
             // typed glyphs sit on the same baseline the renderer draws on
             // (the node's origin). The box edge is approximate; the baseline
             // is what has to line up.
-            world: { x: t[2], y: t[5] - fontSize },
-            fontSize,
+            world: { x: a * local.x + b * local.y + tx, y: c * local.x + d * local.y + ty },
+            fontSize: fontSize * scaleY,
+            rotationDeg,
             fontFamily: fam,
             fontWeight: String(geo.Text.font_weight || 400),
             fontStyle: geo.Text.italic ? 'italic' : 'normal',
-            letterSpacing: geo.Text.letter_spacing || 0,
+            letterSpacing: (geo.Text.letter_spacing || 0) * scaleX,
             lineHeight: geo.Text.line_height || 1.2,
             color,
             value: originalContent,
@@ -1710,6 +1725,12 @@ export class InputManager {
                 this.renderer.requestRender();
             },
         });
+
+        // Hide the underlying node while its overlay stands in (no more
+        // doubling) — AFTER spawning, because spawning first commits whatever
+        // overlay was already open, and that teardown clears this very flag.
+        this.renderer.editingTextId = id;
+        this.renderer.requestRender();
     }
 
     /** Abort the current drag (Esc): restore the pre-drag scene state and

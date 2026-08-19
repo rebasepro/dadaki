@@ -62,6 +62,9 @@ function makeRenderer(zoom = 1): Renderer {
         endDragLayerCache() {},
         invalidateGroupSpriteFor() {},
         invalidateAllGroupSprites() {},
+        // Measured text metrics need real fonts; null makes the text overlay
+        // fall back to the node's own em box, which is what these tests assume.
+        getTextLocalBounds: () => null,
         hoverEdgeId: -1,
         hoverFaceId: -1,
         selectedArtboardId: null,
