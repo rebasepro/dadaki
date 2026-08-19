@@ -3916,7 +3916,9 @@ impl Engine {
         for &id in draw_order.iter().rev() {
             if !candidate_ids.contains(&id) { continue; }
             
-            if let (Some(node), Some(transform_bytes)) = (self.scene.nodes.get(&id), self.global_transforms.get(&id)) {
+            // A node without a resolved global transform is mid-edit and not on
+            // screen; `point_in_geometry` needs one either way.
+            if let (Some(node), true) = (self.scene.nodes.get(&id), self.global_transforms.contains_key(&id)) {
                 if !node.visible { continue; }
                 if node.locked { continue; }
                 
