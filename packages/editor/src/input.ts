@@ -2468,6 +2468,21 @@ export class InputManager {
             }
             this.handlePenDown(this.startPos, bypassSnap);
         } else if (this.ui.activeTool === 'text') {
+            // Landing on existing text EDITS it. Every type tool works this way
+            // — click the words, get a caret in them — and without the check
+            // this branch created a second text node directly on top of the
+            // first: two stacked paragraphs, the older one hidden behind the
+            // newer, and no indication that the thing you meant to retype is
+            // still there underneath.
+            const overText = this.scene.hitTest(this.startPos.x, this.startPos.y);
+            if (overText !== undefined && this.scene.getNode(overText)?.geometry?.Text) {
+                e.preventDefault();
+                this.scene.selectNode(overText, false);
+                this.ui.syncWithSelection();
+                this.editTextNode(overText);
+                return;
+            }
+
             // Create an inline text overlay at the click point, using the same
             // glued/auto-sizing overlay as double-click editing.
             // Suppress the default mousedown focus change: the canvas is
