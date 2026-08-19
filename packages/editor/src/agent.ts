@@ -821,24 +821,30 @@ export function createAgentApi(deps: AgentDeps): AgentApi {
             editStyle(ids, (s) => ({ ...s, corner_radius: radius }));
         },
 
+        // The whole API speaks world units — that is what describe_scene
+        // reports and what the canvas shows. These three used to write local
+        // ones straight through, so inside any group carrying a transform (an
+        // imported SVG's, or a group that has been resized) a move went the
+        // wrong distance and a resize came out the wrong size.
         move(ids, dx, dy) {
             const list = requireNodes(ids);
             scene.transaction(() => {
-                for (const id of list) {
-                    const t = scene.getNodeTransformComponents(id);
-                    scene.setNodeTransformComponents(id, { ...t, x: t.x + dx, y: t.y + dy });
-                }
+                for (const id of list) scene.moveNodeWorld(id, dx, dy);
             });
         },
 
         setPosition(id, x, y) {
             requireNodes(id);
-            scene.transaction(() => scene.setNodePosition(id, x, y));
+            const local = scene.worldPointToParentLocal(id, x, y);
+            scene.transaction(() => scene.setNodePosition(id, local.x, local.y));
         },
 
         resize(id, w, h) {
             requireNodes(id);
-            scene.transaction(() => scene.resizeNode(id, w, h));
+            // A group is sized in world units by the engine; a leaf's geometry
+            // is written in its own space.
+            const size = scene.getNodeType(id) === 3 ? { w, h } : scene.worldSizeToLocal(id, w, h);
+            scene.transaction(() => scene.resizeNode(id, size.w, size.h));
         },
 
         rotate(id, degrees) {

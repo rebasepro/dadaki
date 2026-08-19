@@ -740,6 +740,25 @@ export class WasmScene {
         return { w: w * sx, h: h * sy };
     }
 
+    /** A world POINT in the node's parent space — where to put a node's local
+     *  translation so its origin lands on that point. */
+    worldPointToParentLocal(id: number, x: number, y: number): { x: number; y: number } {
+        const parentId = this.engine!.get_node_parent(id);
+        if (parentId < 0) return { x, y };
+        const t = this.getTransform(parentId); // row-major global
+        const a = t[0],
+            b = t[1],
+            tx = t[2],
+            c = t[3],
+            d = t[4],
+            ty = t[5];
+        const det = a * d - b * c;
+        if (Math.abs(det) < 1e-10) return { x, y };
+        const px = x - tx;
+        const py = y - ty;
+        return { x: (d * px - b * py) / det, y: (-c * px + a * py) / det };
+    }
+
     /** Move a node by a WORLD-space delta, whatever its parent's transform. */
     moveNodeWorld(id: number, wdx: number, wdy: number) {
         const { dx, dy } = this.worldDeltaToLocal(id, wdx, wdy);

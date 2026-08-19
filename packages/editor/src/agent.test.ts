@@ -723,3 +723,51 @@ describe('agent API — styling', () => {
         expect(node?.stroke, 'width-only stroke should default to black').toBe('#000000');
     });
 });
+
+/**
+ * The API speaks WORLD units — that is what describe_scene reports and what
+ * the canvas shows. Inside a group carrying a transform (an imported SVG's, or
+ * a group that has been resized) move/setPosition/resize used to write those
+ * numbers straight into the node's local space, so a move went the wrong
+ * distance and a resize came out the wrong size.
+ */
+describe('agent API — inside a transformed group', () => {
+    /** A group scaled to 200%, holding `a`, which is 80×80 on the canvas. */
+    function scaledGroup() {
+        const { agent, scene } = makeAgent();
+        const a = agent.createRect(0, 0, 40, 40);
+        const b = agent.createRect(60, 0, 40, 40);
+        const g = agent.group([a, b]);
+        scene.setNodeTransformComponents(g, {
+            x: 0,
+            y: 0,
+            scale_x: 2,
+            scale_y: 2,
+            rotation_deg: 0,
+            skew_x_deg: 0,
+            skew_y_deg: 0,
+        });
+        return { agent, scene, a, g };
+    }
+    const box = (scene: WasmScene, id: number) => Array.from(scene.getNodeBounds(id));
+
+    it('move travels the distance it was given', () => {
+        const { agent, scene, a } = scaledGroup();
+        expect(box(scene, a)).toEqual([0, 0, 80, 80]);
+        agent.move([a], 100, 0);
+        expect(box(scene, a)).toEqual([100, 0, 180, 80]);
+    });
+
+    it('setPosition lands the origin on the point it was given', () => {
+        const { agent, scene, a } = scaledGroup();
+        agent.setPosition(a, 300, 300);
+        expect(box(scene, a).slice(0, 2)).toEqual([300, 300]);
+    });
+
+    it('resize gives the size it was asked for', () => {
+        const { agent, scene, a } = scaledGroup();
+        agent.resize(a, 120, 60);
+        const b = box(scene, a);
+        expect([b[2] - b[0], b[3] - b[1]]).toEqual([120, 60]);
+    });
+});
