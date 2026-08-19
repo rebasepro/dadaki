@@ -601,6 +601,55 @@ export class WasmScene {
         this.autosave?.trigger();
     }
 
+    /** Show/hide a node WITHOUT touching history or the dirty flag. Only for
+     *  work that is not an edit — see `withOnlyVisible`. */
+    setNodeVisibleNoHistory(id: number, visible: boolean) {
+        this.engine!.set_node_visible(id, visible);
+        this.invalidateCache();
+    }
+
+    /**
+     * Run `fn` with everything outside `roots` (and their descendants) hidden,
+     * then put every visibility flag back exactly as it was.
+     *
+     * Exporting a selection as PNG works by hiding the rest of the document and
+     * rasterising, and it used to do that through the undo-disciplined
+     * `setNodeVisible` — one history push AND one autosave per node in the
+     * WHOLE document. A single export on a modest drawing pushed more states
+     * than the 50 the stack holds, so the user's real work fell off the bottom
+     * of it and every ⌘Z afterwards walked back into the export's own
+     * intermediate states, where artwork they had never touched was invisible.
+     * It read exactly like what it was: things disappearing at export, with no
+     * way to bring them back.
+     *
+     * So: no history, no dirty flag, and the restore runs in a `finally` — a
+     * render that throws must not leave half the document hidden either.
+     */
+    withOnlyVisible<T>(roots: number[], fn: () => T): T {
+        const previous = new Map<number, boolean>();
+        const record = (id: number) => {
+            previous.set(id, this.getNodeVisible(id));
+            for (const childId of Array.from(this.getNodeChildren(id))) record(childId);
+        };
+        for (const rootId of Array.from(this.getRootNodes())) record(rootId);
+
+        const keep = new Set<number>();
+        const mark = (id: number) => {
+            keep.add(id);
+            for (const childId of Array.from(this.getNodeChildren(id))) mark(childId);
+        };
+        for (const id of roots) mark(id);
+
+        try {
+            for (const id of previous.keys()) {
+                if (!keep.has(id)) this.setNodeVisibleNoHistory(id, false);
+            }
+            return fn();
+        } finally {
+            for (const [id, visible] of previous) this.setNodeVisibleNoHistory(id, visible);
+        }
+    }
+
     setNodeLocked(id: number, locked: boolean) {
         this.saveHistory();
         this.engine!.set_node_locked(id, locked);

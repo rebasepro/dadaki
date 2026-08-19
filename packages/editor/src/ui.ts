@@ -4958,46 +4958,12 @@ export class UIEngine {
             let blob: Blob | null | undefined = null;
 
             if (selection.length > 0) {
-                // High-fidelity selection-only export via native CanvasKit visibility toggling
-                const originalVisibility: Record<number, boolean> = {};
-                const collectAllNodes = (id: number) => {
-                    originalVisibility[id] = this.scene.getNodeVisible(id);
-                    const children = this.scene.getNodeChildren(id);
-                    for (const childId of Array.from(children)) {
-                        collectAllNodes(childId);
-                    }
-                };
-                for (const rootId of Array.from(this.scene.getRootNodes())) {
-                    collectAllNodes(rootId);
-                }
-
-                // Collect descendants of selection
-                const selectionDescendants = new Set<number>();
-                const collectDescendants = (id: number) => {
-                    selectionDescendants.add(id);
-                    const children = this.scene.getNodeChildren(id);
-                    for (const childId of Array.from(children)) {
-                        collectDescendants(childId);
-                    }
-                };
-                for (const id of selection) {
-                    collectDescendants(id);
-                }
-
-                // Temporarily hide anything that is not a selected node or its descendant
-                for (const id of Object.keys(originalVisibility).map(Number)) {
-                    if (!selectionDescendants.has(id)) {
-                        this.scene.setNodeVisible(id, false);
-                    }
-                }
-
-                // Call the regular working artboard/canvas PNG exporter inside CanvasKit
-                blob = this.scene.renderer?.exportPNG(scale, bounds, background, outSize);
-
-                // Restore original visibility flags instantly
-                for (const id of Object.keys(originalVisibility).map(Number)) {
-                    this.scene.setNodeVisible(id, originalVisibility[id]);
-                }
+                // High-fidelity selection-only export: hide the rest of the
+                // document, rasterise, put it back. Leaves no history entry and
+                // no dirty flag behind — an export is not an edit.
+                blob = this.scene.withOnlyVisible(selection, () =>
+                    this.scene.renderer?.exportPNG(scale, bounds, background, outSize),
+                );
             } else {
                 // Artboard / Canvas exports use Skia/CanvasKit renderer directly
                 blob = this.scene.renderer?.exportPNG(scale, bounds, background, outSize);
