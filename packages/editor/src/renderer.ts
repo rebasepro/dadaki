@@ -199,7 +199,14 @@ export class Renderer {
                 this._textWidthMemo.set(key, width);
             }
         }
-        if (width <= 0) width = Math.max(1, geo.content.length) * fontSize * 0.6;
+        // No font provider yet: fall back to the engine's em estimate — of the
+        // LONGEST LINE, which is what the engine measures. Estimating the whole
+        // content as one run made a paragraph's frame as wide as all its lines
+        // laid end to end.
+        if (width <= 0) {
+            const longest = lines.reduce((m, l) => Math.max(m, l.length), 1);
+            width = longest * fontSize * 0.6;
+        }
 
         const h = fontSize + (lines.length - 1) * fontSize * lineHeight;
         // Alignment anchors the text around the origin (center → -w/2, right → -w).

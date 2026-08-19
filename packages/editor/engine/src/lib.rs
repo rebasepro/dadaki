@@ -3017,10 +3017,20 @@ impl Engine {
                         AABB::from_corners([min_x, min_y], [max_x, max_y])
                     }
                 }
-                Geometry::Text { ref content, font_size, .. } => {
-                    let p = transform.transform_point2(Vec2::ZERO);
-                    let approx_w = content.len() as f32 * font_size * 0.6;
-                    AABB::from_corners([p.x, p.y - font_size], [p.x + approx_w, p.y])
+                Geometry::Text { ref content, font_size, line_height, text_align, .. } => {
+                    let [x0, y0, x1, y1] =
+                        text_local_bbox(content, font_size, line_height, text_align);
+                    let c = [
+                        transform.transform_point2(Vec2::new(x0, y0)),
+                        transform.transform_point2(Vec2::new(x1, y0)),
+                        transform.transform_point2(Vec2::new(x0, y1)),
+                        transform.transform_point2(Vec2::new(x1, y1)),
+                    ];
+                    let min_x = c.iter().fold(f32::MAX, |m, p| m.min(p.x));
+                    let min_y = c.iter().fold(f32::MAX, |m, p| m.min(p.y));
+                    let max_x = c.iter().fold(f32::MIN, |m, p| m.max(p.x));
+                    let max_y = c.iter().fold(f32::MIN, |m, p| m.max(p.y));
+                    AABB::from_corners([min_x, min_y], [max_x, max_y])
                 }
             };
 
@@ -3942,10 +3952,11 @@ impl Engine {
                         // Precise geometric test against the actual outline.
                         path_hit(subpaths, &node.style, local_point, local_tol)
                     },
-                    Geometry::Text { ref content, font_size, .. } => {
-                        let approx_w = content.len() as f32 * font_size * 0.6;
-                        local_point.x >= 0.0 && local_point.x <= approx_w &&
-                        local_point.y >= -font_size && local_point.y <= 0.0
+                    Geometry::Text { ref content, font_size, line_height, text_align, .. } => {
+                        let [x0, y0, x1, y1] =
+                            text_local_bbox(content, font_size, line_height, text_align);
+                        local_point.x >= x0 && local_point.x <= x1 &&
+                        local_point.y >= y0 && local_point.y <= y1
                     },
                 };
 
@@ -5412,15 +5423,10 @@ impl Engine {
         self.scene.nodes.insert(id, node);
         self.scene.root_nodes.push(id);
         self.update_node_global_transform(id);
-        // Approximate text bounds for spatial index
-        let approx_w = content.len() as f32 * font_size * 0.6;
-        let approx_h = font_size;
-        let spatial_node = SpatialNode {
-            id,
-            aabb: AABB::from_corners([x, y - approx_h], [x + approx_w, y]),
-        };
-        self.spatial_index.insert(spatial_node);
-        self.node_to_spatial.insert(id, spatial_node);
+        // The one place that knows how much room a text node takes is the
+        // shared bbox — a second estimate here (whole content as one line) went
+        // stale the moment the shared one learned about line breaks.
+        self.update_spatial_index(id);
         self.mark_dirty(id);
         id
     }
@@ -7119,6 +7125,39 @@ impl Engine {
 /// bezier handles for paths). Used to derive the bbox→bbox affine that keeps
 /// mesh fills glued to a geometry edit; both sides of the mapping use the
 /// same measure, so any linear geometry scaling maps meshes exactly.
+
+/// The box a text node occupies in its own local space, as
+/// `[min_x, min_y, max_x, max_y]`.
+///
+/// The origin is the BASELINE of the first line, so the first line spans
+/// `-font_size..0` and every further line sits one `line_height` below;
+/// `text_align` shifts the run left (1 = centre, 2 = right), exactly as the
+/// renderer draws it.
+///
+/// The width is an em estimate — the engine has no font metrics, and the JS
+/// side measures properly for the selection frame — but it is the LONGEST LINE
+/// rather than the whole content. Measuring the content as one line made a
+/// paragraph's box far too wide and only one line tall: clicking the second
+/// line of a three-line text selected nothing, while a strip of empty canvas
+/// out to the right of the first line selected the text. Alignment was ignored
+/// too, so centred text was clickable everywhere except where its glyphs were.
+fn text_local_bbox(content: &str, font_size: f32, line_height: f32, text_align: u8) -> [f32; 4] {
+    let mut lines = 0usize;
+    let mut longest = 0usize;
+    for line in content.split('\n') {
+        lines += 1;
+        longest = longest.max(line.chars().count());
+    }
+    let w = longest as f32 * font_size * 0.6;
+    let x0 = match text_align {
+        1 => -w / 2.0,
+        2 => -w,
+        _ => 0.0,
+    };
+    let below = (lines.saturating_sub(1)) as f32 * font_size * line_height;
+    [x0, -font_size, x0 + w, below]
+}
+
 fn geometry_control_bbox(geo: &Geometry) -> Option<[f32; 4]> {
     match geo {
         Geometry::Rect { width, height } | Geometry::Image { width, height, .. } => {
@@ -7667,6 +7706,46 @@ mod tests {
         assert_eq!(node.transform.x, 40.0, "paste in place keeps the position");
         assert_eq!(node.transform.y, 60.0);
         assert_ne!(pasted[0], id, "the pasted node gets a fresh id");
+    }
+
+    /// Every line of a paragraph is clickable, and only where its glyphs are.
+    ///
+    /// The text box was the whole content measured as ONE line: a three-line
+    /// text was one line tall and three lines wide, so the second and third
+    /// lines selected nothing while a strip of empty canvas to the right of the
+    /// first line selected the text. Alignment was ignored on top of that.
+    #[test]
+    fn a_paragraph_is_clickable_on_every_line_and_nowhere_else() {
+        let mut engine = Engine::new();
+        let t = engine.add_text(200.0, 300.0, "Hello\nWorld\nAgain", 24.0);
+
+        // Baseline of line 1 is y=300; the box runs from 300-24 to the last
+        // line's baseline (two line-heights below).
+        let b = engine.get_node_bounds(t);
+        assert!((b[1] - 276.0).abs() < 0.01, "top is the first line's ascent");
+        assert!((b[3] - (300.0 + 2.0 * 24.0 * 1.2)).abs() < 0.01, "bottom reaches the last line");
+        assert!((b[2] - (200.0 + 5.0 * 24.0 * 0.6)).abs() < 0.01, "width is the LONGEST line");
+
+        assert_eq!(engine.hit_test(210.0, 292.0), Some(t), "first line");
+        assert_eq!(engine.hit_test(210.0, 320.0), Some(t), "second line");
+        assert_eq!(engine.hit_test(210.0, 350.0), Some(t), "third line");
+        assert_eq!(engine.hit_test(400.0, 292.0), None, "not the empty canvas beside it");
+        assert_eq!(engine.hit_test(210.0, 380.0), None, "nor below the last line");
+    }
+
+    /// Centred and right-aligned text is drawn shifted off the origin, so that
+    /// is where it has to be clickable.
+    #[test]
+    fn aligned_text_is_clickable_where_it_is_drawn() {
+        let mut engine = Engine::new();
+        let t = engine.add_text(200.0, 300.0, "Hello", 24.0);
+        let w = 5.0 * 24.0 * 0.6;
+        engine.set_text_properties(t, "", 1, 1.2); // centre
+        assert_eq!(engine.hit_test(200.0 - w / 2.0 + 2.0, 295.0), Some(t));
+        assert_eq!(engine.hit_test(200.0 + w / 2.0 + 5.0, 295.0), None);
+        engine.set_text_properties(t, "", 2, 1.2); // right
+        assert_eq!(engine.hit_test(200.0 - w + 2.0, 295.0), Some(t));
+        assert_eq!(engine.hit_test(200.0 + 5.0, 295.0), None);
     }
 
     /// A shape cut out of a scaled group comes back the size it left at.
