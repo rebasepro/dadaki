@@ -490,14 +490,15 @@ describe('sweep: keyboard and modes', () => {
 });
 
 describe('sweep: working inside a group that has been scaled or turned', () => {
-    const key = (input: InputManager, k: string) =>
+    const key = (input: InputManager, k: string, mods: Record<string, boolean> = {}) =>
         input.onKeyDown({
             key: k,
-            code: k,
+            code: k.length === 1 ? `Key${k.toUpperCase()}` : k,
             shiftKey: false,
             metaKey: false,
             altKey: false,
             ctrlKey: false,
+            ...mods,
             target: document.body,
             preventDefault() {},
             stopPropagation() {},
@@ -558,6 +559,42 @@ describe('sweep: working inside a group that has been scaled or turned', () => {
         input.onMouseMove(mouse(160, 160));
         input.onMouseUp(mouse(160, 160));
         expect(Array.from(scene.getNodeBounds(a))).toEqual([0, 0, 160, 160]);
+    });
+
+    it('a copy pasted inside a scaled group is the size of what was copied', () => {
+        // Clones are born at the root wearing the local transform they had
+        // inside their parent, so a copy of a child of a 200% group started out
+        // half the size — and the world-preserving reparent kept it that way.
+        const { scene, e, a, g } = scaledGroup();
+        const input = makeInput(scene);
+        e.select_node(a, false);
+        const width = (id: number) => {
+            const b = Array.from(scene.getNodeBounds(id));
+            return b[2] - b[0];
+        };
+        key(input, 'c', { metaKey: true });
+        key(input, 'v', { metaKey: true });
+        const copy = sel(scene).find((id) => id !== a && id !== g);
+        expect(copy).toBeDefined();
+        expect(scene.getNodeParent(copy!)).toBe(g);
+        expect(width(copy!)).toBe(width(a));
+    });
+
+    it('a cut child pasted back into a scaled group keeps its size', () => {
+        const { scene, e, a, b, g } = scaledGroup();
+        const input = makeInput(scene);
+        const width = (id: number) => {
+            const bb = Array.from(scene.getNodeBounds(id));
+            return bb[2] - bb[0];
+        };
+        const before = width(a);
+        e.select_node(a, false);
+        key(input, 'x', { metaKey: true });
+        e.select_node(b, false); // the context is still inside the group
+        key(input, 'v', { metaKey: true });
+        const pasted = sel(scene)[0];
+        expect(scene.getNodeParent(pasted)).toBe(g);
+        expect(width(pasted)).toBeCloseTo(before, 5);
     });
 
     it('align and distribute are exact inside a scaled group', () => {

@@ -2093,6 +2093,13 @@ export class InputManager {
                 const newId = this.scene.duplicateNode(id);
                 // duplicate_node builds in a +20,+20 offset; take it back off.
                 if (inPlace) eng.move_node(newId, -20, -20);
+                // Every clone is born at the ROOT wearing the local transform it
+                // had inside its parent, so a copy of a shape in a group scaled
+                // to 200% starts out half the size of what was copied — and the
+                // world-preserving reparent below then keeps it that way. File
+                // it beside its original first: from there it matches what was
+                // copied, and moving it into the paste target preserves that.
+                this.keepCopyBesideOriginal(newId, id);
                 // Pasted groups start collapsed to keep the panel tidy.
                 this.ui.collapseSubtreeByDefault(newId);
                 pasted.push(newId);

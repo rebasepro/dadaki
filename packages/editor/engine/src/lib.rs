@@ -4841,9 +4841,29 @@ impl Engine {
             if !self.scene.nodes.contains_key(&id) {
                 continue;
             }
+            // A cut root is stored in WORLD terms. Its local transform is
+            // measured against a parent that is not coming with it, so a shape
+            // cut out of a group scaled to 200% and pasted back arrived at half
+            // the size it was cut at — the paste re-reads that local transform
+            // against the root. Baking the global here makes a paste land where
+            // the cut happened, whether it goes back to the top level or into
+            // another container.
+            let world = self
+                .global_transforms
+                .get(&id)
+                .map(|&m| Mat3::from_cols_array(&m));
+            let hint = self.scene.nodes.get(&id).map(|n| n.transform);
             self.lift_subtree(id);
             if let Some(node) = self.clipboard.get_mut(&id) {
                 node.parent = None;
+            }
+            if let Some(w) = world {
+                let baked = Transform2D::from_mat3_hint(&w, hint.as_ref());
+                if baked.is_valid() {
+                    if let Some(node) = self.clipboard.get_mut(&id) {
+                        node.transform = baked;
+                    }
+                }
             }
             self.clipboard_roots.push(id);
         }
@@ -7647,6 +7667,31 @@ mod tests {
         assert_eq!(node.transform.x, 40.0, "paste in place keeps the position");
         assert_eq!(node.transform.y, 60.0);
         assert_ne!(pasted[0], id, "the pasted node gets a fresh id");
+    }
+
+    /// A shape cut out of a scaled group comes back the size it left at.
+    ///
+    /// The clipboard holds a node's LOCAL transform, and paste reads it back
+    /// against the root — so a child of a group scaled to 200% returned at half
+    /// the size it was cut at. The cut roots are stored in world terms instead.
+    #[test]
+    fn a_cut_out_of_a_scaled_group_pastes_back_at_its_old_size() {
+        let mut engine = Engine::new();
+        let a = engine.add_rect(0.0, 0.0, 40.0, 40.0);
+        let b = engine.add_rect(60.0, 0.0, 40.0, 40.0);
+        let g = engine.group_nodes(&format!("[{a},{b}]"));
+        engine.set_node_scale(g, 2.0, 2.0);
+
+        let before = engine.get_node_bounds(a);
+        let w = before[2] - before[0];
+        assert!((w - 80.0).abs() < 0.01, "the child is 80 wide on the canvas, not 40");
+
+        engine.cut_nodes(&format!("[{a}]"));
+        let pasted = engine.paste_clipboard(0.0, 0.0);
+        let after = engine.get_node_bounds(pasted[0]);
+        assert!((after[2] - after[0] - w).abs() < 0.01, "same size as it was cut at");
+        assert!((after[0] - before[0]).abs() < 0.01, "and in the same place");
+        assert!((after[1] - before[1]).abs() < 0.01);
     }
 
     /// The reason the clipboard lives outside `Scene`: undo swaps the whole
