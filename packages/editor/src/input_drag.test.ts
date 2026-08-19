@@ -170,11 +170,14 @@ describe('InputManager — selection move drag', () => {
         const sel = Array.from(e.get_selection());
         expect(sel.length).toBe(1);
         expect(sel[0]).not.toBe(r); // the clone is now selected
-        // Clone position = duplicate_node's built-in +20px paste offset + the
-        // +40 drag delta. (The +20 makes the clone land 20px past the cursor —
-        // a quirk worth revisiting, pinned here as current behaviour.)
+        // Clone position = the drag delta, and nothing else. It used to be the
+        // delta PLUS duplicate_node's built-in +20 paste offset, which put the
+        // copy 20 units past the cursor — pinned here as a quirk until the state
+        // sweep showed what it costs under Shift: the axis constraint locks one
+        // axis, and the copy then sat 20 units off it, visibly ignoring the
+        // modifier the user was holding.
         const clone = bounds(scene, sel[0]);
-        expect(clone[0]).toBeCloseTo(60, 3);
+        expect(clone[0]).toBeCloseTo(40, 3);
     });
 
     it('a sub-threshold press-release does not move or snapshot history', () => {

@@ -6059,6 +6059,14 @@ export class InputManager {
                     moveTargets = [];
                     for (const id of this.moveOriginalIds) {
                         const newId = this.scene.engine!.duplicate_node(id);
+                        // `duplicate_node` builds in the +20,+20 offset that
+                        // makes a menu Duplicate visible on top of its original.
+                        // A clone-drag does not want it: the copy is positioned
+                        // by the pointer, so the offset put it 20 units
+                        // down-right of the cursor — and under Shift, 20 units
+                        // off the axis the constraint had just locked. The paste
+                        // path takes it back off for the same reason.
+                        this.scene.engine!.move_node(newId, -20, -20);
                         this.scene.engine!.select_node(newId, true);
                         moveTargets.push(newId);
                     }
