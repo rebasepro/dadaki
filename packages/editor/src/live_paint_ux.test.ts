@@ -345,14 +345,29 @@ describe('a Live Paint group catches clicks only where it paints', () => {
         const a = e.add_rect(0, 0, 100, 100);
         const b = e.add_rect(50, 50, 100, 100);
         for (const id of [a, b]) {
-            e.set_node_style(id, JSON.stringify({
-                fills: [],
-                strokes: [{
-                    paint: { r: 0, g: 0, b: 0, a: 1 }, width: 1, cap: 0, join: 0,
-                    dash_array: [], dash_offset: 0, miter_limit: 4, alignment: 'Center',
-                }],
-                opacity: 1, blend_mode: 0, fill_rule: 0, corner_radius: 0, effects: [],
-            }));
+            e.set_node_style(
+                id,
+                JSON.stringify({
+                    fills: [],
+                    strokes: [
+                        {
+                            paint: { r: 0, g: 0, b: 0, a: 1 },
+                            width: 1,
+                            cap: 0,
+                            join: 0,
+                            dash_array: [],
+                            dash_offset: 0,
+                            miter_limit: 4,
+                            alignment: 'Center',
+                        },
+                    ],
+                    opacity: 1,
+                    blend_mode: 0,
+                    fill_rule: 0,
+                    corner_radius: 0,
+                    effects: [],
+                }),
+            );
         }
         const group = e.group_nodes(JSON.stringify([a, b]));
         e.set_node_live_paint(group, true);

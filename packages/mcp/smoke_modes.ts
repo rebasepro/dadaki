@@ -66,15 +66,13 @@ check(
     readConfig([]).token?.length,
 );
 check('--token overrides the generated one', readConfig(['--token', 'abc']).token === 'abc');
-{
-    // The original env var predates --mode and must keep working.
-    process.env.DADAKI_MCP_HEADFUL = '1';
-    check('DADAKI_MCP_HEADFUL=1 still selects headful', readConfig([]).mode === 'headful');
-    process.env.DADAKI_MCP_HEADFUL = '';
-    process.env.DADAKI_MCP_MODE = 'bridge';
-    check('DADAKI_MCP_MODE is honoured', readConfig([]).mode === 'bridge');
-    process.env.DADAKI_MCP_MODE = '';
-}
+// The original env var predates --mode and must keep working.
+process.env.DADAKI_MCP_HEADFUL = '1';
+check('DADAKI_MCP_HEADFUL=1 still selects headful', readConfig([]).mode === 'headful');
+process.env.DADAKI_MCP_HEADFUL = '';
+process.env.DADAKI_MCP_MODE = 'bridge';
+check('DADAKI_MCP_MODE is honoured', readConfig([]).mode === 'bridge');
+process.env.DADAKI_MCP_MODE = '';
 
 type Content = Array<{ type: string; text?: string; data?: string }>;
 let browser: Browser | null = null;

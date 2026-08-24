@@ -274,7 +274,7 @@ export class PresenceController {
         const zoom = this.renderer.zoom;
         for (const [id, els] of this.els) {
             const p = this.peers.get(id);
-            if (!p || !p.cursor) {
+            if (!p?.cursor) {
                 els.root.style.display = 'none';
                 continue;
             }
