@@ -1,6 +1,6 @@
 {
     "name": "@dadaki/mcp",
-    "version": "1.0.0",
+    "version": "1.0.0-beta.1",
     "description": "MCP server that lets an agent author vector artwork in Dadaki \u2014 intent-level drawing verbs plus render-back so the agent can see its own work.",
     "license": "MIT",
     "private": true,

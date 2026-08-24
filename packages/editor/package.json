@@ -1,6 +1,6 @@
 {
     "name": "@dadaki/editor",
-    "version": "1.0.0",
+    "version": "1.0.0-beta.1",
     "description": "Dadaki — a high-performance, embeddable in-browser vector graphics editor (CanvasKit + Rust/WASM).",
     "license": "MIT",
     "private": true,

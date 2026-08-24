@@ -1,6 +1,11 @@
 /**
  * AboutDialog — modal showing application info and credits.
  */
+// The editor reports its own version rather than relying on the host to inject
+// one: a bug report that says "1.0.0-beta.1" is worth more than one that says
+// "the latest", and an embedder should not have to wire a build-time global to
+// get that. Read straight from the package manifest so the two can never drift.
+import pkg from '../package.json' with { type: 'json' };
 
 // The Dadaki paper-boat mark, turned 45° with the rear facets filled solid.
 // Centred and held at 88% of the tile so it never meets the rounded corner.
@@ -47,6 +52,7 @@ export class AboutDialog {
             </div>
             <div class="about-title">Dadaki Vector Editor</div>
             <div class="about-tagline">Professional In-Browser SVG Graphics Editor</div>
+            <div class="about-version">Version ${pkg.version}</div>
 
             <div class="about-divider"></div>
 

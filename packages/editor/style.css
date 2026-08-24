@@ -2957,6 +2957,12 @@ body.scrubbing * {
 .about-tagline {
     font-size: 11px;
     color: var(--text-dim);
+    margin-bottom: 6px;
+}
+.about-version {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
     margin-bottom: 20px;
 }
 .about-divider {
