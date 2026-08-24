@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Matches the `devEngines` pin in package.json. Homebrew's 11.1.0 trips a
+  # bug on that field, so the version is pinned explicitly rather than floated.
+  PNPM_VERSION: 11.9.0
+
+jobs:
+  test:
+    name: Engine, typecheck, unit tests, lint, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/editor/engine/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('packages/editor/engine/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - uses: jetli/wasm-pack-action@v0.4.0
+
+      # engine/pkg/ is a build product, not a checked-in artifact: the editor
+      # imports it by relative path, so nothing downstream typechecks, tests or
+      # builds until this step has run.
+      - name: Build the wasm engine
+        run: wasm-pack build --target web --release
+        working-directory: packages/editor/engine
+
+      - name: Engine tests
+        run: cargo test --manifest-path packages/editor/engine/Cargo.toml
+
+      - name: Typecheck
+        run: |
+          for pkg in editor app mcp; do
+            ./node_modules/.bin/tsc --noEmit -p "packages/$pkg"
+          done
+
+      - name: Unit tests
+        run: ./node_modules/.bin/vitest run
+
+      - name: Lint and format
+        run: ./node_modules/.bin/biome check
+
+      - name: Production build
+        run: ./node_modules/.bin/vite build packages/app
+
+  conformance:
+    name: SVG conformance (resvg suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/editor/engine/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('packages/editor/engine/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - uses: jetli/wasm-pack-action@v0.4.0
+
+      - name: Build the wasm engine
+        run: wasm-pack build --target web --release
+        working-directory: packages/editor/engine
+
+      # Puppeteer ships without a browser; `pnpm install` does not fetch one.
+      - name: Cache Puppeteer's Chrome
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Chrome
+        run: ./node_modules/.bin/puppeteer browsers install chrome
+
+      # Green while the five documented ceiling entries hold; red on any new
+      # regression, or on one of those five dropping further. See
+      # tests/svg-suite/README.md.
+      - name: Run the conformance suite
+        run: node tests/svg-suite/harness.mjs

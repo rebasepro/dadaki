@@ -12,6 +12,9 @@ tests/svg-suite/report/
 .env.*.local
 
 
+# Local editor/agent config — machine-specific paths, not part of the project
+.claude/
+
 # The built wasm in engine/pkg/ IS committed, so a clone runs without the Rust
 # toolchain. wasm-pack rewrites a `.gitignore` containing `*` into that folder
 # on every build; ignore that file itself so it stops re-hiding the output.
