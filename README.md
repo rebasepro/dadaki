@@ -61,7 +61,16 @@ browser. `pnpm build` produces a static bundle; `pnpm preview` serves it.
 ### SVG conformance suite
 
 `tests/svg-suite/harness.mjs` renders ~1679 SVG fixtures through the app and
-pixel-diffs against `tests/svg-suite/baseline.json` (a resvg reference). Run:
+pixel-diffs against `tests/svg-suite/baseline.json` (a resvg reference).
+
+It drives the editor in headless Chrome, which Puppeteer downloads separately —
+`pnpm install` does **not** fetch it. Once per machine:
+
+```bash
+./node_modules/.bin/puppeteer browsers install chrome
+```
+
+Then run the suite:
 
 ```bash
 node tests/svg-suite/harness.mjs

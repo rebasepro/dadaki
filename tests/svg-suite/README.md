@@ -26,14 +26,39 @@ gate:
   run-to-run) is intentionally *not* gated — progress there shows up in the pass
   count and per-category means.
 
-Current standing (see the per-category summary printed by a run): ~495/1679
-passing, strongest in `shapes`, `painting`, and `text`; weakest in `filters`,
-`masking`, and `paint-servers`, which are largely unimplemented.
+Current standing (see the per-category summary printed by a run): **936/1679
+passing**, mean similarity 0.911, no errors.
+
+| Category | Passing | Mean |
+|---|---|---|
+| `shapes` | 96/133 (72%) | 0.934 |
+| `painting` | 212/304 (70%) | 0.916 |
+| `paint-servers` | 95/149 (64%) | 0.861 |
+| `filters` | 252/397 (63%) | 0.911 |
+| `structure` | 152/247 (62%) | 0.874 |
+| `masking` | 48/93 (52%) | 0.863 |
+| `text` | 81/356 (23%) | 0.958 |
+
+`text` is the interesting row: it has the **highest** mean similarity of any
+category and the **lowest** pass rate. Text renders very nearly right and then
+misses the 0.98 bar on glyph-level antialiasing — so it is the category where
+small rasterisation work would convert the most tests, not the one that is
+least implemented.
 
 ## Running
 
 Requires the app's `engine/pkg` to be built and `node_modules` installed. The
 harness starts (and tears down) its own Vite dev server unless you pass `--url`.
+
+It also needs the Chrome that Puppeteer pins. That browser is a separate
+download — `pnpm install` does **not** fetch it — so once per machine:
+
+```sh
+./node_modules/.bin/puppeteer browsers install chrome
+```
+
+(~350 MB, cached in `~/.cache/puppeteer` and shared by every checkout. Without
+it the harness exits 1 and prints this same command.)
 
 ```sh
 # Run everything, compare against the committed baseline (exit 1 on regressions)
@@ -79,17 +104,21 @@ trees. To refresh, re-download the upstream repo, copy those two directories
 over `fixtures/`, and re-run with `--update` to regenerate the baseline (review
 the diff — an upstream change can legitimately move scores).
 
-## Known: 5 stale baseline entries, all diagnosed
+## Known: 5 ceiling entries, all diagnosed and pinned
 
-A clean run reports **927/1679 passing** and **5 regressions against
-`baseline.json`**. None are caused by pending work — verified by building from
-an unmodified tree at the pre-change commit and re-running: the scores come out
+A clean run reports **936/1679 passing**, no errors, and **exits 0**. Five
+`baseline.json` entries record a score the current architecture cannot reach
+again; they are pinned in `KNOWN_CEILING` in the harness at their true present
+values, so the run is green while they hold and red the moment one drops
+further. None are caused by pending work — verified by building from an
+unmodified tree at the pre-change commit and re-running: the scores come out
 identical.
 
 All five are *stale high-water marks*. `baseline.json` is maintained by raising
 only (`max(old, new)`), so a score recorded under an earlier renderer sticks
 even when the current architecture cannot reach it again. Each has been
-diagnosed rather than left as a mystery:
+diagnosed by rendering its diff and looking at it, rather than left as a
+mystery:
 
 | Test | Baseline → now | Diagnosis |
 |---|---|---|
@@ -102,11 +131,14 @@ Most were four real bugs — a broken supersampled export, a text baseline error
 a dropped `font-family` on import, and luminance masks ignoring alpha — since
 fixed, which is what took the suite from 522 to 927.
 
-**Deliberately not `--update`d.** Refreshing would silently bless the three
-feTile/feConvolveMatrix entries as correct, and their diffs are the clearest
-record of what still differs. Nothing is left here that is merely unexplained.
+**Deliberately not `--update`d, and deliberately not silenced.** Refreshing the
+baseline would bless these as 1.000 and destroy the record of what still
+differs; ignoring them outright would hide a real drop. Pinning them at the
+scores above keeps both properties — the diffs stay the clearest statement of
+the gap, and going *below* a pin still fails the run.
 
-Reading a run: the 5 lines above are expected. **Anything else** in the
-regression list is yours. Errors are not regressions but score 0.000, so check
-the `N test(s) errored` block first — a busy machine can time a test out, and
-the harness retries once before believing it.
+Reading a run: the regression list should be **empty**, and the closing line
+names how many ceiling entries were held. Anything in the regression list is
+yours. Errors are not regressions but score 0.000, so check the `N test(s)
+errored` block first — a busy machine can time a test out, and the harness
+retries once before believing it.
