@@ -64,9 +64,9 @@ export class AboutDialog {
                 <a href="mailto:hello@rebase.pro" class="about-email">hello@rebase.pro</a>
             </div>
             <div class="about-legal">
-                <a href="/privacy" target="_blank" rel="noopener noreferrer" class="about-link">Privacy Policy</a>
+                <a href="https://dadaki.com/privacy" target="_blank" rel="noopener noreferrer" class="about-link">Privacy Policy</a>
                 <span class="about-legal-sep">·</span>
-                <a href="/terms" target="_blank" rel="noopener noreferrer" class="about-link">Terms of Service</a>
+                <a href="https://dadaki.com/terms" target="_blank" rel="noopener noreferrer" class="about-link">Terms of Service</a>
             </div>
 
             <div class="modal-actions about-actions">
