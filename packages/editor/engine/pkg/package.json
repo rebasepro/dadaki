@@ -1,0 +1,15 @@
+{
+  "name": "engine",
+  "type": "module",
+  "version": "1.0.0-beta.1",
+  "files": [
+    "engine_bg.wasm",
+    "engine.js",
+    "engine.d.ts"
+  ],
+  "main": "engine.js",
+  "types": "engine.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

@@ -79,9 +79,24 @@ node tests/svg-suite/harness.mjs
 ## The engine (Rust/WASM)
 
 `packages/editor/engine/` is the Rust crate; `packages/editor/engine/pkg/` is the
-prebuilt wasm-bindgen output, imported by the editor via a relative path
-(`../engine/pkg/engine`). Rebuilding requires the `wasm-pack` toolchain, but
-day-to-day editor work does **not** need a rebuild.
+wasm-bindgen output, imported by the editor via a relative path
+(`../engine/pkg/engine`). That output is **committed**, so a fresh clone runs,
+typechecks and tests without the Rust toolchain — day-to-day editor work does
+**not** need a rebuild.
+
+If you change the Rust, rebuild it:
+
+```bash
+cd packages/editor/engine && wasm-pack build --target web --release
+```
+
+Then **commit the regenerated `pkg/`** along with your `src/lib.rs` change, and
+re-run the JS tests — they import the built wasm, so without a rebuild they test
+the old engine. The browser caches it too; hard-reload after rebuilding.
+
+> `wasm-pack` writes a `.gitignore` containing `*` into `pkg/` on every build.
+> That file is itself ignored (see the root `.gitignore`) so it cannot re-hide
+> the committed output.
 
 ## Embedding
 

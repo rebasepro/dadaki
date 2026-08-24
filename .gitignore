@@ -12,6 +12,12 @@ tests/svg-suite/report/
 .env.*.local
 
 
+# The built wasm in engine/pkg/ IS committed, so a clone runs without the Rust
+# toolchain. wasm-pack rewrites a `.gitignore` containing `*` into that folder
+# on every build; ignore that file itself so it stops re-hiding the output.
+# (Already-tracked files stay tracked regardless — this only silences the noise.)
+packages/editor/engine/pkg/.gitignore
+
 # Nested online app — its own separate git repo
 /cloud/
 
