@@ -1752,7 +1752,7 @@ impl Engine {
         let mut open_mask = false;
         let mut faces_written = false;
         // Faces sit at the bottom of the group, under the members' strokes.
-        let mut write_faces = |s: &mut Self, total: &mut u32, written: &mut bool| {
+        let write_faces = |s: &mut Self, total: &mut u32, written: &mut bool| {
             if let Some(g) = lp_group {
                 if !*written {
                     s.write_lp_faces(g, total);
@@ -1933,9 +1933,8 @@ impl Engine {
             // Only draw leaf if it's in the visible set
             if !visible_set.contains(&id) { return; }
 
-            // CMD_DRAW_NODE = 2
             let rec = begin_record(&mut self.render_buffer);
-            self.render_buffer.extend_from_slice(&2u32.to_le_bytes());
+            self.render_buffer.extend_from_slice(&CMD_DRAW_NODE.to_le_bytes());
             self.render_buffer.extend_from_slice(&id.to_le_bytes());
             
             // NodeType: Path=0, Rect=1, Ellipse=2, Text=4, Image=5
@@ -2149,7 +2148,7 @@ impl Engine {
         total_nodes: &mut u32,
     ) {
         let rec = begin_record(&mut self.render_buffer);
-        self.render_buffer.extend_from_slice(&2u32.to_le_bytes()); // CMD_DRAW_NODE
+        self.render_buffer.extend_from_slice(&CMD_DRAW_NODE.to_le_bytes());
         self.render_buffer.extend_from_slice(&id.to_le_bytes());
         self.render_buffer.extend_from_slice(&0u32.to_le_bytes()); // NodeType::Path
 

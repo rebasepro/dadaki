@@ -107,9 +107,6 @@ impl CurveSeg {
     fn free_ends(&self) -> (bool, bool) {
         match self { CurveSeg::Line { free, .. } | CurveSeg::Cubic { free, .. } => *free }
     }
-    fn node(&self) -> u32 {
-        match self { CurveSeg::Line { node, .. } | CurveSeg::Cubic { node, .. } => *node }
-    }
     /// Ordinal of this curve within its source node's geometry — stable across
     /// moves/topology changes, so painted edges can re-attach by (node, seg, t).
     fn seg(&self) -> u32 {
@@ -213,24 +210,6 @@ fn quads_to_closed_pathpoints(quads: &[[Vec2; 4]]) -> Vec<PathPoint> {
     if pts.len() > 1 {
         let last = pts.pop().unwrap();
         pts[0].cp1 = last.cp1;
-    }
-    pts
-}
-
-/// Like `quads_to_closed_pathpoints` but for an OPEN chain — every anchor is
-/// kept (nothing folded), so painted edges reconstruct as true curves.
-fn quads_to_open_pathpoints(quads: &[[Vec2; 4]]) -> Vec<PathPoint> {
-    if quads.is_empty() {
-        return Vec::new();
-    }
-    let mut pts: Vec<PathPoint> = Vec::new();
-    let first = quads[0][0];
-    pts.push(PathPoint { x: first.x, y: first.y, cp1: first, cp2: first, corner_radius: 0.0 });
-    for q in quads {
-        if let Some(last) = pts.last_mut() {
-            last.cp2 = q[1];
-        }
-        pts.push(PathPoint { x: q[3].x, y: q[3].y, cp1: q[2], cp2: q[3], corner_radius: 0.0 });
     }
     pts
 }
