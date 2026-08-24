@@ -8,7 +8,7 @@
                 "--mode",
                 "relay",
                 "--url",
-                "https://dadaki.rebase.website"
+                "https://dadaki.com"
             ],
             "env": {}
         }

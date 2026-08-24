@@ -16,7 +16,7 @@
 import { AgentCallError, type EditorTransport, unwrap } from './transport.ts';
 
 export interface RelayTransportOptions {
-    /** Base URL of the hosted app, e.g. https://dadaki.rebase.website */
+    /** Base URL of the hosted app, e.g. https://dadaki.com */
     origin: string;
     /** Shared token identifying this agent session. */
     token: string;

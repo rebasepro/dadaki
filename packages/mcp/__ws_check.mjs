@@ -1,7 +1,7 @@
 import { createServer as netServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import puppeteer from 'puppeteer';
-const SITE='https://dadaki.rebase.website/edit/new/blank';
+const SITE='https://dadaki.com/edit/new/blank';
 const SERVER='/Users/francesco/dadaki-vector-editor/packages/mcp/src/index.ts';
 const TOKEN='ws-check-token';
 const freePort=async()=>{const s=netServer();await new Promise(r=>s.listen(0,'127.0.0.1',r));const p=s.address().port;await new Promise(r=>s.close(()=>r()));return p;};
