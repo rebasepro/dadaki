@@ -12,17 +12,18 @@
  * placement without a round-trip.
  *
  * Every tool works in every mode. The mode decides only how a call reaches an
- * editor (see transport.ts): a browser this server owns, or one the user has
- * open. Nothing in the tool layer below knows which is in use.
+ * editor (see transport.ts) — and in both modes that editor is a tab the user
+ * has open, never one this server owns. Nothing in the tool layer below knows
+ * which is in use.
  *
- *   headless  (default)  a throwaway browser serving the local build
- *   headful              the same, with a window so a human can watch
- *   bridge               drive the editor tab the user already has open
- *   --url <addr>         point any of the above at a dev server or deployment
+ *   relay (default)  drive the user's tab in the hosted app, paired by its
+ *                    backend with an 8-character code
+ *   bridge           drive the user's tab on this machine, over loopback
+ *   --url <addr>     point either at a dev server, staging, or a deployment
  *
  * Usage (stdio):
- *   pnpm build            # produce packages/app/dist, which the server serves
- *   node --experimental-strip-types packages/mcp/src/index.ts [--mode bridge]
+ *   npx -y @dadaki/mcp                        # relay, against dadaki.com
+ *   node --experimental-strip-types packages/mcp/src/index.ts --mode bridge
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -31,8 +32,20 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { createTransport, readConfig, rememberToken } from './config.ts';
 
-const config = readConfig();
-const { transport: session, notice } = await createTransport(config);
+/**
+ * Startup failures are ordinary user errors — a config still asking for a mode
+ * that no longer exists, an address nothing answers on. An MCP client shows
+ * the server's stderr and nothing else, so that message IS the diagnosis; a
+ * stack trace printed above it only buries the line saying what to change.
+ */
+function fatal(err: unknown): never {
+    console.error((err as Error)?.message ?? String(err));
+    process.exit(1);
+}
+
+const { transport: session, notice } = await (async () => createTransport(readConfig()))().catch(
+    fatal,
+);
 // Diagnostics go to stderr: stdout is the MCP wire protocol.
 console.error(notice);
 
@@ -83,9 +96,10 @@ THINGS THAT WILL BITE:
   - Every call is one undo step. If a drawing goes wrong, undo, or clear and
     start again — repairing a mess usually costs more than redoing it.
 
-WHEN SOMEONE IS WATCHING (bridge mode): you are editing a document open in a
-person's own window. Use select so they can see which object you are working
-on, and prefer several small labelled steps over one large opaque one.`;
+SOMEONE IS ALWAYS WATCHING: every mode drives a document open in a person's
+own window, live, while they look at it. Use select so they can see which
+object you are working on, and prefer several small labelled steps over one
+large opaque one.`;
 
 const server = new McpServer({ name: 'dadaki', version: '1.0.0' }, { instructions: INSTRUCTIONS });
 
@@ -589,4 +603,13 @@ const shutdown = async () => {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-await server.connect(new StdioServerTransport());
+const stdio = new StdioServerTransport();
+// An MCP client shuts a server down by closing its stdin, and nothing else
+// would stop us: bridge mode holds a listening socket, which keeps the event
+// loop alive indefinitely. Every client restart would leave an orphan behind,
+// each still holding the fixed bridge port — so the next server could not have
+// it, and the connect URL that is supposed to be stable would change.
+stdio.onclose = shutdown;
+process.stdin.on('end', shutdown);
+
+await server.connect(stdio);

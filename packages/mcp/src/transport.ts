@@ -8,9 +8,10 @@
  * `transport.call(method, args)` and never learns which mode it is in.
  *
  * Rendering deliberately is NOT part of this interface. It used to be a
- * puppeteer screenshot, which only one transport could do; it is now
- * `agent.toPNG()`, a normal call that CanvasKit services inside the page. So a
- * render looks the same — and produces the same pixels — in every mode.
+ * screenshot of a browser the server drove itself, which only one transport
+ * could do; it is now `agent.toPNG()`, a normal call that CanvasKit services
+ * inside the page. So a render looks the same — and produces the same pixels —
+ * in every mode, and no transport needs to control a browser to produce one.
  */
 
 export interface EditorTransport {
@@ -26,9 +27,9 @@ export class AgentCallError extends Error {}
 
 /**
  * The snippet both transports run inside the page. Kept here so the two paths
- * can't drift: the bridge evaluates it directly, puppeteer passes it to
- * `page.evaluate`. Async so a Promise-returning verb (importSVG, toPNG) is
- * awaited in-page rather than serialized across the wire as `{}`.
+ * can't drift: each hands it to the page as-is. Async so a Promise-returning
+ * verb (importSVG, toPNG) is awaited in-page rather than serialized across the
+ * wire as `{}`.
  */
 export const IN_PAGE_INVOKE = `async (method, args) => {
     const agent = window.app?.agent;

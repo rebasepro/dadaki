@@ -3,5 +3,8 @@ packages:
 
 allowBuilds:
   '@firebase/util': true
+  # esbuild resolves its platform binary through an optional dependency; its
+  # install script is not needed, and skipping it keeps the install clean.
+  esbuild: false
   protobufjs: true
   puppeteer: true

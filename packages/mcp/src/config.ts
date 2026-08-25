@@ -13,10 +13,17 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { EditorTransport } from './transport.ts';
 import { BridgeTransport } from './transport_bridge.ts';
-import { PuppeteerTransport } from './transport_puppeteer.ts';
 import { RelayTransport } from './transport_relay.ts';
 
-export type Mode = 'headless' | 'headful' | 'bridge' | 'relay';
+export type Mode = 'relay' | 'bridge';
+
+/**
+ * Modes that used to exist: the server launched its own Chrome via puppeteer
+ * and served the local build to it. They are gone, and the flags are kept only
+ * to say so — a stale config should be told what to change, not silently run
+ * in a mode the user did not pick.
+ */
+const REMOVED_MODES = ['headless', 'headful'] as const;
 
 /**
  * Default bridge port. Fixed, not ephemeral, so the connect URL is the SAME
@@ -102,20 +109,22 @@ export function readConfig(argv: string[] = process.argv.slice(2)): Config {
     }
 
     const rawMode = args.get('mode') ?? process.env.DADAKI_MCP_MODE;
-    let mode: Mode;
     if (
-        rawMode === 'bridge' ||
-        rawMode === 'headful' ||
-        rawMode === 'headless' ||
-        rawMode === 'relay'
+        (rawMode !== undefined &&
+            REMOVED_MODES.includes(rawMode as (typeof REMOVED_MODES)[number])) ||
+        envFlag('DADAKI_MCP_HEADFUL')
     ) {
-        mode = rawMode;
-    } else if (envFlag('DADAKI_MCP_HEADFUL')) {
-        // Retained: this was the original way to watch the agent work.
-        mode = 'headful';
-    } else {
-        mode = 'headless';
+        throw new Error(
+            `[dadaki-mcp] ${rawMode ?? 'headful'} mode has been removed. It launched a ` +
+                'browser of its own, which meant shipping puppeteer — a Chrome download — ' +
+                'to every install, for a mode that only worked from a repo checkout. Use ' +
+                '`--mode relay` for the hosted app (the default) or `--mode bridge` for an ' +
+                'editor running on this machine; both drive a tab you already have open.',
+        );
     }
+    // Relay is the default because it is the arrangement that needs nothing
+    // set up: open the app, click "Connect agent", give the agent the code.
+    const mode: Mode = rawMode === 'bridge' ? 'bridge' : 'relay';
 
     const url = args.get('url') ?? process.env.DADAKI_MCP_URL;
     const explicitPort = args.get('port') ?? process.env.DADAKI_MCP_PORT;
@@ -186,56 +195,47 @@ export async function createTransport(
         };
     }
 
-    if (cfg.mode === 'bridge') {
-        const transport = new BridgeTransport({ port: cfg.port, token: cfg.token });
-        const port = await transport.listen();
-        const base = cfg.url ?? 'http://localhost:5199/';
-        const sep = base.includes('?') ? '&' : '?';
-        const connectUrl = `${base}${sep}agentBridge=${port}&token=${cfg.token}`;
+    // Bridge: the editor running on this machine. The server listens and the
+    // page dials in, so the only thing it owns is a socket.
+    const transport = new BridgeTransport({ port: cfg.port, token: cfg.token });
+    const port = await transport.listen();
+    const base = cfg.url ?? 'http://localhost:5199/';
+    const sep = base.includes('?') ? '&' : '?';
+    const connectUrl = `${base}${sep}agentBridge=${port}&token=${cfg.token}`;
 
-        // A hosted editor cannot dial loopback — Chrome's Local Network Access
-        // checks block it — so the bridge is the wrong mode against one, and
-        // the tab that tried gets a device-access prompt for its trouble. Say
-        // so instead of printing a URL that can only fail.
-        if (!isLoopback(base)) {
-            return {
-                transport,
-                notice:
-                    `[dadaki-mcp] bridge mode — listening on 127.0.0.1:${port}\n` +
-                    `[dadaki-mcp] WARNING: --url points at ${base}, which is not this machine.\n` +
-                    '[dadaki-mcp] A page served from there cannot reach a loopback port, so no\n' +
-                    '[dadaki-mcp] editor can attach to this bridge. Use --mode relay for a hosted\n' +
-                    '[dadaki-mcp] editor, or drop --url to drive one running locally.',
-            };
-        }
-
-        // The bridge listening says nothing about whether there is an editor to
-        // attach. Printing a URL to a dev server that isn't running produces a
-        // dead link and no clue why — so check, and say which half is missing.
-        const reachable = await editorReachable(base);
-        const warning = reachable
-            ? ''
-            : `\n[dadaki-mcp] NOTE: nothing is serving ${base} yet, so that URL will not load.\n` +
-              '[dadaki-mcp] Start the editor first (`pnpm dev` for the local app), or pass\n' +
-              '[dadaki-mcp] --url <address> if your editor runs somewhere else.';
-
+    // A hosted editor cannot dial loopback — Chrome's Local Network Access
+    // checks block it — so the bridge is the wrong mode against one, and
+    // the tab that tried gets a device-access prompt for its trouble. Say
+    // so instead of printing a URL that can only fail.
+    if (!isLoopback(base)) {
         return {
             transport,
             notice:
                 `[dadaki-mcp] bridge mode — listening on 127.0.0.1:${port}\n` +
-                '[dadaki-mcp] open your editor with this URL to attach it:\n' +
-                `\n    ${connectUrl}\n\n` +
-                '[dadaki-mcp] the tab stays attached across reloads until you clear it.' +
-                warning,
+                `[dadaki-mcp] WARNING: --url points at ${base}, which is not this machine.\n` +
+                '[dadaki-mcp] A page served from there cannot reach a loopback port, so no\n' +
+                '[dadaki-mcp] editor can attach to this bridge. Use --mode relay for a hosted\n' +
+                '[dadaki-mcp] editor, or drop --url to drive one running locally.',
         };
     }
 
-    const transport = new PuppeteerTransport({
-        headful: cfg.mode === 'headful',
-        url: cfg.url,
-    });
+    // The bridge listening says nothing about whether there is an editor to
+    // attach. Printing a URL to a dev server that isn't running produces a
+    // dead link and no clue why — so check, and say which half is missing.
+    const reachable = await editorReachable(base);
+    const warning = reachable
+        ? ''
+        : `\n[dadaki-mcp] NOTE: nothing is serving ${base} yet, so that URL will not load.\n` +
+          '[dadaki-mcp] Start the editor first (`pnpm dev` for the local app), or pass\n' +
+          '[dadaki-mcp] --url <address> if your editor runs somewhere else.';
+
     return {
         transport,
-        notice: `[dadaki-mcp] ${cfg.mode} mode${cfg.url ? ` — ${cfg.url}` : ''}`,
+        notice:
+            `[dadaki-mcp] bridge mode — listening on 127.0.0.1:${port}\n` +
+            '[dadaki-mcp] open your editor with this URL to attach it:\n' +
+            `\n    ${connectUrl}\n\n` +
+            '[dadaki-mcp] the tab stays attached across reloads until you clear it.' +
+            warning,
     };
 }

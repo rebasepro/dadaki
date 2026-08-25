@@ -1,12 +1,14 @@
 /**
- * End-to-end smoke test for the MCP server.
+ * End-to-end smoke test for the MCP server: every tool, against a real editor.
  *
  * The unit tests in `packages/editor/src/agent.test.ts` cover the agent API
  * against the real engine, but they can't see the parts that only exist once
- * the whole thing is assembled: the MCP handshake and tool schemas, the CDP
- * bridge into the page, CanvasKit actually booting headless, and rendering.
- * Those are exactly where this integration breaks, so drive it as a real
- * client would.
+ * the whole thing is assembled: the MCP handshake and tool schemas, a call
+ * crossing into the page, CanvasKit actually booting, and rendering. Those are
+ * exactly where this integration breaks, so drive it as a real client would.
+ *
+ * The server never launches a browser — it drives a tab a person has open — so
+ * the harness stands in for the person (see harness.ts).
  *
  *   pnpm build                                   # produces packages/app/dist
  *   node --experimental-strip-types packages/mcp/smoke.ts [outDir]
@@ -18,11 +20,9 @@
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { startBridgedSession } from './harness.ts';
 
 const OUT = process.argv[2] ?? tmpdir();
-const SERVER = new URL('./src/index.ts', import.meta.url).pathname;
 
 let failures = 0;
 function check(label: string, ok: boolean, detail?: unknown) {
@@ -34,11 +34,8 @@ function check(label: string, ok: boolean, detail?: unknown) {
     }
 }
 
-const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: ['--experimental-strip-types', SERVER],
-});
-const client = new Client({ name: 'dadaki-smoke', version: '1.0.0' });
+const session = await startBridgedSession({ name: 'dadaki-smoke' });
+const { client } = session;
 
 type Content = Array<{ type: string; text?: string; data?: string }>;
 
@@ -50,8 +47,6 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 }
 
 try {
-    await client.connect(transport);
-
     // Tool descriptions say what each verb does; the server instructions say
     // how to WORK. Without them an agent gets 30 verbs and no sense that it
     // should be looking at renders, which is the whole point of the tool.
@@ -258,7 +253,7 @@ try {
 
     console.log(`\nartifacts written to ${OUT}`);
 } finally {
-    await client.close().catch(() => {});
+    await session.close();
 }
 
 console.log(failures === 0 ? '\nall checks passed' : `\n${failures} check(s) failed`);

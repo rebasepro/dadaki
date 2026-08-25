@@ -25,14 +25,18 @@ inevitably-divergent Node implementation, the server drives the **real** editor.
 Agent edits therefore go through the same engine, history and export paths as a
 human's.
 
+That browser is always **yours** — a tab you have open. The server launches no
+browser of its own, which is why installing it downloads no browser either: it
+is a few hundred kilobytes of JavaScript and nothing else.
+
 The agent API (`EditorHandle.agent`) is identical in every editor instance. What
 differs between modes is only how a call gets into the page, which is isolated
 behind one `EditorTransport` interface — so **every tool works in every mode**,
 and nothing in the tool layer knows which is in use.
 
 ```
-                          ┌── CDP ───▶ a browser this server launches
-agent ──stdio──▶ MCP server├── ws ────▶ your editor tab, on localhost
+                          ┌── ws ────▶ your editor tab, on localhost
+agent ──stdio──▶ MCP server┤
                           └── HTTPS ─▶ app backend ──SSE──▶ your tab, hosted
 ```
 
@@ -45,11 +49,9 @@ editor chrome, at whatever scale is asked for.
 
 | Mode | What it does | Use it for |
 | --- | --- | --- |
-| `relay` | Drives your tab in the **hosted app** | The deployed SaaS — the default in `.mcp.json` |
+| `relay` | Drives your tab in the **hosted app** | dadaki.com — the default |
 | `bridge` | Drives your tab on **localhost** | Local dev against `pnpm dev` |
-| `headless` | Throwaway browser serving the local build | Scripts, CI, unattended work |
-| `headful` | The same, with a visible window | Watching an agent work; debugging |
-| `--url <addr>` | Any of the above, pointed elsewhere | Dev server, staging, the deployment |
+| `--url <addr>` | Either of the above, pointed elsewhere | Dev server, staging, another deployment |
 
 **Why two "your tab" modes.** `bridge` has the page dial `ws://127.0.0.1`
 directly, which only works when the page itself is served from localhost. From
@@ -57,43 +59,63 @@ a public origin Chrome refuses the connection outright — Local Network Access
 checks, `ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS` — so the hosted app needs
 `relay`, where both sides connect outward and the backend pairs them.
 
-**`headless` is the code default; `relay` is what the checked-in `.mcp.json`
-selects.** That split is deliberate: headless is right for a script, and wrong
-for a person. In headless mode the document lives in an invisible browser owned
-by the server process — you can't see it, can't take it over, and it is **lost
-when the server restarts**, which MCP clients do routinely. Reach for it when
-something else is consuming the exported SVG, not when you want to keep the
-artwork.
+**There used to be two more modes**, `headless` and `headful`, in which the
+server launched a browser through puppeteer and served the local build to it.
+They are gone. They cost every install a Chrome download, they only ever worked
+from a repo checkout, and the document they produced lived in a window nobody
+could see — lost on the next server restart, which MCP clients do routinely.
+Both flags now fail with a message pointing at `relay` or `bridge`.
 
 ### Setup
 
+Nothing to clone, nothing to build:
+
 ```bash
-pnpm install
-pnpm build          # produces packages/app/dist, which the server serves
+claude mcp add dadaki -- npx -y @dadaki/mcp@latest --mode relay --url https://dadaki.com/
 ```
 
-Register it with an MCP client:
+Any other client, same command in its own config:
+
+```json
+{
+  "mcpServers": {
+    "dadaki": {
+      "command": "npx",
+      "args": ["-y", "@dadaki/mcp@latest", "--mode", "relay", "--url", "https://dadaki.com/"]
+    }
+  }
+}
+```
+
+`relay` against `https://dadaki.com` is also what you get with no arguments at
+all. Add `"--mode", "bridge"` — or `"env": {"DADAKI_MCP_MODE": "bridge"}` — to
+drive an editor running on your own machine instead.
+
+Then open a document, click **Connect agent**, and give your agent the
+8-character code. It calls the `connect` tool with it and is attached.
+
+#### From a checkout
+
+Working on the server itself, run it from source:
 
 ```json
 {
   "mcpServers": {
     "dadaki": {
       "command": "node",
-      "args": ["--experimental-strip-types", "/path/to/vector-editor/packages/mcp/src/index.ts"]
+      "args": ["--experimental-strip-types", "/path/to/dadaki/packages/mcp/src/index.ts"]
     }
   }
 }
 ```
 
-Add `"--mode", "relay"` (or `bridge`, `headful`) to `args` — or
-`"env": {"DADAKI_MCP_MODE": "relay"}` — to switch modes. `DADAKI_MCP_HEADFUL=1`
-still works.
+`pnpm --filter @dadaki/mcp build` produces `dist/index.js`, the single file the
+npm package ships; `npm publish` from `packages/mcp` runs it first.
 
 ### Relay mode (the hosted app)
 
 ```bash
-node --experimental-strip-types packages/mcp/src/index.ts \
-  --mode relay --url https://your-app/
+npx -y @dadaki/mcp --mode relay --url https://your-app/
 ```
 
 Then, in the app: open a document, click **Connect agent**, and give the agent
@@ -115,7 +137,7 @@ deployment would need sticky routing or a shared store.
 
 ### Bridge mode
 
-The server launches no browser. It listens on loopback and prints a URL:
+It listens on loopback and prints a URL:
 
 ```
 [dadaki-mcp] bridge mode — listening on 127.0.0.1:54666
@@ -225,14 +247,35 @@ survive the feature being broken.
 
 ```bash
 pnpm test                                     # agent API unit tests
-pnpm --filter @dadaki/mcp smoke               # full MCP round-trip (headless)
+pnpm --filter @dadaki/mcp smoke               # full MCP round-trip, every tool
+pnpm --filter @dadaki/mcp smoke:bundle        # the same, against the published bundle
 pnpm --filter @dadaki/mcp smoke:bridge        # bridge mode, incl. its security rules
 pnpm --filter @dadaki/mcp smoke:modes <dir>   # every mode; <dir> holds cert.pem/key.pem
+pnpm --filter @dadaki/mcp smoke:offline       # relay economics, against a stand-in backend
+pnpm --filter @dadaki/mcp smoke:relay         # relay against a real deployment
 ```
+
+**`smoke:bundle` matters more than it looks.** What npm ships is not these
+sources — it is one esbuild output with every dependency inlined and a
+`createRequire` shim. A test that only runs `src/` cannot see a bundling
+failure, and a bundling failure reaches users as a broken install. Every smoke
+test takes `DADAKI_MCP_TEST_BUNDLE=1` and runs against `dist/index.js` instead.
+
+**`smoke:offline` counts requests.** Against a real deployment you cannot tell
+whether a tool call cost one HTTP round-trip or two, and that difference is the
+whole latency of a drawing loop. A stand-in backend can also refuse a pairing
+code or vanish entirely on demand, which is how the failure messages get tested
+at all.
 
 The unit tests cover the agent API against the real WASM engine. The smoke tests
 cover what only exists assembled: the MCP handshake, each transport, CanvasKit
 booting, and rendering.
+
+Since the server drives a tab a *person* has open, the tests have to supply the
+person: `harness.ts` serves the built app, opens it with puppeteer, and attaches
+it over the bridge. That harness is the only thing here that touches puppeteer,
+it lives outside `src/`, and it is never published — which is what keeps a
+browser download out of `npx @dadaki/mcp`.
 
 `smoke:bridge` is the one worth reading. Bridge mode's correctness claim is that
 a call lands in *somebody else's* page, so the test opens an editor itself,

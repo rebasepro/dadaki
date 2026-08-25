@@ -2,12 +2,14 @@
  * Mode-coverage test: every mode must reach an editor, and every tool must
  * behave the same once it gets there.
  *
- * The headless and bridge arrangements have their own smoke tests. This covers
- * what those don't:
+ * The bridged arrangement has its own smoke tests. This covers what those
+ * don't:
  *
- *   - config resolution for each mode (flags and environment variables);
- *   - `--url`, which is how any mode points at a dev server or a deployment
- *     instead of the bundled build;
+ *   - config resolution for each mode (flags and environment variables),
+ *     including the removed browser-owning modes, which must fail loudly
+ *     rather than quietly running as something else;
+ *   - `--url`, which is how a mode points at a dev server or a deployment
+ *     instead of the default address;
  *   - the bridge from an HTTPS origin, which is the deployed-app case. That one
  *     is not obvious: `ws://127.0.0.1` from an `https://` page could be blocked
  *     as mixed content, which would rule bridge mode out for the cloud app
@@ -21,15 +23,13 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createServer as createHttpsServer } from 'node:https';
-import { createServer as createNetServer } from 'node:net';
 import { extname, join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import puppeteer, { type Browser } from 'puppeteer';
+import { APP_DIST, CHROME_ARGS, freePort, SERVER_ARGV, serveStatic } from './harness.ts';
 import { readConfig } from './src/config.ts';
-import { APP_DIST, serveStatic } from './src/transport_puppeteer.ts';
 
-const SERVER = new URL('./src/index.ts', import.meta.url).pathname;
 const CERT_DIR = process.argv[2] ?? '/tmp';
 const TOKEN = 'modes-test-token';
 
@@ -43,19 +43,11 @@ function check(label: string, ok: boolean, detail?: unknown) {
 }
 const skip = (label: string, why: string) => console.log(`  --  ${label} (skipped: ${why})`);
 
-async function freePort(): Promise<number> {
-    const s = createNetServer();
-    await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
-    const port = (s.address() as { port: number }).port;
-    await new Promise<void>((r) => s.close(() => r()));
-    return port;
-}
-
 // ─── Config resolution ──────────────────────────────────────────────────
 
-check('defaults to headless', readConfig([]).mode === 'headless');
-check('--mode headful is honoured', readConfig(['--mode', 'headful']).mode === 'headful');
+check('defaults to relay', readConfig([]).mode === 'relay');
 check('--mode bridge is honoured', readConfig(['--mode', 'bridge']).mode === 'bridge');
+check('--mode relay is honoured', readConfig(['--mode', 'relay']).mode === 'relay');
 check(
     '--url is carried through',
     readConfig(['--url', 'https://example.test/']).url === 'https://example.test/',
@@ -66,52 +58,172 @@ check(
     readConfig([]).token?.length,
 );
 check('--token overrides the generated one', readConfig(['--token', 'abc']).token === 'abc');
-// The original env var predates --mode and must keep working.
+
+// The browser-owning modes are gone. A config that still asks for one must be
+// told, not silently given a different mode: the artwork would land somewhere
+// the user isn't looking, which is the confusing failure worth a hard error.
+for (const gone of ['headless', 'headful']) {
+    let message = '';
+    try {
+        readConfig(['--mode', gone]);
+    } catch (err) {
+        message = (err as Error).message;
+    }
+    check(
+        `--mode ${gone} fails with a way forward`,
+        /has been removed/.test(message) && /--mode relay/.test(message),
+        message.slice(0, 120),
+    );
+}
 process.env.DADAKI_MCP_HEADFUL = '1';
-check('DADAKI_MCP_HEADFUL=1 still selects headful', readConfig([]).mode === 'headful');
+{
+    let message = '';
+    try {
+        readConfig([]);
+    } catch (err) {
+        message = (err as Error).message;
+    }
+    check(
+        'DADAKI_MCP_HEADFUL=1 fails with a way forward',
+        /has been removed/.test(message),
+        message,
+    );
+}
 process.env.DADAKI_MCP_HEADFUL = '';
 process.env.DADAKI_MCP_MODE = 'bridge';
 check('DADAKI_MCP_MODE is honoured', readConfig([]).mode === 'bridge');
 process.env.DADAKI_MCP_MODE = '';
 
-type Content = Array<{ type: string; text?: string; data?: string }>;
 let browser: Browser | null = null;
 const httpServed = await serveStatic(APP_DIST);
 
-// ─── --url mode ─────────────────────────────────────────────────────────
-// Pointing at an already-running editor is the mechanism the cloud app uses;
-// only the address and the need to sign in differ.
+// ─── shutting the server down ───────────────────────────────────────────
+// An MCP client stops a server by closing its stdin. Nothing else would stop
+// bridge mode: it holds a listening socket, which keeps the event loop alive
+// on its own. Every client restart used to leave an orphan behind, each still
+// holding the fixed port — so the next server could not have 7331, and the
+// connect URL that is supposed to be stable quietly changed.
 {
-    const client = new Client({ name: 'modes-url', version: '1.0.0' });
+    const exitedWithin = (ms: number, kill: (c: ReturnType<typeof spawn>) => void) =>
+        new Promise<boolean>((resolve) => {
+            const child = spawn(process.execPath, [
+                ...SERVER_ARGV,
+                '--mode',
+                'bridge',
+                '--port',
+                '0',
+            ]);
+            const timer = setTimeout(() => {
+                child.kill('SIGKILL');
+                resolve(false);
+            }, ms);
+            child.on('exit', () => {
+                clearTimeout(timer);
+                resolve(true);
+            });
+            // Give it a moment to finish starting before asking it to stop.
+            setTimeout(() => kill(child), 1_500);
+        });
+
+    check(
+        'bridge mode exits when its client closes stdin',
+        await exitedWithin(12_000, (c) => c.stdin?.end()),
+    );
+    check('bridge mode exits on SIGTERM', await exitedWithin(12_000, (c) => c.kill('SIGTERM')));
+}
+
+// ─── a call with nothing attached ───────────────────────────────────────
+// This has to come back with instructions, and come back SOON. It used to wait
+// two minutes, so the MCP client's own timeout fired first and the agent was
+// told "request timed out" — the one message it cannot act on.
+{
+    const client = new Client({ name: 'modes-unattached', version: '1.0.0' });
+    const started = Date.now();
     try {
         await client.connect(
             new StdioClientTransport({
                 command: process.execPath,
-                args: [
-                    '--experimental-strip-types',
-                    SERVER,
-                    '--mode',
-                    'headless',
-                    '--url',
-                    `${httpServed.origin}/index.html`,
-                ],
+                args: [...SERVER_ARGV, '--mode', 'bridge', '--port', '0'],
             }),
         );
-        const r = await client.callTool({
-            name: 'create_rect',
-            arguments: { x: 10, y: 10, width: 100, height: 100 },
-        });
-        const text = (r.content as Content)[0]?.text ?? '';
+        const r = await client.callTool({ name: 'describe_scene', arguments: {} });
+        const secs = (Date.now() - started) / 1000;
+        const text = (r.content as Array<{ text?: string }>)[0]?.text ?? '';
         check(
-            '--url drives an editor served elsewhere',
-            !r.isError && text.includes('"id"'),
-            text.slice(0, 120),
+            'an unattached bridge answers in seconds, not minutes',
+            Boolean(r.isError) && secs < 20,
+            {
+                secs,
+                text,
+            },
         );
+        check('and says which URL to open', /bridge URL/.test(text), text);
     } catch (err) {
-        check('--url drives an editor served elsewhere', false, (err as Error).message);
+        check(
+            'an unattached bridge answers in seconds, not minutes',
+            false,
+            (err as Error).message,
+        );
     } finally {
         await client.close().catch(() => {});
     }
+}
+
+// ─── a stale config, at the CLI ─────────────────────────────────────────
+// readConfig throwing is only half of it. An MCP client shows the user the
+// server's stderr and nothing else, so the message has to ARRIVE as a message:
+// this used to surface as an unhandled exception, with the one line saying
+// what to change buried under a stack trace from inside the bundle.
+{
+    const { out, code } = await new Promise<{ out: string; code: number | null }>((resolve) => {
+        const child = spawn(process.execPath, [...SERVER_ARGV, '--mode', 'headless']);
+        let buf = '';
+        child.stderr.on('data', (d) => {
+            buf += String(d);
+        });
+        child.on('exit', (c) => resolve({ out: buf, code: c }));
+    });
+    check(
+        'a removed mode is reported as a message, not a crash',
+        /has been removed/.test(out) && !/\n\s+at /.test(out) && !/throw new Error/.test(out),
+        out.slice(0, 240),
+    );
+    check('a removed mode exits non-zero', code === 1, code);
+}
+
+// ─── relay --url ────────────────────────────────────────────────────────
+// Relay defaults to the hosted app, and `--url` is how it is pointed at a
+// staging deployment or a dev backend instead. Getting that wrong is invisible
+// — the server starts fine and pairs against the WRONG deployment — so the
+// address it settled on has to appear in what it prints.
+{
+    const notice = await new Promise<string>((resolve) => {
+        const child = spawn(process.execPath, [
+            ...SERVER_ARGV,
+            '--mode',
+            'relay',
+            '--url',
+            httpServed.origin,
+        ]);
+        let buf = '';
+        child.stderr.on('data', (d) => {
+            buf += String(d);
+        });
+        setTimeout(() => {
+            child.kill('SIGKILL');
+            resolve(buf);
+        }, 6_000);
+    });
+    check(
+        'relay reports the deployment it was pointed at',
+        notice.includes(`relay mode — ${httpServed.origin}`),
+        notice.slice(0, 200),
+    );
+    check(
+        'relay names the button that attaches an editor',
+        /Connect agent/.test(notice) && /8-character code/.test(notice),
+        notice.slice(0, 400),
+    );
 }
 
 // ─── bridge: the connect URL must survive a restart ─────────────────────
@@ -124,12 +236,7 @@ const httpServed = await serveStatic(APP_DIST);
     /** Start the server, read its printed connect URL, then kill it. */
     const startAndRead = () =>
         new Promise<string>((resolve) => {
-            const child = spawn(process.execPath, [
-                '--experimental-strip-types',
-                SERVER,
-                '--mode',
-                'bridge',
-            ]);
+            const child = spawn(process.execPath, [...SERVER_ARGV, '--mode', 'bridge']);
             let buf = '';
             const done = (v: string) => {
                 child.kill('SIGKILL');
@@ -146,13 +253,7 @@ const httpServed = await serveStatic(APP_DIST);
     /** Start the server and return everything it printed before dying. */
     const startAndCapture = (extra: string[] = []) =>
         new Promise<string>((resolve) => {
-            const child = spawn(process.execPath, [
-                '--experimental-strip-types',
-                SERVER,
-                '--mode',
-                'bridge',
-                ...extra,
-            ]);
+            const child = spawn(process.execPath, [...SERVER_ARGV, '--mode', 'bridge', ...extra]);
             let buf = '';
             child.stderr.on('data', (d) => {
                 buf += String(d);
@@ -180,37 +281,6 @@ const httpServed = await serveStatic(APP_DIST);
         first,
         second,
     });
-}
-
-// ─── headful ────────────────────────────────────────────────────────────
-// Same transport as headless with the window shown, but "same code path" is
-// exactly the assumption worth checking: a real window needs a display, and
-// on a headless machine this is the one mode that legitimately cannot run.
-{
-    const client = new Client({ name: 'modes-headful', version: '1.0.0' });
-    try {
-        await client.connect(
-            new StdioClientTransport({
-                command: process.execPath,
-                args: ['--experimental-strip-types', SERVER, '--mode', 'headful'],
-            }),
-        );
-        const r = await client.callTool({
-            name: 'create_rect',
-            arguments: { x: 20, y: 20, width: 80, height: 80 },
-        });
-        const text = (r.content as Content)[0]?.text ?? '';
-        check(
-            'headful drives a visible window',
-            !r.isError && text.includes('"id"'),
-            text.slice(0, 120),
-        );
-    } catch (err) {
-        // No display (CI, ssh) is a legitimate reason, not a failure.
-        skip('headful drives a visible window', (err as Error).message.slice(0, 80));
-    } finally {
-        await client.close().catch(() => {});
-    }
 }
 
 // ─── Bridge from an HTTPS origin (the deployed-app case) ────────────────
@@ -257,8 +327,7 @@ const httpServed = await serveStatic(APP_DIST);
                 new StdioClientTransport({
                     command: process.execPath,
                     args: [
-                        '--experimental-strip-types',
-                        SERVER,
+                        ...SERVER_ARGV,
                         '--mode',
                         'bridge',
                         '--port',
@@ -270,12 +339,7 @@ const httpServed = await serveStatic(APP_DIST);
             );
             browser = await puppeteer.launch({
                 headless: true,
-                args: [
-                    '--use-gl=swiftshader',
-                    '--enable-unsafe-swiftshader',
-                    '--no-sandbox',
-                    '--ignore-certificate-errors',
-                ],
+                args: [...CHROME_ARGS, '--ignore-certificate-errors'],
             });
             const page = await browser.newPage();
             await page.goto(

@@ -2,9 +2,10 @@
  * End-to-end test for BRIDGE mode — the agent driving an editor tab it does
  * not own.
  *
- * Bridge mode is the one arrangement the headless smoke test cannot cover: the
- * MCP server launches no browser, and correctness means a tool call lands in
- * SOMEBODY ELSE'S already-open page. So this stands in for the human: it opens
+ * What this covers that smoke.ts does not is the attaching itself: the connect
+ * URL, the credentials being stripped from it, and the proof that a tool call
+ * lands in SOMEBODY ELSE'S already-open page. So this stands in for the human,
+ * by hand rather than through the harness: it opens
  * an editor itself, attaches it with the bridge URL, drives it over MCP, and
  * then reads the page back DIRECTLY (not through MCP) to prove the edits
  * really landed in that tab rather than in some other instance.
@@ -13,13 +14,11 @@
  *   node --experimental-strip-types packages/mcp/smoke_bridge.ts
  */
 
-import { createServer } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import puppeteer from 'puppeteer';
-import { APP_DIST, serveStatic } from './src/transport_puppeteer.ts';
+import { APP_DIST, CHROME_ARGS, freePort, SERVER_ARGV, serveStatic } from './harness.ts';
 
-const SERVER = new URL('./src/index.ts', import.meta.url).pathname;
 const TOKEN = 'smoke-test-token';
 
 let failures = 0;
@@ -31,23 +30,12 @@ function check(label: string, ok: boolean, detail?: unknown) {
     }
 }
 
-/** Grab a free loopback port; the bridge needs a known one to build its URL. */
-async function freePort(): Promise<number> {
-    const s = createServer();
-    await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
-    const port = (s.address() as { port: number }).port;
-    await new Promise<void>((r) => s.close(() => r()));
-    return port;
-}
-
 const port = await freePort();
 const served = await serveStatic(APP_DIST);
 const browser = await puppeteer.launch({
     headless: true,
     args: [
-        '--use-gl=swiftshader',
-        '--enable-unsafe-swiftshader',
-        '--no-sandbox',
+        ...CHROME_ARGS,
         // Lets one test open the same local server under a hostname that is not
         // loopback, which is the only way to exercise the hosted-origin path.
         '--host-resolver-rules=MAP hosted.test 127.0.0.1',
@@ -68,16 +56,7 @@ try {
     await client.connect(
         new StdioClientTransport({
             command: process.execPath,
-            args: [
-                '--experimental-strip-types',
-                SERVER,
-                '--mode',
-                'bridge',
-                '--port',
-                String(port),
-                '--token',
-                TOKEN,
-            ],
+            args: [...SERVER_ARGV, '--mode', 'bridge', '--port', String(port), '--token', TOKEN],
         }),
     );
     check('server starts in bridge mode without launching a browser', true);

@@ -26,3 +26,4 @@ packages/editor/engine/pkg/.gitignore
 
 # Second worktree of the same online app repo — also its own checkout
 /cloud-main/
+packages/mcp/LICENSE

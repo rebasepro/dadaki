@@ -4,6 +4,42 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### MCP server
+
+- **`@dadaki/mcp` is published to npm.** Connecting an agent is one line —
+  `npx -y @dadaki/mcp --mode relay --url https://dadaki.com/` — with nothing to
+  clone, install or build. The package is a single bundled file with no
+  dependencies.
+- **Removed the `headless` and `headful` modes.** They launched a browser of
+  their own through puppeteer, which meant every install paid for a Chrome
+  download, and they only ever worked from a repo checkout. Both flags (and
+  `DADAKI_MCP_HEADFUL=1`) now fail with a message pointing at `relay` or
+  `bridge`, the two modes that drive a tab you already have open.
+- **`relay` is the default mode**, replacing `headless`.
+- **A relay tool call no longer costs two HTTP round-trips** (`1.0.0-beta.2`).
+  Every call asked the backend `/status` before making the call, doubling the
+  requests against the deployment — and the round-trip is the whole cost of a
+  drawing loop. The relay answers `409` the instant nothing is attached, so the
+  call already carries that answer. A relay that is entirely down now says so
+  in milliseconds instead of claiming "no editor is attached" four seconds
+  later.
+- **Bridge mode exits when its client closes stdin** (`1.0.0-beta.2`). It holds
+  a listening socket, which kept the process alive on its own, so every MCP
+  client restart left an orphan behind — each still holding the fixed port
+  7331, so the connect URL that is supposed to be stable quietly changed.
+- **A bridge call with nothing attached answers in 4s, not 120s**
+  (`1.0.0-beta.2`). The client's own timeout fired first, so the agent was told
+  "request timed out" instead of which URL to open. Relay already worked this
+  way; bridge had been left behind.
+- **The tarball carries the licence** it claims in its manifest.
+- **Startup failures print as a message, not a crash** (`1.0.0-beta.2`). A
+  config still naming a removed mode used to surface as an unhandled exception,
+  burying the line that says what to change under a stack trace from inside the
+  bundle. An MCP client shows the user stderr and nothing else, so that line is
+  the whole diagnosis.
+
 ## [1.0.0-beta.1] — 2026-08-24
 
 First public release. The editor is feature-complete and the `createEditor`

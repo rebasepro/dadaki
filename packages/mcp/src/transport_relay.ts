@@ -130,12 +130,10 @@ export class RelayTransport implements EditorTransport {
         }
     }
 
-    async call<T = unknown>(method: string, args: unknown[] = []): Promise<T> {
-        if (!(await this.attached())) await this.waitForEditor();
-
-        let res: Response;
+    /** One call attempt. Network failures are the transport's own error. */
+    private async post(method: string, args: unknown[]): Promise<Response> {
         try {
-            res = await fetch(`${this.base}/call`, {
+            return await fetch(`${this.base}/call`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ token: this.opts.token, method, args }),
@@ -146,6 +144,20 @@ export class RelayTransport implements EditorTransport {
                 `could not reach the relay at ${this.base} (${(err as Error).message})`,
             );
         }
+    }
+
+    async call<T = unknown>(method: string, args: unknown[] = []): Promise<T> {
+        // Just make the call. This used to ask /status first, every time —
+        // which doubled the requests, and the round-trip to a deployment is the
+        // whole cost of a drawing loop. The relay answers 409 immediately when
+        // nothing is attached, so the call already carries that answer.
+        let res = await this.post(method, args);
+        if (res.status === 409) {
+            // Not attached *at this instant*. Worth waiting on: the human may
+            // still be opening the tab, or reloading one that was attached.
+            await this.waitForEditor();
+            res = await this.post(method, args);
+        }
 
         if (res.status === 409) {
             throw new AgentCallError('no editor is attached to this session');
@@ -153,6 +165,9 @@ export class RelayTransport implements EditorTransport {
         if (!res.ok) {
             throw new AgentCallError(`relay returned ${res.status} for ${method}`);
         }
+        // An answered call is proof of an editor, so a later drop is a reload
+        // to be waited out rather than a session that never existed.
+        this.seenEditor = true;
         return unwrap<T>((await res.json()) as { ok: boolean; value?: unknown; error?: string });
     }
 

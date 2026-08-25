@@ -15,5 +15,12 @@
         "noUnusedParameters": true,
         "noFallthroughCasesInSwitch": true
     },
-    "include": ["src", "smoke.ts"]
+    "include": [
+        "src",
+        "harness.ts",
+        "smoke.ts",
+        "smoke_bridge.ts",
+        "smoke_modes.ts",
+        "smoke_relay_offline.ts"
+    ]
 }

@@ -57,6 +57,8 @@ export class BridgeTransport implements EditorTransport {
     private readonly opts: BridgeTransportOptions;
     /** Resolves when an editor attaches; replaced after each disconnect. */
     private attached!: Promise<void>;
+    /** Has an editor ever held this bridge? Decides how patient `call` is. */
+    private seenEditor = false;
     private markAttached!: () => void;
 
     constructor(opts: BridgeTransportOptions) {
@@ -131,6 +133,7 @@ export class BridgeTransport implements EditorTransport {
             }
 
             this.socket = ws;
+            this.seenEditor = true;
             this.markAttached();
             console.error('[dadaki-mcp] editor attached');
 
@@ -169,7 +172,13 @@ export class BridgeTransport implements EditorTransport {
     async call<T = unknown>(method: string, args: unknown[] = []): Promise<T> {
         await this.listen();
         if (!this.socket || this.socket.readyState !== this.socket.OPEN) {
-            const wait = this.opts.attachTimeoutMs ?? 120_000;
+            // Fail FAST when no editor has ever attached: the agent's next move
+            // is to tell the human to open the connect URL, and it cannot say
+            // that while blocked. Waiting two minutes only meant the MCP
+            // client's own timeout fired first, so the agent got "Request timed
+            // out" instead of the instructions. Once a tab HAS attached, a drop
+            // is usually a reload — wait long enough for it to come back.
+            const wait = this.opts.attachTimeoutMs ?? (this.seenEditor ? 45_000 : 4_000);
             const timedOut = Symbol('timeout');
             // Hold the handle so the loser can be cancelled: without this, a
             // burst of calls issued right after attaching each leaves a live
