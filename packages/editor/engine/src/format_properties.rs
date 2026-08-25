@@ -16,9 +16,10 @@
 //! about the next malformed file.
 //!
 //! Everything here is deterministic: seeded `StdRng`, fixed iteration counts,
-//! no wall-clock in the assertions except the explicitly-labelled scaling
-//! guards at the end. Budgets are kept tight so the suite stays fast — the
-//! whole module is a small fraction of a second.
+//! and not one assertion that reads a clock — the scaling guards at the end
+//! count allocations instead, for reasons written up there. Budgets are kept
+//! tight so the suite stays fast — the whole module is a small fraction of a
+//! second.
 
 #![cfg(test)]
 
@@ -768,11 +769,32 @@ fn pathological_depth_and_cycles_do_not_overflow_the_stack() {
 // large documents. This project has already shipped one O(n²) of exactly that
 // kind (a live-paint scan on insertion).
 //
-// They compare *ratios*, never absolute milliseconds, so they mean the same
-// thing on a fast laptop and a loaded CI box. The thresholds sit far from
-// linear and far from quadratic: with an 8× larger input, linear predicts ~8×
-// and quadratic predicts ~64×, so a limit of 24× cannot be tripped by timer
-// noise but cannot be passed by an accidental quadratic either.
+// They measure ALLOCATIONS, not milliseconds. The wall-clock version produced
+// two false failures: once reporting a 36× blowup for work that is provably
+// linear, once failing a single test in a run whose only unusual feature was a
+// busy machine. Interleaving the samples and keeping each one's minimum
+// reduced that flakiness without removing it, because no amount of sampling
+// makes a shared CPU quiet — and a guard that fails at random teaches people
+// to rerun until green, which is worse than not having the guard.
+//
+// An allocation count is deterministic: the same input gives the same number,
+// on any machine, under any load. It is counted per-thread, so the rest of the
+// suite running in parallel is invisible to it. And it is a real proxy for
+// this work — serializing n nodes allocates in proportion to n.
+//
+// What they compare is cost PER NODE, not total cost. A ratio of totals sounds
+// equivalent and is not: a quadratic is diluted by whatever linear work sits
+// beside it, and a real injected O(n²) came to only 9.6× of an 8× baseline —
+// under any threshold loose enough to be safe. Per node, a linear path is flat
+// or falling as documents grow (buffer growth amortizes; measured 3.06 → 3.00
+// allocations and 2394 → 1052 bytes per node from 250 to 8000 rects), while
+// the same injected quadratic climbs to 3.4× its small-document cost. Flat
+// versus climbing is a difference in kind, so the bound can be tight.
+//
+// What it cannot see is a quadratic that allocates nothing — a nested scan
+// over data already in hand. `perf_saving_and_loading_stay_fast` still times
+// that, and is `#[ignore]`d: run deliberately, on a quiet machine, rather than
+// failing at random in everyone's default suite.
 
 fn engine_with_rects(n: u32) -> Engine {
     let mut engine = Engine::new();
@@ -788,34 +810,97 @@ fn engine_with_rects(n: u32) -> Engine {
     engine
 }
 
-/// Ratio of `b`'s cost to `a`'s, measured by **interleaving** the two and
-/// taking each one's fastest run.
-///
-/// Interleaving is the whole point. `cargo test` runs this module in parallel
-/// with the fuzz tests above, so timing `a` five times and then `b` five times
-/// lets a contention spike land entirely on one of them — which is exactly how
-/// an earlier version of this guard reported a 36× blowup for work that is
-/// provably linear when measured serially. Alternating means both samples see
-/// the same machine, and taking the minimum discards the spikes.
-fn cost_ratio(runs: usize, mut a: impl FnMut(), mut b: impl FnMut()) -> f64 {
-    let (mut ta, mut tb) = (std::time::Duration::MAX, std::time::Duration::MAX);
-    for _ in 0..runs {
-        let t = std::time::Instant::now();
-        a();
-        ta = ta.min(t.elapsed());
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 
-        let t = std::time::Instant::now();
-        b();
-        tb = tb.min(t.elapsed());
+thread_local! {
+    /// Allocations made by THIS thread. Per-thread so that a parallel test
+    /// run — which is how `cargo test` always runs — cannot perturb a count.
+    static ALLOC_CALLS: Cell<u64> = const { Cell::new(0) };
+    /// Bytes requested by THIS thread. Counted alongside the calls because the
+    /// two catch different quadratics: a nested loop allocating per element
+    /// blows up the call count, while one that allocates an n-sized buffer per
+    /// element keeps the count linear and blows up the bytes.
+    static ALLOC_BYTES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The system allocator, counting calls on the way through.
+///
+/// `const { Cell::new(0) }` above matters: a lazily-initialized thread-local
+/// allocates on first touch, from inside the allocator, which recurses.
+struct CountingAllocator;
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOC_CALLS.with(|c| c.set(c.get() + 1));
+        ALLOC_BYTES.with(|c| c.set(c.get() + layout.size() as u64));
+        unsafe { System.alloc(layout) }
     }
-    tb.as_secs_f64() / ta.as_secs_f64().max(1e-9)
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // A growing buffer reallocates, and that is real work worth seeing: a
+        // quadratic that regrows one Vec repeatedly shows up here and nowhere
+        // else.
+        ALLOC_CALLS.with(|c| c.set(c.get() + 1));
+        ALLOC_BYTES.with(|c| c.set(c.get() + new_size as u64));
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+/// Allocation calls and bytes performed while running `f`.
+fn allocations(mut f: impl FnMut()) -> (u64, u64) {
+    let calls = ALLOC_CALLS.with(|c| c.get());
+    let bytes = ALLOC_BYTES.with(|c| c.get());
+    f();
+    (
+        ALLOC_CALLS.with(|c| c.get()) - calls,
+        ALLOC_BYTES.with(|c| c.get()) - bytes,
+    )
+}
+
+/// What one node costs: allocation calls and bytes, divided by node count.
+///
+/// Both, because a quadratic can hide in either alone. A nested loop that
+/// allocates per pair blows up the call count; one that allocates an n-sized
+/// buffer per node keeps the calls linear and blows up only the bytes. The
+/// second shape passed a call-count-only guard when it was tried against it.
+fn cost_per_node(n: u32, f: impl FnMut()) -> (f64, f64) {
+    let (calls, bytes) = allocations(f);
+    assert!(calls > 0, "measured zero allocations — the work under test did not run");
+    (calls as f64 / n as f64, bytes as f64 / n as f64)
+}
+
+/// A bigger document must not cost MORE per node than a smaller one.
+fn assert_stays_linear(what: &str, small: (f64, f64), large: (f64, f64)) {
+    let calls = large.0 / small.0;
+    assert!(
+        calls < MAX_PER_NODE_GROWTH,
+        "{what} looks super-linear: at {LARGE} nodes each one costs {calls:.2}× the \
+         allocation calls it did at {SMALL} (a linear path stays at ~1×)",
+    );
+    let bytes = large.1 / small.1;
+    assert!(
+        bytes < MAX_PER_NODE_GROWTH,
+        "{what} looks super-linear: at {LARGE} nodes each one allocates {bytes:.2}× the \
+         bytes it did at {SMALL} (a linear path stays at ~1×)",
+    );
 }
 
 const SMALL: u32 = 250;
-const LARGE: u32 = 2_000; // 8× SMALL
-/// Linear predicts ~8×, quadratic ~64×. Sitting at 24× leaves room for the
-/// noise a parallel test run adds while still failing an accidental quadratic.
-const MAX_RATIO: f64 = 24.0;
+/// 32× SMALL. Wide enough that a quadratic dominates the linear work beside it
+/// rather than hiding inside it — at 8× it did hide.
+const LARGE: u32 = 8_000;
+/// Measured per-node growth is 0.98× at worst on a linear path and 3.4× for an
+/// injected quadratic, so this sits with half again as much headroom as the
+/// real code needs and still catches the thing it is for. The measurement does
+/// not vary between runs, so the headroom is for honest changes to the writer,
+/// not for machine noise.
+const MAX_PER_NODE_GROWTH: f64 = 1.5;
 
 /// Saving and loading must stay linear in document size.
 ///
@@ -830,31 +915,27 @@ fn saving_and_loading_scale_linearly_with_document_size() {
     let small_bytes = small.serialize_proto();
     let large_bytes = large.serialize_proto();
 
-    let save = cost_ratio(4, || { small.serialize_proto(); }, || { large.serialize_proto(); });
-    assert!(
-        save < MAX_RATIO,
-        "saving looks super-linear: {SMALL}→{LARGE} nodes cost {save:.1}× \
-         (linear ≈ 8×, quadratic ≈ 64×)",
+    assert_stays_linear(
+        "saving",
+        cost_per_node(SMALL, || { small.serialize_proto(); }),
+        cost_per_node(LARGE, || { large.serialize_proto(); }),
     );
 
-    let load = cost_ratio(
-        4,
-        || { proto::deserialize_from_proto(&small_bytes).unwrap(); },
-        || { proto::deserialize_from_proto(&large_bytes).unwrap(); },
-    );
-    assert!(
-        load < MAX_RATIO,
-        "loading looks super-linear: {SMALL}→{LARGE} nodes cost {load:.1}× \
-         (linear ≈ 8×, quadratic ≈ 64×)",
+    assert_stays_linear(
+        "loading",
+        cost_per_node(SMALL, || { proto::deserialize_from_proto(&small_bytes).unwrap(); }),
+        cost_per_node(LARGE, || { proto::deserialize_from_proto(&large_bytes).unwrap(); }),
     );
 
-    // Deterministic half of the guard: output size must scale linearly too.
-    // This one cannot flake under any machine load, so it holds the line even
-    // if the timing assertions above are ever relaxed.
-    let size_ratio = large_bytes.len() as f64 / small_bytes.len() as f64;
+    // Output size must stay linear too — a different failure from the same
+    // family, and the one that catches a writer which repeats itself.
+    let bytes_per_node = |b: &Vec<u8>, n: u32| b.len() as f64 / n as f64;
+    let size_growth =
+        bytes_per_node(&large_bytes, LARGE) / bytes_per_node(&small_bytes, SMALL);
     assert!(
-        size_ratio < 16.0,
-        "serialized size grew {size_ratio:.1}× for 8× the nodes",
+        size_growth < MAX_PER_NODE_GROWTH,
+        "each node takes {size_growth:.2}× as many bytes on disk in a {LARGE}-node \
+         document as in a {SMALL}-node one",
     );
 }
 
@@ -873,17 +954,22 @@ fn the_save_path_cost_model_holds() {
         "undo snapshots must not be enveloped",
     );
 
-    let ratio = cost_ratio(4, || { engine.serialize_scene(); }, || { engine.serialize_proto(); });
+    // The snapshot IS the raw payload. Deflate shrinks that ~12×, so a real
+    // compression pass moves this ratio far from 1 — which makes size a
+    // stronger claim than speed was, as well as a deterministic one.
+    let snapshot = engine.serialize_scene();
+    let raw = proto::serialize_payload_only(&engine.scene_for_test(), LARGE + 1);
+    let overhead = snapshot.len() as f64 / raw.len() as f64;
     assert!(
-        ratio > 1.0,
-        "a compressed save should cost more than a bare undo snapshot, but the \
-         snapshot was {:.1}× the price — is it going through the file path?",
-        1.0 / ratio,
+        (0.99..=1.01).contains(&overhead),
+        "an undo snapshot should be the bare payload, but it is {overhead:.2}× that size \
+         ({} vs {} bytes) — is it going through the file path?",
+        snapshot.len(),
+        raw.len(),
     );
 
     // Compression must earn the CPU it spends on every save.
     let saved = engine.serialize_proto();
-    let raw = proto::serialize_payload_only(&engine.scene_for_test(), LARGE + 1);
     let gain = raw.len() as f64 / saved.len() as f64;
     assert!(
         gain > 3.0,
@@ -1061,10 +1147,82 @@ fn snapshot_cost_does_not_scale_with_the_editor_owned_collections() {
     let tp: Vec<String> = (0..60).map(|i| format!(r#""{i}":{}"#, i + 1)).collect();
     loaded.set_text_paths_json(format!("{{{}}}", tp.join(",")));
 
-    let ratio = cost_ratio(4, || { bare.serialize_scene(); }, || { loaded.serialize_scene(); });
+    // Parsing 160 JSON entries per save would allocate hundreds of times; the
+    // typed path costs three allocations more than the empty one. No machine
+    // load can push a measurement across the gap between those two.
+    // Both documents hold the same number of nodes, so a plain ratio is the
+    // right comparison here — there is no size difference to normalize away.
+    let (bare_calls, bare_bytes) = allocations(|| { bare.serialize_scene(); });
+    let (full_calls, full_bytes) = allocations(|| { loaded.serialize_scene(); });
+    let calls = full_calls as f64 / bare_calls as f64;
+    let bytes = full_bytes as f64 / bare_bytes as f64;
     assert!(
-        ratio < 1.35,
-        "populating the editor-owned collections made an undo snapshot {ratio:.2}x more \
-         expensive — they are probably being parsed or re-rendered per save again",
+        calls < 1.10 && bytes < 1.10,
+        "populating the editor-owned collections made an undo snapshot allocate {calls:.3}× \
+         the calls and {bytes:.3}× the bytes — they are probably being parsed or re-rendered \
+         per save again",
     );
 }
+
+/// The wall-clock half of the guards above, kept for the one failure an
+/// allocation count cannot see: a quadratic that allocates nothing.
+///
+/// `#[ignore]`d deliberately. Timing on a shared CPU is not reliable enough to
+/// gate every run — that unreliability is what the guards above were rewritten
+/// to escape — but it is worth having when someone is looking into performance
+/// on a quiet machine:
+///
+///   cargo test --release -- --ignored perf_
+#[test]
+#[ignore]
+fn perf_saving_and_loading_stay_fast() {
+    /// Interleaved, so a contention spike cannot land on only one sample, and
+    /// each side keeps its fastest run, so a spike is discarded rather than
+    /// averaged in. Even then this is only trustworthy on an idle machine —
+    /// which is the whole reason it no longer runs by default.
+    fn time_ratio(runs: usize, mut a: impl FnMut(), mut b: impl FnMut()) -> f64 {
+        let (mut ta, mut tb) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        for _ in 0..runs {
+            let t = std::time::Instant::now();
+            a();
+            ta = ta.min(t.elapsed());
+
+            let t = std::time::Instant::now();
+            b();
+            tb = tb.min(t.elapsed());
+        }
+        tb.as_secs_f64() / ta.as_secs_f64().max(1e-9)
+    }
+
+    let small = engine_with_rects(SMALL);
+    let large = engine_with_rects(LARGE);
+    let small_bytes = small.serialize_proto();
+    let large_bytes = large.serialize_proto();
+
+    // Derived from the sizes rather than hardcoded, so changing SMALL or LARGE
+    // cannot silently decalibrate this the way a literal 24 did when LARGE grew.
+    // Linear predicts the size ratio itself; quadratic predicts its square.
+    let linear = LARGE as f64 / SMALL as f64;
+    let limit = linear * 3.0;
+
+    let save = time_ratio(4, || { small.serialize_proto(); }, || { large.serialize_proto(); });
+    assert!(
+        save < limit,
+        "saving took {save:.1}× the time for {linear:.0}× the nodes \
+         (linear ≈ {linear:.0}×, quadratic ≈ {:.0}×)",
+        linear * linear,
+    );
+
+    let load = time_ratio(
+        4,
+        || { proto::deserialize_from_proto(&small_bytes).unwrap(); },
+        || { proto::deserialize_from_proto(&large_bytes).unwrap(); },
+    );
+    assert!(
+        load < limit,
+        "loading took {load:.1}× the time for {linear:.0}× the nodes \
+         (linear ≈ {linear:.0}×, quadratic ≈ {:.0}×)",
+        linear * linear,
+    );
+}
+
