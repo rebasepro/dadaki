@@ -21,6 +21,20 @@ All notable changes to this project are documented here. The format follows
   selection could push the user's real work off the bottom of it, leaving ⌘Z to
   walk back through the gesture's own intermediate states instead.
 
+### Agent bridge
+
+- **A dropped relay stream no longer locks the tab out of its own document.**
+  A proxy can reset the SSE stream without telling either end — writing into the
+  dead stream does not throw and the request's abort signal never fires — so the
+  relay went on believing an editor was attached. The tab reconnected, was
+  refused by its own corpse (`409 already attached`), and retried forever, while
+  the agent was told an editor *was* attached and then timed out on every call.
+  Observed live: `attached` flipping true/false with nobody touching the tab, and
+  a drawing session dying after four calls.
+  The editor now answers the relay's keepalive ping, which is the only evidence
+  that the stream still reaches it, and stops treating a stale `attached` reading
+  as final.
+
 ### Library (`@dadaki/editor`)
 
 - **The package is publishable.** It was marked `private`, while the README

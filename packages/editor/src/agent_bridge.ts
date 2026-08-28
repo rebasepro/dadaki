@@ -339,6 +339,8 @@ function connectRelay(
     let stopped = false;
     let retry = 500;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    /** Consecutive times /status claimed someone else holds this token. */
+    let lockedOut = 0;
 
     const reconnect = () => {
         if (stopped) return;
@@ -348,10 +350,17 @@ function connectRelay(
 
     const open = async () => {
         if (stopped) return;
-        // Don't fight an editor that already holds this token.
+        // Don't fight an editor that already holds this token — but do not take
+        // "attached" as final either. A reset stream leaves a session the relay
+        // still believes in, and deferring to it forever is how a tab ends up
+        // locked out of its own document: the thing holding the token IS this
+        // tab's dead connection. After a couple of readings, try the stream and
+        // let the relay decide — it hands the token back once that session has
+        // gone quiet, and still answers 409 while a real editor holds it.
         try {
             const status = await fetch(`${base}/status?${qs}`, { credentials: 'omit' });
-            if (status.ok && (await status.json())?.attached) {
+            if (status.ok && (await status.json())?.attached && lockedOut < 2) {
+                lockedOut += 1;
                 console.warn(
                     '[dadaki] another editor is already attached to this agent session — ' +
                         'close it, or re-open with a fresh URL.',
@@ -369,8 +378,23 @@ function connectRelay(
 
         es.addEventListener('attached', () => {
             retry = 500;
+            lockedOut = 0;
             onStatus?.(true);
             console.info('[dadaki] agent bridge attached (relay)');
+        });
+
+        // Answer the relay's keepalive. This is the only evidence that the
+        // stream still reaches this tab: the relay sending a frame proves
+        // nothing, because a proxy can drop the connection without either end
+        // being told. Without this reply the relay keeps a dead session alive
+        // and then refuses to let the real editor back in.
+        es.addEventListener('ping', () => {
+            void fetch(`${base}/heartbeat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: creds.token }),
+                credentials: 'omit',
+            }).catch(() => {});
         });
 
         // An agent redeemed the pairing code for this session.
