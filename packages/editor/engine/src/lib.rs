@@ -10044,6 +10044,63 @@ mod tests {
         assert!(engine.query_face_at(600.0, 500.0) >= 0, "moved region should exist");
     }
 
+    /// A square cut by an L, drawn as separate OPEN strokes — the shape traced
+    /// line art has. No closed source shape means no containment signature, so
+    /// a fill is re-attached by its stored point alone. The L is concave and
+    /// its centroid lands inside the region it wraps around.
+    fn concave_l_fixture(engine: &mut Engine) -> u32 {
+        let seg = |x0: i32, y0: i32, x1: i32, y1: i32| format!(
+            r#"[{{"closed":false,"points":[
+                {{"x":{x0}.0,"y":{y0}.0,"cp1":[{x0}.0,{y0}.0],"cp2":[{x0}.0,{y0}.0]}},
+                {{"x":{x1}.0,"y":{y1}.0,"cp1":[{x1}.0,{y1}.0],"cp2":[{x1}.0,{y1}.0]}}
+            ]}}]"#,
+        );
+        let first = engine.add_path(&seg(100, 100, 400, 100));
+        engine.add_path(&seg(400, 100, 400, 400));
+        engine.add_path(&seg(400, 400, 100, 400));
+        engine.add_path(&seg(100, 400, 100, 100));
+        engine.add_path(&seg(400, 200, 200, 200));
+        engine.add_path(&seg(200, 200, 200, 400));
+        flag_scene_lp(engine);
+        first
+    }
+
+    #[test]
+    fn test_concave_face_keeps_its_fill_across_a_rebuild() {
+        // The stored point was the polygon CENTROID, which for a concave region
+        // need not lie in the region at all — here it lands squarely inside the
+        // region the L wraps around. The containment tier then handed the L's
+        // colour to its neighbour, and the L came back bare.
+        let mut engine = Engine::new();
+        let first = concave_l_fixture(&mut engine);
+
+        let l_face = engine.query_face_at(150.0, 150.0); // the concave L
+        let notch = engine.query_face_at(300.0, 300.0);  // the square it wraps
+        assert!(l_face >= 0 && notch >= 0, "expected both regions");
+        assert_ne!(l_face, notch, "the cut must divide the square");
+
+        // Paint ONLY the L, so nothing competes for a face and the outcome
+        // cannot depend on which order the fills happen to be replaced in.
+        engine.set_face_fill(l_face as u32, 1.0, 0.0, 0.0, 1.0);
+
+        // A rebuild that changes no geometry whatsoever, as a style edit does.
+        engine.move_node(first, 0.0, 0.0);
+        let _ = engine.get_filled_faces();
+
+        let l2 = engine.query_face_at(150.0, 150.0);
+        let n2 = engine.query_face_at(300.0, 300.0);
+        assert!(l2 >= 0 && n2 >= 0, "regions must still exist after the rebuild");
+        assert!(
+            engine.get_face_paint(l2 as u32).contains("\"r\":1.0"),
+            "the L must keep its own fill, got {:?}", engine.get_face_paint(l2 as u32),
+        );
+        assert!(
+            engine.get_face_paint(n2 as u32).is_empty(),
+            "the fill must not jump to the region the L wraps, got {:?}",
+            engine.get_face_paint(n2 as u32),
+        );
+    }
+
     #[test]
     fn test_overlapping_circle_fills_follow_separation() {
         // The hard case: two overlapping circles make three faces, all bounded by

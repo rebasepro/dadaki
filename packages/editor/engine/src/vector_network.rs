@@ -795,7 +795,12 @@ impl VectorNetwork {
                 f.group,
                 f.signature.clone(),
                 carry_point(
-                    polygon_centroid(&f.boundary_polygon),
+                    // A point guaranteed to lie INSIDE the face. The plain
+                    // centroid is not: a concave region (an L, a wedge, most of
+                    // any traced drawing) puts it in the neighbour it wraps, and
+                    // the containment tier below then hands that neighbour the
+                    // colour and leaves this region bare.
+                    representative_point(&f.boundary_polygon),
                     self.group_built_transform.get(&f.group),
                     group_transforms.get(&f.group),
                 ),
@@ -1991,7 +1996,9 @@ impl VectorNetwork {
         // happened to yield first.
         let mut all_candidates: Vec<(u32, u32, Vec<u32>, Vec2)> = self.faces.values()
             .filter(|f| !f.is_outer)
-            .map(|f| (f.id, f.group, f.signature.clone(), polygon_centroid(&f.boundary_polygon)))
+            // Interior points on both sides, so "nearest" compares like with
+            // like and a concave face is represented by somewhere it actually is.
+            .map(|f| (f.id, f.group, f.signature.clone(), representative_point(&f.boundary_polygon)))
             .collect();
         all_candidates.sort_by_key(|(fid, _, _, _)| *fid);
 
