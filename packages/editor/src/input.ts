@@ -3784,10 +3784,17 @@ export class InputManager {
     flipSelection(axis: 'h' | 'v') {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return;
-        for (const id of selection) {
-            if (axis === 'h') this.scene.flipNodeH(id);
-            else this.scene.flipNodeV(id);
-        }
+        // One gesture, one undo step. Unwrapped, each flipNode* pushed its own
+        // history state, so flipping a large selection could push more states
+        // than the 50 the stack holds — taking the user's real work off the
+        // bottom of it and leaving ⌘Z to walk back through a half-flipped
+        // drawing one shape at a time.
+        this.scene.transaction(() => {
+            for (const id of selection) {
+                if (axis === 'h') this.scene.flipNodeH(id);
+                else this.scene.flipNodeV(id);
+            }
+        });
         this.scene.invalidateCache();
         this.ui.syncWithSelection();
     }
@@ -3871,22 +3878,27 @@ export class InputManager {
         // outermost and the selection keeps its own stacking.
         const stepOrder = forward ? [...backToFront].reverse() : backToFront;
         const jumpOrder = forward ? backToFront : [...backToFront].reverse();
-        for (const id of allTheWay ? jumpOrder : stepOrder) {
-            if (allTheWay) {
-                if (forward) this.scene.bringToFront(id);
-                else this.scene.sendToBack(id);
-                continue;
+        // One gesture, one undo step: each reorder wrapper pushes its own
+        // history state, so restacking a large selection used to push one per
+        // shape and could overflow the 50-deep stack on its own.
+        this.scene.transaction(() => {
+            for (const id of allTheWay ? jumpOrder : stepOrder) {
+                if (allTheWay) {
+                    if (forward) this.scene.bringToFront(id);
+                    else this.scene.sendToBack(id);
+                    continue;
+                }
+                const parent = this.scene.getNodeParent(id);
+                const sibs = Array.from(
+                    parent === -1 ? this.scene.getRootNodes() : this.scene.getNodeChildren(parent),
+                );
+                const idx = sibs.indexOf(id);
+                const neighbour = forward ? sibs[idx + 1] : sibs[idx - 1];
+                if (neighbour !== undefined && chosen.has(neighbour)) continue;
+                if (forward) this.scene.bringForward(id);
+                else this.scene.sendBackward(id);
             }
-            const parent = this.scene.getNodeParent(id);
-            const sibs = Array.from(
-                parent === -1 ? this.scene.getRootNodes() : this.scene.getNodeChildren(parent),
-            );
-            const idx = sibs.indexOf(id);
-            const neighbour = forward ? sibs[idx + 1] : sibs[idx - 1];
-            if (neighbour !== undefined && chosen.has(neighbour)) continue;
-            if (forward) this.scene.bringForward(id);
-            else this.scene.sendBackward(id);
-        }
+        });
         this.ui.updateLayerList();
     }
 

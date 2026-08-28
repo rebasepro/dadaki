@@ -1568,9 +1568,14 @@ export class UIEngine {
         const currentVisible = this.scene.getNodeVisible(selection[0]);
 
         const newVisible = !currentVisible;
-        for (const id of selection) {
-            this.scene.setNodeVisible(id, newVisible);
-        }
+        // One click, one undo step. Unwrapped, each setNodeVisible pushed its
+        // own history state and triggered its own autosave, so hiding a large
+        // selection could push more states than the 50 the stack holds.
+        this.scene.transaction(() => {
+            for (const id of selection) {
+                this.scene.setNodeVisible(id, newVisible);
+            }
+        });
 
         // Update button visual
         this.toggleVisible.classList.toggle('active', newVisible);
@@ -1583,9 +1588,11 @@ export class UIEngine {
         const currentLocked = this.scene.getNodeLocked(selection[0]);
 
         const newLocked = !currentLocked;
-        for (const id of selection) {
-            this.scene.setNodeLocked(id, newLocked);
-        }
+        this.scene.transaction(() => {
+            for (const id of selection) {
+                this.scene.setNodeLocked(id, newLocked);
+            }
+        });
 
         this.toggleLocked.classList.toggle('active', newLocked);
     }
@@ -1623,14 +1630,21 @@ export class UIEngine {
             } catch {}
             return;
         }
-        for (const id of selection) {
-            const node = this.scene.getNode(id);
-            if (!node) continue;
-            const newStyle = { ...node.style, opacity, blend_mode };
-            const json = JSON.stringify(newStyle);
-            if (withHistory) this.scene.setNodeStyle(id, json);
-            else this.scene.setNodeStyleNoHistory(id, json);
-        }
+        const apply = () => {
+            for (const id of selection) {
+                const node = this.scene.getNode(id);
+                if (!node) continue;
+                const newStyle = { ...node.style, opacity, blend_mode };
+                const json = JSON.stringify(newStyle);
+                if (withHistory) this.scene.setNodeStyle(id, json);
+                else this.scene.setNodeStyleNoHistory(id, json);
+            }
+        };
+        // Committing opacity/blend across a selection is one edit; without the
+        // bracket it was one history state per node. The no-history path is
+        // the live-drag preview and must stay outside any snapshot.
+        if (withHistory) this.scene.transaction(apply);
+        else apply();
     }
 
     /** Apply the Radius field to the selection. Rect → shape corner_radius;
