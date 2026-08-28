@@ -65,8 +65,10 @@ browser. `pnpm build` produces a static bundle; `pnpm preview` serves it.
 `tests/svg-suite/harness.mjs` renders ~1679 SVG fixtures through the app and
 pixel-diffs against `tests/svg-suite/baseline.json` (a resvg reference).
 
-It drives the editor in headless Chrome, which Puppeteer downloads separately —
-`pnpm install` does **not** fetch it. Once per machine:
+It drives the editor in headless Chrome. The workspace turns off Puppeteer's
+install script (`allowBuilds` in `pnpm-workspace.yaml`), so `pnpm install` does
+**not** fetch a ~150 MB browser a clone may never use. Install one once per
+machine, only if you want to run this suite:
 
 ```bash
 ./node_modules/.bin/puppeteer browsers install chrome

@@ -104,7 +104,8 @@ jobs:
         run: wasm-pack build --target web --release
         working-directory: packages/editor/engine
 
-      # Puppeteer ships without a browser; `pnpm install` does not fetch one.
+      # `allowBuilds` turns Puppeteer's install script off, so nothing has
+      # fetched a browser yet — this job is the only one that needs one.
       - name: Cache Puppeteer's Chrome
         uses: actions/cache@v4
         with:
