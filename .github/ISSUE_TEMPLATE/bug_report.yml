@@ -1,0 +1,81 @@
+name: Bug report
+description: Something in the editor behaves wrongly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The single most useful thing you can attach is a
+        file that reproduces it — export the artwork and drop it in below.
+
+        Security problems go through [SECURITY.md](https://github.com/rebasepro/dadaki/blob/main/SECURITY.md)
+        instead, not this form.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, and what did the editor do instead of what you expected?
+      placeholder: |
+        I selected six shapes and pressed ⌘⇧] to bring them to front. They came
+        forward, but ⌘Z afterwards only moved one shape back per press.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered, starting from an empty document if you can get there.
+      placeholder: |
+        1. Draw three overlapping rectangles
+        2. Select all of them
+        3. Press ⌘⇧]
+        4. Press ⌘Z once
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: file
+    attributes:
+      label: A file that reproduces it
+      description: >
+        Drag an exported `.svg` or the editor's own saved file onto this box.
+        Optional, but it usually turns a day of guessing into ten minutes.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The version from the About dialog, or the commit you built from.
+      placeholder: "1.0.0-beta.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how
+    attributes:
+      label: How are you running it
+      options:
+        - dadaki.com
+        - Local clone (pnpm dev)
+        - Embedded via @dadaki/editor
+        - Driven by an agent over MCP
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and OS
+      placeholder: "Chrome 150, macOS 15.2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Console output
+      description: Anything red in the browser console. Leave blank if it was quiet.
+      render: shell

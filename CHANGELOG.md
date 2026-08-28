@@ -6,6 +6,33 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Editor
+
+- **A Live Paint fill no longer jumps to the region beside it.** Fills are
+  anchored to a point inside their region so they survive a rebuild, and that
+  point was the polygon centroid — which for a concave region (an L, a wedge,
+  most of any traced drawing) lies outside the region, usually inside the
+  neighbour it wraps. Any edit that rebuilt the arrangement, including one that
+  touched no geometry at all, handed the colour to that neighbour and left the
+  real region bare.
+- **One gesture is one undo step again.** Flipping, restacking, and the eye,
+  lock and opacity controls each pushed one history state *per selected node*.
+  The stack holds 50 and silently drops the oldest, so a single click on a large
+  selection could push the user's real work off the bottom of it, leaving ⌘Z to
+  walk back through the gesture's own intermediate states instead.
+
+### Repository
+
+- **CI now runs.** `pnpm install` failed on every run — corepack rejects a
+  version *range* in `devEngines.packageManager`, so the engine tests,
+  typecheck, unit tests, lint, build and conformance suite had never executed
+  on a push. The pin is an exact version now.
+- **A clone no longer downloads a browser it may never use.** Puppeteer's
+  install script is off; the ~150 MB Chrome is fetched on demand, by the one
+  suite that needs it.
+- **A contributing guide, a security policy and issue templates**, and
+  `./test-all.sh` now runs the same five checks CI does.
+
 ### MCP server
 
 - **`@dadaki/mcp` is published to npm.** Connecting an agent is one line —

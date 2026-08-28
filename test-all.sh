@@ -1,7 +1,6 @@
 #!/bin/sh
-# Run the full test suite: Rust engine (incl. transform invariants) + JS.
-# Standalone script because `npm run`/`pnpm` are blocked in this repo
-# (devEngines pin) and the rustup toolchain is not on PATH.
+# Run the same gate CI runs: Rust engine, typecheck, JS tests, lint, build.
+# Standalone script because the rustup toolchain is not on PATH by default.
 set -e
 cd "$(dirname "$0")"
 
@@ -19,3 +18,11 @@ done
 
 echo "── JS tests (vitest) ─────────────────────────────────"
 ./node_modules/.bin/vitest run
+
+echo "── lint and format (biome) ───────────────────────────"
+./node_modules/.bin/biome check
+
+echo "── production build (vite) ───────────────────────────"
+./node_modules/.bin/vite build packages/app
+
+echo "── all green ─────────────────────────────────────────"

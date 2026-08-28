@@ -107,6 +107,15 @@ the old engine. The browser caches it too; hard-reload after rebuilding.
 See [`packages/editor/README.md`](packages/editor/README.md) for the
 `createEditor(container, options)` API and the host contract.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the setup, the gate `./test-all.sh`
+runs, and the one rule that bites everybody: an engine change must be committed
+together with its rebuilt `pkg/`.
+
+Found a security problem? Please report it privately — see
+[SECURITY.md](SECURITY.md).
+
 ## License
 
 MIT © Dadaki — see [LICENSE](LICENSE).
