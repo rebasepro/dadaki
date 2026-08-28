@@ -8,10 +8,16 @@ UI (tools, layers, properties, rulers, multi-document tabs) is TypeScript.
 It ships as a single embeddable component: give it a DOM container and a
 CanvasKit instance, and it builds the whole editor inside that container.
 
-## Install (workspace / local link)
+## Install
 
-This package is currently distributed via the workspace (not npm). Consume it
-with a `workspace:*` (pnpm) or a local `link:`/`file:` dependency:
+```bash
+npm install @dadaki/editor canvaskit-wasm@0.39.1
+```
+
+`canvaskit-wasm` is a **peer** dependency: the host loads CanvasKit and passes
+the instance in, so there is exactly one copy of Skia on the page.
+
+From inside this repository, use the workspace instead:
 
 ```jsonc
 // package.json
@@ -20,6 +26,37 @@ with a `workspace:*` (pnpm) or a local `link:`/`file:` dependency:
     "@dadaki/editor": "workspace:*" // or "link:../vector-editor/packages/editor"
   }
 }
+```
+
+### What the package ships, and what your bundler needs
+
+The package is distributed as **TypeScript source** — `exports` points at
+`src/index.ts` — together with the compiled wasm engine in `engine/pkg/`. Your
+build compiles it along with your own code, which is what lets you follow a
+stack trace into the editor and what keeps the wasm a single artifact rather
+than one copy per consumer.
+
+That means the package expects a **Vite-class bundler**:
+
+- `src/index.ts` imports the editor chrome as `./chrome.html?raw`, so the build
+  must understand the `?raw` suffix (Vite does; other bundlers need a raw
+  loader).
+- It must resolve `.wasm` as an asset — `engine/pkg/engine.js` loads
+  `engine_bg.wasm` relative to its own module URL.
+- If you typecheck the source, add `"vite/client"` to `compilerOptions.types`,
+  which supplies the `?raw` module declaration.
+
+**Exclude the package from dependency pre-bundling.** Vite's dev-mode optimizer
+pre-bundles anything under `node_modules` without running the plugins the
+source relies on, so `vite dev` fails on the `?raw` import unless you opt out.
+`vite build` does not go through the optimizer and works either way — which
+means skipping this step gives you a project that builds but will not start:
+
+```ts
+// vite.config.ts
+export default defineConfig({
+    optimizeDeps: { exclude: ['@dadaki/editor'] },
+});
 ```
 
 ## Usage

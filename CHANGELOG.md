@@ -21,6 +21,24 @@ All notable changes to this project are documented here. The format follows
   selection could push the user's real work off the bottom of it, leaving ⌘Z to
   walk back through the gesture's own intermediate states instead.
 
+### Library (`@dadaki/editor`)
+
+- **The package is publishable.** It was marked `private`, while the README
+  documented it as the embeddable library — so nobody could actually install
+  what the docs described. It now carries the metadata npm wants, and ships the
+  compiled wasm engine alongside the source: `files` did not include
+  `engine/pkg`, and even once it did, the `.gitignore` wasm-pack writes into
+  that folder (containing `*`) kept npm from packing it. `prepack` removes it.
+- **`canvaskit-wasm` is a peer dependency**, not a direct one. It is type-only
+  in the shipped source and the host passes the instance in, so a consumer
+  should end up with exactly one copy of Skia on the page. `@types/opentype.js`
+  moved the other way, into `dependencies`: the package ships TypeScript, so a
+  consumer typechecking it needs those types resolvable.
+- **Tests no longer ship** in the tarball — 46 of its 109 files were `*.test.ts`.
+- The README now states what the package expects of a bundler, including the
+  `optimizeDeps.exclude` a Vite consumer needs. Without it `vite build` works
+  and `vite dev` does not, which is the worst way to find out.
+
 ### Repository
 
 - **CI now runs.** `pnpm install` failed on every run — corepack rejects a
