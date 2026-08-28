@@ -6,8 +6,10 @@ on:
   pull_request:
 
 env:
-  # Matches the `devEngines` pin in package.json. Homebrew's 11.1.0 trips a
-  # bug on that field, so the version is pinned explicitly rather than floated.
+  # Matches the exact `devEngines` pin in package.json. That field has to hold a
+  # single version, not a range: corepack refuses a range with "Invalid package
+  # manager specification ... expected a semver version" and the install dies
+  # before anything below it runs.
   PNPM_VERSION: 11.9.0
 
 jobs:
