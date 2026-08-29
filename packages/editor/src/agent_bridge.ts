@@ -316,12 +316,22 @@ function connectLocal(
 }
 
 /**
- * Relay transport: hold an SSE stream from this origin, post results back.
+ * Relay transport: long-poll this origin for calls, post results back.
  *
- * Reconnection is manual rather than EventSource's built-in retry, because the
- * relay refuses a second editor for the same token (409) and EventSource, which
- * cannot see status codes, would reconnect against that forever. Checking
- * `/status` first turns that into a clear message and a stop.
+ * WHY NOT SSE. This used to hold an EventSource. On the managed runtime that
+ * silently does not work: a custom function's response is completed rather than
+ * streamed, so the request finishes the moment `start()` has written its first
+ * frame — `GET /editor` returns in 4ms — and the tab sees a stream that attaches
+ * and immediately dies, forever. The browser reported it as a parade of
+ * ERR_ABORTED and ERR_HTTP2_PROTOCOL_ERROR, which reads like flaky networking
+ * rather than a transport that was never going to work.
+ *
+ * A held request, by contrast, is fine: the relay keeps `/call` open for 25s
+ * routinely. So the editor asks for its next call and the relay simply does not
+ * answer until there is one, or until it has waited long enough to say so. That
+ * is one ordinary request per 20 idle seconds, and an immediate answer when
+ * there is work — and, unlike a stream, it does not pin the editor to whichever
+ * replica happened to accept the connection.
  */
 function connectRelay(
     agent: AgentApi,
@@ -335,116 +345,80 @@ function connectRelay(
     // route mounted anywhere else exists in dev and 404s in production.
     const base = `${(opts.relayOrigin ?? window.location.origin).replace(/\/+$/, '')}/api/functions/agent-bridge`;
     const qs = `token=${encodeURIComponent(creds.token)}`;
-    let source: EventSource | null = null;
     let stopped = false;
+    let live = false;
     let retry = 500;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    /** Consecutive times /status claimed someone else holds this token. */
-    let lockedOut = 0;
+    let announced = false;
 
-    const reconnect = () => {
-        if (stopped) return;
-        timer = setTimeout(open, retry);
-        retry = Math.min(retry * 2, maxRetryMs);
+    const settle = (ok: boolean) => {
+        if (ok === live) return;
+        live = ok;
+        onStatus?.(ok);
     };
 
-    const open = async () => {
-        if (stopped) return;
-        // Don't fight an editor that already holds this token — but do not take
-        // "attached" as final either. A reset stream leaves a session the relay
-        // still believes in, and deferring to it forever is how a tab ends up
-        // locked out of its own document: the thing holding the token IS this
-        // tab's dead connection. After a couple of readings, try the stream and
-        // let the relay decide — it hands the token back once that session has
-        // gone quiet, and still answers 409 while a real editor holds it.
-        try {
-            const status = await fetch(`${base}/status?${qs}`, { credentials: 'omit' });
-            if (status.ok && (await status.json())?.attached && lockedOut < 2) {
-                lockedOut += 1;
-                console.warn(
-                    '[dadaki] another editor is already attached to this agent session — ' +
-                        'close it, or re-open with a fresh URL.',
-                );
-                reconnect();
-                return;
-            }
-        } catch {
-            // Status is only an optimisation; fall through and try the stream.
+    /** Run one call and hand the relay its result. */
+    async function serve(call: { id: string; method: string; args: unknown[] }) {
+        // A call is proof of an agent, whichever way it arrived — this also
+        // covers a reconnect that missed the announcement.
+        if (!announced) {
+            announced = true;
+            opts.onAgentPresent?.(true);
         }
-        if (stopped) return;
+        // `invoke` dispatches on method and args; the id is the relay's, and
+        // travels back on the reply rather than through the agent.
+        const body = await invoke(agent, { method: call.method, args: call.args });
+        // Results go over an ordinary POST; a failure here just means the agent
+        // sees its own timeout, which is the right outcome.
+        await fetch(`${base}/reply`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: creds.token, id: call.id, ...body }),
+            credentials: 'omit',
+        }).catch(() => {});
+    }
 
-        const es = new EventSource(`${base}/editor?${qs}`);
-        source = es;
-
-        es.addEventListener('attached', () => {
-            retry = 500;
-            lockedOut = 0;
-            onStatus?.(true);
-            console.info('[dadaki] agent bridge attached (relay)');
-        });
-
-        // Answer the relay's keepalive. This is the only evidence that the
-        // stream still reaches this tab: the relay sending a frame proves
-        // nothing, because a proxy can drop the connection without either end
-        // being told. Without this reply the relay keeps a dead session alive
-        // and then refuses to let the real editor back in.
-        es.addEventListener('ping', () => {
-            void fetch(`${base}/heartbeat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ token: creds.token }),
-                credentials: 'omit',
-            }).catch(() => {});
-        });
-
-        // An agent redeemed the pairing code for this session.
-        es.addEventListener('agent', () => {
-            opts.onAgentPresent?.(true);
-            console.info('[dadaki] an agent joined this session');
-        });
-
-        es.addEventListener('call', async (event) => {
-            // A call is proof of an agent, whichever way it attached — this also
-            // covers a reconnect that missed the `agent` announcement.
-            opts.onAgentPresent?.(true);
-            let msg: CallFrame;
+    async function loop() {
+        while (!stopped) {
             try {
-                msg = JSON.parse((event as MessageEvent).data);
+                const res = await fetch(`${base}/poll?${qs}`, { credentials: 'omit' });
+                if (!res.ok) throw new Error(`poll ${res.status}`);
+                const data = (await res.json()) as {
+                    call?: { id: string; method: string; args: unknown[] };
+                    agentPresent?: boolean;
+                };
+                settle(true);
+                retry = 500;
+
+                if (data.call) {
+                    await serve(data.call);
+                    continue; // straight back for the next one, no idle gap
+                }
+                if (data.agentPresent && !announced) {
+                    announced = true;
+                    opts.onAgentPresent?.(true);
+                }
             } catch {
-                return;
+                // The relay is unreachable, or answered badly. Back off rather
+                // than spin, and report the channel down so the UI can say so.
+                settle(false);
+                await new Promise((resolve) => {
+                    timer = setTimeout(resolve, retry);
+                });
+                retry = Math.min(retry * 2, maxRetryMs);
             }
-            if (typeof msg.id !== 'number' || !msg.method) return;
-            const body = await invoke(agent, msg);
-            // Results go over an ordinary POST; a failure here just means the
-            // agent sees its own timeout, which is the right outcome.
-            await fetch(`${base}/reply`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ token: creds.token, id: msg.id, ...body }),
-                credentials: 'omit',
-            }).catch(() => {});
-        });
+        }
+    }
 
-        es.onerror = () => {
-            if (source !== es) return;
-            es.close();
-            source = null;
-            onStatus?.(false);
-            reconnect();
-        };
-    };
-
-    void open();
+    void loop();
     return {
         get connected() {
-            return source?.readyState === EventSource.OPEN;
+            return live;
         },
         disconnect() {
             stopped = true;
             if (timer) clearTimeout(timer);
-            source?.close();
-            source = null;
-            onStatus?.(false);
+            settle(false);
         },
     };
 }
