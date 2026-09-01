@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [1.0.0-beta.2] — 2026-09-01
+
 ### Editor
 
 - **A Live Paint fill no longer jumps to the region beside it.** Fills are
@@ -159,4 +163,5 @@ exposure, not missing work.
   Chrome's rasterizer to resvg's. They are pinned and documented, not silenced.
 - Undo history is capped at 50 states; the oldest is dropped.
 
+[1.0.0-beta.2]: https://github.com/rebasepro/dadaki/releases/tag/v1.0.0-beta.2
 [1.0.0-beta.1]: https://github.com/rebasepro/dadaki/releases/tag/v1.0.0-beta.1

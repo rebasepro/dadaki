@@ -2,7 +2,7 @@
   "name": "engine",
   "type": "module",
   "description": "Geometry and scene-graph core for the Dadaki vector editor, compiled to WebAssembly.",
-  "version": "1.0.0-beta.1",
+  "version": "1.0.0-beta.2",
   "license": "MIT",
   "repository": {
     "type": "git",
