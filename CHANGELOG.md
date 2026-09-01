@@ -6,7 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Repository
+
+- **`npm` works inside the repository again.** The pnpm pin lived in
+  `devEngines.packageManager`, which npm enforces on *every* command — so
+  `npm login`, `npm publish` and even `npm --version` failed with
+  `EBADDEVENGINES` anywhere in the tree, including the package directories they
+  are published from. The pin is the standard `packageManager` field now:
+  corepack reads it natively, so pnpm is still held at exactly 11.9.0.
 
 ## [1.0.0-beta.2] — 2026-09-01
 

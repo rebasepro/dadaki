@@ -19,13 +19,7 @@
     "keywords": [],
     "author": "",
     "license": "MIT",
-    "devEngines": {
-        "packageManager": {
-            "name": "pnpm",
-            "version": "11.9.0",
-            "onFail": "download"
-        }
-    },
+    "packageManager": "pnpm@11.9.0",
     "devDependencies": {
         "@biomejs/biome": "^2.5.3",
         "@types/node": "^26.1.0",

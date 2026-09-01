@@ -45,11 +45,16 @@ browser. `pnpm build` produces a static bundle; `pnpm preview` serves it.
 | `pnpm lint` / `pnpm format` | Biome lint / format                                      |
 | `pnpm dev:cloud` | The hosted app **if** you have the separate `cloud/` repo checked out locally (backend + frontend via Rebase). Not part of this repo. |
 
-> **pnpm version:** the repo pins pnpm **11.9.0** exactly, via `devEngines`
-> with `onFail: download` — corepack fetches that version for you, so any recent
+> **pnpm version:** the repo pins pnpm **11.9.0** exactly, via the standard
+> `packageManager` field — corepack fetches that version for you, so any recent
 > pnpm (or plain `corepack pnpm install`) works. The pin has to be an exact
-> version rather than a range: corepack rejects a range in that field with
+> version rather than a range: corepack rejects a range with
 > `Invalid package manager specification ... expected a semver version`.
+>
+> It is deliberately **not** `devEngines.packageManager`. npm enforces that
+> field on every command, so `npm login`, `npm publish` and even `npm --version`
+> died with `EBADDEVENGINES` anywhere in the repo — including in `packages/`,
+> where the packages are published from.
 
 ## Drawing with an agent (MCP)
 

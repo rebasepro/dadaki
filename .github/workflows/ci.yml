@@ -6,7 +6,7 @@ on:
   pull_request:
 
 env:
-  # Matches the exact `devEngines` pin in package.json. That field has to hold a
+  # Matches the exact `packageManager` pin in package.json. It has to hold a
   # single version, not a range: corepack refuses a range with "Invalid package
   # manager specification ... expected a semver version" and the install dies
   # before anything below it runs.
