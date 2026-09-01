@@ -1,7 +1,7 @@
 # Data Model Reference
 
 > **Audience**: AI agents and developers working on this codebase.
-> **Source of truth**: [engine/src/lib.rs](file:///Users/francesco/dadaki-vector-editor/engine/src/lib.rs)
+> **Source of truth**: [engine/src/lib.rs](packages/editor/engine/src/lib.rs)
 
 ---
 
@@ -43,7 +43,7 @@ The vector editor uses a **Rust/WASM engine** as the authoritative data store, w
 ## Core Structs
 
 ### `Scene`
-[Source](file:///Users/francesco/dadaki-vector-editor/engine/src/lib.rs#L240-L251)
+[Source](packages/editor/engine/src/lib.rs#L240-L251)
 
 The top-level document container.
 
@@ -57,7 +57,7 @@ The top-level document container.
 | `document_height` | `f32` | Document canvas height (default: 1000.0). |
 
 ### `Node`
-[Source](file:///Users/francesco/dadaki-vector-editor/engine/src/lib.rs#L191-L203)
+[Source](packages/editor/engine/src/lib.rs#L191-L203)
 
 A single element in the scene graph.
 
@@ -75,7 +75,7 @@ A single element in the scene graph.
 | `locked` | `bool` | Prevents selection and editing. |
 
 ### `NodeType` (enum)
-[Source](file:///Users/francesco/dadaki-vector-editor/engine/src/lib.rs#L17-L25)
+[Source](packages/editor/engine/src/lib.rs#L17-L25)
 
 ```rust
 pub enum NodeType {
@@ -88,7 +88,7 @@ pub enum NodeType {
 ```
 
 ### `Geometry` (enum)
-[Source](file:///Users/francesco/dadaki-vector-editor/engine/src/lib.rs#L169-L175)
+[Source](packages/editor/engine/src/lib.rs#L169-L175)
 
 ```rust
 pub enum Geometry {
@@ -102,7 +102,7 @@ pub enum Geometry {
 > **Note**: `Group` nodes use `Geometry::Rect { width: 0, height: 0 }` as a placeholder — the group's bounds are computed dynamically from children.
 
 ### `Style`
-[Source](file:///Users/francesco/dadaki-vector-editor/engine/src/lib.rs#L35-L59)
+[Source](packages/editor/engine/src/lib.rs#L35-L59)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -134,7 +134,7 @@ pub enum Geometry {
 | 7 | Color Burn | 15 | Luminosity |
 
 ### `Color`
-[Source](file:///Users/francesco/dadaki-vector-editor/engine/src/lib.rs#L27-L33)
+[Source](packages/editor/engine/src/lib.rs#L27-L33)
 
 ```rust
 pub struct Color {
@@ -146,7 +146,7 @@ pub struct Color {
 ```
 
 ### `PathPoint`
-[Source](file:///Users/francesco/dadaki-vector-editor/engine/src/lib.rs#L177-L183)
+[Source](packages/editor/engine/src/lib.rs#L177-L183)
 
 ```rust
 pub struct PathPoint {
@@ -160,7 +160,7 @@ pub struct PathPoint {
 > When `cp1 == (x, y)` and `cp2 == (x, y)`, the point is a **corner** (no smooth curve). Otherwise it's a smooth Bézier anchor.
 
 ### `Subpath`
-[Source](file:///Users/francesco/dadaki-vector-editor/engine/src/lib.rs#L185-L189)
+[Source](packages/editor/engine/src/lib.rs#L185-L189)
 
 ```rust
 pub struct Subpath {
@@ -296,7 +296,7 @@ Hit tolerance is `HIT_TOLERANCE = 4.0` document pixels.
 
 ## Undo/Redo (History)
 
-[Source](file:///Users/francesco/dadaki-vector-editor/engine/src/lib.rs) — `History` struct
+[Source](packages/editor/engine/src/lib.rs) — `History` struct
 
 The history system uses **full scene snapshots** (JSON strings from `serialize_scene()`):
 
@@ -320,7 +320,7 @@ History {
 
 ### JSON (runtime interchange)
 
-`Engine.get_scene_json()` returns the scene as JSON matching the TypeScript [SceneData](file:///Users/francesco/dadaki-vector-editor/src/types.ts#L95-L98) interface:
+`Engine.get_scene_json()` returns the scene as JSON matching the TypeScript [SceneData](packages/editor/src/types.ts#L95-L98) interface:
 
 ```json
 {
@@ -344,7 +344,7 @@ History {
 
 ### Protobuf/Bincode (persistence)
 
-[Source](file:///Users/francesco/dadaki-vector-editor/engine/src/proto.rs)
+[Source](packages/editor/engine/src/proto.rs)
 
 For IndexedDB persistence, the engine uses a custom binary format:
 
@@ -361,7 +361,7 @@ For IndexedDB persistence, the engine uses a custom binary format:
 
 ## Persistence
 
-[Source](file:///Users/francesco/dadaki-vector-editor/src/persistence.ts)
+[Source](packages/editor/src/persistence.ts)
 
 - **Storage**: IndexedDB (`VectorEditorDB` → `scenes` store → `current_scene` key)
 - **Format**: Protobuf binary (via `engine.serialize_proto()`)
@@ -372,7 +372,7 @@ For IndexedDB persistence, the engine uses a custom binary format:
 
 ## Vector Network (Experimental)
 
-[Source](file:///Users/francesco/dadaki-vector-editor/engine/src/vector_network.rs)
+[Source](packages/editor/engine/src/vector_network.rs)
 
 A graph-based alternative to the traditional subpath model:
 
@@ -388,7 +388,7 @@ The vector network can compute **faces** (closed regions) from the edge graph. I
 
 ## TypeScript ↔ WASM Boundary
 
-The `WasmScene` class ([wasm_scene.ts](file:///Users/francesco/dadaki-vector-editor/src/wasm_scene.ts)) is the **sole facade** between TypeScript and the Rust engine. Key patterns:
+The `WasmScene` class ([wasm_scene.ts](packages/editor/src/wasm_scene.ts)) is the **sole facade** between TypeScript and the Rust engine. Key patterns:
 
 1. **Mutations**: Call engine method → invalidate cache → trigger autosave
 2. **History**: `saveHistory()` called before each mutation (serializes full scene)

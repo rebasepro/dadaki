@@ -7,8 +7,10 @@
 // the old one by eye in a design tool.
 import puppeteer from 'puppeteer';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = '/Users/francesco/dadaki-vector-editor';
+// This file lives in .github/, so the repository root is one level up.
+const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '');
 const b64 = (p, mime) => `data:${mime};base64,${readFileSync(p).toString('base64')}`;
 
 // Inline the real assets: the mark the app ships as its icon, and Inter, the

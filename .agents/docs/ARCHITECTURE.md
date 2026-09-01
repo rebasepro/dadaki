@@ -149,7 +149,7 @@ input.ts: handleMouseDown()
 
 ## Tool System
 
-Tools are managed as an enum/state in [input.ts](file:///Users/francesco/dadaki-vector-editor/src/input.ts):
+Tools are managed as an enum/state in [input.ts](packages/editor/src/input.ts):
 
 | Tool | Description |
 |---|---|
@@ -168,7 +168,7 @@ Each tool captures `mousedown`, `mousemove`, `mouseup`, and `keydown` events, wi
 
 ## UI Panels
 
-[ui.ts](file:///Users/francesco/dadaki-vector-editor/src/ui.ts) manages:
+[ui.ts](packages/editor/src/ui.ts) manages:
 
 | Panel | Function |
 |---|---|
@@ -182,7 +182,7 @@ Each tool captures `mousedown`, `mousemove`, `mouseup`, and `keydown` events, wi
 
 ## Boolean Operations
 
-[boolean_ops.ts](file:///Users/francesco/dadaki-vector-editor/src/boolean_ops.ts) implements:
+[boolean_ops.ts](packages/editor/src/boolean_ops.ts) implements:
 
 | Operation | Description |
 |---|---|
@@ -197,7 +197,7 @@ These extract path geometry from selected nodes, compute the boolean result usin
 
 ## File I/O
 
-[file_io.ts](file:///Users/francesco/dadaki-vector-editor/src/file_io.ts) supports:
+[file_io.ts](packages/editor/src/file_io.ts) supports:
 
 | Format | Import | Export |
 |---|---|---|
@@ -205,13 +205,13 @@ These extract path geometry from selected nodes, compute the boolean result usin
 | JSON | ✅ Raw scene JSON | ✅ `get_scene_json()` |
 | PNG | ❌ | ✅ Canvas rasterization |
 
-SVG conversion is handled by [svg_utils.ts](file:///Users/francesco/dadaki-vector-editor/src/svg_utils.ts) which maps between SVG elements/attributes and the engine's node model.
+SVG conversion is handled by [svg_utils.ts](packages/editor/src/svg_utils.ts) which maps between SVG elements/attributes and the engine's node model.
 
 ---
 
 ## Alignment
 
-[align.ts](file:///Users/francesco/dadaki-vector-editor/src/align.ts) provides:
+[align.ts](packages/editor/src/align.ts) provides:
 
 - Align Left / Center / Right
 - Align Top / Middle / Bottom

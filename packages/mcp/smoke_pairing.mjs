@@ -1,12 +1,13 @@
 // End-to-end check of the pairing flow, as a real MCP client would see it:
 // spawn the dadaki MCP server, hand it ONLY the code from the editor, and see
 // whether it can then drive the document.
+import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const CODE = process.argv[2];
 const BACKEND = process.argv[3] ?? 'http://localhost:3001';
-const SERVER = '/Users/francesco/dadaki-vector-editor/packages/mcp/src/index.ts';
+const SERVER = fileURLToPath(new URL('./src/index.ts', import.meta.url));
 
 let fail = 0;
 const check = (label, ok, detail) =>

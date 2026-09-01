@@ -15,6 +15,7 @@
  * Override the origins with RELAY_FRONTEND / RELAY_BACKEND to point at a
  * deployment instead.
  */
+import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { randomBytes } from 'node:crypto';
@@ -22,7 +23,7 @@ import puppeteer from 'puppeteer';
 
 const FRONTEND = process.env.RELAY_FRONTEND ?? 'http://localhost:5200';
 const BACKEND = process.env.RELAY_BACKEND ?? 'http://localhost:3001';
-const SERVER   = '/Users/francesco/dadaki-vector-editor/packages/mcp/src/index.ts';
+const SERVER   = fileURLToPath(new URL('./src/index.ts', import.meta.url));
 const TOKEN    = randomBytes(24).toString('hex');
 
 let fail = 0;
