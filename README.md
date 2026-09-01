@@ -8,12 +8,13 @@ the **open-source** editor.
 
 <img src=".github/screenshot.png" alt="The Dadaki editor: overlapping circles and lines whose regions have been filled with the Live Paint bucket, the layer tree on the left, shape properties on the right" />
 
-It is a pnpm workspace with two packages:
+It is a pnpm workspace with three packages:
 
-| Package                          | What it is                                                            |
-| -------------------------------- | -------------------------------------------------------------------- |
-| [`@dadaki/editor`](packages/editor) | The reusable, embeddable editor **library** (`createEditor`).      |
-| [`@dadaki/app`](packages/app)       | A deployable **demo shell** — local-only, no backend required.     |
+| Package                             | What it is                                                      |
+| ----------------------------------- | --------------------------------------------------------------- |
+| [`@dadaki/editor`](packages/editor) | The reusable, embeddable editor **library** (`createEditor`).     |
+| [`@dadaki/app`](packages/app)       | A deployable **demo shell** — local-only, no backend required.    |
+| [`@dadaki/mcp`](packages/mcp)       | An **MCP server** that lets an agent draw in a tab you have open. |
 
 The hosted product (accounts, teams, cloud sync) lives in a **separate** repo
 (`dadaki-cloud`) and consumes `@dadaki/editor` as a dependency. This repo has no
@@ -50,11 +51,35 @@ browser. `pnpm build` produces a static bundle; `pnpm preview` serves it.
 > version rather than a range: corepack rejects a range in that field with
 > `Invalid package manager specification ... expected a semver version`.
 
+## Drawing with an agent (MCP)
+
+[`@dadaki/mcp`](packages/mcp) is an MCP server that hands an agent the editor's
+own API, so what it produces is **real vector geometry** — paths, gradients,
+live text — rather than a generated raster image. The tools are verbs at the
+level of intent (`create_rect`, `align`, `boolean`), paired with
+`describe_scene` and `render_png_image` so the agent can look at its own work
+and correct it.
+
+It drives a tab **you** have open, through the same engine, history and export
+paths a human's edits take: one agent call is one undo step, so you can work in
+the same window, undo its changes, or take over mid-drawing. It launches no
+browser of its own and downloads none.
+
+```bash
+claude mcp add dadaki -- npx -y @dadaki/mcp@latest --mode relay --url https://dadaki.com/
+```
+
+Then open a document, click **Connect agent**, and give the agent the
+8-character code. Add `--mode bridge` to drive an editor running locally against
+`pnpm dev` instead. See [`packages/mcp/README.md`](packages/mcp/README.md) for
+the transports, the full tool list, and the security rules on the bridge.
+
 ## Develop
 
 ```bash
 ./node_modules/.bin/tsc --noEmit -p packages/editor/tsconfig.json   # typecheck lib
 ./node_modules/.bin/tsc --noEmit -p packages/app/tsconfig.json      # typecheck app
+./node_modules/.bin/tsc --noEmit -p packages/mcp/tsconfig.json      # typecheck MCP server
 ./node_modules/.bin/vitest run                                      # unit tests
 ./node_modules/.bin/biome check --write                             # lint + format
 ./node_modules/.bin/vite build packages/app                         # production build

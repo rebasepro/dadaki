@@ -64,6 +64,19 @@ All notable changes to this project are documented here. The format follows
   suite that needs it.
 - **A contributing guide, a security policy and issue templates**, and
   `./test-all.sh` now runs the same five checks CI does.
+- **Everything the repository ships now states that it is MIT.** The Rust crate
+  declared no licence at all, which wasm-pack passes straight through: the
+  generated `engine/pkg/package.json` — packed *inside* the `@dadaki/editor`
+  tarball — claimed nothing either. `@dadaki/app` had no `license` field. The
+  crate now carries the text as well as the field, so `pkg/` gets a copy on
+  every build. That copy needed `git add -f`: the `.gitignore` wasm-pack writes
+  into `pkg/` (containing `*`) hides any file not already tracked, so it would
+  have passed locally and shipped without the licence from a clone — `prepack`
+  copies the licence but does not rebuild the wasm.
+- **The README documents the MCP server.** It described a workspace of two
+  packages and never mentioned `packages/mcp`, so the one thing the repository
+  description leads with — driving the editor from an agent — could not be
+  found from the front page.
 
 ### MCP server
 

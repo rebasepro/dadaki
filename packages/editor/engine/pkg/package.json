@@ -1,7 +1,13 @@
 {
   "name": "engine",
   "type": "module",
+  "description": "Geometry and scene-graph core for the Dadaki vector editor, compiled to WebAssembly.",
   "version": "1.0.0-beta.1",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rebasepro/dadaki"
+  },
   "files": [
     "engine_bg.wasm",
     "engine.js",

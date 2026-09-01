@@ -2,6 +2,9 @@
 name = "engine"
 version = "1.0.0-beta.1"
 edition = "2021"
+description = "Geometry and scene-graph core for the Dadaki vector editor, compiled to WebAssembly."
+repository = "https://github.com/rebasepro/dadaki"
+license = "MIT"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
