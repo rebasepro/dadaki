@@ -39,6 +39,7 @@ interface Reveals {
 
 function makeUI(scene: WasmScene, activeTool = 'selection'): Reveals {
     const calls: number[][] = [];
+    let lastKey = '';
     const ui = {
         activeTool,
         setActiveTool(t: string) {
@@ -48,6 +49,15 @@ function makeUI(scene: WasmScene, activeTool = 'selection'): Reveals {
         updateLayerList() {},
         revealSelection() {
             calls.push(Array.from(scene.engine!.get_selection()));
+        },
+        revealSelectionIfChanged() {
+            // The real one no-ops on an unchanged selection; mirror that here
+            // so the tests see what the panel would actually do.
+            const now = Array.from(scene.engine!.get_selection());
+            const key = now.join(',');
+            if (key === lastKey) return;
+            lastKey = key;
+            calls.push(now);
         },
         hideContextMenu() {},
         refreshArtboardPanel() {},
@@ -93,6 +103,20 @@ function groupedScene() {
     const group = scene.engine.group_nodes(JSON.stringify([a, b]));
     return { scene, group, a, b };
 }
+
+const mouse = (x: number, y: number) =>
+    ({
+        clientX: x,
+        clientY: y,
+        shiftKey: false,
+        altKey: false,
+        metaKey: false,
+        ctrlKey: false,
+        button: 0,
+        detail: 1,
+        preventDefault() {},
+        stopPropagation() {},
+    }) as unknown as MouseEvent;
 
 const dbl = (x: number, y: number) =>
     ({
@@ -145,6 +169,35 @@ describe('entering a group reveals it in the Objects panel', () => {
         input.onDoubleClick(dbl(20, 20)); // inner group → the rect
 
         expect(calls).toEqual([[group], [a]]);
+    });
+
+    it('a plain click on the canvas reveals what it selected', () => {
+        // Figma's behaviour, and the other half of collapsing groups by
+        // default: with the tree folded up, a shape picked on the canvas has no
+        // row on screen until something reveals it.
+        const { scene, group } = groupedScene();
+        const { ui, calls } = makeUI(scene);
+        const input = new InputManager(document.createElement('canvas'), scene, ui, makeRenderer());
+
+        input.onMouseDown(mouse(20, 20));
+        input.onMouseUp(mouse(20, 20));
+
+        expect(calls).toEqual([[group]]);
+    });
+
+    it('does not reveal the same selection twice', () => {
+        // Every mouse-up asks. Re-scrolling to a row already scrolled to would
+        // fight anyone who has scrolled the panel deliberately.
+        const { scene, group } = groupedScene();
+        const { ui, calls } = makeUI(scene);
+        const input = new InputManager(document.createElement('canvas'), scene, ui, makeRenderer());
+
+        for (let i = 0; i < 3; i++) {
+            input.onMouseDown(mouse(20, 20));
+            input.onMouseUp(mouse(20, 20));
+        }
+
+        expect(calls).toEqual([[group]]);
     });
 
     it('does not reveal when the double-click lands on empty canvas', () => {

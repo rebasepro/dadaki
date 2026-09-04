@@ -63,6 +63,7 @@ function makeUI(): UIEngine {
         syncWithSelection() {},
         updateLayerList() {},
         revealSelection() {},
+        revealSelectionIfChanged() {},
         hideContextMenu() {},
         refreshArtboardPanel() {},
         applyToolCursor() {},

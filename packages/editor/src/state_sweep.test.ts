@@ -109,6 +109,7 @@ function makeUI(activeTool = 'selection') {
         syncWithSelection() {},
         updateLayerList() {},
         revealSelection() {},
+        revealSelectionIfChanged() {},
         hideContextMenu() {},
         refreshArtboardPanel() {},
         applyToolCursor() {},

@@ -234,8 +234,14 @@ export class UIEngine {
     private _dismissContextMenu: ((e: MouseEvent) => void) | null = null;
     private _dismissContextMenuKey: ((e: KeyboardEvent) => void) | null = null;
 
-    // Layer tree state
-    private _collapsedGroups: Set<number> = new Set();
+    // Layer tree state.
+    //
+    // The set holds the groups that are EXPANDED, not the ones that are
+    // collapsed, because collapsed is the default — a document of nested groups
+    // opens as a short list of its top-level objects, the way Figma's layers
+    // panel does, instead of unrolling every leaf it contains into a list you
+    // have to fold up by hand before you can see the shape of the file.
+    private _expandedGroups: Set<number> = new Set();
     private _collapsedArtboards: Set<number> = new Set();
 
     /** Node ids currently being dragged in the layer panel (the whole selection
@@ -494,8 +500,10 @@ export class UIEngine {
 
         // Prefer the selected node(s); fall back to the selected artboard.
         let targetNode: number | null = null;
+        let selectionKey = '';
         try {
             const sel = Array.from(this.scene.engine.get_selection());
+            selectionKey = sel.join(',');
             if (sel.length) targetNode = sel[sel.length - 1];
         } catch {
             return;
@@ -515,7 +523,7 @@ export class UIEngine {
             // Expand every collapsed ancestor group.
             let cur = this.scene.getNodeParent(targetNode);
             while (cur !== -1) {
-                this._collapsedGroups.delete(cur);
+                this._expandedGroups.add(cur);
                 cur = this.scene.getNodeParent(cur);
             }
             // Expand the artboard that spatially contains the node's root ancestor.
@@ -536,22 +544,81 @@ export class UIEngine {
                 ? `.layer-item[data-node-id="${targetNode}"]`
                 : `.layer-item[data-artboard-id="${targetArtboard}"]`;
         const row = this.layerList.querySelector(sel) as HTMLElement | null;
-        // NOT `behavior: 'smooth'`. `updateLayerList` above rebuilds the whole
-        // list through `innerHTML = ''`, and a smooth scroll started in the
-        // same task against a scrollport whose content has just been replaced
-        // is simply dropped — measured: the panel stayed exactly where it was,
-        // with the target row 99px above the top edge, while the identical call
-        // without `smooth` landed it flush. That silently broke the Locate
-        // button for as long as it has existed. An instant jump is also what
-        // this should be: it is navigation, not an animation to watch.
-        row?.scrollIntoView({ block: 'nearest' });
+        // `instant`, stated rather than left to the default: this is
+        // navigation, and an animated scroll of a long tree is time spent
+        // watching rows go past. It also has to be, twice over —
+        // `updateLayerList` above rebuilds the whole list through
+        // `innerHTML = ''`, and a SMOOTH scroll started in the same task
+        // against a scrollport whose content has just been replaced is dropped
+        // on the floor. Measured in the editor: with `smooth` the panel did not
+        // move at all and the target row sat 99px above the top edge; the same
+        // call without it landed the row flush. Naming `instant` also keeps a
+        // future `scroll-behavior: smooth` in the panel's CSS from quietly
+        // bringing both problems back.
+        row?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        // Same key the mouse-up hook computes, so an explicit reveal (the
+        // Locate button, entering a group) is not immediately redone by it.
+        this._lastRevealedKey = selectionKey;
+    }
+
+    /** The selection the panel was last scrolled to, so an unchanged one is
+     *  not scrolled to again on every mouse-up. */
+    private _lastRevealedKey = '';
+
+    /**
+     * Reveal the selection after a canvas gesture — Figma's behaviour, and the
+     * other half of collapsing groups by default: with the tree folded up, a
+     * shape you pick on the canvas would otherwise have no row on screen at all.
+     *
+     * Does as little as the change requires. Rebuilding the list is O(document)
+     * DOM work that the panel deliberately avoids on a plain selection change
+     * (`updateLayerSelection` re-highlights in place instead), so this only
+     * pays for it when an ancestor is actually collapsed and the row therefore
+     * does not exist yet. When the row is already in the tree — the common case
+     * — it just scrolls, and when the selection has not changed it does
+     * nothing at all.
+     */
+    revealSelectionIfChanged() {
+        if (!this.scene.engine) return;
+        let selection: number[];
+        try {
+            selection = Array.from(this.scene.engine.get_selection());
+        } catch {
+            return;
+        }
+        const key = selection.join(',');
+        if (key === this._lastRevealedKey) return;
+        this._lastRevealedKey = key;
+
+        const target = selection[selection.length - 1];
+        if (target === undefined) return;
+
+        // A collapsed ancestor means the row is not rendered — that needs the
+        // full expand-and-rebuild. Otherwise the row exists and a scroll is all
+        // this is.
+        for (let cur = this.scene.getNodeParent(target); cur !== -1; ) {
+            if (!this._expandedGroups.has(cur)) {
+                this.revealSelection();
+                return;
+            }
+            cur = this.scene.getNodeParent(cur);
+        }
+        const row = this.layerList.querySelector(
+            `.layer-item[data-node-id="${target}"]`,
+        ) as HTMLElement | null;
+        row?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
     }
 
     /**
-     * Collapse a freshly-created subtree (paste / duplicate / SVG import) in the
-     * Objects panel so a large copied or imported group doesn't flood the list
-     * with expanded descendants. Every group in the subtree (the new root and
-     * all nested groups) starts collapsed; leaf nodes have nothing to collapse.
+     * Force a whole subtree collapsed: the new root and every group beneath it.
+     *
+     * Collapsed is the default now, so this is no longer what makes a pasted or
+     * imported group arrive folded up. It still has two jobs: "collapse all"
+     * from Alt/Option+click on a chevron, and clearing any expanded state that
+     * a freshly-created subtree could otherwise inherit — the engine may reissue
+     * a deleted node's id, and an id that was expanded before it was deleted
+     * would come back expanded on something entirely different.
+     *
      * Callers still need to `updateLayerList()` to reflect the change.
      */
     collapseSubtreeByDefault(id: number) {
@@ -559,7 +626,7 @@ export class UIEngine {
         const walk = (nid: number) => {
             const children = this.scene.getNodeChildren(nid);
             if (children.length === 0) return;
-            this._collapsedGroups.add(nid);
+            this._expandedGroups.delete(nid);
             for (const child of children) walk(child);
         };
         walk(id);
@@ -572,7 +639,7 @@ export class UIEngine {
         const walk = (nid: number) => {
             const children = this.scene.getNodeChildren(nid);
             if (children.length === 0) return;
-            this._collapsedGroups.delete(nid);
+            this._expandedGroups.add(nid);
             for (const child of children) walk(child);
         };
         walk(id);
@@ -658,11 +725,11 @@ export class UIEngine {
         const children = this.scene.getNodeChildren(id);
         const isGroup = children.length > 0;
         if (expand) {
-            if (isGroup && this._collapsedGroups.has(id)) this._collapsedGroups.delete(id);
+            if (isGroup && !this._expandedGroups.has(id)) this._expandedGroups.add(id);
             else return;
         } else {
-            if (isGroup && !this._collapsedGroups.has(id)) {
-                this._collapsedGroups.add(id);
+            if (isGroup && this._expandedGroups.has(id)) {
+                this._expandedGroups.delete(id);
             } else {
                 // Already collapsed (or a leaf) — hop to the parent group.
                 const parent = this.scene.getNodeParent(id);
@@ -3708,8 +3775,8 @@ export class UIEngine {
 
         // Drop collapse state for nodes that no longer exist (deleted / ungrouped)
         // so the set doesn't grow without bound over a long session.
-        for (const gid of this._collapsedGroups) {
-            if (this.scene.getNodeType(gid) === undefined) this._collapsedGroups.delete(gid);
+        for (const gid of this._expandedGroups) {
+            if (this.scene.getNodeType(gid) === undefined) this._expandedGroups.delete(gid);
         }
 
         // Figma-style mask roles: within each group, a mask marks the siblings
@@ -3727,7 +3794,7 @@ export class UIEngine {
             const nodeTypeKey = UIEngine.NODE_TYPE_KEY[nodeTypeNum] || 'Path';
             const isGroup = nodeTypeKey === 'Group';
             const children = isGroup ? this.scene.getNodeChildren(id) : null;
-            const isCollapsed = this._collapsedGroups.has(id);
+            const isCollapsed = !this._expandedGroups.has(id);
             const hasChildren = isGroup && children !== null && children.length > 0;
 
             const nodeVisible = this.scene.getNodeVisible(id);
@@ -3855,8 +3922,8 @@ export class UIEngine {
             // (the name owns dblclick-to-rename via stopPropagation above).
             if (hasChildren) {
                 row.addEventListener('dblclick', () => {
-                    if (this._collapsedGroups.has(id)) this._collapsedGroups.delete(id);
-                    else this._collapsedGroups.add(id);
+                    if (this._expandedGroups.has(id)) this._expandedGroups.delete(id);
+                    else this._expandedGroups.add(id);
                     this.updateLayerList();
                 });
             }
@@ -3866,16 +3933,16 @@ export class UIEngine {
                 const chevron = item.querySelector('.layer-chevron') as HTMLElement;
                 chevron.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    const collapsed = this._collapsedGroups.has(id);
+                    const collapsed = !this._expandedGroups.has(id);
                     if (e.altKey) {
                         // Alt/Option+click toggles the ENTIRE subtree (expand-all
                         // / collapse-all), matching Figma & Illustrator.
                         if (collapsed) this.expandSubtree(id);
                         else this.collapseSubtreeByDefault(id);
                     } else if (collapsed) {
-                        this._collapsedGroups.delete(id);
+                        this._expandedGroups.add(id);
                     } else {
-                        this._collapsedGroups.add(id);
+                        this._expandedGroups.delete(id);
                     }
                     this.updateLayerList();
                 });
@@ -4386,7 +4453,7 @@ export class UIEngine {
 
         if (moved > 0) {
             // Reveal the result when dropping into a collapsed group.
-            if (zone === 'into') this._collapsedGroups.delete(targetId);
+            if (zone === 'into') this._expandedGroups.add(targetId);
             this.updateLayerList();
             this.syncWithSelection();
         }

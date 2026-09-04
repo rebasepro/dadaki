@@ -6722,6 +6722,17 @@ export class InputManager {
     }
 
     onMouseUp(e: MouseEvent) {
+        this.handleMouseUp(e);
+        // AFTER the gesture, never during it: a marquee rewrites the selection
+        // on every mousemove, and a panel chasing that would be unreadable.
+        // Here rather than at the tail of `handleMouseUp`, which returns early
+        // down a dozen paths. Costs nothing when the selection did not change,
+        // and nothing but a scroll when the row is already in the tree — see
+        // `revealSelectionIfChanged`.
+        this.ui.revealSelectionIfChanged();
+    }
+
+    private handleMouseUp(e: MouseEvent) {
         if (!this.isMouseDown) return;
         // A shift-click on something already selected takes it out again — but
         // only if the gesture stayed a click. A drag was the user moving the

@@ -468,6 +468,7 @@ function stubUI(): UIEngine {
         syncWithSelection() {},
         updateLayerList() {},
         revealSelection() {},
+        revealSelectionIfChanged() {},
         collapseSubtreeByDefault() {},
         getCurrentStyle: () => '{}',
         contextBar: { refresh() {} },

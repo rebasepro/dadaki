@@ -16,12 +16,27 @@ All notable changes to this project are documented here. The format follows
   scrolled out of the list. It now expands the ancestors and scrolls to what you
   entered, at every level of a drill-down. Figma does this; Illustrator makes
   you press Locate Object, which is what this editor had.
+- **Groups arrive collapsed, like Figma's.** A document of nested groups opened
+  as a list with every leaf unrolled into it, which you had to fold up by hand
+  before you could see the shape of the file. The panel now records which groups
+  are EXPANDED rather than which are collapsed, so collapsed is the default and
+  a three-deep nest is one row until you open it.
+- **Selecting on the canvas scrolls the panel to it.** The other half of
+  collapsing by default: with the tree folded up, a shape you click has no row
+  on screen at all until something reveals it. Figma does this; it happens after
+  the gesture, never during, so a marquee doesn't drag the panel around behind
+  it. It does as little as the change requires — measured on a 47-row tree, a
+  selection already in the tree costs 0.4ms and no rebuild, and only a selection
+  hidden inside a collapsed group pays the 6.7ms to expand and rebuild.
 - **The Objects panel's Locate button actually scrolls now.** It asked for a
   *smooth* scroll in the same task that rebuilt the whole list through
   `innerHTML = ''`, and the browser drops such an animation on the floor:
   measured, the panel stayed exactly where it was with the target row 99px above
   the top edge, while the same call without `smooth` landed it flush. It has
-  been silently doing nothing for as long as it has existed.
+  been silently doing nothing for as long as it has existed. The scroll is
+  `instant` now — named rather than left to the default, so a future
+  `scroll-behavior: smooth` in the panel's CSS cannot quietly bring back both
+  that bug and the wait it implies on a long tree.
 
 ## [1.0.0-beta.3] — 2026-09-04
 

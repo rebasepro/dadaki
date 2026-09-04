@@ -80,6 +80,7 @@ function makeUI(activeTool = 'pen'): UIEngine {
         syncWithSelection() {},
         updateLayerList() {},
         revealSelection() {},
+        revealSelectionIfChanged() {},
         hideContextMenu() {},
         refreshArtboardPanel() {},
         applyToolCursor() {},
