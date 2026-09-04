@@ -1,6 +1,6 @@
 {
     "name": "@dadaki/app",
-    "version": "1.0.0-beta.2",
+    "version": "1.0.0-beta.3",
     "description": "Deployable open-source demo shell for the Dadaki vector editor (local-only, no backend).",
     "license": "MIT",
     "type": "module",

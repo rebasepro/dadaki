@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.0-beta.3] — 2026-09-04
+
 ### Editor
 
 - **Every Google Font is now pickable, by name.** The font list was seventeen
@@ -32,6 +34,11 @@ All notable changes to this project are documented here. The format follows
   `EBADDEVENGINES` anywhere in the tree, including the package directories they
   are published from. The pin is the standard `packageManager` field now:
   corepack reads it natively, so pnpm is still held at exactly 11.9.0.
+
+### MCP server
+
+- `set_text`'s `fontFamily` now says what it accepts: any Google Fonts family,
+  by its exact name. An agent had no way to know the editor would take one.
 
 ## [1.0.0-beta.2] — 2026-09-01
 
