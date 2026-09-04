@@ -67,6 +67,7 @@ function makeUI(activeTool = 'selection'): UIEngine {
         setActiveRegion() {},
         syncWithSelection() {},
         updateLayerList() {},
+        revealSelection() {},
         hideContextMenu() {},
         refreshArtboardPanel() {},
         applyToolCursor() {},

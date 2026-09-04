@@ -63,6 +63,7 @@ function makeUI(): UIEngine {
         activeTool: 'pen',
         syncWithSelection() {},
         updateLayerList() {},
+        revealSelection() {},
         hideContextMenu() {},
         refreshArtboardPanel() {},
         applyToolCursor() {},

@@ -536,7 +536,15 @@ export class UIEngine {
                 ? `.layer-item[data-node-id="${targetNode}"]`
                 : `.layer-item[data-artboard-id="${targetArtboard}"]`;
         const row = this.layerList.querySelector(sel) as HTMLElement | null;
-        row?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        // NOT `behavior: 'smooth'`. `updateLayerList` above rebuilds the whole
+        // list through `innerHTML = ''`, and a smooth scroll started in the
+        // same task against a scrollport whose content has just been replaced
+        // is simply dropped — measured: the panel stayed exactly where it was,
+        // with the target row 99px above the top edge, while the identical call
+        // without `smooth` landed it flush. That silently broke the Locate
+        // button for as long as it has existed. An instant jump is also what
+        // this should be: it is navigation, not an animation to watch.
+        row?.scrollIntoView({ block: 'nearest' });
     }
 
     /**

@@ -68,6 +68,7 @@ function makeUI(): UIEngine {
         setActiveTool() {},
         syncWithSelection() {},
         updateLayerList() {},
+        revealSelection() {},
         hideContextMenu() {},
         refreshArtboardPanel() {},
         applyToolCursor() {},

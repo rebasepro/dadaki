@@ -467,6 +467,7 @@ function stubUI(): UIEngine {
         setActiveRegion() {},
         syncWithSelection() {},
         updateLayerList() {},
+        revealSelection() {},
         collapseSubtreeByDefault() {},
         getCurrentStyle: () => '{}',
         contextBar: { refresh() {} },

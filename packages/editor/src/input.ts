@@ -724,7 +724,12 @@ export class InputManager {
                     this.enteredGroup = selection[0];
                     this.scene.selectNode(targetChild, false);
                     this.ui.syncWithSelection();
-                    this.ui.updateLayerList();
+                    // Going into a group is navigation, so the Objects panel
+                    // follows you in: it expands the ancestors you just walked
+                    // through and scrolls to the child you landed on. Without
+                    // it the panel still shows the collapsed group you were
+                    // looking at, and nothing on screen says where you are.
+                    this.ui.revealSelection();
                     return;
                 }
             }
@@ -748,7 +753,7 @@ export class InputManager {
         this.ui.setActiveTool('direct');
         this.scene.selectNode(hitId, false);
         this.ui.syncWithSelection();
-        this.ui.updateLayerList();
+        this.ui.revealSelection();
         this.enterPathEditMode(hitId);
     }
 
@@ -3810,7 +3815,11 @@ export class InputManager {
                     this.enteredGroup = id;
                     this.scene.selectNode(children[0], false);
                     this.ui.syncWithSelection();
-                    this.ui.updateLayerList();
+                    // Same as the double-click above: this is the shared "go
+                    // inside" verb, reached by Enter, the context bar's Edit
+                    // button and the breadcrumb, and they should all leave the
+                    // panel showing where you now are.
+                    this.ui.revealSelection();
                 }
                 break;
             }

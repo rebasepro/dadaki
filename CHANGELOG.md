@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Editor
+
+- **Going into a group takes the Objects panel with you.** Entering a group —
+  by double-click, by Enter, by the context bar's Edit button or by the
+  breadcrumb — is navigation, and afterwards "where am I" is a real question the
+  panel was answering wrongly: it still showed the collapsed group you had been
+  looking at, with the child you were now holding hidden inside it and possibly
+  scrolled out of the list. It now expands the ancestors and scrolls to what you
+  entered, at every level of a drill-down. Figma does this; Illustrator makes
+  you press Locate Object, which is what this editor had.
+- **The Objects panel's Locate button actually scrolls now.** It asked for a
+  *smooth* scroll in the same task that rebuilt the whole list through
+  `innerHTML = ''`, and the browser drops such an animation on the floor:
+  measured, the panel stayed exactly where it was with the target row 99px above
+  the top edge, while the same call without `smooth` landed it flush. It has
+  been silently doing nothing for as long as it has existed.
+
 ## [1.0.0-beta.3] — 2026-09-04
 
 ### Editor
