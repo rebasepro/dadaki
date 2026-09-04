@@ -4331,7 +4331,9 @@ export class Renderer {
         // Skip if already selected — the selection overlay covers it
         if (this.scene.getSelection().includes(id)) return;
 
-        const b = this.scene.getNodeBounds(id);
+        // Measured: hovering a text node must outline the glyphs, not the
+        // engine's per-character estimate of them.
+        const b = this.scene.getMeasuredNodeBounds(id);
         if (b[2] <= b[0] || b[3] <= b[1]) return;
 
         canvas.save();
@@ -4373,7 +4375,12 @@ export class Renderer {
             const nodeTypeNum = this.scene.getNodeType(id);
             if (nodeTypeNum === undefined) continue;
 
-            const bounds = this.scene.getNodeBounds(id);
+            // Measured, so the frame drawn round a multi-selection ends where
+            // the glyphs do. The per-node text outline below has always used
+            // the measured box; this union used the engine's 0.6em estimate,
+            // which is how a perfectly centred wordmark still got a frame
+            // hanging off its right-hand side.
+            const bounds = this.scene.getMeasuredNodeBounds(id);
             totalMinX = Math.min(totalMinX, bounds[0]);
             totalMinY = Math.min(totalMinY, bounds[1]);
             totalMaxX = Math.max(totalMaxX, bounds[2]);

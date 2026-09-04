@@ -45,6 +45,9 @@ function makeTree(
         hidden?: number[];
         masks?: number[];
         boolGroups?: number[];
+        /** Real (measured) bounds where they differ from the engine's estimate —
+         *  i.e. text, whose engine box is a per-character guess. */
+        measured?: Record<number, [number, number, number, number]>;
     } = {},
 ): WasmScene {
     const ids = Object.keys(nodes).map(Number);
@@ -68,6 +71,7 @@ function makeTree(
         getNodeIsMask: (id: number) => masks.has(id),
         isBooleanGroup: (id: number) => boolGroups.has(id),
         getNodeBounds: (id: number) => Float32Array.from(nodes[id]),
+        getMeasuredNodeBounds: (id: number) => flags.measured?.[id] ?? nodes[id],
         getResolvedSubpaths: () => [],
         getTransform: () => Float32Array.from([1, 0, 0, 0, 1, 0, 0, 0, 1]),
     } as unknown as WasmScene;
@@ -191,6 +195,22 @@ describe('SnapEngine', () => {
         expect(engine.snapAxis('x', 198, 8)?.value).toBe(200); // mask edge
         expect(engine.snapAxis('x', 498, 8)).toBeNull(); // masked-away edge
         expect(engine.snapAxis('x', 52, 8)?.value).toBe(50); // still visible
+    });
+
+    it('snaps to a text node’s glyphs, not the engine’s estimate of them', () => {
+        const engine = new SnapEngine();
+        // The engine boxes this text out to 400 (longest line × 0.6em); it
+        // actually types to 373. Snapping to 400 puts a guide — and the shape
+        // you are dragging — on an edge with nothing drawn at it.
+        const scene = makeTree(
+            { 1: [100, 0, 400, 50] },
+            {},
+            { measured: { 1: [100, 0, 373, 50] } },
+        );
+        engine.begin(scene, []);
+
+        expect(engine.snapAxis('x', 374, 8)?.value).toBe(373); // where the glyphs end
+        expect(engine.snapAxis('x', 400, 4)).toBeNull(); // the estimate is not a target
     });
 
     it('includes the edges of every artboard as snap targets', () => {

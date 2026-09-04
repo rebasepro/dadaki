@@ -7138,7 +7138,17 @@ export class InputManager {
         }
     }
 
-    /** Union of the selected nodes' world bounds, or null if nothing is selected. */
+    /**
+     * Union of the selected nodes' world bounds, or null if nothing is selected.
+     *
+     * Measured, not estimated. A single selection's frame comes from
+     * `getNodeLocalBounds` and hugs the glyphs; the multi-selection frame used
+     * the engine's 0.6em-per-character box, so selecting a centred wordmark with
+     * the logo above it drew a frame hanging 15pt off the text's right edge and
+     * lied about where the artwork ended. The resize and move gestures start
+     * from these same numbers, so the frame you grab and the maths behind it
+     * have to be the same box.
+     */
     getSelectionBounds(): { x: number; y: number; w: number; h: number } | null {
         const selection = this.scene.engine!.get_selection();
         if (selection.length === 0) return null;
@@ -7148,7 +7158,7 @@ export class InputManager {
             maxX = -Infinity,
             maxY = -Infinity;
         for (const id of selection) {
-            const b = this.scene.getNodeBounds(id);
+            const b = this.scene.getMeasuredNodeBounds(id);
             minX = Math.min(minX, b[0]);
             minY = Math.min(minY, b[1]);
             maxX = Math.max(maxX, b[2]);

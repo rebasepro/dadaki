@@ -214,7 +214,11 @@ export class SnapEngine {
                 return; // a group contributes only through its children
             }
 
-            pushRect(scene.getNodeBounds(id), clip);
+            // Measured, so a guide off a text node's edge lands on the glyphs.
+            // Collected once per drag (see begin/beginHover), so the walk this
+            // costs for a group holding text is paid at grab time, not per
+            // frame.
+            pushRect(scene.getMeasuredNodeBounds?.(id) ?? scene.getNodeBounds(id), clip);
 
             // Path vertices as exact 2D snap points (endpoint chaining).
             if (canAnchors) {

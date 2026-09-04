@@ -22,6 +22,14 @@ All notable changes to this project are documented here. The format follows
   slant and letter spacing), walk groups so a group *containing* text is
   corrected too, and fall back to the engine's box when a selection holds no
   text or no font has loaded yet — so nothing without text moves by a unit.
+- **…and the box drawn round the selection tells the truth about it.** Same
+  estimate, one layer up: a *single* selection's frame has always come from the
+  measured bounds, but the multi-selection union, the hover outline and the
+  snap targets still came from the guess. So a wordmark that was now perfectly
+  centred under its logo got a frame hanging 15pt off its right-hand side — the
+  artwork was right and the box said it wasn't. All three read the glyphs now.
+  The resize and move gestures start from those same numbers, so the frame you
+  grab and the arithmetic behind it can no longer disagree.
 - **Going into a group takes the Objects panel with you.** Entering a group —
   by double-click, by Enter, by the context bar's Edit button or by the
   breadcrumb — is navigation, and afterwards "where am I" is a real question the

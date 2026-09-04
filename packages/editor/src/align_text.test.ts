@@ -22,7 +22,9 @@ import { resolve } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import init, { Engine, History } from '../engine/pkg/engine';
 import { alignSelection, distributeSelection } from './align';
+import { InputManager } from './input';
 import type { Renderer } from './renderer';
+import type { UIEngine } from './ui';
 import { WasmScene } from './wasm_scene';
 
 let wasmModule: { memory: WebAssembly.Memory };
@@ -59,11 +61,26 @@ function attachTextMeasurement(scene: WasmScene, width = TYPESET_WIDTH) {
             const x = align === 1 ? -width / 2 : align === 2 ? -width : 0;
             return { x, y: -geo.font_size, w: width, h: geo.font_size };
         },
-        // Align never renders; these exist because WasmScene talks to them.
+        // Nothing here renders; the rest of the surface exists because
+        // WasmScene and InputManager talk to it.
+        zoom: 1,
+        pan: { x: 0, y: 0 },
+        dpr: 1,
         invalidateRenderCaches() {},
         invalidateGroupSpriteFor() {},
+        invalidateAllGroupSprites() {},
         requestRender() {},
         clearImageCache() {},
+        notifyViewChange() {},
+        onViewChange() {},
+        beginDragLayerCache: () => false,
+        setDragMovingRoots() {},
+        endDragLayerCache() {},
+        hoverEdgeId: -1,
+        hoverFaceId: -1,
+        selectedArtboardId: null,
+        artboardHandleHitTest: () => null,
+        artboardLabelHitTest: () => null,
     } as unknown as Renderer;
 }
 
@@ -203,6 +220,65 @@ describe('align: a group and a text node', () => {
         scene.renderer = null;
         alignSelection(scene, [g, t], 'hcenter');
         expect(centerX(scene, t)).toBeCloseTo(centerX(scene, g), 3);
+    });
+});
+
+describe('the box drawn around the selection', () => {
+    /**
+     * The complaint that came after the align fix: the artwork was centred but
+     * the frame around it was not. A single selection's frame has always come
+     * from the measured local bounds, but the MULTI-selection union came from
+     * the engine's estimate — so selecting a centred wordmark with the logo it
+     * sits under drew a frame hanging 15pt off the text's right-hand side, and
+     * the box said the elements were not centred when they were.
+     */
+    function makeInput(scene: WasmScene) {
+        return new InputManager(
+            document.createElement('canvas'),
+            scene,
+            {
+                activeTool: 'selection',
+                syncWithSelection() {},
+                updateLayerList() {},
+                revealSelection() {},
+                revealSelectionIfChanged() {},
+                hideContextMenu() {},
+                refreshArtboardPanel() {},
+                applyToolCursor() {},
+                collapseSubtreeByDefault() {},
+                gradientEdit: { isActive: () => false, hitTest: () => null },
+            } as unknown as UIEngine,
+            scene.renderer as Renderer,
+        );
+    }
+
+    it('ends where the glyphs end, so a centred selection gets a centred frame', () => {
+        const { scene, g, t } = logoAndWordmark();
+        alignSelection(scene, [g, t], 'hcenter');
+        scene.engine!.select_node(g, false);
+        scene.engine!.select_node(t, true);
+
+        const frame = makeInput(scene).getSelectionBounds()!;
+        const group = scene.getNodeBounds(g);
+        const [glyphLo, glyphHi] = glyphSpan(scene, t);
+
+        // The frame is the union of what is actually drawn…
+        expect(frame.x).toBeCloseTo(Math.min(group[0], glyphLo), 3);
+        expect(frame.x + frame.w).toBeCloseTo(Math.max(group[2], glyphHi), 3);
+        // …and therefore shares its centre with both of them.
+        expect(frame.x + frame.w / 2).toBeCloseTo((group[0] + group[2]) / 2, 3);
+    });
+
+    it('does not stretch to the engine’s estimate of the text', () => {
+        const { scene, g, t } = logoAndWordmark();
+        alignSelection(scene, [g, t], 'hcenter');
+        scene.engine!.select_node(g, false);
+        scene.engine!.select_node(t, true);
+
+        const frame = makeInput(scene).getSelectionBounds()!;
+        const estimate = scene.getNodeBounds(t)[2]; // 0.6em × 10 characters
+        expect(estimate).toBeGreaterThan(glyphSpan(scene, t)[1]); // the estimate does overshoot
+        expect(frame.x + frame.w).toBeLessThan(estimate); // the frame does not follow it
     });
 });
 
