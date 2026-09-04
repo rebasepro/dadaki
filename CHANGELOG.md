@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.0-beta.4] — 2026-09-04
+
 ### Editor
 
 - **Align centres text on its glyphs, not on a guess.** The engine has no font

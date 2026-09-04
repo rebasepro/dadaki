@@ -1,6 +1,6 @@
 {
     "name": "dadaki-vector-editor-workspace",
-    "version": "1.0.0-beta.3",
+    "version": "1.0.0-beta.4",
     "description": "Workspace root: @dadaki/editor (OSS library) + @dadaki/app (deployable demo).",
     "type": "module",
     "private": true,
