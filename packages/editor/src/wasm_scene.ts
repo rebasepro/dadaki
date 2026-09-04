@@ -1471,6 +1471,87 @@ export class WasmScene {
         return this.engine!.get_node_bounds(id);
     }
 
+    /**
+     * A node's world bounds as `[minX, minY, maxX, maxY]`, with TEXT MEASURED
+     * rather than estimated.
+     *
+     * The engine has no font metrics, so it boxes a text node as its longest
+     * line × 0.6em (see `text_local_bbox`). That is fine for hit-testing and
+     * wrong for layout: aligning a wordmark to a logo by that box leaves the
+     * glyphs off-centre by half the error — 7pt for "REBASE.pro" in Inter 48,
+     * and ±30% of the run for glyphs that are nothing like 0.6em wide. Anything
+     * that POSITIONS text by its box should read this instead.
+     *
+     * Falls back to the engine's own box whenever nothing better exists: no
+     * renderer, no font provider yet, or a subtree with no text in it — where
+     * the engine's AABB is authoritative and already accounts for strokes and
+     * effects.
+     */
+    getMeasuredNodeBounds(id: number): [number, number, number, number] {
+        const measured = this.measuredTextBounds(id, 0);
+        if (measured) return measured;
+        const b = this.getNodeBounds(id);
+        return [b[0], b[1], b[2], b[3]];
+    }
+
+    /** World bounds of a subtree that contains measurable text, or null when it
+     *  holds none — the caller then keeps the engine's box for it untouched. */
+    private measuredTextBounds(id: number, depth: number): [number, number, number, number] | null {
+        if (depth > 32) return null; // cycle guard, as elsewhere in the walkers
+
+        if (this.getNodeType(id) === 4) {
+            // The same box the selection frame draws — measured with the font,
+            // weight, slant and letter spacing the glyphs are actually drawn
+            // with, and anchored the way the alignment shifts the run.
+            const local = this.renderer?.getTextLocalBounds?.(id);
+            if (!local) return null;
+            const t = this.getTransform(id); // row-major world 3×3
+            let minX = Infinity,
+                minY = Infinity,
+                maxX = -Infinity,
+                maxY = -Infinity;
+            for (const [lx, ly] of [
+                [local.x, local.y],
+                [local.x + local.w, local.y],
+                [local.x + local.w, local.y + local.h],
+                [local.x, local.y + local.h],
+            ]) {
+                const x = t[0] * lx + t[1] * ly + t[2];
+                const y = t[3] * lx + t[4] * ly + t[5];
+                minX = Math.min(minX, x);
+                minY = Math.min(minY, y);
+                maxX = Math.max(maxX, x);
+                maxY = Math.max(maxY, y);
+            }
+            return [minX, minY, maxX, maxY];
+        }
+
+        // A Boolean Group paints ONE resolved outline and never its operands:
+        // its engine bounds ARE that outline, so unioning children would report
+        // geometry nobody can see.
+        if (this.isBooleanGroup(id)) return null;
+
+        const kids = this.getNodeChildren(id);
+        if (kids.length === 0) return null;
+        let box: [number, number, number, number] | null = null;
+        let corrected = false;
+        for (const kid of kids) {
+            const m = this.measuredTextBounds(kid, depth + 1);
+            if (m) corrected = true;
+            const cb: ArrayLike<number> = m ?? this.getNodeBounds(kid);
+            if (cb.length < 4 || (cb[2] <= cb[0] && cb[3] <= cb[1])) continue;
+            box = box
+                ? [
+                      Math.min(box[0], cb[0]),
+                      Math.min(box[1], cb[1]),
+                      Math.max(box[2], cb[2]),
+                      Math.max(box[3], cb[3]),
+                  ]
+                : [cb[0], cb[1], cb[2], cb[3]];
+        }
+        return corrected ? box : null;
+    }
+
     /** Fill a vector-network face (paint bucket). Undoable like any other mutation. */
     setFaceFill(faceId: number, r: number, g: number, b: number, a: number) {
         this.saveHistory();

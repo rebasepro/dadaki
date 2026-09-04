@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Editor
 
+- **Align centres text on its glyphs, not on a guess.** The engine has no font
+  metrics, so it boxes a text node as its longest line × 0.6em — fine for
+  hit-testing, fiction for layout — and align read exactly that box. Centring a
+  wordmark on a logo therefore left the glyphs off by half of whatever the
+  estimate got wrong: "REBASE.pro" at Inter 48 types at 273.19 against a 288
+  estimate, so it landed 7.4pt to the left, every time. Runs whose glyphs are
+  nothing like 0.6em are worse — ten W's are out by 98pt, a third of their own
+  length — and only centre-aligned text escaped, by luck. Align and distribute
+  now measure the same box the selection frame draws (real family, weight,
+  slant and letter spacing), walk groups so a group *containing* text is
+  corrected too, and fall back to the engine's box when a selection holds no
+  text or no font has loaded yet — so nothing without text moves by a unit.
 - **Going into a group takes the Objects panel with you.** Entering a group —
   by double-click, by Enter, by the context bar's Edit button or by the
   breadcrumb — is navigation, and afterwards "where am I" is a real question the

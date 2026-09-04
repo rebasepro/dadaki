@@ -16,11 +16,19 @@ interface NodeBounds {
     maxY: number;
 }
 
+/**
+ * World bounds of everything being aligned, with text MEASURED.
+ *
+ * The engine estimates a text box as its longest line × 0.6em, having no font
+ * metrics of its own. Centring a wordmark on that box lands the glyphs half the
+ * estimate's error off — always, and in whichever direction the estimate missed
+ * — which is what "I aligned centres and the text sits to the left" is.
+ */
 function collectBounds(scene: WasmScene, ids: number[]): NodeBounds[] {
     const out: NodeBounds[] = [];
     for (const id of ids) {
-        const b = scene.getNodeBounds(id);
-        if (b.length === 4 && (b[2] > b[0] || b[3] > b[1])) {
+        const b = scene.getMeasuredNodeBounds(id);
+        if (b[2] > b[0] || b[3] > b[1]) {
             out.push({ id, minX: b[0], minY: b[1], maxX: b[2], maxY: b[3] });
         }
     }
