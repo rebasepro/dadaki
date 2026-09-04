@@ -3,6 +3,7 @@
  * Loads Google Fonts dynamically and registers them with CanvasKit.
  */
 import type { CanvasKit } from 'canvaskit-wasm';
+import { type FontMeta, lookupFont } from './font_catalog';
 
 /**
  * Family assigned to newly created text. Needed because CanvasKit's RefDefault
@@ -12,26 +13,54 @@ import type { CanvasKit } from 'canvaskit-wasm';
  */
 export const DEFAULT_TEXT_FONT = 'Inter';
 
-/** Curated list of available Google Fonts. */
-export const GOOGLE_FONTS = [
-    'Inter',
-    'Roboto',
-    'Open Sans',
-    'Lato',
-    'Montserrat',
-    'Poppins',
-    'Nunito',
-    'Playfair Display',
-    'Merriweather',
-    'Lora',
-    'PT Serif',
-    'JetBrains Mono',
-    'Fira Code',
-    'Source Code Pro',
-    'Bebas Neue',
-    'Oswald',
-    'Raleway',
-];
+/**
+ * Which faces to fetch for a family, and from where.
+ *
+ * Not every family publishes 400 and 700: Instrument Serif is 400-only, Buda is
+ * 300-only, Molle has no upright face at all. Asking the CDN for a face that
+ * was never published costs a 404 per family per session and, worse, leaves the
+ * family with no regular face and so no text on screen. The catalog says what
+ * exists, so we ask only for that and snap each slot to the nearest real
+ * weight.
+ */
+interface FacePlan {
+    subset: string;
+    regular: number;
+    /** Null when the family has nothing heavier than its regular face. */
+    bold: number | null;
+    /** Whether to fetch a SEPARATE italic face — false for an italic-only
+     *  family, whose italic is already its regular. */
+    italic: boolean;
+    /** True for an italic-only family, whose italic face IS its regular one. */
+    italicOnly: boolean;
+}
+
+/** The weight in `weights` closest to `target`; ties go to the heavier face. */
+function nearestWeight(weights: readonly number[], target: number): number {
+    let best = weights[0];
+    for (const w of weights) {
+        if (Math.abs(w - target) <= Math.abs(best - target)) best = w;
+    }
+    return best;
+}
+
+function facePlan(meta: FontMeta | undefined): FacePlan {
+    // A family the catalog has never heard of — an older document, or one saved
+    // after the catalog was generated — keeps the old blind guess: latin 400
+    // and 700, with 404s tolerated.
+    if (!meta) {
+        return { subset: 'latin', regular: 400, bold: 700, italic: true, italicOnly: false };
+    }
+    const regular = nearestWeight(meta.weights, 400);
+    const bold = nearestWeight(meta.weights, 700);
+    return {
+        subset: meta.subset,
+        regular,
+        bold: bold > regular ? bold : null,
+        italic: meta.hasItalic && meta.hasNormal,
+        italicOnly: !meta.hasNormal,
+    };
+}
 
 /**
  * The faces of one family. Named rather than positional: these used to be a
@@ -73,15 +102,64 @@ export function onFontLoaded(cb: () => void) {
 /**
  * Ensure a Google Font CSS link is added to the document head
  * (so the inline text editor uses the correct font).
+ *
+ * The requested axes come from the catalog: Google's css2 endpoint answers 400
+ * Bad Request — and the overlay then falls back to a system face — for an
+ * `ital` it does not publish, so asking every family for italic is not an
+ * option.
  */
 export function ensureFontCSS(fontFamily: string) {
     const linkId = `gfont-${fontFamily.replace(/\s+/g, '-')}`;
     if (document.getElementById(linkId)) return;
+    const meta = lookupFont(fontFamily);
+    const weights = meta
+        ? [...new Set([nearestWeight(meta.weights, 400), nearestWeight(meta.weights, 700)])]
+        : [400, 700];
+    const axes = meta?.hasItalic
+        ? `ital,wght@${[
+              ...(meta.hasNormal ? weights.map((w) => `0,${w}`) : []),
+              ...weights.map((w) => `1,${w}`),
+          ].join(';')}`
+        : `wght@${weights.join(';')}`;
     const link = document.createElement('link');
     link.id = linkId;
     link.rel = 'stylesheet';
-    link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(fontFamily)}:wght@400;700&display=swap`;
+    link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(fontFamily)}:${axes}&display=swap`;
     document.head.appendChild(link);
+}
+
+/**
+ * Make one family renderable in ordinary HTML, cheaply, for previewing it in a
+ * list.
+ *
+ * `ensureFontCSS` is the wrong tool for a font picker: it adds a stylesheet
+ * link per family, and scrolling a two-thousand-family list would leave that
+ * many <link> elements and Google round-trips in the document. This registers a
+ * single face straight from the same CDN the editor already fetches from.
+ */
+const previewFaces = new Set<string>();
+export function ensurePreviewFace(fontFamily: string): void {
+    if (previewFaces.has(fontFamily) || fontDataCache.has(fontFamily)) return;
+    previewFaces.add(fontFamily);
+    const meta = lookupFont(fontFamily);
+    if (!meta || typeof FontFace === 'undefined') return;
+    const plan = facePlan(meta);
+    const style = plan.italicOnly ? 'italic' : 'normal';
+    const url = `https://cdn.jsdelivr.net/fontsource/fonts/${meta.id}@latest/${plan.subset}-${plan.regular}-${style}.woff2`;
+    try {
+        const face = new FontFace(fontFamily, `url(${url})`, {
+            weight: String(plan.regular),
+            style,
+            display: 'swap',
+        });
+        face.load()
+            .then((f) => document.fonts.add(f))
+            .catch(() => {
+                /* a preview that won't load just renders in the fallback face */
+            });
+    } catch {
+        /* ignore — preview only */
+    }
 }
 
 /**
@@ -105,14 +183,16 @@ export async function loadGoogleFontData(fontFamily: string): Promise<ArrayBuffe
         // Fetch raw TTFs, NOT the Google Fonts CSS: for a modern browser
         // User-Agent that CSS resolves to woff2, which CanvasKit/FreeType can't
         // decode (renders tofu). The fontsource CDN serves plain TTF that
-        // CanvasKit registers correctly. Grab regular (400) and bold (700).
+        // CanvasKit registers correctly.
         const id = fontsourceId(fontFamily);
+        const plan = facePlan(lookupFont(fontFamily));
         const url = (w: number, style: 'normal' | 'italic') =>
-            `https://cdn.jsdelivr.net/fontsource/fonts/${id}@latest/latin-${w}-${style}.ttf`;
+            `https://cdn.jsdelivr.net/fontsource/fonts/${id}@latest/${plan.subset}-${w}-${style}.ttf`;
         const fetchTtf = async (
-            w: number,
+            w: number | null,
             style: 'normal' | 'italic',
         ): Promise<ArrayBuffer | null> => {
+            if (w === null) return null;
             try {
                 const resp = await fetch(url(w, style));
                 return resp.ok ? await resp.arrayBuffer() : null;
@@ -124,11 +204,15 @@ export async function loadGoogleFontData(fontFamily: string): Promise<ArrayBuffe
         // a slant, and without an italic face registered there is nothing for
         // it to select, so `italic: true` silently renders upright. Not every
         // family publishes one (Bebas Neue, for instance), hence the nulls.
+        //
+        // An italic-only family (Molle) has no upright face to fetch at all, so
+        // its italic IS its regular — otherwise it would fail as unavailable.
+        const upright = plan.italicOnly ? 'italic' : 'normal';
         const [regular, bold, italic, boldItalic] = await Promise.all([
-            fetchTtf(400, 'normal'),
-            fetchTtf(700, 'normal'),
-            fetchTtf(400, 'italic'),
-            fetchTtf(700, 'italic'),
+            fetchTtf(plan.regular, upright),
+            fetchTtf(plan.bold, upright),
+            fetchTtf(plan.italic ? plan.regular : null, 'italic'),
+            fetchTtf(plan.italic ? plan.bold : null, 'italic'),
         ]);
         if (!regular) throw new Error('no TTF for regular weight');
 

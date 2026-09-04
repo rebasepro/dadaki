@@ -4,6 +4,7 @@ import { logAppEvent, withBulkAnalytics } from './analytics';
 import { createColorSwatch } from './color_picker';
 import type { ContextBar } from './context_bar';
 import { FileIO } from './file_io';
+import { FontPicker } from './font_picker';
 import { ensureFontCSS, loadGoogleFontData } from './fonts';
 import { GradientEditController, sampleGradientColor } from './gradient_edit';
 import {
@@ -203,6 +204,9 @@ export class UIEngine {
     // Typography DOM elements
     textContentInput: HTMLTextAreaElement;
     textFontFamily: HTMLSelectElement;
+    /** Searchable overlay on `textFontFamily` — the catalog is far too long for
+     *  a native select, and it owns that select's options. */
+    private fontPicker: FontPicker | null = null;
     textFontSize: HTMLInputElement;
     textLineHeight: HTMLInputElement;
     textAlign: HTMLSelectElement;
@@ -282,6 +286,7 @@ export class UIEngine {
         // Typography
         this.textContentInput = document.getElementById('text-content') as HTMLTextAreaElement;
         this.textFontFamily = document.getElementById('text-font-family') as HTMLSelectElement;
+        if (this.textFontFamily) this.fontPicker = FontPicker.attach(this.textFontFamily);
         this.textFontSize = document.getElementById('text-font-size') as HTMLInputElement;
         this.textLineHeight = document.getElementById('text-line-height') as HTMLInputElement;
         this.textAlign = document.getElementById('text-align') as HTMLSelectElement;
@@ -2101,8 +2106,10 @@ export class UIEngine {
             if (this.textContentInput && document.activeElement !== this.textContentInput) {
                 this.textContentInput.value = node.geometry.Text.content || '';
             }
-            if (this.textFontFamily)
-                this.textFontFamily.value = node.geometry.Text.font_family || '';
+            // Through the picker, not `select.value = …`: the option for this
+            // family may not exist yet (they are created on demand), and
+            // assigning a value with no matching option blanks the control.
+            this.fontPicker?.setValue(node.geometry.Text.font_family || '');
             if (this.textFontSize)
                 this.textFontSize.value = String(node.geometry.Text.font_size || 32);
             if (this.textLineHeight)
@@ -2163,6 +2170,14 @@ export class UIEngine {
 
         if (this.fillsList) this.fillsList.innerHTML = '';
         if (this.strokesList) this.strokesList.innerHTML = '';
+    }
+
+    /** Release resources that outlive the container's DOM — the font picker
+     *  parks its popover on `document.body`, so emptying the container is not
+     *  enough to take it with it. Called from `EditorHandle.destroy`. */
+    dispose(): void {
+        this.fontPicker?.destroy();
+        this.fontPicker = null;
     }
 
     /** Apply typography properties from the side panel to the selected text node. */

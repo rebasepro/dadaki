@@ -364,7 +364,10 @@ tool(
         id: z.number(),
         text: z.string().optional(),
         fontSize: z.number().positive().optional(),
-        fontFamily: z.string().optional(),
+        fontFamily: z
+            .string()
+            .optional()
+            .describe('Any Google Fonts family, by its exact name — "Instrument Serif".'),
         align: z.enum(['left', 'center', 'right']).optional(),
         weight: z.number().min(100).max(900).optional().describe('400 normal, 700 bold'),
         italic: z.boolean().optional(),

@@ -594,6 +594,7 @@ export async function createEditor(
         },
         destroy: () => {
             presence.dispose();
+            ui.dispose();
             (renderer as { stop?: () => void }).stop?.();
             container.innerHTML = '';
         },

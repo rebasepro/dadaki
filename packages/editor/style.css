@@ -1121,6 +1121,117 @@ textarea.prop-input {
     border-color: var(--accent);
 }
 
+/* ─── Font Picker ─── */
+
+.fp-wrap {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+}
+
+/* Looks like the select it replaces, but left-aligned like a value and with
+   room for a long family name to elide rather than push the row wide. */
+.fp-trigger {
+    text-align: left;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    line-height: 18px;
+}
+
+.fp-popover {
+    position: fixed;
+    z-index: 10000;
+    width: 260px;
+    padding: 8px;
+    box-sizing: border-box;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+    font-size: 11px;
+    color: var(--text-main);
+}
+
+.fp-search {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg-input);
+    border: 1px solid transparent;
+    border-radius: 5px;
+    color: var(--text-main);
+    font-family: inherit;
+    font-size: 11px;
+    height: 26px;
+    padding: 0 8px;
+    outline: none;
+}
+.fp-search:focus { border-color: var(--accent); }
+
+.fp-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin: 8px 0 6px;
+}
+.fp-filter {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 10px;
+    padding: 2px 6px;
+}
+.fp-filter:hover { color: var(--text-main); background: var(--bg-hover); }
+.fp-filter.active { color: var(--accent); background: var(--accent-dim); }
+
+/* The list is windowed: rows are positioned by index against a spacer sized to
+   the full result count, so two thousand fonts cost a dozen DOM nodes. */
+.fp-list {
+    position: relative;
+    height: 300px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+.fp-spacer { width: 1px; }
+
+.fp-row {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    box-sizing: border-box;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.fp-row.current { color: var(--accent); }
+.fp-row.active { background: var(--bg-hover); }
+
+.fp-row.fp-header {
+    cursor: default;
+    color: var(--text-label);
+    font-family: inherit;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: none;
+}
+
+.fp-empty {
+    padding: 12px 8px;
+    color: var(--text-dim);
+    text-align: center;
+}
+
 /* ─── Color Swatch ─── */
 
 .color-input {
