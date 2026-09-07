@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Editor
+
+- **Resizing an imported group works.** Grabbing a corner of an SVG import
+  jumped the artwork and left the final shape nowhere near the box that had
+  just been dragged. Three faults stacked, all of them in the gap between the
+  box you grab and the box the gesture measures against. **Ellipses were boxed
+  with their untransformed radii** — a circle scaled to 56×46 on screen still
+  reported 36×36 — so one stale circle dragged its whole group's bounds, and
+  the resize, which re-reads those bounds every frame, compounded the error as
+  you dragged. **The selection frame inflated rotated children**, because it
+  unioned each child's box *pushed through* the child's transform and the box
+  of a rotated box is bigger than the rotated shape; on a 175×170 import the
+  frame hung 6.6 × 8.3 units off the artwork, so grabbing that handle and
+  nudging it half a unit jumped the shape 8 units. `transform="rotate(…)"` on a
+  child is routine in an SVG export, which is why imports had it worst. And
+  **both sides measured curves by sampling**, which can only land inside the
+  true extreme, and disagreed with each other about by how much; they solve
+  B'(t) = 0 for the exact extremes now, engine and editor alike. A resize also
+  no longer gives up mid-convergence: a shape with a large corner radius used
+  to settle 0.6% off the size the drag asked for.
+
 ## [1.0.0-beta.4] — 2026-09-04
 
 ### Editor

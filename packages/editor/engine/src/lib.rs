@@ -736,6 +736,90 @@ fn default_opacity() -> f32 { 1.0 }
 /// World-space pick tolerance in document pixels (scaled to local space at use).
 const HIT_TOLERANCE: f32 = 4.0;
 
+/// Grow `min`/`max` to contain a cubic Bézier exactly: the two endpoints, plus
+/// any point where the curve turns on an axis, found by solving B'(t) = 0.
+///
+/// Bounds used to come from `flatten_subpath`, which only reports the sampled
+/// points — so the extreme of a curve falling between two samples was simply
+/// missed, and every curved shape reported a box a fraction inside its own
+/// outline. That fraction is what the selection frame is drawn from and what
+/// the resize gesture measures against, so it read as the box never quite
+/// sitting on the artwork. Solving costs less than subdividing anyway.
+fn accumulate_cubic_bounds(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, min: &mut Vec2, max: &mut Vec2) {
+    let mut grow = |p: Vec2| {
+        *min = min.min(p);
+        *max = max.max(p);
+    };
+    grow(p0);
+    grow(p3);
+    let at = |t: f32| -> Vec2 {
+        let u = 1.0 - t;
+        p0 * (u * u * u) + p1 * (3.0 * u * u * t) + p2 * (3.0 * u * t * t) + p3 * (t * t * t)
+    };
+    for axis in 0..2 {
+        let (c0, c1, c2, c3) = if axis == 0 {
+            (p0.x, p1.x, p2.x, p3.x)
+        } else {
+            (p0.y, p1.y, p2.y, p3.y)
+        };
+        // B'(t)/3 = a·t² + b·t + c
+        let a = -c0 + 3.0 * c1 - 3.0 * c2 + c3;
+        let b = 2.0 * (c0 - 2.0 * c1 + c2);
+        let c = c1 - c0;
+        let mut roots = [f32::NAN; 2];
+        if a.abs() < 1e-9 {
+            if b.abs() > 1e-9 {
+                roots[0] = -c / b;
+            }
+        } else {
+            let disc = b * b - 4.0 * a * c;
+            if disc >= 0.0 {
+                let s = disc.sqrt();
+                roots[0] = (-b + s) / (2.0 * a);
+                roots[1] = (-b - s) / (2.0 * a);
+            }
+        }
+        for t in roots {
+            if t.is_finite() && t > 0.0 && t < 1.0 {
+                grow(at(t));
+            }
+        }
+    }
+}
+
+/// Grow `min`/`max` to contain every segment of `sp` mapped through `m`,
+/// closing curve included. An affine map takes a cubic's control points to the
+/// control points of the mapped cubic, so transforming first and solving after
+/// is exact — no need to flatten in between.
+fn accumulate_subpath_bounds(sp: &Subpath, m: &Mat3, min: &mut Vec2, max: &mut Vec2) {
+    let n = sp.points.len();
+    if n == 0 {
+        return;
+    }
+    if n == 1 {
+        let p = m.transform_point2(Vec2::new(sp.points[0].x, sp.points[0].y));
+        *min = min.min(p);
+        *max = max.max(p);
+        return;
+    }
+    let mut seg = |a: &PathPoint, b: &PathPoint| {
+        accumulate_cubic_bounds(
+            m.transform_point2(Vec2::new(a.x, a.y)),
+            m.transform_point2(a.cp2),
+            m.transform_point2(b.cp1),
+            m.transform_point2(Vec2::new(b.x, b.y)),
+            min,
+            max,
+        );
+    };
+    for i in 1..n {
+        seg(&sp.points[i - 1], &sp.points[i]);
+    }
+    if sp.closed {
+        seg(&sp.points[n - 1], &sp.points[0]);
+    }
+}
+
 /// Flatten a subpath's cubic segments into a polyline in local space.
 /// Includes the closing curve when `closed`.
 fn flatten_subpath(sp: &Subpath) -> Vec<Vec2> {
@@ -2953,23 +3037,15 @@ impl Engine {
                 // the selection frame hugs the border the renderer draws.
                 Geometry::Rect { width, height } if node.style.corner_radius > 1e-3 => {
                     let resolved = round_subpaths(&rect_subpaths(width, height, node.style.corner_radius));
-                    let mut min_x = f32::MAX;
-                    let mut min_y = f32::MAX;
-                    let mut max_x = f32::MIN;
-                    let mut max_y = f32::MIN;
+                    let mut lo = Vec2::splat(f32::MAX);
+                    let mut hi = Vec2::splat(f32::MIN);
                     for sp in &resolved {
-                        for lp in &flatten_subpath(sp) {
-                            let p = transform.transform_point2(*lp);
-                            min_x = min_x.min(p.x);
-                            min_y = min_y.min(p.y);
-                            max_x = max_x.max(p.x);
-                            max_y = max_y.max(p.y);
-                        }
+                        accumulate_subpath_bounds(sp, &transform, &mut lo, &mut hi);
                     }
-                    if min_x > max_x {
+                    if lo.x > hi.x {
                         AABB::from_corners([0.0, 0.0], [0.0, 0.0])
                     } else {
-                        AABB::from_corners([min_x, min_y], [max_x, max_y])
+                        AABB::from_corners([lo.x, lo.y], [hi.x, hi.y])
                     }
                 }
                 Geometry::Rect { width, height } | Geometry::Image { width, height, .. } => {
@@ -2985,38 +3061,42 @@ impl Engine {
 
                     AABB::from_corners([min_x, min_y], [max_x, max_y])
                 }
+                // An affine map sends an ellipse to another ellipse, and the
+                // half-extents of THAT one are the row norms of A·diag(rx, ry) —
+                // exact for any scale, rotation or skew. Padding the transformed
+                // centre with the raw radii (what this did) reports the box the
+                // ellipse had before its transform: scale a group holding a
+                // circle and its box keeps the size it was drawn at while the
+                // shape on screen grows away from it. Group bounds union child
+                // boxes, so one stale circle drags the group's own frame — and
+                // the resize gesture, which re-reads these bounds every frame,
+                // then scales against a box that is not the artwork.
                 Geometry::Ellipse { radius_x, radius_y } => {
                     let p = transform.transform_point2(Vec2::ZERO);
-                    AABB::from_corners([p.x - radius_x, p.y - radius_y], [p.x + radius_x, p.y + radius_y])
+                    let ax = transform.x_axis;
+                    let ay = transform.y_axis;
+                    let ex = ((ax.x * radius_x).powi(2) + (ay.x * radius_y).powi(2)).sqrt();
+                    let ey = ((ax.y * radius_x).powi(2) + (ay.y * radius_y).powi(2)).sqrt();
+                    AABB::from_corners([p.x - ex, p.y - ey], [p.x + ex, p.y + ey])
                 }
                 Geometry::Path { ref subpaths, .. } => {
-                    let mut min_x = f32::MAX;
-                    let mut min_y = f32::MAX;
-                    let mut max_x = f32::MIN;
-                    let mut max_y = f32::MIN;
-                    let mut has_points = false;
+                    let mut lo = Vec2::splat(f32::MAX);
+                    let mut hi = Vec2::splat(f32::MIN);
                     // Bounds must hug the *resolved* (corner-radius-rounded) outline —
                     // the same geometry the renderer emits. Using the raw sharp subpaths
                     // makes the selection/resize box overshoot to the sharp corner
                     // vertices, which sit outside the visible rounded border.
                     let resolved = round_subpaths(subpaths);
-                    // Flatten each subpath into line segments so bounds
-                    // reflect the actual curve, not the control polygon.
+                    // Solve each segment for its true extremes rather than
+                    // sampling it — the control polygon is too big and a
+                    // flattened polyline is a shade too small.
                     for sp in &resolved {
-                        let flattened = flatten_subpath(sp);
-                        for lp in &flattened {
-                            has_points = true;
-                            let p = transform.transform_point2(*lp);
-                            min_x = min_x.min(p.x);
-                            min_y = min_y.min(p.y);
-                            max_x = max_x.max(p.x);
-                            max_y = max_y.max(p.y);
-                        }
+                        accumulate_subpath_bounds(sp, &transform, &mut lo, &mut hi);
                     }
-                    if !has_points {
+                    if lo.x > hi.x {
                         AABB::from_corners([0.0, 0.0], [0.0, 0.0])
                     } else {
-                        AABB::from_corners([min_x, min_y], [max_x, max_y])
+                        AABB::from_corners([lo.x, lo.y], [hi.x, hi.y])
                     }
                 }
                 Geometry::Text { ref content, font_size, line_height, text_align, .. } => {
@@ -3055,28 +3135,16 @@ impl Engine {
             return None;
         }
 
-        let mut min_x = f32::MAX;
-        let mut min_y = f32::MAX;
-        let mut max_x = f32::MIN;
-        let mut max_y = f32::MIN;
-        let mut has_points = false;
+        let m = transform.unwrap_or(Mat3::IDENTITY);
+        let mut lo = Vec2::splat(f32::MAX);
+        let mut hi = Vec2::splat(f32::MIN);
         for sp in &round_subpaths(&node.bool_cache) {
-            for lp in &flatten_subpath(sp) {
-                has_points = true;
-                let p = match transform {
-                    Some(t) => t.transform_point2(*lp),
-                    None => *lp,
-                };
-                min_x = min_x.min(p.x);
-                min_y = min_y.min(p.y);
-                max_x = max_x.max(p.x);
-                max_y = max_y.max(p.y);
-            }
+            accumulate_subpath_bounds(sp, &m, &mut lo, &mut hi);
         }
-        if !has_points {
+        if lo.x > hi.x {
             return None;
         }
-        Some([min_x, min_y, max_x, max_y])
+        Some([lo.x, lo.y, hi.x, hi.y])
     }
 
     /// World AABB of a Boolean Group's resolved outline (see `boolean_outline_bounds`).
@@ -4512,22 +4580,25 @@ impl Engine {
                     // linear function of the anchor scale; iterate to converge.
                     let target_w = new_w.max(1.0);
                     let target_h = new_h.max(1.0);
-                    // Convergence is geometric with ratio ~ (rounding cut / size);
-                    // 8 iterations lands well under a tenth of a pixel even for
-                    // large radii, and each pass is just a flatten of the outline.
-                    for _ in 0..8 {
-                        // Bounds of the resolved outline in local geometry space
-                        let mut min_x = f32::MAX; let mut min_y = f32::MAX;
-                        let mut max_x = f32::MIN; let mut max_y = f32::MIN;
-                        let mut has_points = false;
+                    // Convergence is geometric with ratio ~ (rounding cut / size),
+                    // which approaches 1 when a corner radius is a large share of
+                    // the target size — a 40-unit fillet squeezed into 80 units of
+                    // width needs a couple of dozen passes, and stopping at 8 left
+                    // the shape a visible 0.6% off the size the drag asked for.
+                    // Each pass is only a re-measure of the outline, so the extra
+                    // rounds cost nothing next to being wrong.
+                    for _ in 0..32 {
+                        // Bounds of the resolved outline in local geometry space,
+                        // measured exactly the way `get_node_bounds` measures it —
+                        // this loop is solving for the size that call will report,
+                        // so a different measure here converges on the wrong size.
+                        let mut lo = Vec2::splat(f32::MAX);
+                        let mut hi = Vec2::splat(f32::MIN);
                         for sp in round_subpaths(subpaths).iter() {
-                            for lp in flatten_subpath(sp) {
-                                has_points = true;
-                                min_x = min_x.min(lp.x); min_y = min_y.min(lp.y);
-                                max_x = max_x.max(lp.x); max_y = max_y.max(lp.y);
-                            }
+                            accumulate_subpath_bounds(sp, &Mat3::IDENTITY, &mut lo, &mut hi);
                         }
-                        if !has_points { return; }
+                        if lo.x > hi.x { return; }
+                        let (min_x, min_y, max_x, max_y) = (lo.x, lo.y, hi.x, hi.y);
                         let old_w = (max_x - min_x).max(1e-3);
                         let old_h = (max_y - min_y).max(1e-3);
                         if (old_w - target_w).abs() < 0.02 && (old_h - target_h).abs() < 0.02 {

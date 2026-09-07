@@ -75,6 +75,44 @@ interface Mat {
     f: number;
 }
 
+const IDENTITY_MAT: Mat = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+
+/** Circle-as-cubic constant: handle length for a quarter arc of radius 1. */
+const KAPPA = 0.5522847498;
+
+/**
+ * A rounded rectangle's outline as one closed cubic subpath, matching the
+ * fillet the engine resolves for `corner_radius` (same clamp: a corner may eat
+ * at most half of each edge it touches). Needed wherever the rect is measured
+ * through a rotation, where the sharp corners the arcs cut away would otherwise
+ * be taken for the extreme points.
+ */
+function roundedRectSubpaths(w: number, h: number, radius: number): Subpath[] {
+    const r = Math.min(radius, w / 2, h / 2);
+    const k = KAPPA * r;
+    const pt = (x: number, y: number, cp1: [number, number], cp2: [number, number]): PathPoint => ({
+        x,
+        y,
+        cp1,
+        cp2,
+    });
+    return [
+        {
+            closed: true,
+            points: [
+                pt(r, 0, [r - k, 0], [r, 0]),
+                pt(w - r, 0, [w - r, 0], [w - r + k, 0]),
+                pt(w, r, [w, r - k], [w, r]),
+                pt(w, h - r, [w, h - r], [w, h - r + k]),
+                pt(w - r, h, [w - r + k, h], [w - r, h]),
+                pt(r, h, [r, h], [r - k, h]),
+                pt(0, h - r, [0, h - r + k], [0, h - r]),
+                pt(0, r, [0, r], [0, r - k]),
+            ],
+        },
+    ];
+}
+
 /** Cache of measured CSS first-line baseline offsets (em), keyed by font style. */
 const _cssBaselineCache = new Map<string, number>();
 /**
@@ -7288,66 +7326,146 @@ export class InputManager {
 
     /**
      * A node's bounds in its own local (pre-transform) space, mirroring what
-     * the renderer draws for the selection outline. Groups union their
-     * children's local bounds through the children's local transforms.
+     * the renderer draws for the selection outline. Groups measure each
+     * descendant's outline through the accumulated child transforms.
      */
     getNodeLocalBounds(
         id: number,
         depth = 0,
     ): { x: number; y: number; w: number; h: number } | null {
+        return this.boundsInSpace(id, IDENTITY_MAT, depth);
+    }
+
+    /**
+     * Bounds of what a node paints, expressed in an ancestor's space — `M` maps
+     * the node's own space into that space.
+     *
+     * The outline itself is measured through `M`; a box measured first and
+     * pushed through `M` afterwards is NOT the same thing. The AABB of a
+     * transformed AABB is strictly bigger than the AABB of the transformed
+     * shape for anything rotated or skewed, so a group that unioned its
+     * children's boxes that way reported a frame larger than its artwork — and
+     * an SVG import, where `transform="rotate(…)"` on a child is routine, got a
+     * selection box visibly off the drawing with the resize handles sitting on
+     * empty canvas. Grabbing one then jumped the shape, because the gesture
+     * sizes against the engine's (correct) bounds while the handle came from
+     * this one.
+     */
+    private boundsInSpace(
+        id: number,
+        M: Mat,
+        depth = 0,
+    ): { x: number; y: number; w: number; h: number } | null {
         if (depth > 16) return null;
+        let minX = Infinity,
+            minY = Infinity,
+            maxX = -Infinity,
+            maxY = -Infinity;
+        const add = (x: number, y: number) => {
+            const p = this.matApply(M, { x, y });
+            minX = Math.min(minX, p.x);
+            minY = Math.min(minY, p.y);
+            maxX = Math.max(maxX, p.x);
+            maxY = Math.max(maxY, p.y);
+        };
+        const addRect = (x: number, y: number, w: number, h: number) => {
+            add(x, y);
+            add(x + w, y);
+            add(x + w, y + h);
+            add(x, y + h);
+        };
+        // An affine map takes a cubic's control points to the control points of
+        // the mapped cubic, so flattening after `M` and flattening before it
+        // give the same curve — bounds included.
+        const addSubpaths = (subpaths: Subpath[]) => {
+            if (!subpaths.length) return;
+            const b = this.renderer.calculatePathBounds({
+                subpaths: subpaths.map((sp) => ({
+                    closed: sp.closed,
+                    points: sp.points.map((pt) => {
+                        const a = this.matApply(M, pt);
+                        const c1 = this.matApply(M, { x: pt.cp1[0], y: pt.cp1[1] });
+                        const c2 = this.matApply(M, { x: pt.cp2[0], y: pt.cp2[1] });
+                        return { x: a.x, y: a.y, cp1: [c1.x, c1.y], cp2: [c2.x, c2.y] };
+                    }),
+                })),
+            });
+            minX = Math.min(minX, b.minX);
+            minY = Math.min(minY, b.minY);
+            maxX = Math.max(maxX, b.maxX);
+            maxY = Math.max(maxY, b.maxY);
+        };
+        const done = () =>
+            minX === Infinity ? null : { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+
         if (this.scene.getNodeType(id) === 3) {
             // Boolean Group: the operands are consumed by the op and never
             // painted, so the frame follows the resolved outline. Without this
             // the selection box (and the resize handles on it) would span the
             // operand union — visibly wider than the shape it is framing.
+            // The cheap probe first — it answers null for an ordinary group, so
+            // only a real Boolean Group pays for reading its cached outline.
             const bb = this.scene.getBooleanLocalBounds(id);
-            if (bb) return bb;
-            // Group
-            const kids = this.scene.getNodeChildren(id);
-            let minX = Infinity,
-                minY = Infinity,
-                maxX = -Infinity,
-                maxY = -Infinity;
-            for (const kid of kids) {
-                const lb = this.getNodeLocalBounds(kid, depth + 1);
-                if (!lb) continue;
-                const l = this.scene.getNodeLocalTransform(kid); // column-major
-                const M: Mat = { a: l[0], b: l[1], c: l[3], d: l[4], e: l[6], f: l[7] };
-                for (const [cx, cy] of [
-                    [lb.x, lb.y],
-                    [lb.x + lb.w, lb.y],
-                    [lb.x + lb.w, lb.y + lb.h],
-                    [lb.x, lb.y + lb.h],
-                ]) {
-                    const p = this.matApply(M, { x: cx, y: cy });
-                    minX = Math.min(minX, p.x);
-                    minY = Math.min(minY, p.y);
-                    maxX = Math.max(maxX, p.x);
-                    maxY = Math.max(maxY, p.y);
-                }
+            if (bb) {
+                const cache = (
+                    this.scene.getNode(id) as unknown as { bool_cache?: Subpath[] } | null
+                )?.bool_cache;
+                if (cache?.length) addSubpaths(cache);
+                else addRect(bb.x, bb.y, bb.w, bb.h);
+                return done();
             }
-            return minX === Infinity ? null : { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+            for (const kid of this.scene.getNodeChildren(id)) {
+                const l = this.scene.getNodeLocalTransform(kid); // column-major
+                const K: Mat = { a: l[0], b: l[1], c: l[3], d: l[4], e: l[6], f: l[7] };
+                const b = this.boundsInSpace(kid, this.matMul(M, K), depth + 1);
+                if (!b) continue;
+                minX = Math.min(minX, b.x);
+                minY = Math.min(minY, b.y);
+                maxX = Math.max(maxX, b.x + b.w);
+                maxY = Math.max(maxY, b.y + b.h);
+            }
+            return done();
         }
+
         const geo = this.scene.getNodeGeometry(id);
         if (!geo) return null;
-        if (geo.Rect) return { x: 0, y: 0, w: geo.Rect.width, h: geo.Rect.height };
-        if (geo.Image) return { x: 0, y: 0, w: geo.Image.width, h: geo.Image.height };
+        if (geo.Rect) {
+            const { width: w, height: h } = geo.Rect;
+            const r = this.scene.getNodeStyle(id)?.corner_radius ?? 0;
+            // Sharp corners are the extreme points of a plain rect, but a
+            // rounded one's arcs cut them away — under a rotation the cut
+            // corner, not the sharp one, is what the renderer draws.
+            if (r > 1e-3) addSubpaths(roundedRectSubpaths(w, h, r));
+            else addRect(0, 0, w, h);
+            return done();
+        }
+        if (geo.Image) {
+            addRect(0, 0, geo.Image.width, geo.Image.height);
+            return done();
+        }
         if (geo.Ellipse) {
+            // An affine map sends the ellipse to another ellipse; its
+            // half-extents are the row norms of M's linear part scaled by the
+            // radii. (Boxing the ellipse first and rotating the box after
+            // overshoots by up to √2.)
             const { radius_x: rx, radius_y: ry } = geo.Ellipse;
-            return { x: -rx, y: -ry, w: 2 * rx, h: 2 * ry };
+            const c = this.matApply(M, { x: 0, y: 0 });
+            const ex = Math.hypot(M.a * rx, M.c * ry);
+            const ey = Math.hypot(M.b * rx, M.d * ry);
+            return { x: c.x - ex, y: c.y - ey, w: 2 * ex, h: 2 * ey };
         }
         if (geo.Path) {
-            const b = this.renderer.calculatePathBounds({
-                subpaths: this.scene.getResolvedSubpaths(id),
-            });
-            return { x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY };
+            addSubpaths(this.scene.getResolvedSubpaths(id));
+            return done();
         }
         if (geo.Text) {
             const b = this.renderer.getTextLocalBounds(id);
-            if (b) return b;
-            const approxW = geo.Text.content.length * geo.Text.font_size * 0.6;
-            return { x: 0, y: -geo.Text.font_size, w: approxW, h: geo.Text.font_size };
+            if (b) addRect(b.x, b.y, b.w, b.h);
+            else {
+                const approxW = geo.Text.content.length * geo.Text.font_size * 0.6;
+                addRect(0, -geo.Text.font_size, approxW, geo.Text.font_size);
+            }
+            return done();
         }
         return null;
     }

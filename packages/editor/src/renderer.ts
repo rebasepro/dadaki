@@ -35,6 +35,7 @@ import {
     tessellate,
     vEdgeCubic,
 } from './mesh_geom';
+import { pathBounds } from './path_bounds';
 import type { MeshGradient, MeshVertex } from './types';
 
 /**
@@ -4889,118 +4890,14 @@ export class Renderer {
         canvas.restore();
     }
 
+    /** @see pathBounds — kept as a method so call sites read the same. */
     calculatePathBounds(path: {
         subpaths: Array<{
             points: Array<{ x: number; y: number; cp1: [number, number]; cp2: [number, number] }>;
             closed: boolean;
         }>;
     }) {
-        let minX = Infinity,
-            minY = Infinity,
-            maxX = -Infinity,
-            maxY = -Infinity;
-        let hasPoints = false;
-        for (const sp of path.subpaths) {
-            const pts = sp.points;
-            const n = pts.length;
-            if (n === 0) continue;
-            // Include the first anchor
-            hasPoints = true;
-            minX = Math.min(minX, pts[0].x);
-            minY = Math.min(minY, pts[0].y);
-            maxX = Math.max(maxX, pts[0].x);
-            maxY = Math.max(maxY, pts[0].y);
-            // Flatten each cubic segment and include sampled points
-            for (let i = 1; i < n; i++) {
-                const a = pts[i - 1];
-                const b = pts[i];
-                this.flattenCubicBounds(
-                    a.x,
-                    a.y,
-                    a.cp2[0],
-                    a.cp2[1],
-                    b.cp1[0],
-                    b.cp1[1],
-                    b.x,
-                    b.y,
-                    (x, y) => {
-                        minX = Math.min(minX, x);
-                        minY = Math.min(minY, y);
-                        maxX = Math.max(maxX, x);
-                        maxY = Math.max(maxY, y);
-                    },
-                );
-            }
-            if (sp.closed && n >= 2) {
-                const a = pts[n - 1];
-                const b = pts[0];
-                this.flattenCubicBounds(
-                    a.x,
-                    a.y,
-                    a.cp2[0],
-                    a.cp2[1],
-                    b.cp1[0],
-                    b.cp1[1],
-                    b.x,
-                    b.y,
-                    (x, y) => {
-                        minX = Math.min(minX, x);
-                        minY = Math.min(minY, y);
-                        maxX = Math.max(maxX, x);
-                        maxY = Math.max(maxY, y);
-                    },
-                );
-            }
-        }
-        return hasPoints ? { minX, minY, maxX, maxY } : { minX: 0, minY: 0, maxX: 0, maxY: 0 };
-    }
-
-    /** Subdivide a cubic Bézier and call cb for sampled points along the curve. */
-    private flattenCubicBounds(
-        x0: number,
-        y0: number,
-        x1: number,
-        y1: number,
-        x2: number,
-        y2: number,
-        x3: number,
-        y3: number,
-        cb: (x: number, y: number) => void,
-    ) {
-        // Adaptive subdivision: split until segments are flat enough
-        const stack: [number, number, number, number, number, number, number, number][] = [
-            [x0, y0, x1, y1, x2, y2, x3, y3],
-        ];
-        const tolerance = 0.5;
-        while (stack.length > 0) {
-            const [ax, ay, bx, by, cx, cy, dx, dy] = stack.pop()!;
-            // Flatness test: max distance of control points from the line a→d
-            const ux = 3 * bx - 2 * ax - dx;
-            const uy = 3 * by - 2 * ay - dy;
-            const vx = 3 * cx - ax - 2 * dx;
-            const vy = 3 * cy - ay - 2 * dy;
-            const maxDist = Math.max(ux * ux, vx * vx) + Math.max(uy * uy, vy * vy);
-            if (maxDist <= 16 * tolerance * tolerance) {
-                cb(dx, dy);
-            } else {
-                // De Casteljau split at t=0.5
-                const abx = (ax + bx) / 2,
-                    aby = (ay + by) / 2;
-                const bcx = (bx + cx) / 2,
-                    bcy = (by + cy) / 2;
-                const cdx = (cx + dx) / 2,
-                    cdy = (cy + dy) / 2;
-                const abcx = (abx + bcx) / 2,
-                    abcy = (aby + bcy) / 2;
-                const bcdx = (bcx + cdx) / 2,
-                    bcdy = (bcy + cdy) / 2;
-                const mx = (abcx + bcdx) / 2,
-                    my = (abcy + bcdy) / 2;
-                // Push second half first so first half is processed next
-                stack.push([mx, my, bcdx, bcdy, cdx, cdy, dx, dy]);
-                stack.push([ax, ay, abx, aby, abcx, abcy, mx, my]);
-            }
-        }
+        return pathBounds(path.subpaths);
     }
 
     private drawGrid(canvas: Canvas, dpr: number) {

@@ -729,3 +729,61 @@ fn batched_move_matches_individual_moves() {
     b.move_nodes("[{\"id\":1}]");
     assert_eq!(b.get_node_bounds(outer_b), before, "bad payload must not mutate the scene");
 }
+
+// ─── 8. A transformed ellipse's world box hugs the transformed ellipse ───────
+
+/// The reported AABB of an ellipse must be the box of the ellipse the renderer
+/// draws — under scale, rotation, skew, and inherited group transforms alike.
+///
+/// This is the contract that padding the transformed centre with the raw radii
+/// silently broke: it holds for the identity, and for every uniform-scale
+/// example anyone would pick by hand, so nothing caught it until a user scaled
+/// a group of circles and watched the selection box come loose from the art.
+#[test]
+fn a_transformed_ellipse_reports_the_box_of_its_transformed_outline() {
+    let mut rng = Lcg::new(0xE111);
+    for i in 0..400 {
+        let mut engine = Engine::new();
+        let cx = rng.range(-200.0, 200.0);
+        let cy = rng.range(-200.0, 200.0);
+        let rx = rng.range(2.0, 90.0);
+        let ry = rng.range(2.0, 90.0);
+        let id = engine.add_ellipse(cx, cy, rx, ry);
+
+        // Nest it under a transformed group half the time, so the inherited
+        // part of the chain is exercised as well as the node's own.
+        if i % 2 == 0 {
+            let other = engine.add_rect(0.0, 0.0, 10.0, 10.0);
+            let group = engine.group_nodes(&format!("[{id},{other}]"));
+            engine.set_node_rotation(group, rng.range(-180.0, 180.0));
+            engine.set_node_scale(group, rng.scale(), rng.scale());
+            engine.move_node(group, rng.range(-100.0, 100.0), rng.range(-100.0, 100.0));
+        }
+        engine.set_node_rotation(id, rng.range(-180.0, 180.0));
+        engine.set_node_scale(id, rng.scale(), rng.scale());
+        engine.set_node_skew(id, rng.range(-40.0, 40.0), rng.range(-40.0, 40.0));
+
+        // Ground truth: densely sample the ellipse boundary in local space and
+        // push every point through the node's world transform.
+        let world = Mat3::from_cols_array(engine.global_transforms.get(&id).unwrap());
+        let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
+        let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
+        for k in 0..4096 {
+            let t = k as f32 / 4096.0 * std::f32::consts::TAU;
+            let p = world.transform_point2(Vec2::new(rx * t.cos(), ry * t.sin()));
+            min_x = min_x.min(p.x); min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x); max_y = max_y.max(p.y);
+        }
+
+        let b = engine.get_node_bounds(id);
+        // The sampled hull sits just inside the true extent, so allow a
+        // sampling-sized slack — and nothing near the size of the shape.
+        let tol = 0.02 * (max_x - min_x).max(max_y - min_y).max(1.0);
+        for (k, (got, want)) in b.iter().zip([min_x, min_y, max_x, max_y].iter()).enumerate() {
+            assert!(
+                (got - want).abs() <= tol,
+                "iter {i}: ellipse bounds[{k}] = {got}, sampled outline says {want}",
+            );
+        }
+    }
+}
