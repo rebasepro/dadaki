@@ -52,15 +52,13 @@
                 <div id="layers-panel-resizer" title="Drag to resize"></div>
             </aside>
 
-            <nav id="toolbar">
-                <!-- Tool rail rendered by src/toolbar.ts -->
-            </nav>
-
             <section id="canvas-container">
                 <canvas id="editor-canvas"></canvas>
                 <canvas id="ruler-top" class="ruler ruler-top"></canvas>
                 <canvas id="ruler-left" class="ruler ruler-left"></canvas>
                 <button id="ruler-corner" class="ruler-corner" title="Snap to grid: off"></button>
+                <!-- Tool rail rendered by src/toolbar.ts; floats over the canvas. -->
+                <nav id="toolbar"></nav>
             </section>
 
             <aside id="side-panel">
@@ -369,7 +367,7 @@
                     <div class="panel-section-body" data-section-body="export">
                         <div class="prop-row">
                             <span class="label">Scale</span>
-                            <select id="export-pane-scale" class="prop-select" style="width: 60px; flex: 0 0 60px;">
+                            <select id="export-pane-scale" class="prop-select">
                                 <option value="0.5">0.5×</option>
                                 <option value="1" selected>1×</option>
                                 <option value="1.5">1.5×</option>
@@ -378,32 +376,33 @@
                                 <option value="4">4×</option>
                                 <option value="custom">Custom…</option>
                             </select>
-                            <span class="header-spacer"></span>
-                            <span class="label" style="margin-left: 10px;">Format</span>
-                            <select id="export-pane-format" class="prop-select" style="width: 70px; flex: 0 0 70px;">
+                        </div>
+                        <div class="prop-row" id="export-pane-size-row" style="display: none;">
+                            <span class="label">Size</span>
+                            <input type="number" id="export-pane-width" class="prop-input" min="1" max="8192" step="1" title="Width (px)">
+                            <button id="export-pane-ratio-lock" class="dim-icon-btn active" title="Lock aspect ratio">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                            </button>
+                            <input type="number" id="export-pane-height" class="prop-input" min="1" max="8192" step="1" title="Height (px)">
+                        </div>
+                        <div class="prop-row">
+                            <span class="label">Format</span>
+                            <select id="export-pane-format" class="prop-select">
                                 <option value="png">PNG</option>
                                 <option value="svg">SVG</option>
                             </select>
                         </div>
-                        <div class="prop-row" id="export-pane-size-row" style="display: none;">
-                            <span class="label">W</span>
-                            <input type="number" id="export-pane-width" class="prop-input" min="1" max="8192" step="1" style="width: 62px; flex: 0 0 62px;">
-                            <button id="export-pane-ratio-lock" class="dim-icon-btn active" title="Lock aspect ratio" style="margin: 0 4px;">
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-                            </button>
-                            <span class="label">H</span>
-                            <input type="number" id="export-pane-height" class="prop-input" min="1" max="8192" step="1" style="width: 62px; flex: 0 0 62px;">
-                            <span class="label" style="margin-left: 4px;">px</span>
-                        </div>
                         <div class="prop-row" id="export-pane-options-row">
                             <span class="label">Suffix</span>
-                            <input type="text" id="export-pane-suffix" class="prop-input" placeholder="e.g. @2x" style="width: 70px; flex: 0 0 70px;">
-                            <span class="header-spacer"></span>
-                            <label class="ab-transparent" style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
-                                <input type="checkbox" id="export-pane-transparent" checked style="margin: 0; accent-color: var(--accent);"> Transparent
+                            <input type="text" id="export-pane-suffix" class="prop-input" placeholder="e.g. @2x">
+                        </div>
+                        <div class="prop-row">
+                            <span class="label"></span>
+                            <label class="ab-transparent toggle-label">
+                                <input type="checkbox" id="export-pane-transparent" checked> Transparent background
                             </label>
                         </div>
-                        <div class="prop-row" style="margin-top: 8px;">
+                        <div class="prop-row" style="margin-top: 12px;">
                             <button id="export-pane-btn" class="export-pane-btn">Export selection</button>
                         </div>
                     </div>

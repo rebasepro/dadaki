@@ -1670,7 +1670,7 @@ export class Renderer {
         if (this._overlayPaints) return this._overlayPaints;
         const ck = this.ck;
         const selOutline = new ck.Paint();
-        selOutline.setColor(ck.Color(0, 162, 255, 1.0));
+        selOutline.setColor(ck.Color(0, 153, 255, 1.0));
         selOutline.setStyle(ck.PaintStyle.Stroke);
 
         const selHandleFill = new ck.Paint();
@@ -1678,11 +1678,11 @@ export class Renderer {
         selHandleFill.setStyle(ck.PaintStyle.Fill);
 
         const selHandleStroke = new ck.Paint();
-        selHandleStroke.setColor(ck.Color(0, 162, 255, 1.0));
+        selHandleStroke.setColor(ck.Color(0, 153, 255, 1.0));
         selHandleStroke.setStyle(ck.PaintStyle.Stroke);
 
         const hoverOutline = new ck.Paint();
-        hoverOutline.setColor(ck.Color(0, 162, 255, 0.55));
+        hoverOutline.setColor(ck.Color(0, 153, 255, 0.55));
         hoverOutline.setStyle(ck.PaintStyle.Stroke);
         hoverOutline.setAntiAlias(true);
 
@@ -1695,7 +1695,7 @@ export class Renderer {
         artboardFill.setStyle(ck.PaintStyle.Fill);
 
         const artboardStroke = new ck.Paint();
-        artboardStroke.setColor(ck.Color(80, 80, 80, 1.0));
+        artboardStroke.setColor(ck.Color(48, 48, 48, 1.0));
         artboardStroke.setStyle(ck.PaintStyle.Stroke);
 
         this._overlayPaints = {
@@ -1995,7 +1995,7 @@ export class Renderer {
         if (exporting || snapshotPass === 'above') {
             canvas.clear(this.ck.TRANSPARENT);
         } else {
-            canvas.clear(this.ck.Color(43, 43, 43, 1.0));
+            canvas.clear(this.ck.Color(24, 24, 24, 1.0));
             // During a cached drag the grid is already in the below snapshot.
             if (!dragActive) this.drawGrid(canvas, dpr);
         }
@@ -4617,7 +4617,7 @@ export class Renderer {
         fill.setAntiAlias(true);
 
         const accent = new ck.Paint();
-        accent.setColor(ck.Color(0, 162, 255, 1));
+        accent.setColor(ck.Color(0, 153, 255, 1));
         accent.setStyle(ck.PaintStyle.Stroke);
         accent.setAntiAlias(true);
 
@@ -4737,7 +4737,7 @@ export class Renderer {
         fill.setAntiAlias(true);
 
         const accent = new ck.Paint();
-        accent.setColor(ck.Color(0, 162, 255, 1));
+        accent.setColor(ck.Color(0, 153, 255, 1));
         accent.setStyle(ck.PaintStyle.Stroke);
         accent.setAntiAlias(true);
 
@@ -5144,12 +5144,15 @@ export class Renderer {
     }
 
     private drawArtboardLabel(canvas: Canvas, ab: Artboard, selected: boolean) {
-        const px = 11;
+        const px = 12;
         const size = px / this.zoom;
-        const font = new this.ck.Font(null, size);
+        // The UI face once its bytes are in; checking first keeps a label drawn
+        // before fonts load from caching the default face for good.
+        const face = getFontData('Inter') ? this.getTypeface('Inter') : null;
+        const font = new this.ck.Font(face, size);
         const paint = new this.ck.Paint();
         paint.setColor(
-            selected ? this.ck.Color(0, 162, 255, 1.0) : this.ck.Color(150, 150, 150, 1.0),
+            selected ? this.ck.Color(0, 153, 255, 1.0) : this.ck.Color(153, 153, 153, 1.0),
         );
         paint.setAntiAlias(true);
         const blob = this.ck.TextBlob.MakeFromText(ab.name, font);
@@ -5270,16 +5273,16 @@ export class Renderer {
         anchorFill.setStyle(this.ck.PaintStyle.Fill);
 
         const anchorStroke = new this.ck.Paint();
-        anchorStroke.setColor(this.ck.Color(0, 162, 255, 1.0));
+        anchorStroke.setColor(this.ck.Color(0, 153, 255, 1.0));
         anchorStroke.setStyle(this.ck.PaintStyle.Stroke);
         anchorStroke.setStrokeWidth(lineWidth * 1.5);
 
         const selectedFill = new this.ck.Paint();
-        selectedFill.setColor(this.ck.Color(0, 162, 255, 1.0));
+        selectedFill.setColor(this.ck.Color(0, 153, 255, 1.0));
         selectedFill.setStyle(this.ck.PaintStyle.Fill);
 
         const handleFill = new this.ck.Paint();
-        handleFill.setColor(this.ck.Color(0, 162, 255, 1.0));
+        handleFill.setColor(this.ck.Color(0, 153, 255, 1.0));
         handleFill.setStyle(this.ck.PaintStyle.Fill);
 
         // Draw hover segment highlight
@@ -5292,7 +5295,7 @@ export class Renderer {
             // Only draw if not closed or not at the end
             if (sp.closed || h.segmentIndex < sp.points.length - 1) {
                 const highlightPaint = new this.ck.Paint();
-                highlightPaint.setColor(this.ck.Color(0, 162, 255, 0.4));
+                highlightPaint.setColor(this.ck.Color(0, 153, 255, 0.4));
                 highlightPaint.setStyle(this.ck.PaintStyle.Stroke);
                 highlightPaint.setStrokeWidth(lineWidth * 3);
 
@@ -5372,7 +5375,7 @@ export class Renderer {
         const lineWidth = 1.5 / this.zoom;
 
         const fill = new this.ck.Paint();
-        fill.setColor(this.ck.Color(0, 162, 255, 1.0));
+        fill.setColor(this.ck.Color(0, 153, 255, 1.0));
         fill.setStyle(this.ck.PaintStyle.Fill);
 
         const stroke = new this.ck.Paint();
@@ -5410,7 +5413,7 @@ export class Renderer {
         else canvas.drawPath(shapePath!, fillPaint);
 
         const strokePaint = new this.ck.Paint();
-        strokePaint.setColor(this.ck.Color(0, 162, 255, 1.0));
+        strokePaint.setColor(this.ck.Color(0, 153, 255, 1.0));
         strokePaint.setStyle(this.ck.PaintStyle.Stroke);
         strokePaint.setStrokeWidth(1.5 / this.zoom);
 
@@ -5438,13 +5441,13 @@ export class Renderer {
 
         const fill = new this.ck.Paint();
         fill.setStyle(this.ck.PaintStyle.Fill);
-        fill.setColor(this.ck.Color(0, 162, 255, 0.12));
+        fill.setColor(this.ck.Color(0, 153, 255, 0.12));
         fill.setAntiAlias(true);
         canvas.drawPath(path, fill);
 
         const stroke = new this.ck.Paint();
         stroke.setStyle(this.ck.PaintStyle.Stroke);
-        stroke.setColor(this.ck.Color(0, 162, 255, 1.0));
+        stroke.setColor(this.ck.Color(0, 153, 255, 1.0));
         stroke.setStrokeWidth(1.5 / this.zoom);
         stroke.setAntiAlias(true);
         canvas.drawPath(path, stroke);
@@ -5469,7 +5472,7 @@ export class Renderer {
         }
 
         const paint = new this.ck.Paint();
-        paint.setColor(this.ck.Color(0, 162, 255, 1.0));
+        paint.setColor(this.ck.Color(0, 153, 255, 1.0));
         paint.setStyle(this.ck.PaintStyle.Stroke);
         paint.setStrokeWidth(1.5 / this.zoom);
         paint.setAntiAlias(true);
@@ -5779,7 +5782,7 @@ export class Renderer {
         const adopt = this.inputManager?.penHoverAdopt;
         if (adopt) {
             const ap = new this.ck.Paint();
-            ap.setColor(this.ck.Color(0, 162, 255, 1.0));
+            ap.setColor(this.ck.Color(0, 153, 255, 1.0));
             ap.setStyle(this.ck.PaintStyle.Stroke);
             ap.setStrokeWidth(1.5 / this.zoom);
             canvas.drawCircle(adopt.x, adopt.y, 6 / this.zoom, ap);
@@ -5790,7 +5793,7 @@ export class Renderer {
         if (!points || points.length === 0) return;
 
         const strokePaint = new this.ck.Paint();
-        strokePaint.setColor(this.ck.Color(0, 162, 255, 1.0));
+        strokePaint.setColor(this.ck.Color(0, 153, 255, 1.0));
         strokePaint.setStyle(this.ck.PaintStyle.Stroke);
         strokePaint.setStrokeWidth(2 / this.zoom);
 
@@ -5828,7 +5831,7 @@ export class Renderer {
                 rubber.cubicTo(last.cp2x, last.cp2y, hover.x, hover.y, hover.x, hover.y);
             }
             const rubberPaint = new this.ck.Paint();
-            rubberPaint.setColor(this.ck.Color(0, 162, 255, 0.5));
+            rubberPaint.setColor(this.ck.Color(0, 153, 255, 0.5));
             rubberPaint.setStyle(this.ck.PaintStyle.Stroke);
             rubberPaint.setStrokeWidth(1.5 / this.zoom);
             canvas.drawPath(rubber, rubberPaint);
@@ -5841,7 +5844,7 @@ export class Renderer {
         if (this.inputManager?.penHoverClosing && points.length > 1) {
             const first = points[0];
             const ringPaint = new this.ck.Paint();
-            ringPaint.setColor(this.ck.Color(0, 162, 255, 1.0));
+            ringPaint.setColor(this.ck.Color(0, 153, 255, 1.0));
             ringPaint.setStyle(this.ck.PaintStyle.Stroke);
             ringPaint.setStrokeWidth(1.5 / this.zoom);
             canvas.drawCircle(first.x, first.y, 6 / this.zoom, ringPaint);
@@ -5855,7 +5858,7 @@ export class Renderer {
         handleLinePaint.setStrokeWidth(1 / this.zoom);
 
         const handleDotPaint = new this.ck.Paint();
-        handleDotPaint.setColor(this.ck.Color(0, 162, 255, 1.0));
+        handleDotPaint.setColor(this.ck.Color(0, 153, 255, 1.0));
         handleDotPaint.setStyle(this.ck.PaintStyle.Fill);
 
         dotPaint.setStyle(this.ck.PaintStyle.Fill);
@@ -5877,7 +5880,7 @@ export class Renderer {
                 this.ck.LTRBRect(p.x - dotSize, p.y - dotSize, p.x + dotSize, p.y + dotSize),
                 dotPaint,
             );
-            dotPaint.setColor(this.ck.Color(0, 162, 255, 1.0));
+            dotPaint.setColor(this.ck.Color(0, 153, 255, 1.0));
             dotPaint.setStyle(this.ck.PaintStyle.Stroke);
             dotPaint.setStrokeWidth(1 / this.zoom);
             canvas.drawRect(

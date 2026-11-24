@@ -125,11 +125,13 @@ export class GuidesController {
         }
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, cssW, cssH);
-        ctx.fillStyle = '#2b2b2b';
+        // Ruler chrome matches the panels (--bg-panel), ticks and labels sit
+        // well below the text colours so the numbers read as a scale, not copy.
+        ctx.fillStyle = '#111111';
         ctx.fillRect(0, 0, cssW, cssH);
-        ctx.strokeStyle = '#4a4a4a';
-        ctx.fillStyle = '#888';
-        ctx.font = '9px system-ui, sans-serif';
+        ctx.strokeStyle = '#333333';
+        ctx.fillStyle = '#6b6b6b';
+        ctx.font = '9px Inter, system-ui, sans-serif';
         ctx.lineWidth = 1;
 
         const { zoom } = this.renderer;

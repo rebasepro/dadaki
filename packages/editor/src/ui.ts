@@ -3507,8 +3507,8 @@ export class UIEngine {
 
             const wContainer = document.createElement('div');
             wContainer.className = 'dim-input';
-            wContainer.style.width = '44px';
-            wContainer.style.flex = '0 0 44px';
+            wContainer.style.width = '56px';
+            wContainer.style.flex = '0 0 56px';
             wContainer.title = 'Stroke thickness';
 
             const wLabel = document.createElement('span');
@@ -3546,13 +3546,12 @@ export class UIEngine {
             wContainer.appendChild(wInput);
 
             const alignSelect = document.createElement('select');
-            alignSelect.className = 'prop-select';
-            alignSelect.style.width = '46px';
-            alignSelect.style.flex = '0 0 46px';
+            alignSelect.className = 'prop-select stroke-align-select';
+            alignSelect.title = 'Stroke position';
             alignSelect.innerHTML = `
-                <option value="Center">Ctr</option>
-                <option value="Inner">In</option>
-                <option value="Outer">Out</option>
+                <option value="Center">Center</option>
+                <option value="Inner">Inside</option>
+                <option value="Outer">Outside</option>
             `;
             alignSelect.value = stroke.alignment || 'Center';
             alignSelect.addEventListener('change', () => {
