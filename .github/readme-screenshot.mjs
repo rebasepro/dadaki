@@ -3,6 +3,8 @@
 //     pnpm dev            # packages/app on :5199
 //     node .github/readme-screenshot.mjs
 //
+// DADAKI_URL points it at a dev server on another port.
+//
 // A screenshot is the one image in a README that cannot be faked without it
 // becoming a lie, so this drives the actual application: it builds a small
 // composition through the engine's own verbs, paints the regions with the Live
@@ -19,7 +21,7 @@ const page = await browser.newPage();
 // 2× so the panels and type are crisp on a retina display, where a 1× capture
 // of a UI reads as blurry.
 await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 2 });
-await page.goto('http://localhost:5199', { waitUntil: 'networkidle0' });
+await page.goto(process.env.DADAKI_URL ?? 'http://localhost:5199', { waitUntil: 'networkidle0' });
 await page.waitForFunction('!!window.app?.scene?.engine', { timeout: 60000 });
 
 await page.evaluate(() => {
@@ -127,6 +129,13 @@ await page.evaluate(() => {
     r.pan = { x: canvas.clientWidth / 2 - (W / 2) * z, y: canvas.clientHeight / 2 - (H / 2) * z };
     r.requestRender?.();
 });
+
+// Groups start collapsed in the layer tree; open this one so the panel shows
+// the paths the picture is made of rather than a single row.
+await new Promise((r) => setTimeout(r, 300));
+await page.click('#layer-list .layer-chevron[data-toggle-id]:not(.expanded)').catch(() => {});
+// Off the row again, or its hover-only lock/eye buttons end up in the picture.
+await page.mouse.move(1200, 130);
 
 await new Promise((r) => setTimeout(r, 1500));
 await page.screenshot({ path: OUT });
