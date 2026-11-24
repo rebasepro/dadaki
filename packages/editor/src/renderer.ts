@@ -398,6 +398,15 @@ export class Renderer {
     // past it, the group renders as sharp vectors (few groups are visible when
     // zoomed in, so direct is cheap), and a re-bake at the new scale is queued.
     private static readonly SPRITE_USABLE_UPSCALE = 1.15;
+    /** Device px per world unit from which EVERY clip mask draws as a canvas
+     *  clip rather than alpha layers (see the render loop's mask handling). */
+    private static readonly GEOMETRIC_CLIP_MIN_DEV_SCALE = 24;
+    /** Below that scale, a clip path with at most this many points (Skia's
+     *  count: a cubic segment is 3) still draws as a clip. Set between two
+     *  measured cases: Tux's clips (40-109 points) were cheaper as clips at
+     *  every zoom; 13 blobs of 721 points were ~1.7× slower as clips below
+     *  the threshold. */
+    private static readonly SIMPLE_CLIP_MAX_POINTS = 256;
 
     // ─── Gradient shader cache ───
     private _gradientCache: Map<string, ReturnType<CanvasKit['Shader']['MakeLinearGradient']>> =
@@ -2282,14 +2291,24 @@ export class Renderer {
         const contentAA = !this._exportNoAA;
         p.setAntiAlias(contentAA);
 
-        // Geometric-clip masks (mask_type 2) render as real canvas clips only
-        // when zoomed in enough that the alpha-mask saveLayer sandwich is the
+        // Geometric-clip masks (mask_type 2) render as real canvas clips when
+        // zoomed in enough that the alpha-mask saveLayer sandwich is the
         // dominant cost. Measured on Tux.svg (13 clip spans): at ≥24 device px
         // per unit clips cut frame time up to ~2× (no more full-viewport
         // layers), while at low zoom Skia's AA path-clip masks are *slower*
         // than the layers — so each frame picks the cheaper strategy.
+        //
+        // Re-measured 2026-11 (CanvasKit as shipped, Apple GPU), that low-zoom
+        // loss no longer holds for short clip paths. A document of eight Tux
+        // copies (80 clips of 40-109 points) was as fast or faster with clips
+        // at every zoom, and spent most of its zoom time below the threshold:
+        // gesture captures took 45-75 ms there against 12-26 ms above it. A
+        // stand-in with long clip paths (721 points) still lost ~1.7× below
+        // it. So below the threshold a clip span decides at its mask shape
+        // (see the clip-capture branch): short paths, rects and ellipses clip;
+        // long paths, text and images take the alpha-layer path as before.
         const clipMaskDevScale = this.zoom * dpr;
-        const useGeometricClips = clipMaskDevScale >= 24;
+        const useGeometricClips = clipMaskDevScale >= Renderer.GEOMETRIC_CLIP_MIN_DEV_SCALE;
 
         // Group nesting depth — 0 means the next START_GROUP is a root group
         // (the sprite-cache unit).
@@ -2391,10 +2410,9 @@ export class Renderer {
             } else if (cmdType === 4) {
                 // CMD_BEGIN_MASK
                 // Read mask_type: 0 = alpha, 1 = luminance, 2 = geometric clip.
-                // Clip-eligible masks fall back to the alpha protocol at low
-                // zoom, where layers are cheaper than AA path clips.
-                let maskType = reader.u32();
-                if (maskType === 2 && !useGeometricClips) maskType = 0;
+                // Below the zoom threshold a clip span can still fall back to
+                // the alpha protocol; that is decided at its mask shape.
+                const maskType = reader.u32();
                 this._maskStack.push({
                     mode: maskType,
                     pendingClip: maskType === 2,
@@ -2721,6 +2739,12 @@ export class Renderer {
                 if (clipSpan && clipSpan.mode === 2 && clipSpan.pendingClip) {
                     clipSpan.pendingClip = false;
                     let clipped = false;
+                    // Below the zoom threshold only a simple shape clips; the
+                    // rest falls back to the alpha protocol — the span's
+                    // clip-scope save is undone and the mask shape is drawn as
+                    // an ordinary alpha mask, exactly as before.
+                    const geometryStart = reader.offset;
+                    let fallBackToLayers = false;
                     if (nodeType === 0 || nodeType === 1 || nodeType === 2) {
                         // Reuse the node-transformed clip path across frames;
                         // rebuilding costs a wasm path copy + transform per
@@ -2746,15 +2770,34 @@ export class Renderer {
                                 this._clipPathCache.set(nodeId, entry);
                             }
                         }
-                        if (entry) {
+                        if (
+                            entry &&
+                            !useGeometricClips &&
+                            nodeType === 0 && // a path; 1 and 2 are rect and ellipse
+                            entry.path.countPoints() > Renderer.SIMPLE_CLIP_MAX_POINTS
+                        ) {
+                            fallBackToLayers = true;
+                        } else if (entry) {
                             // AA matches the content AA (off only in the
                             // supersampled export pass, where the downscale
                             // supplies it).
                             canvas.clipPath(entry.path, this.ck.ClipOp.Intersect, contentAA);
                             clipped = true;
                         }
+                    } else if (!useGeometricClips) {
+                        // Text or an image as the clip shape: as an alpha mask
+                        // it shows; as a clip it would hide the span.
+                        fallBackToLayers = true;
                     }
-                    if (!clipped) {
+                    if (fallBackToLayers) {
+                        canvas.restore(); // the clip-scope save from CMD_BEGIN_MASK
+                        clipSpan.mode = 0;
+                        clipSpan.pendingLayer = true;
+                        reader.offset = geometryStart;
+                        // Fall through: the deferred-layer branch below opens
+                        // this span's layers bounded to the shape, which then
+                        // draws into them.
+                    } else if (!clipped) {
                         // Unclippable geometry (text/image) — hide the span,
                         // matching what an empty alpha mask would produce.
                         canvas.clipRect(
@@ -2763,8 +2806,10 @@ export class Renderer {
                             false,
                         );
                     }
-                    reader.offset = recordStart + recordLen;
-                    continue;
+                    if (!fallBackToLayers) {
+                        reader.offset = recordStart + recordLen;
+                        continue;
+                    }
                 }
 
                 // Deferred mask layers: this DRAW_NODE is the mask shape of an
