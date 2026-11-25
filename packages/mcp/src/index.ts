@@ -31,6 +31,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { createTransport, readConfig, rememberToken } from './config.ts';
+import { type SceneDescription, summarizeForConnect } from './scene_summary.ts';
 
 /**
  * Startup failures are ordinary user errors — a config still asking for a mode
@@ -177,8 +178,8 @@ tool(
         rememberToken(token);
         // Prove it end to end rather than reporting a paired token that turns
         // out to drive nothing: if the tab is really there, describe answers.
-        const scene = await session.call('describe');
-        return { connected: true, scene };
+        const scene = await session.call<SceneDescription>('describe');
+        return { connected: true, ...summarizeForConnect(scene) };
     },
 );
 
