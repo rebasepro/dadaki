@@ -46,10 +46,13 @@ body, html {
     color: var(--text-main);
     touch-action: none;
     overscroll-behavior: none;
-    font-size: 12px;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }
+/* On body, not html. Nothing in the editor is sized in rem, but a host page's
+   components are: on html this shrank every rem-based dialog the host opened
+   over the editor to three quarters size (9px tab labels in the hosted app). */
+body { font-size: 12px; }
 
 /* ─── App Shell ─── */
 
