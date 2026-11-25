@@ -27,6 +27,21 @@ All notable changes to this project are documented here. The format follows
   no longer gives up mid-convergence: a shape with a large corner radius used
   to settle 0.6% off the size the drag asked for.
 
+### MCP server
+
+Published on its own as `@dadaki/mcp` 1.0.0-beta.4, which brings it level with
+the rest of the project.
+
+- **`connect` answers with an outline of a large document, not all of it.** It
+  returned the whole scene to prove the tab was there, and a real design is
+  hundreds of paths with their points and styles: connecting to a 730-object
+  file returned 461,000 characters, more than an agent's tool result may hold,
+  so the first thing an agent saw after connecting was an error. A document
+  whose description fits in 20,000 characters still comes back whole; a larger
+  one comes back as the canvas, the selection, the object count and the top
+  level with each group's size (2,200 characters for that file), with a note
+  pointing at `describe_scene` and `render_png_image`.
+
 ## [1.0.0-beta.4] — 2026-09-04
 
 ### Editor
